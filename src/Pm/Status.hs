@@ -24,6 +24,7 @@ import Pm.Config (Config (..))
 import Pm.Import (stagingArchivedSummary)
 import Pm.Scan (freshnessSweep)
 import Pm.Types
+import Pm.Vault (VaultCacheMeta (..), readVaultCacheMeta)
 
 data StatusOpts = StatusOpts
   { stCached :: Bool
@@ -92,6 +93,27 @@ runStatus cfg opts = do
           if lag == 0
             then printf "  备份盘     上次同步 %s · 当时无滞后（EXTRA %d）\n" bstamp (bmExtra m)
             else printf "  ⚠ 备份盘   上次同步 %s · 当时落后 %d 项 → 插盘后 pm backup\n" bstamp lag
+      -- vault（只读缓存 —— I11 之前 status 对 vault 目录零接触，§10.1）
+      case cfgVaultPath cfg of
+        Nothing -> pure ()
+        Just _ -> do
+          mv <- readVaultCacheMeta root
+          case mv of
+            Nothing -> putStrLn "  vault      未比对过 → pm vault status"
+            Just v -> do
+              let vstamp = formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz (vmAt v))
+                  vlag = vmNew v + vmMissing v + vmRenamed v + vmDrift v
+              if vlag == 0
+                then printf "  vault      上次比对 %s · 无差异（dup %d · unpushable %d）\n" vstamp (vmDuplicate v) (vmUnpushable v)
+                else
+                  printf
+                    "  ⚠ vault    上次比对 %s · 差异 %d（NEW %d / MISS %d / REN %d / DRIFT %d）→ pm vault status\n"
+                    vstamp
+                    vlag
+                    (vmNew v)
+                    (vmMissing v)
+                    (vmRenamed v)
+                    (vmDrift v)
       -- Freshness sweep（共享实现：Pm.Scan.freshnessSweep）
       pending <-
         if stCached opts

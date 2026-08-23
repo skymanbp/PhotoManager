@@ -13,14 +13,12 @@ module Pm.Backup
   ) where
 
 import Data.Aeson
-import qualified Data.ByteString.Lazy as BSL
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
 
-import Pm.Config (Config (..), pmDir, readRootInfo)
+import Pm.Config (Config (..), pmDir, readJsonMaybe, readRootInfo, writeSideCache)
 import Pm.Types
 import Pm.Win (listCandidateDrives, suppressCriticalErrorDialogs)
 
@@ -96,19 +94,10 @@ instance FromJSON BackupCacheMeta where
 cacheDir :: FilePath -> FilePath
 cacheDir mainRoot = pmDir mainRoot </> "backup-cache"
 
--- | Snapshot copy of the backup catalog + meta, kept on the MAIN root.
--- Plain overwrite is fine here: this is a display cache, rebuilt by every
--- @pm backup@; the durable copy lives on the backup drive itself.
+-- | Snapshot copy of the backup catalog + meta, kept on the MAIN root
+-- (shared pair-write: Pm.Config.writeSideCache).
 writeBackupCache :: FilePath -> Catalog -> BackupCacheMeta -> IO ()
-writeBackupCache mainRoot bakCat meta = do
-  createDirectoryIfMissing True (cacheDir mainRoot)
-  BSL.writeFile (cacheDir mainRoot </> "catalog.json") (encode bakCat)
-  BSL.writeFile (cacheDir mainRoot </> "meta.json") (encode meta)
+writeBackupCache mainRoot = writeSideCache (cacheDir mainRoot)
 
 readBackupCacheMeta :: FilePath -> IO (Maybe BackupCacheMeta)
-readBackupCacheMeta mainRoot = do
-  let fp = cacheDir mainRoot </> "meta.json"
-  ex <- doesFileExist fp
-  if not ex
-    then pure Nothing
-    else either (const Nothing) Just <$> eitherDecodeFileStrict fp
+readBackupCacheMeta mainRoot = readJsonMaybe (cacheDir mainRoot </> "meta.json")

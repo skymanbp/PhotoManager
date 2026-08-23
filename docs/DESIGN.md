@@ -428,6 +428,14 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - sync_photos.py **退役由 pm 接管（用户裁定 2026-08-22）**：P3 用它做最后一次
   互校（比对通过才算验收），P5 把档案侧文档/skill 指针改指 `pm vault status`
   并 `git rm` 该脚本（档案 vault 本地 git 历史可恢复；跨仓改动 confirm-first）。
+- **P3a 实测验收（2026-08-23）**：`pm vault status --json` 与 sync_photos.py
+  双跑真实库，全部 legacy 键**集合逐项一致**——78 OK / 15 NEW / 1 RENAME /
+  0 MISSING / 0 DRIFT / 0 DUPLICATE，source_count 94 / vault_count 79，
+  RENAME 恰为档案侧登记的 `_DSC9014.JPG ≡ landscape/_DSC9013_2.JPG`；
+  UNPUSHABLE 轴当前 .png=0 空洞通过，已由合成 fixture 测试补位（VaultTests）。
+  legacy 逐行为基线与 vault 拓扑实测：`docs/specs/sync-photos-legacy-spec.md`、
+  `docs/specs/vault-topology-p3.md`。vault 侧 sha 缓存放主库 `.pm/vault-cache/`
+  （I11 之前对 vault 目录零写入；status 全链路只读 vault）。
 
 ### 10.2 `pm vault push`
 

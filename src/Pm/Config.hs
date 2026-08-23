@@ -14,6 +14,8 @@ module Pm.Config
   , writeRootInfo
   , freshRootId
   , pmDir
+  , readJsonMaybe
+  , writeSideCache
   ) where
 
 import Crypto.Random (getRandomBytes)
@@ -111,13 +113,26 @@ pmDir root = root </> ".pm"
 rootInfoPath :: FilePath -> FilePath
 rootInfoPath root = pmDir root </> "root-id.json"
 
-readRootInfo :: FilePath -> IO (Maybe RootInfo)
-readRootInfo root = do
-  let fp = rootInfoPath root
+-- | doesFileExist + decode → Maybe 的共用读取（root-id \/ 备份缓存 \/
+-- vault 缓存共用；损坏文件按缺席处理，各调用点自行决定后续语义）。
+readJsonMaybe :: Aeson.FromJSON a => FilePath -> IO (Maybe a)
+readJsonMaybe fp = do
   exists <- doesFileExist fp
   if not exists
     then pure Nothing
     else either (const Nothing) Just <$> eitherDecodeFileStrict fp
+
+readRootInfo :: FilePath -> IO (Maybe RootInfo)
+readRootInfo = readJsonMaybe . rootInfoPath
+
+-- | 侧缓存目录的成对覆盖写（catalog.json + meta.json）。备份盘缓存与
+-- vault 缓存共用：都是可重建的展示\/加速缓存，纯覆盖写即可——耐久层在
+-- 别处（备份盘自己的 .pm、照片文件本身）。
+writeSideCache :: Aeson.ToJSON meta => FilePath -> Catalog -> meta -> IO ()
+writeSideCache dir cat meta = do
+  createDirectoryIfMissing True dir
+  BSL.writeFile (dir </> "catalog.json") (Aeson.encode cat)
+  BSL.writeFile (dir </> "meta.json") (Aeson.encode meta)
 
 writeRootInfo :: FilePath -> RootInfo -> IO ()
 writeRootInfo root info = do

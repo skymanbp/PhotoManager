@@ -11,6 +11,7 @@ import Pm.Cli (GoOpts (..))
 import Pm.Commands
 import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
 import Pm.Status (StatusOpts (..), runStatus)
+import Pm.Vault (runVaultStatus)
 import Pm.Win (setupConsole)
 
 data Cmd
@@ -25,6 +26,7 @@ data Cmd
   | CmdImport GoOpts
   | CmdBackup BackupCmd
   | CmdClean GoOpts -- clean staging
+  | CmdVaultStatus Bool -- --json（sync_photos.py 兼容输出）
 
 main :: IO ()
 main = do
@@ -59,6 +61,7 @@ run (CmdImport go) = withCfg (runImport go)
 run (CmdBackup (BackupInit p)) = withCfg (runBackupInit p)
 run (CmdBackup (BackupRun go mworkers)) = withCfg (runBackupRun go mworkers)
 run (CmdClean go) = withCfg (runClean go)
+run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
 
 parserInfo :: ParserInfo Cmd
 parserInfo =
@@ -67,7 +70,7 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    infoOption "pm 0.2.1 (P2.1)" (long "version" <> help "打印版本")
+    infoOption "pm 0.3.0 (P3a)" (long "version" <> help "打印版本")
   commands =
     hsubparser
       ( command "init" (info initP (progDesc "生成配置 + 主库 root 标识"))
@@ -76,6 +79,7 @@ parserInfo =
           <> command "import" (info importP (progDesc "暂存区 To-Be-Sync'd → Raw/成片 归档计划"))
           <> command "backup" (info backupP (progDesc "主库 → 备份盘单向增量（init 登记备份盘）"))
           <> command "clean" (info cleanP (progDesc "clean staging: 三副本确认后的暂存清理计划"))
+          <> command "vault" (info vaultP (progDesc "相册 ↔ vault 展示集（status 兼容 sync_photos.py）"))
           <> command "doctor" (info doctorP (progDesc "崩溃恢复对账 + 完整性体检（默认只读）"))
           <> command "trash" (info trashP (progDesc "隔离区：list / empty（唯一最终清除入口）"))
           <> command "undo" (info undoP (progDesc "由主库 journal 生成反向计划（经 pm apply 执行）"))
@@ -119,6 +123,15 @@ parserInfo =
     fmap CmdClean $
       hsubparser
         (command "staging" (info goOpts (progDesc "仅清理「Raw/成片 + 备份盘」都有同 sha 副本的暂存文件")))
+  vaultP =
+    hsubparser
+      ( command
+          "status"
+          ( info
+              (CmdVaultStatus <$> switch (long "json" <> help "sync_photos.py 兼容的 JSON 输出（六键值形状逐字段一致 + unpushable）"))
+              (progDesc "相册 ↔ vault 六态差异（只读；退出码 0/1/2 同 sync_photos.py）")
+          )
+      )
   doctorP =
     CmdDoctor
       <$> ( DoctorOpts
