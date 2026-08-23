@@ -67,10 +67,17 @@ data Checkpoint
   | CpQuarAfterMove
   deriving (Show, Eq)
 
-newtype ExecEnv = ExecEnv {eeCheckpoint :: Checkpoint -> IO ()}
+data ExecEnv = ExecEnv
+  { eeCheckpoint :: Checkpoint -> IO ()
+  , eeDoneSync :: Sync
+    -- ^ Copy 的 Done 持久化模式。主库默认 Buffered（可组提交，C2/C3 从盘面
+    -- 重建）；备份路径必须 Barrier（DESIGN.md §9）—— 备份盘是可移动介质，
+    -- 打印结果后用户随时可能拔盘，Done 必须在汇报前已落盘。
+    -- Rename/Quarantine 的 Done 永远 Barrier，不受此字段影响。
+  }
 
 defaultExecEnv :: ExecEnv
-defaultExecEnv = ExecEnv (\_ -> pure ())
+defaultExecEnv = ExecEnv {eeCheckpoint = \_ -> pure (), eeDoneSync = Buffered}
 
 data ItemOutcome
   = ODone {oSha :: Maybe Text, oDstStat :: Maybe StatSnap, oTrashRel :: Maybe FilePath}
@@ -193,7 +200,7 @@ execCopy env root j oid ix op = do
                         else do
                           eeCheckpoint env CpCopyAfterMove
                           td <- getCurrentTime
-                          jAppend j Buffered (JDone oid (Just (opSha op)) Nothing td)
+                          jAppend j (eeDoneSync env) (JDone oid (Just (opSha op)) Nothing td)
                           pure (ODone (Just (opSha op)) (Just post) Nothing)
 
 -- ─── Rename (§6.2) ──────────────────────────────────────────────────────────

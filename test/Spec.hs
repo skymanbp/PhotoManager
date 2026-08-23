@@ -5,21 +5,28 @@ module Main (main) where
 
 import Control.Exception (IOException, SomeException, throwIO, try)
 import Control.Monad (forM_, when)
-import Data.Time (getCurrentTime)
+import qualified Data.Text as T
+import Data.Time (UTCTime (..), fromGregorian, getCurrentTime)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
+import Test.Tasty.QuickCheck (chooseInt, elements, forAll, listOf1, testProperty, (.&&.), (===))
 
 import Pm.Catalog
+import Pm.Clean
+import Pm.Diff
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec
 import Pm.Hash
+import Pm.Import
 import Pm.Journal
 import Pm.Lock (withRootLock)
+import Pm.Names
 import Pm.Op
 import Pm.Plan
+import Pm.Scan (ScanOpts (..), ScanResult (..), scanRoot)
 import Pm.Trash
 import Pm.Types
 import Pm.Undo (buildUndoPlan)
@@ -45,6 +52,11 @@ tests =
     , doctorTests
     , undoTests
     , lockTests
+    , namesTests
+    , importTests
+    , diffTests
+    , backupE2eTests
+    , cleanTests
     ]
 
 -- ─── P0 基础 ────────────────────────────────────────────────────────────────
@@ -163,7 +175,8 @@ mkPlanIO root ops = do
       }
 
 injectAt :: Checkpoint -> ExecEnv
-injectAt cp = ExecEnv (\c -> when (c == cp) (throwIO (userError "inject-crash")))
+injectAt cp =
+  defaultExecEnv {eeCheckpoint = \c -> when (c == cp) (throwIO (userError "inject-crash"))}
 
 -- | 注入崩溃：期望异常逃逸（= 进程死亡模型）。
 runCrash :: ExecEnv -> Plan -> IO ()
@@ -261,9 +274,12 @@ execCopyTests =
           createDirectoryIfMissing True root
           op <- mkCopyOp (dir </> "s.jpg") "MINE" ("相册" </> "a.jpg")
           plan <- mkPlanIO root [op]
-          let env = ExecEnv $ \c -> when (c == CpCopyAfterFlush) $ do
-                createDirectoryIfMissing True (root </> "相册")
-                writeFile (root </> "相册" </> "a.jpg") "INTERLOPER"
+          let env =
+                defaultExecEnv
+                  { eeCheckpoint = \c -> when (c == CpCopyAfterFlush) $ do
+                      createDirectoryIfMissing True (root </> "相册")
+                      writeFile (root </> "相册" </> "a.jpg") "INTERLOPER"
+                  }
           r <- execPlan env plan
           case r of
             Right [(_, OConflict _)] -> pure ()
@@ -615,3 +631,300 @@ lockTests =
           r2 <- withRootLock root (pure ("again" :: String))
           r2 @?= Just "again"
     ]
+
+-- ─── P2: Names ──────────────────────────────────────────────────────────────
+
+pad2 :: Int -> String
+pad2 n = if n < 10 then '0' : show n else show n
+
+namesTests :: TestTree
+namesTests =
+  testGroup
+    "Pm.Names (§8 子集)"
+    [ testCase "parseYYMM 正常" (parseYYMM "26-04-Providence" @?= Just (26, 4, "Providence"))
+    , testCase "月份 13 拒绝" (parseYYMM "26-13-X" @?= Nothing)
+    , testCase "无地点拒绝" (parseYYMM "26-04-" @?= Nothing)
+    , testCase "无连字符拒绝" (parseYYMM "2604-X" @?= Nothing)
+    , testCase "canonRawEvent 补 -Raw + 推导年份" $
+        canonRawEvent "26-04-Providence" @?= Just ("2026", "26-04-Providence-Raw")
+    , testCase "canonRawEvent 幂等（已带 -Raw）" $
+        canonRawEvent "23-01-Cotswold-Raw" @?= Just ("2023", "23-01-Cotswold-Raw")
+    , testCase "Scheme B 不猜（P3 的 pm names 处理）" $
+        canonRawEvent "RAW-2025-Winter-Alaska" @?= Nothing
+    , testCase "canonProcessedEvent 恒等" $
+        canonProcessedEvent "26-04-Providence" @?= Just "26-04-Providence"
+    , testCase "canonProcessedEvent 剥离误带的 -Raw" $
+        canonProcessedEvent "23-04-EU-Raw" @?= Just "23-04-EU"
+    , testCase "canonProcessedEvent 非事件名拒绝" (canonProcessedEvent "molly" @?= Nothing)
+    , testProperty "parse/canon roundtrip + 幂等（QuickCheck）" $
+        forAll ((,,) <$> chooseInt (0, 99) <*> chooseInt (1, 12) <*> listOf1 (elements ['a' .. 'z'])) $
+          \(yy, mm, loc) ->
+            let name = pad2 yy <> "-" <> pad2 mm <> "-" <> loc
+                canon = name <> "-Raw"
+                yr = "20" <> pad2 yy
+             in (parseYYMM name === Just (yy, mm, loc))
+                  .&&. (canonRawEvent name === Just (yr, canon))
+                  .&&. (canonRawEvent canon === Just (yr, canon))
+    ]
+
+-- ─── P2: Import 计划器（纯） ────────────────────────────────────────────────
+
+t0 :: UTCTime
+t0 = UTCTime (fromGregorian 2026 1 1) 0
+
+mkE :: FilePath -> String -> Entry
+mkE p sha = Entry p 1 0 (T.pack sha) KindPhoto Nothing
+
+mkCat :: [Entry] -> Catalog
+mkCat es = Catalog "test-root" t0 (entryMap es)
+
+importTests :: TestTree
+importTests =
+  testGroup
+    "Pm.Import (§7 计划器纯函数)"
+    [ testCase "staging Raw 事件 → Raw\\20YY\\…-Raw（侧车同批）" $ do
+        let a = mkE ("To-Be-Sync'd" </> "Raw" </> "26-04-Providence" </> "A.ARW") "s1"
+            x = mkE ("To-Be-Sync'd" </> "Raw" </> "26-04-Providence" </> "A.xmp") "s2"
+            rep = planImport (mkCat [a, x])
+        irCopy rep
+          @?= [ (a, "Raw" </> "2026" </> "26-04-Providence-Raw" </> "A.ARW")
+              , (x, "Raw" </> "2026" </> "26-04-Providence-Raw" </> "A.xmp")
+              ]
+    , testCase "staging Raw 带显式年份层（一致 → 接受）" $ do
+        let a = mkE ("To-Be-Sync'd" </> "Raw" </> "2026" </> "26-06-R66" </> "B.ARW") "s1"
+            rep = planImport (mkCat [a])
+        irCopy rep @?= [(a, "Raw" </> "2026" </> "26-06-R66-Raw" </> "B.ARW")]
+    , testCase "显式年份层与事件名年份不一致 → 不猜，unrecognized" $ do
+        let a = mkE ("To-Be-Sync'd" </> "Raw" </> "2025" </> "26-06-R66" </> "B.ARW") "s1"
+            rep = planImport (mkCat [a])
+        (irCopy rep, irUnrecognized rep) @?= ([], [enPath a])
+    , testCase "Processed 事件 → 成片\\事件" $ do
+        let a = mkE ("To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "c.jpg") "s1"
+            rep = planImport (mkCat [a])
+        irCopy rep @?= [(a, "成片" </> "26-06-R66" </> "c.jpg")]
+    , testCase "目标已存在同 sha → 已归档冗余，不入计划" $ do
+        let src = mkE ("To-Be-Sync'd" </> "Processed" </> "23-04-EU" </> "x.jpg") "same"
+            dst = mkE ("成片" </> "23-04-EU" </> "x.jpg") "same"
+            rep = planImport (mkCat [src, dst])
+        (irCopy rep, irAlready rep) @?= ([], [(enPath src, enPath dst)])
+    , testCase "目标已存在不同 sha → 返修 NEEDS-DECISION" $ do
+        let src = mkE ("To-Be-Sync'd" </> "Processed" </> "23-04-EU" </> "x.jpg") "new"
+            dst = mkE ("成片" </> "23-04-EU" </> "x.jpg") "old"
+            rep = planImport (mkCat [src, dst])
+        irRework rep @?= [(src, enPath dst)]
+        let items = importPlanItems "R:" rep
+        case items of
+          [PlanItem 0 OpCopy {} (StNeedsDecision _)] -> pure ()
+          other -> assertFailure ("expected 1 needs-decision copy, got " <> show other)
+    , testCase "待修改 不碰；顶层散文件 unrecognized" $ do
+        let p = mkE ("To-Be-Sync'd" </> "待修改" </> "DSC08960.ARW") "s1"
+            junk = mkE ("To-Be-Sync'd" </> "notes.txt") "s2"
+            rep = planImport (mkCat [p, junk])
+        (irPendingEdit rep, irUnrecognized rep, irCopy rep)
+          @?= ([enPath p], [enPath junk], [])
+    , testCase "两个源撞同一目标 → 整组拒绝 (dupTarget)" $ do
+        let a = mkE ("To-Be-Sync'd" </> "Raw" </> "26-06-R66" </> "D.ARW") "s1"
+            b = mkE ("To-Be-Sync'd" </> "Raw" </> "2026" </> "26-06-R66" </> "D.ARW") "s2"
+            rep = planImport (mkCat [a, b])
+        (irCopy rep, length (irDupTarget rep)) @?= ([], 2)
+    , testCase "importPlanItems: src 绝对化 + 前置条件来自 catalog" $ do
+        let e = (mkE ("To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "c.jpg") "abc") {enSize = 7, enMtimeNs = 99}
+            rep = planImport (mkCat [e])
+        case importPlanItems ("R:" </> "lib") rep of
+          [PlanItem 0 (OpCopy src dst sha sz mt) StPending] -> do
+            src @?= ("R:" </> "lib" </> enPath e)
+            dst @?= ("成片" </> "26-06-R66" </> "c.jpg")
+            (sha, sz, mt) @?= ("abc", 7, 99)
+          other -> assertFailure ("unexpected items: " <> show other)
+    , testCase "stagingArchivedSummary 排除 待修改" $ do
+        let s1 = mkE ("To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "c.jpg") "x"
+            s2 = mkE ("To-Be-Sync'd" </> "待修改" </> "y.ARW") "y"
+            a1 = mkE ("成片" </> "26-06-R66" </> "c.jpg") "x"
+        stagingArchivedSummary (mkCat [s1, s2, a1]) @?= (1, 1)
+    ]
+
+-- ─── P2: 备份 diff（纯）+ 端到端 fixture ────────────────────────────────────
+
+diffTests :: TestTree
+diffTests =
+  testGroup
+    "Pm.Diff.backupDiff (§9)"
+    [ testCase "add / update / extra / same 分类" $ do
+        let m1 = mkE ("成片" </> "a.jpg") "A"
+            m2 = mkE ("成片" </> "b.jpg") "B"
+            m3 = mkE ("成片" </> "c.jpg") "C-new"
+            b2 = mkE ("成片" </> "b.jpg") "B"
+            b3 = mkE ("成片" </> "c.jpg") "C-old"
+            b4 = mkE ("成片" </> "extra.jpg") "E"
+            d = backupDiff (mkCat [m1, m2, m3]) (mkCat [b2, b3, b4])
+        (bdAdd d, bdUpdate d, bdExtra d, bdSame d)
+          @?= ([m1], [(m3, b3)], [enPath b4], 1)
+    , testCase "update → supersede 复合：隔离在前、Copy 在后、同一相对路径" $ do
+        let m = mkE ("成片" </> "c.jpg") "C-new"
+            b = mkE ("成片" </> "c.jpg") "C-old"
+            d = backupDiff (mkCat [m]) (mkCat [b])
+        case backupPlanItems "M:" d of
+          [PlanItem 0 (OpQuarantine v vs _) StPending, PlanItem 1 (OpCopy src dst sha _ _) StPending] -> do
+            (v, vs) @?= (enPath b, "C-old")
+            (src, dst, sha) @?= ("M:" </> enPath m, enPath m, "C-new")
+          other -> assertFailure ("unexpected items: " <> show other)
+    ]
+
+scanQuiet :: String -> FilePath -> IO Catalog
+scanQuiet rid root = srCatalog <$> scanRoot (ScanOpts 1 False) Nothing (T.pack rid) root
+
+backupE2eTests :: TestTree
+backupE2eTests =
+  testGroup
+    "backup 端到端 (fixture 双 root)"
+    [ testCase "首备落位 → 再 diff 清零；EXTRA 永不动" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let mroot = dir </> "main"
+              broot = dir </> "bak"
+          createDirectoryIfMissing True (mroot </> "成片" </> "26-06-R66")
+          createDirectoryIfMissing True broot
+          writeFile (mroot </> "成片" </> "26-06-R66" </> "a.jpg") "AAA"
+          writeFile (mroot </> "成片" </> "26-06-R66" </> "b.jpg") "BBB"
+          writeFile (broot </> "extra.jpg") "EX"
+          mcat <- scanQuiet "m" mroot
+          bcat0 <- scanQuiet "b" broot
+          let d0 = backupDiff mcat bcat0
+          (length (bdAdd d0), bdExtra d0) @?= (2, ["extra.jpg"])
+          pid <- newPlanId
+          now <- getCurrentTime
+          let plan = Plan pid "backup" broot now (backupPlanItems mroot d0)
+          rs <- execOk plan
+          map (outcomeLabel . snd) rs @?= ["DONE", "DONE"]
+          a <- readFile (broot </> "成片" </> "26-06-R66" </> "a.jpg")
+          a @?= "AAA"
+          bcat1 <- scanQuiet "b" broot
+          let d1 = backupDiff mcat bcat1
+          (length (bdAdd d1), length (bdUpdate d1), bdSame d1, bdExtra d1)
+            @?= (0, 0, 2, ["extra.jpg"])
+          ex <- readFile (broot </> "extra.jpg")
+          ex @?= "EX"
+    , testCase "主库更新 → supersede：备份旧字节入备份盘 trash，新字节落位" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let mroot = dir </> "main"
+              broot = dir </> "bak"
+          createDirectoryIfMissing True (mroot </> "成片")
+          createDirectoryIfMissing True (broot </> "成片")
+          writeFile (mroot </> "成片" </> "a.jpg") "AAA-NEW!"
+          writeFile (broot </> "成片" </> "a.jpg") "AAA"
+          mcat <- scanQuiet "m" mroot
+          bcat <- scanQuiet "b" broot
+          let d = backupDiff mcat bcat
+          length (bdUpdate d) @?= 1
+          pid <- newPlanId
+          now <- getCurrentTime
+          let plan = Plan pid "backup" broot now (backupPlanItems mroot d)
+          rs <- execOk plan
+          map (outcomeLabel . snd) rs @?= ["DONE", "DONE"]
+          newC <- readFile (broot </> "成片" </> "a.jpg")
+          newC @?= "AAA-NEW!"
+          tv <- trashView broot
+          case tvRegistered tv of
+            [(r, True)] -> do
+              oldC <- readFile (trashDir broot </> trTrashRel r)
+              oldC @?= "AAA"
+            other -> assertFailure ("expected 1 trash entry on backup root, got " <> show (length other))
+    , testCase "Done Barrier 模式（备份路径）行为一致" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+          createDirectoryIfMissing True root
+          op <- mkCopyOp (dir </> "s.jpg") "BARRIER" ("成片" </> "s.jpg")
+          plan <- mkPlanIO root [op]
+          r <- execPlan defaultExecEnv {eeDoneSync = Barrier} plan
+          case r of
+            Right [(_, ODone {})] -> pure ()
+            other -> assertFailure ("expected done, got " <> show other)
+    ]
+
+-- ─── P2: clean staging ──────────────────────────────────────────────────────
+
+cleanTests :: TestTree
+cleanTests =
+  testGroup
+    "Pm.Clean (三副本前置)"
+    [ testCase "三副本齐 → eligible（带两侧见证）" $ do
+        let s = mkE ("To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "c.jpg") "X"
+            a = mkE ("成片" </> "26-06-R66" </> "c.jpg") "X"
+            b = mkE ("成片" </> "26-06-R66" </> "c.jpg") "X"
+            rep = planClean (mkCat [s, a]) (mkCat [b])
+        case clEligible rep of
+          [c] -> (ccStaging c, ccArchiveCopies c, ccBackupCopies c) @?= (s, [a], [b])
+          other -> assertFailure ("expected 1 eligible, got " <> show (length other))
+        clHeld rep @?= []
+    , testCase "缺备份副本 → HELD" $ do
+        let s = mkE ("To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "c.jpg") "X"
+            a = mkE ("成片" </> "26-06-R66" </> "c.jpg") "X"
+            rep = planClean (mkCat [s, a]) (mkCat [])
+        (clEligible rep, map fst (clHeld rep)) @?= ([], [enPath s])
+        case clHeld rep of
+          [(_, why)] -> assertBool why ("备份盘无此内容" `elemSubstr` why)
+          _ -> assertFailure "expected 1 held"
+    , testCase "缺归档副本 → HELD" $ do
+        let s = mkE ("To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "c.jpg") "X"
+            b = mkE ("成片" </> "26-06-R66" </> "c.jpg") "X"
+            rep = planClean (mkCat [s]) (mkCat [b])
+        case clHeld rep of
+          [(p, why)] -> do
+            p @?= enPath s
+            assertBool why ("主库归档层无此内容" `elemSubstr` why)
+          _ -> assertFailure "expected 1 held"
+    , testCase "待修改 从不清理" $ do
+        let s = mkE ("To-Be-Sync'd" </> "待修改" </> "y.ARW") "X"
+            a = mkE ("Raw" </> "2023" </> "y.ARW") "X"
+            rep = planClean (mkCat [s, a]) (mkCat [a])
+        (clEligible rep, clHeld rep, clPendingEdit rep) @?= ([], [], [enPath s])
+    , testCase "verifyCandidates: 备份见证盘面已变 → 降级 HELD" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let mroot = dir </> "main"
+              broot = dir </> "bak"
+          createDirectoryIfMissing True (mroot </> "To-Be-Sync'd" </> "Processed" </> "26-06-R66")
+          createDirectoryIfMissing True (mroot </> "成片" </> "26-06-R66")
+          createDirectoryIfMissing True (broot </> "成片" </> "26-06-R66")
+          writeFile (mroot </> "To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "c.jpg") "X3"
+          writeFile (mroot </> "成片" </> "26-06-R66" </> "c.jpg") "X3"
+          writeFile (broot </> "成片" </> "26-06-R66" </> "c.jpg") "X3"
+          mcat <- scanQuiet "m" mroot
+          bcat <- scanQuiet "b" broot
+          let rep = planClean mcat bcat
+          length (clEligible rep) @?= 1
+          -- 正例：三副本活体核对通过
+          (ok1, held1) <- verifyCandidates mroot broot (clEligible rep)
+          (length ok1, held1) @?= (1, [])
+          -- 反例：备份副本在 catalog 之后被改 → 降级
+          writeFile (broot </> "成片" </> "26-06-R66" </> "c.jpg") "TAMPERED"
+          (ok2, held2) <- verifyCandidates mroot broot (clEligible rep)
+          length ok2 @?= 0
+          case held2 of
+            [(_, why)] -> assertBool why ("备份副本盘面已变" `elemSubstr` why)
+            _ -> assertFailure "expected 1 demoted"
+    , testCase "端到端：quarantine 计划落 trash 且保相对路径" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let mroot = dir </> "main"
+              srel = "To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "c.jpg"
+          createDirectoryIfMissing True (mroot </> takeDirectory srel)
+          createDirectoryIfMissing True (mroot </> "成片" </> "26-06-R66")
+          writeFile (mroot </> srel) "X9"
+          writeFile (mroot </> "成片" </> "26-06-R66" </> "c.jpg") "X9"
+          mcat <- scanQuiet "m" mroot
+          -- 备份 catalog 直接用主库 catalog 模拟（clean 只看 sha 集合）
+          let rep = planClean mcat mcat
+          pid <- newPlanId
+          now <- getCurrentTime
+          let plan = Plan pid "clean-staging" mroot now (cleanPlanItems (clEligible rep))
+          rs <- execOk plan
+          map (outcomeLabel . snd) rs @?= ["DONE"]
+          stEx <- doesFileExist (mroot </> srel)
+          stEx @?= False
+          c <- readFile (trashDir mroot </> T.unpack pid </> srel)
+          c @?= "X9"
+          -- 归档副本原封不动
+          keep <- readFile (mroot </> "成片" </> "26-06-R66" </> "c.jpg")
+          keep @?= "X9"
+    ]
+
+elemSubstr :: String -> String -> Bool
+elemSubstr needle hay = any (\i -> take (length needle) (drop i hay) == needle) [0 .. length hay]

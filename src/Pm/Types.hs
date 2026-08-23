@@ -39,15 +39,20 @@ data RootInfo = RootInfo
   { riId :: Text
   , riRole :: RootRole
   , riCreated :: UTCTime
+  , riFsType :: Maybe Text
+    -- ^ 探测到的卷文件系统（"NTFS"\/"exFAT"…，§9 备份盘记录用）；仅供参考，
+    -- 协议不依赖它。旧 root-id.json 缺此字段 → Nothing。
   }
   deriving (Show, Eq)
 
 instance ToJSON RootInfo where
-  toJSON r = object ["id" .= riId r, "role" .= riRole r, "created" .= riCreated r]
+  toJSON r =
+    object
+      ["id" .= riId r, "role" .= riRole r, "created" .= riCreated r, "fsType" .= riFsType r]
 
 instance FromJSON RootInfo where
   parseJSON = withObject "RootInfo" $ \o ->
-    RootInfo <$> o .: "id" <*> o .: "role" <*> o .: "created"
+    RootInfo <$> o .: "id" <*> o .: "role" <*> o .: "created" <*> o .:? "fsType"
 
 data FileKind = KindPhoto | KindSidecar | KindMeta
   deriving (Show, Eq)

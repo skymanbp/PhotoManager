@@ -19,9 +19,11 @@ import Data.Time
 import System.FilePath (splitDirectories, (</>))
 import Text.Printf (printf)
 
+import Pm.Backup (BackupCacheMeta (..), readBackupCacheMeta)
 import Pm.Catalog (loadCatalog)
 import Pm.Config (Config (..))
 import Pm.Hash (StatSnap (..), statSnap)
+import Pm.Import (stagingArchivedSummary)
 import Pm.Scan (listTree)
 import Pm.Types
 
@@ -68,13 +70,30 @@ runStatus cfg opts = do
         ts -> do
           let oldestDays = round (diffUTCTime now (minimum ts) / 86400) :: Integer
           printf "  验证        最久未验证字节 %d 天前\n" oldestDays
-      -- Staging events
+      -- Staging events（已归档冗余 → clean；否则 → import）
       let stagingEvents =
             Set.toList . Set.fromList $
               mapMaybe stagingEventOf (Map.keys (catEntries cat))
-      unless (null stagingEvents) $ do
-        printf "  ⚠ 暂存区 %d 个事件未归档: %s\n" (length stagingEvents) (show stagingEvents)
-        putStrLn "      → pm import（P2 交付）"
+          (nStaging, nArchived) = stagingArchivedSummary cat
+      unless (null stagingEvents) $
+        if nStaging > 0 && nArchived == nStaging
+          then do
+            printf "  暂存区    %d 个事件 %d 文件内容已全部归档（冗余）\n" (length stagingEvents) nStaging
+            putStrLn "      → pm clean staging（三副本确认，需插备份盘）"
+          else do
+            printf "  ⚠ 暂存区 %d 个事件未归档: %s\n" (length stagingEvents) (show stagingEvents)
+            putStrLn "      → pm import"
+      -- 备份盘（只读缓存，不探硬件 —— 拔盘状态下也能报，§9）
+      mbk <- readBackupCacheMeta root
+      case mbk of
+        Nothing ->
+          putStrLn "  备份盘     未登记/未同步 → 插盘后 pm backup init <镜像路径>，再 pm backup"
+        Just m -> do
+          let bstamp = formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz (bmAt m))
+              lag = bmAdd m + bmUpdate m
+          if lag == 0
+            then printf "  备份盘     上次同步 %s · 当时无滞后（EXTRA %d）\n" bstamp (bmExtra m)
+            else printf "  ⚠ 备份盘   上次同步 %s · 当时落后 %d 项 → 插盘后 pm backup\n" bstamp lag
       -- Freshness sweep
       pending <-
         if stCached opts

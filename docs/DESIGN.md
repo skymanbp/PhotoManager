@@ -200,8 +200,8 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm scan [root]` | 全量/增量索引（首扫全量 hash，之后 stat-比对；变更集才重 hash） | 仅 .pm/ |
 | `pm status` | **总览仪表盘**：头行永远打印「索引时间（几分钟前）· 文件数」；各层规模、staging 待归档、备份盘滞后（未挂载则显示上次同步时间）、vault 差异、命名/版本问题计数、最久未验证字节年龄；**每个问题行末尾给出可直接复制的下一步命令** | 否 |
 | `pm import [--apply]` | To-Be-Sync'd 事件 → `Raw\年\` + `成片\` 归档计划 | apply 时 |
-| `pm backup [--apply]` | 主库 → 备份盘单向增量；备份盘多出的只报 EXTRA 永不动 | apply 时 |
-| `pm clean staging [--apply]` | **隔离区入口**：仅对「Raw/成片 已有同 sha 副本 **且** 备份 root catalog 也有同 sha 副本」（三副本确认）的 staging 文件生成 Quarantine 计划；不满足的标 `HELD(缺哪份)`；备份盘未挂载 → 不生成任何项，报「无法确认第三副本」 | apply 时 |
+| `pm backup [--apply]` | 主库 → 备份盘单向增量；备份盘多出的只报 EXTRA 永不动。**`pm backup init <盘上镜像路径>`（P2 落锤）**：插盘后一次性登记——写 role=Backup 的 root-id.json（含 FS 探测）+ 配置记 UUID+盘内相对路径，此后按 UUID 认盘 | apply 时 |
+| `pm clean staging [--apply]` | **隔离区入口**：仅对「Raw/成片 已有同 sha 副本 **且** 备份 root catalog 也有同 sha 副本」（三副本确认）的 staging 文件生成 Quarantine 计划；不满足的标 `HELD(缺哪份)`；备份盘未挂载 → 不生成任何项，报「无法确认第三副本」。**`待修改\` 永不入清理计划（P2 落锤，与 §7 import 不碰同源）**；catalog 声称的两侧副本在计划期再过一次活体 stat 核对，变了降级 HELD | apply 时 |
 | `pm vault status` | 相册↔vault 六态差异（§10.1 兼容 schema） | 否 |
 | `pm vault push [--apply]` | NEW→定类别后拷入 vault（类别来自 GUI 勾选或 `--category`/计划文件，**CLI 无法看图，不装作能分类**）；DRIFT→确认后 supersede 复合；RENAME→只报告/BLOCKED（§10.2）；结束打印显式 git 步骤 | apply 时 |
 | `pm vault ingest <files> --category <c>` | skill 调用的非交互批量入口：拷 相册/ + 拷 vault 类目 + 冲突检测 + journal 登记 inbox-origin；`--finalize` 单独一步移 `_inbox→_done`（供 skill 在 photos.json 校验通过后调，§10.3） | 是（同协议） |
@@ -341,9 +341,13 @@ undo：从 trash 还原 victim 回 dst，新副本转 quarantine
 
 ## 7. 归档（`pm import`）
 
-- 输入：`To-Be-Sync'd\Raw\<事件>` → `Raw\<年>\<规范名>\`；
-  `To-Be-Sync'd\Processed\<事件>` → `成片\<规范名>\`。
-- 事件名按 canonical scheme（§8，待用户定）规范化后落位；侧车跟随。
+- 输入：`To-Be-Sync'd\Raw\[<年>\]<事件>` → `Raw\<年>\<规范名>\`；
+  `To-Be-Sync'd\Processed\<事件>` → `成片\<规范名>\`。（P2 实测：暂存 Raw 的
+  事件夹直接位于 `Raw\` 下无年份层；计划器两种布局都接受，年份一律由事件名
+  `YY-` 推导，显式年份层与推导不一致 → 不猜，报 unrecognized。）
+- 事件名按 canonical scheme（§8 Scheme A）规范化后落位；侧车跟随；
+  计划期校验同批目标唯一性（两个源撞同一目标 → 整组拒绝）；生成计划前先做
+  暂存区新鲜度守卫（与索引不一致 → 先 pm scan，不基于过期 catalog 出计划）。
 - 老事件返修（如 `Processed\23-04-EU`）：逐文件走 §6.1——同 sha skip、
   不同 sha 标 `NEEDS-DECISION` 交 `pm resolve`。
 - 归档后 staging 原文件**原地不动**；`pm status` 依据**已复验的** Done 标记
@@ -363,17 +367,22 @@ undo：从 trash 还原 victim 回 dst，新副本转 quarantine
 
 - 备份 root 识别：`getLogicalDrives` 枚举 + `SetErrorMode(SEM_FAILCRITICALERRORS)`
   抑制「请插入磁盘」系统对话框 + 只探 REMOVABLE/FIXED 卷找 `.pm/root-id.json`
-  （role=Backup）；找不到 → 提示插盘，绝不猜。（GetDriveTypeW/SetErrorMode 若
-  Win32 包未绑定则自行 foreign import——P0 spike 确认。）
-- `pm init` 记录备份盘 FS 类型与时间戳粒度进 root-id.json；exFAT 无元数据日志，
-  rename 原子性弱于 NTFS——doctor 矩阵（§6.4）不依赖原子性假设，仅依赖
-  「tmp 与 dst 不同名」这一约定。
+  （role=Backup，UUID 与配置登记值相符才认）；找不到 → 提示插盘，绝不猜。
+  （P2 落锤：GetDriveTypeW/SetErrorMode/GetVolumeInformationW 均无 Win32 包
+  绑定，已在 Pm.Win 自行 foreign import。）
+- 登记入口 = **`pm backup init <盘上镜像路径>`**（P2 落锤，取代原设想的
+  pm init 一并处理）：写 role=Backup root-id.json（含 GetVolumeInformationW
+  探测的 FS 类型）+ 主配置记 `[backup] id/subpath`；拒绝与主库嵌套的路径和
+  git 工作树。exFAT 无元数据日志，rename 原子性弱于 NTFS——doctor 矩阵
+  （§6.4）不依赖原子性假设，仅依赖「tmp 与 dst 不同名」这一约定。
 - 单向 add/update：主库有而备份没有 → Copy；同名不同 hash → 计划标出方向
   （默认判主库新），**经确认后走 §6.5 supersede 复合**（备份盘旧字节进备份盘
   自己的 `.pm/trash/`，不丢）；备份盘多出的 → EXTRA 只读报告。
-- 备份 root 的 catalog 记录**备份盘自己 stat 的值**（§3）；journal 与 dst 跨卷
-  无排序保证——故备份路径的 Done 一律即时 FlushFileBuffers（不组提交），
-  且 doctor 的 C3/C4 行专门接这个残余。
+- 备份 root 的 catalog 记录**备份盘自己 stat 的值**（§3）。备份计划的
+  journal/trash/tmp 全在备份 root 自己的 `.pm` 下（P2 落锤，与效果同卷）；
+  备份路径的 Done 仍一律即时 FlushFileBuffers（不组提交）——理由是可移动
+  介质：结果打印后用户随时可能拔盘，Done 必须在汇报前已落盘；
+  doctor（`--backup`）的 C3/C4 行专门接这个残余。
 - worker 数是 Root 属性：init 探测介质（seek-penalty/MediaType），
   removable/rotational 默认 1（避免寻道抖动），NVMe/SSD 默认物理核数；可手动覆盖。
 - 拔盘期间 `pm status` 用备份 root 的本地缓存快照报「上次同步时间 + 当时滞后量」。

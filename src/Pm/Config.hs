@@ -41,6 +41,10 @@ data Config = Config
   , cfgVaultPath :: Maybe FilePath
   , cfgPhotosJson :: Maybe FilePath
   , cfgWorkers :: Maybe Int
+  , cfgBackupId :: Maybe Text
+    -- ^ 备份 root 的 UUID（`pm backup init` 登记；发现流程按 UUID 认盘，§9）
+  , cfgBackupSubpath :: Maybe FilePath
+    -- ^ 备份镜像相对盘根的位置（如 "Photography"）；盘符不入配置
   }
   deriving (Show, Eq)
 
@@ -51,6 +55,8 @@ instance TOML.DecodeTOML Config where
       <*> TOML.getFieldsOpt ["vault", "path"]
       <*> TOML.getFieldsOpt ["portfolio", "photos-json"]
       <*> TOML.getFieldsOpt ["main", "workers"]
+      <*> TOML.getFieldsOpt ["backup", "id"]
+      <*> TOML.getFieldsOpt ["backup", "subpath"]
 
 configFilePath :: IO FilePath
 configFilePath = do
@@ -80,6 +86,11 @@ renderConfig c =
     , "path = '" <> T.pack (cfgMainPath c) <> "'"
     ]
       <> maybe [] (\w -> ["workers = " <> T.pack (show w)]) (cfgWorkers c)
+      <> ( case (cfgBackupId c, cfgBackupSubpath c) of
+            (Just bid, Just sub) ->
+              ["", "[backup]", "id = '" <> bid <> "'", "subpath = '" <> T.pack sub <> "'"]
+            _ -> []
+         )
       <> maybe [] (\p -> ["", "[vault]", "path = '" <> T.pack p <> "'"]) (cfgVaultPath c)
       <> maybe
         []
