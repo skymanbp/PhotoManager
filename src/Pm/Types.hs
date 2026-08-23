@@ -91,6 +91,9 @@ data Entry = Entry
   , enMtimeNs :: Integer
   , enSha :: Text
   , enKind :: FileKind
+  , enLastVerified :: Maybe UTCTime
+    -- ^ 上次真实重读并核对 sha 的时刻（I3b 介质级验证轮转的依据）。
+    -- 旧快照缺此字段 → 载入时回填快照的 scanned 时间（Catalog.loadCatalog）。
   }
   deriving (Show, Eq)
 
@@ -101,6 +104,7 @@ instance ToJSON Entry where
     , "mtimeNs" .= enMtimeNs e
     , "sha256" .= enSha e
     , "kind" .= enKind e
+    , "lastVerified" .= enLastVerified e
     ]
 
 instance FromJSON Entry where
@@ -111,6 +115,7 @@ instance FromJSON Entry where
       <*> o .: "mtimeNs"
       <*> o .: "sha256"
       <*> o .: "kind"
+      <*> o .:? "lastVerified"
 
 -- | Snapshot of one root. The snapshot is a rebuildable cache; the journal is
 -- the durable layer (DESIGN.md §3). Entries are serialized as a list and

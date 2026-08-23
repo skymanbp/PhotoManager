@@ -32,7 +32,7 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
 ## 阶段
 
 - P0 ✅ 脚手架 + init/scan/status（只读）
-- P1 安全内核（Exec/Journal/doctor/trash/undo/apply）
+- P1 ✅ 安全内核（Exec/Journal/doctor/trash/undo/apply/resolve；矩阵逐行测试 + 双模故障注入）
 - P2 import / backup / clean staging
 - P3 vault status/push + names + versions
 - P4 GUI（C#，经 pm serve JSON API）

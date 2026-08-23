@@ -61,6 +61,13 @@ runStatus cfg opts = do
       mapM_
         (\(name, (n, b)) -> printf "  %-14s %5d 文件 %8.1f GiB\n" name n (gib b))
         (sortOn fst layers)
+      -- 最久未验证字节年龄（I3b）
+      let verifTimes = mapMaybe enLastVerified (Map.elems (catEntries cat))
+      case verifTimes of
+        [] -> pure ()
+        ts -> do
+          let oldestDays = round (diffUTCTime now (minimum ts) / 86400) :: Integer
+          printf "  验证        最久未验证字节 %d 天前\n" oldestDays
       -- Staging events
       let stagingEvents =
             Set.toList . Set.fromList $

@@ -38,8 +38,17 @@ loadCatalog root = do
       else do
         r <- eitherDecodeFileStrict fp
         case r of
-          Right c -> pure (Just c, warns)
+          Right c -> pure (Just (backfill c), warns)
           Left e -> pure (Nothing, warns <> [fp <> ": " <> e])
+  -- 旧快照的条目缺 lastVerified → 该 sha 正是那次扫描真实读盘算出的，
+  -- 用快照时间作为验证基线。
+  backfill c =
+    c
+      { catEntries =
+          fmap
+            (\e -> if enLastVerified e == Nothing then e {enLastVerified = Just (catScanned c)} else e)
+            (catEntries c)
+      }
 
 saveCatalog :: FilePath -> Catalog -> IO ()
 saveCatalog root cat = do

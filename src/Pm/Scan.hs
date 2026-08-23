@@ -137,7 +137,8 @@ scanRoot opts oldCat rootId root = do
         post <- statSnap abs'
         if post /= preSnap
           then pure (Left rel) -- changed while hashing → volatile, not indexed
-          else
+          else do
+            vnow <- getCurrentTime
             pure
               ( Right
                   Entry
@@ -146,6 +147,7 @@ scanRoot opts oldCat rootId root = do
                     , enMtimeNs = ssMtimeNs post
                     , enSha = sha
                     , enKind = classifyExt (takeExtension rel)
+                    , enLastVerified = Just vnow
                     }
               )
       bump bytes = do
