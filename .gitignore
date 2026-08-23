@@ -11,3 +11,5 @@ memory/
 
 # Local scratch
 *.local.*
+
+.ce/

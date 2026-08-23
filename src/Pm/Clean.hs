@@ -17,14 +17,16 @@ module Pm.Clean
   , planClean
   , verifyCandidates
   , cleanPlanItems
+  , threeCopiesStillExist
   ) where
 
 import Control.Exception (SomeException, try)
 import Control.Monad (foldM)
 import qualified Data.Map.Strict as Map
+import Data.Text (Text)
 import System.FilePath (splitDirectories, (</>))
 
-import Pm.Hash (StatSnap (..), statSnap)
+import Pm.Hash (sha256File)
 import Pm.Import (stagingTop)
 import Pm.Op
 import Pm.Plan (ItemStatus (..), PlanItem (..))
@@ -61,10 +63,13 @@ planClean mainCat bakCat =
   isPendingEdit e = take 2 (parts e) == [stagingTop, "待修改"]
   staging = [e | e <- Map.elems (catEntries mainCat), inStaging e]
   pendingEdit = [enPath e | e <- staging, isPendingEdit e]
+  -- 评审 mj-5：「归档副本」按契约只认 Raw/成片 两层——相册是下游收藏集，
+  -- 只在相册有副本说明归档层错位，必须 HELD 而不是放行清理。
+  inArchiveLayer e = take 1 (parts e) `elem` [["Raw"], ["成片"]]
   archiveBySha =
     Map.fromListWith
       (<>)
-      [(enSha e, [e]) | e <- Map.elems (catEntries mainCat), not (inStaging e)]
+      [(enSha e, [e]) | e <- Map.elems (catEntries mainCat), inArchiveLayer e]
   backupBySha =
     Map.fromListWith (<>) [(enSha e, [e]) | e <- Map.elems (catEntries bakCat)]
   judged =
@@ -86,27 +91,44 @@ planClean mainCat bakCat =
   heldReason False True = "HELD(备份盘无此内容 → 先 pm backup)"
   heldReason False False = "HELD(内部不一致)" -- 列表推导守卫保证不可达；仅为模式完备
 
--- | catalog 声称的第二/第三副本还要过一次活体 stat 核对（size+mtime 未变才
--- 认那份 sha 还作数）；变了就降级 HELD，绝不按过期 catalog 清理。
+-- | catalog 声称的第二/第三副本还要过一次**真实重 hash** 活体核对（评审
+-- mj-6：只比 size+mtime 挡不住位腐或恢复了时间戳的同尺寸覆盖——sha 才是
+-- 内容证明）；不符就降级 HELD，绝不按过期 catalog 清理。
 -- Returns (verified, demoted-to-held).
 verifyCandidates :: FilePath -> FilePath -> [CleanCandidate] -> IO ([CleanCandidate], [(FilePath, String)])
 verifyCandidates mainRoot backupRoot = foldM step ([], [])
  where
   step (ok, held) c = do
-    aOk <- anyStatMatch mainRoot (ccArchiveCopies c)
-    bOk <- anyStatMatch backupRoot (ccBackupCopies c)
+    let sha = enSha (ccStaging c)
+    aOk <- anyWitnessAlive mainRoot sha (ccArchiveCopies c)
+    bOk <- anyWitnessAlive backupRoot sha (ccBackupCopies c)
     pure $ case (aOk, bOk) of
       (True, True) -> (ok <> [c], held)
-      (False, _) -> (ok, held <> [(enPath (ccStaging c), "HELD(归档副本盘面已变 → 先 pm scan)")])
-      (_, False) -> (ok, held <> [(enPath (ccStaging c), "HELD(备份副本盘面已变 → 先 pm backup)")])
-  anyStatMatch root' es = go es
-   where
-    go [] = pure False
-    go (e : rest) = do
-      r <- try (statSnap (root' </> enPath e)) :: IO (Either SomeException StatSnap)
-      case r of
-        Right s | ssSize s == enSize e && ssMtimeNs s == enMtimeNs e -> pure True
-        _ -> go rest
+      (False, _) -> (ok, held <> [(enPath (ccStaging c), "HELD(归档副本内容核对不过 → 先 pm scan)")])
+      (_, False) -> (ok, held <> [(enPath (ccStaging c), "HELD(备份副本内容核对不过 → 先 pm backup)")])
+
+-- | 至少一个见证条目在盘上重读出期望 sha 才算副本仍然存在。
+anyWitnessAlive :: FilePath -> Text -> [Entry] -> IO Bool
+anyWitnessAlive root' sha = go
+ where
+  go [] = pure False
+  go (e : rest) = do
+    r <- try (sha256File (root' </> enPath e)) :: IO (Either SomeException Text)
+    case r of
+      Right actual | actual == sha -> pure True
+      _ -> go rest
+
+-- | @pm trash empty@ 对 clean-staging 隔离记录的最终屏障（评审 cx-3）：
+-- 永久删除前按**当前** catalog + 真实重 hash 重新确认「归档层 + 备份盘」
+-- 各有一份同 sha 副本仍然在盘。任何一侧不过 → 该条目 HELD 不删。
+threeCopiesStillExist :: FilePath -> Catalog -> FilePath -> Catalog -> Text -> IO Bool
+threeCopiesStillExist mainRoot mainCat backupRoot bakCat sha = do
+  let inArchiveLayer e = take 1 (splitDirectories (enPath e)) `elem` [["Raw"], ["成片"]]
+      archiveWits = [e | e <- Map.elems (catEntries mainCat), inArchiveLayer e, enSha e == sha]
+      backupWits = [e | e <- Map.elems (catEntries bakCat), enSha e == sha]
+  aOk <- anyWitnessAlive mainRoot sha archiveWits
+  bOk <- anyWitnessAlive backupRoot sha backupWits
+  pure (aOk && bOk)
 
 -- | Quarantine items for the candidates that survived the CLI's live stat
 -- verification. Victims keep their staging-relative path inside the trash,
@@ -121,5 +143,6 @@ cleanPlanItems cands =
         , opReason = "clean-staging:三副本已确认"
         }
       StPending
+      Nothing
   | (ix, c) <- zip [0 ..] cands
   ]

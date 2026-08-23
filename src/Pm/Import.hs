@@ -22,10 +22,10 @@ module Pm.Import
   , stagingArchivedSummary
   ) where
 
-import Data.Char (isDigit)
+import Data.Char (isDigit, toLower)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import System.FilePath (joinPath, splitDirectories, (</>))
+import System.FilePath (joinPath, splitDirectories, takeBaseName, takeDirectory, (</>))
 
 import Pm.Names (canonProcessedEvent, canonRawEvent)
 import Pm.Op
@@ -92,12 +92,21 @@ planImport cat =
       pendingEdit = [enPath e | (e, Left ()) <- routed]
       unrecognized = [enPath e | (e, Right Nothing) <- routed]
       mapped = [(e, dst) | (e, Right (Just dst)) <- routed]
-      -- 同批目标唯一性：两个源指向同一 dst → 全组进 dupTarget，拒绝入计划
-      dstCount = Map.fromListWith (+) [(dst, 1 :: Int) | (_, dst) <- mapped]
-      isDup (_, dst) = Map.findWithDefault 0 dst dstCount > 1
+      -- 评审 mj-2：NTFS 大小写不敏感——目标唯一性与已归档查询一律用
+      -- case-fold 键，计划期就抓住 26-06-R66\D.ARW vs 26-06-r66\d.arw 这类
+      -- 同目标碰撞，而不是留给执行期的晚期 conflict。
+      catByFold = Map.fromList [(foldPath (enPath e), e) | e <- Map.elems (catEntries cat)]
+      dstCount = Map.fromListWith (+) [(foldPath dst, 1 :: Int) | (_, dst) <- mapped]
+      collided (_, dst) = Map.findWithDefault 0 (foldPath dst) dstCount > 1
+      -- 评审 mj-3：撞名升级到「同目录同 stem 组」——被拒文件的侧车
+      -- (.xmp/.acr 同 stem) 一起进 dup 桶，绝不产生孤立侧车（§7 侧车跟随）。
+      stemKey rel = (foldPath (takeDirectory rel), foldPath (takeBaseName rel))
+      collStems =
+        Set.fromList [stemKey (enPath e) | m@(e, _) <- mapped, collided m]
+      isDup m@(e, _) = collided m || stemKey (enPath e) `Set.member` collStems
       dups = filter isDup mapped
       uniq = filter (not . isDup) mapped
-      classify (e, dst) = case Map.lookup dst (catEntries cat) of
+      classify (e, dst) = case Map.lookup (foldPath dst) catByFold of
         Nothing -> (Just (e, dst), Nothing, Nothing)
         Just archived
           | enSha archived == enSha e -> (Nothing, Just (enPath e, dst), Nothing)
@@ -112,11 +121,15 @@ planImport cat =
         , irDupTarget = [(enPath e, dst) | (e, dst) <- dups]
         }
 
+-- | Windows-semantics comparison key（评审 mj-2）：case-fold 全路径。
+foldPath :: FilePath -> FilePath
+foldPath = map toLower
+
 -- | Plan items for the actionable part of the report. @root@ is the main
 -- library root (staging lives inside it) — sources become absolute here.
 importPlanItems :: FilePath -> ImportReport -> [PlanItem]
 importPlanItems root rep =
-  [PlanItem ix op st | (ix, (op, st)) <- zip [0 ..] (copies <> reworks)]
+  [PlanItem ix op st Nothing | (ix, (op, st)) <- zip [0 ..] (copies <> reworks)]
  where
   copies = [(mkCopy e dst, StPending) | (e, dst) <- irCopy rep]
   reworks =

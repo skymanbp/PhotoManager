@@ -10,16 +10,22 @@ module Pm.Undo
   ) where
 
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.FilePath ((</>))
 
+import Pm.Config (readRootInfo)
 import Pm.Journal
 import Pm.Op
 import Pm.Plan
+import Pm.Types (RootInfo (..))
 
 -- | Undo the last @n@ Done operations (most recent first in the plan).
+-- §6.5 自动复位产生的 @…~r@ 复位 rename 与其配对的 Quarantine 互为净零，
+-- 一起从可撤销序列剔除——撤销「一次已被自动回滚的隔离」没有意义且会把
+-- victim 再次搬进 trash。
 buildUndoPlan :: FilePath -> Int -> IO (Either String Plan)
 buildUndoPlan root n = do
   (entries, warns) <- readJournal root
@@ -27,7 +33,15 @@ buildUndoPlan root n = do
     (w : _) -> pure (Left ("journal 损坏，先跑 pm doctor: " <> w))
     [] -> do
       let intents = Map.fromList [(jeOpId e, jeOp e) | e@JIntent {} <- entries]
-          dones = [(jeOpId e, jeVerifiedSha e, jeTrashRel e) | e@JDone {} <- entries]
+          allDones = [(jeOpId e, jeVerifiedSha e, jeTrashRel e) | e@JDone {} <- entries]
+          restoredBases =
+            Set.fromList [T.dropEnd 2 oid | (oid, _, _) <- allDones, "~r" `T.isSuffixOf` oid]
+          dones =
+            [ d
+            | d@(oid, _, _) <- allDones
+            , not ("~r" `T.isSuffixOf` oid)
+            , not (oid `Set.member` restoredBases)
+            ]
           lastN = reverse (drop (length dones - n) dones)
       if null lastN
         then pure (Left "journal 中没有可撤销的已完成操作")
@@ -38,13 +52,15 @@ buildUndoPlan root n = do
             Right ops -> do
               pid <- newPlanId
               now <- getCurrentTime
+              minfo <- readRootInfo root
               pure . Right $
                 Plan
                   { plId = pid
                   , plKind = "undo"
                   , plRootPath = root
+                  , plRootId = riId <$> minfo
                   , plCreated = now
-                  , plItems = [PlanItem i op StPending | (i, op) <- zip [0 ..] ops]
+                  , plItems = [PlanItem i op StPending Nothing | (i, op) <- zip [0 ..] ops]
                   }
 
 reverseOp

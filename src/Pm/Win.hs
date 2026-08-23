@@ -1,4 +1,13 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+
+-- 评审 mn-1：x86 上 Windows API 是 stdcall，x86_64 上两者同一 ABI。
+-- 与 Win32 包同款的 CPP 宏保证 32 位构建也不会栈失衡。
+#if defined(i386_HOST_ARCH)
+#define WINDOWS_CCONV stdcall
+#else
+#define WINDOWS_CCONV ccall
+#endif
 
 -- | The only module that talks to Win32 directly. Everything here exists
 -- because the portable API has the wrong semantics on Windows (DESIGN.md §6,
@@ -65,13 +74,13 @@ moveFileNoReplace src dst = Win32File.moveFileEx src (Just dst) 0
 
 -- ─── Backup-drive discovery primitives (§9) ─────────────────────────────────
 
-foreign import ccall unsafe "windows.h SetErrorMode"
+foreign import WINDOWS_CCONV unsafe "windows.h SetErrorMode"
   c_SetErrorMode :: Word32 -> IO Word32
 
-foreign import ccall unsafe "windows.h GetDriveTypeW"
+foreign import WINDOWS_CCONV unsafe "windows.h GetDriveTypeW"
   c_GetDriveTypeW :: LPTSTR -> IO Word32
 
-foreign import ccall unsafe "windows.h GetVolumeInformationW"
+foreign import WINDOWS_CCONV unsafe "windows.h GetVolumeInformationW"
   c_GetVolumeInformationW ::
     LPTSTR -> LPTSTR -> Word32 -> Ptr Word32 -> Ptr Word32 -> Ptr Word32 -> LPTSTR -> Word32 -> IO Word32
 

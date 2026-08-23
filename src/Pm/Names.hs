@@ -12,8 +12,7 @@ module Pm.Names
   , canonProcessedEvent
   ) where
 
-import Data.Char (isDigit)
-import Data.List (isSuffixOf, stripPrefix)
+import Data.Char (isDigit, toLower)
 
 -- | \"26-04-Providence\" → Just (26, 4, \"Providence\"). The location part
 -- must be non-empty; the month must be 1-12 (a name like \"26-13-X\" is not
@@ -28,27 +27,40 @@ parseYYMM (a : b : '-' : c : d : '-' : rest)
       Just (read [a, b], mm, rest)
 parseYYMM _ = Nothing
 
+-- | Case-insensitively strip ONE trailing \"-Raw\" and parse what remains.
+-- 评审 mj-1：后缀必须先剥再验地点非空——否则 \"26-04--Raw\" 的空地点会被
+-- \"-Raw\" 冒充成地点、\"26-04-Raw\" 会歧义成地点叫 Raw；两者都必须拒绝。
+-- Returns (yy, mm, location-without-suffix).
+parseEventBase :: String -> Maybe (Int, Int, String)
+parseEventBase name =
+  case stripRawSuffix name of
+    Just base -> parseYYMM base -- 带后缀：剥掉后仍须是合法 YY-MM-地点
+    Nothing -> parseYYMM name
+ where
+  stripRawSuffix s =
+    let n = length s
+     in if n >= 4 && map toLower (drop (n - 4) s) == "-raw"
+          then Just (take (n - 4) s)
+          else Nothing
+
 -- | Staging raw event folder → (year folder, canonical Scheme A name).
 -- \"26-04-Providence\" → (\"2026\", \"26-04-Providence-Raw\"); idempotent on
--- names already carrying the \"-Raw\" suffix.
+-- names already carrying the suffix (also normalizes \"-raw\" → \"-Raw\").
 canonRawEvent :: String -> Maybe (String, String)
 canonRawEvent name = do
-  (yy, _, _) <- parseYYMM name
-  let canon = if "-Raw" `isSuffixOf` name then name else name <> "-Raw"
-  pure (yearFolder yy, canon)
+  (yy, mm, loc) <- parseEventBase name
+  pure (yearFolder yy, pad2 yy <> "-" <> pad2 mm <> "-" <> loc <> "-Raw")
 
 -- | Staging processed event folder → canonical 成片 folder name
--- (\"YY-MM-地点\", stripping a stray \"-Raw\" suffix if present).
+-- (\"YY-MM-地点\", any stray \"-Raw\" suffix stripped).
 canonProcessedEvent :: String -> Maybe String
 canonProcessedEvent name = do
-  (_, _, loc) <- parseYYMM name
-  case stripSuffixStr "-Raw" name of
-    Just stripped | not (null (drop 6 stripped)) -> pure stripped
-    _ -> if null loc then Nothing else pure name
+  (yy, mm, loc) <- parseEventBase name
+  pure (pad2 yy <> "-" <> pad2 mm <> "-" <> loc)
 
 -- | All library years are 20xx (earliest event: 2022).
 yearFolder :: Int -> String
-yearFolder yy = "20" <> (if yy < 10 then '0' : show yy else show yy)
+yearFolder yy = "20" <> pad2 yy
 
-stripSuffixStr :: String -> String -> Maybe String
-stripSuffixStr suf s = reverse <$> stripPrefix (reverse suf) (reverse s)
+pad2 :: Int -> String
+pad2 n = if n < 10 then '0' : show n else show n

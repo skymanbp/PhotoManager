@@ -17,6 +17,7 @@ module Pm.Doctor
 import Control.Monad (filterM, forM, forM_, unless, when)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
@@ -24,7 +25,7 @@ import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, remov
 import System.FilePath ((</>))
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (pmDir)
+import Pm.Config (pmDir, readRootInfo)
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
 import Pm.Hash (sha256File)
 import Pm.Journal
@@ -91,9 +92,18 @@ runDoctor root opts = do
       afterClean = lastSegment entries
       donesAfterClean = [(jeOpId e, jeVerifiedSha e, jeTrashRel e) | e@JDone {} <- afterClean]
       pending = Map.toList (intents `Map.difference` terminals)
+      -- Exec 组内自动复位（§6.5）/undo 复位会把隔离文件从 trash 移回原位，
+      -- 且该 rename 有自己的 Intent+Done。这些 trash 源路径要从 C4 的
+      -- 「Done 目标应仍在」检查中排除，否则复位会被误报为 CORRUPT。
+      restoredFrom =
+        Set.fromList
+          [ opOldRel op
+          | (oid, op@OpRename {}) <- Map.toList intents
+          , Just (TDone _ _) <- [Map.lookup oid terminals] -- Failed 的复位没动文件，不豁免
+          ]
 
   pendingFindings <- concat <$> mapM (classifyPending root) pending
-  c4Findings <- concat <$> mapM (verifyDone root intents) donesAfterClean
+  c4Findings <- concat <$> mapM (verifyDone root intents restoredFrom) donesAfterClean
 
   -- Trash reconciliation (Q1 + purged records)
   tv <- trashView root
@@ -216,14 +226,21 @@ verifyFp p (FpDir s) = do
   if isD then (== s) <$> dirFingerprint p else pure False
 
 -- C4: an interrupted batch's Done claims re-verified against disk.
-verifyDone :: FilePath -> Map.Map Text Op -> (Text, Maybe Text, Maybe FilePath) -> IO [Finding]
-verifyDone root intents (oid, msha, mtrash) =
+-- @restoredFrom@ = trash 源路径集合，其文件已被 journaled 复位 rename 移走
+-- （§6.5 自动复位 / undo）——对应的 Quarantine Done 不再检查 trash 目标。
+verifyDone :: FilePath -> Map.Map Text Op -> Set.Set FilePath -> (Text, Maybe Text, Maybe FilePath) -> IO [Finding]
+verifyDone root intents restoredFrom (oid, msha, mtrash) =
   case Map.lookup oid intents of
     Nothing -> pure [Finding "C3" Info (T.unpack oid <> ": Done 无对应 Intent（journal 头部轮转或跨批），跳过") ""]
     Just op -> case (op, msha) of
       (OpCopy _ dstRel _ _ _, Just sha) -> checkTarget (root </> dstRel) dstRel sha
       (OpQuarantine _ _ _, Just sha)
-        | Just trashRel <- mtrash -> checkTarget (trashDir root </> trashRel) trashRel sha
+        | Just trashRel <- mtrash ->
+            if (".pm" </> "trash" </> trashRel) `Set.member` restoredFrom
+              then
+                pure
+                  [Finding "Q-RESTORED" Info (T.unpack oid <> ": 隔离后已被 journaled 复位（" <> trashRel <> "），无需核查") ""]
+              else checkTarget (trashDir root </> trashRel) trashRel sha
       _ -> pure [] -- rename Done carries no content claim
  where
   checkTarget abs' rel sha = do
@@ -306,14 +323,16 @@ applyRepairs root findings pending stale = do
       actual <- sha256File (root </> dstRel)
       pid <- newPlanId
       now <- getCurrentTime
+      minfo <- readRootInfo root
       let p =
             Plan
               { plId = pid
               , plKind = "doctor-c5-quarantine"
               , plRootPath = root
+              , plRootId = riId <$> minfo
               , plCreated = now
               , plItems =
-                  [PlanItem 0 (OpQuarantine dstRel actual ("doctor-c5:" <> oid)) StPending]
+                  [PlanItem 0 (OpQuarantine dstRel actual ("doctor-c5:" <> oid)) StPending Nothing]
               }
       fp <- savePlan p
       putStrLn ("  修复: C5 隔离计划已生成 " <> fp <> " → 审阅后 pm apply " <> T.unpack pid)

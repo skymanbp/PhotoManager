@@ -52,23 +52,28 @@ backupDiff mainCat bakCat =
 
 -- | Plan items mutating the BACKUP root. Adds become plain copies; updates
 -- become the §6.5 supersede compound — quarantine the backup's old bytes
--- (into the backup root's own trash) immediately before the copy. Extras are
--- deliberately absent: nothing in the algebra can touch them.
+-- (into the backup root's own trash) immediately before the copy. Each pair
+-- shares a group id（评审 cx-2：--only\/resolve 按组闭包，Exec 组内失败自动
+-- 复位）. Extras are deliberately absent: nothing in the algebra can touch
+-- them.
 backupPlanItems :: FilePath -> BackupDiff -> [PlanItem]
 backupPlanItems mainRoot d =
-  [PlanItem ix op StPending | (ix, op) <- zip [0 ..] (adds <> updates)]
+  [PlanItem ix op st g | (ix, (op, st, g)) <- zip [0 ..] (adds <> updates)]
  where
-  adds = map copyOf (bdAdd d)
+  adds = [(copyOf m, StPending, Nothing) | m <- bdAdd d]
   updates =
     concat
-      [ [ OpQuarantine
-            { opVictimRel = enPath b
-            , opVictimSha = enSha b
-            , opReason = "supersede:backup-update"
-            }
-        , copyOf m
+      [ [ ( OpQuarantine
+              { opVictimRel = enPath b
+              , opVictimSha = enSha b
+              , opReason = "supersede:backup-update"
+              }
+          , StPending
+          , Just g
+          )
+        , (copyOf m, StPending, Just g)
         ]
-      | (m, b) <- bdUpdate d
+      | (g, (m, b)) <- zip [0 ..] (bdUpdate d)
       ]
   copyOf m =
     OpCopy

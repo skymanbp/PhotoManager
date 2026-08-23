@@ -9,22 +9,20 @@ module Pm.Status
   , runStatus
   ) where
 
-import Control.Exception (SomeException, try)
-import Control.Monad (forM, unless)
+import Control.Monad (unless)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
 import Data.Time
-import System.FilePath (splitDirectories, (</>))
+import System.FilePath (splitDirectories)
 import Text.Printf (printf)
 
 import Pm.Backup (BackupCacheMeta (..), readBackupCacheMeta)
 import Pm.Catalog (loadCatalog)
 import Pm.Config (Config (..))
-import Pm.Hash (StatSnap (..), statSnap)
 import Pm.Import (stagingArchivedSummary)
-import Pm.Scan (listTree)
+import Pm.Scan (freshnessSweep)
 import Pm.Types
 
 data StatusOpts = StatusOpts
@@ -94,28 +92,14 @@ runStatus cfg opts = do
           if lag == 0
             then printf "  备份盘     上次同步 %s · 当时无滞后（EXTRA %d）\n" bstamp (bmExtra m)
             else printf "  ⚠ 备份盘   上次同步 %s · 当时落后 %d 项 → 插盘后 pm backup\n" bstamp lag
-      -- Freshness sweep
+      -- Freshness sweep（共享实现：Pm.Scan.freshnessSweep）
       pending <-
         if stCached opts
           then do
             putStrLn "  （--cached: 未做新鲜度核对）"
             pure 0
           else do
-            (files, _errs) <- listTree root
-            snaps <- forM files $ \rel -> do
-              r <- try (statSnap (root </> rel)) :: IO (Either SomeException StatSnap)
-              pure (rel, r)
-            let diskMap = Map.fromList [(rel, s) | (rel, Right s) <- snaps]
-                catMap = catEntries cat
-                newN = Map.size (diskMap `Map.difference` catMap)
-                missingN = Map.size (catMap `Map.difference` diskMap)
-                changedN =
-                  length
-                    [ ()
-                    | (rel, s) <- Map.toList diskMap
-                    , Just e <- [Map.lookup rel catMap]
-                    , enSize e /= ssSize s || enMtimeNs e /= ssMtimeNs s
-                    ]
+            (newN, changedN, missingN, _errN) <- freshnessSweep root "" (catEntries cat)
             if newN + missingN + changedN == 0
               then putStrLn "  ✓ 索引与磁盘一致" >> pure 0
               else do

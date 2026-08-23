@@ -44,6 +44,9 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
 - P1 ✅ 安全内核（Exec/Journal/doctor/trash/undo/apply/resolve；矩阵逐行测试 + 双模故障注入）
 - P2 ✅ import / backup / clean staging（计划器纯函数 + 双 root fixture 端到端；
   真实归档待用户 `pm apply`，备份盘验收待插盘 `pm backup init`）
+- P2.1 ✅ codex 评审 12 项修复（计划带 root UUID + supersede 复合组自动复位、
+  clean 执行期三副本重验 + trash 屏障、目标键 case-fold、Names 边角；
+  评审归档 docs/reviews/2026-08-23-p2-codex-review.md）
 - P3 vault status/push + names + versions
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接

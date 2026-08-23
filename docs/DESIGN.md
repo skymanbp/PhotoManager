@@ -118,8 +118,13 @@ Entry     = { relPath, size, mtimeNs, sha256, lastVerified, kind :: Photo | Side
               -- mtimeNs 一律是「本 root 上 stat 回来的值」，绝不跨 root 比较
 Event     = 解析自事件夹名: { date, location, scheme :: A|B|Bare, layer }
 VersionGroup = 同一规范化 stem 下的多个 Entry（跨层聚合）
-Plan      = { planId, createdAt, ops :: [Op], 生成时的 (size,mtime) 前提快照 }
-              -- 持久化在 .pm/plans/<planId>.json，供 pm apply/resolve/审计
+Plan      = { planId, kind, rootPath, rootId :: UUID, createdAt,
+              items :: [{ix, op, status, group :: Maybe Int}] }
+              -- 持久化在 .pm/plans/<planId>.json，供 pm apply/resolve/审计。
+              -- P2.1（评审 cx-1/cx-2）：rootId = 被变更 root 的 UUID，apply 前
+              -- 重新发现并绑定执行 root（盘符会漂移，路径不是身份）；group =
+              -- 复合组 id（supersede 配对），--only/resolve 按组闭包、执行层
+              -- 组内失败自动复位、无 rootId 的旧计划拒绝执行
 Op        = Copy { src, dst, expectedSha }
           | Rename { old, new, expectedSha | dirFingerprint }  -- 指纹供 undo 校验
           | Quarantine { victim, expectedSha, reason }
@@ -143,7 +148,9 @@ Catalog   = snapshot (catalog.json, 原子替换写 + rename 前 fsync) + journa
 ## 4. 架构
 
 ```
-app/Main.hs                 -- optparse-applicative；main 首行设置 stdout/stderr UTF-8（§14）
+app/Main.hs                 -- 仅选项解析 + 分发；main 首行设置 stdout/stderr UTF-8（§14）
+src/Pm/Cli.hs               -- 计划执行公共路径：root-UUID 绑定、组闭包、clean 执行期复验（P2.1 拆分）
+src/Pm/Commands.hs          -- 各命令编排（P2.1 拆分；serve/GUI 复用同一路径）
 src/Pm/Config.hs            -- TOML 配置（roots、别名、后缀表、portfolio photos.json 路径）
 src/Pm/Catalog.hs           -- snapshot + 内存索引
 src/Pm/Journal.hs           -- NDJSON append + 持久化屏障 + replay + 对账
@@ -208,9 +215,9 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、别名登记、同批目标唯一性校验） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
 | `pm doctor [--deep]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash；每次体检轮转复验 1/N 全库（--deep 全量） | 否 |
-| `pm apply <planId> [--only 3,7-9]` | 执行（或部分执行）已存的计划；conflict 项只停该项、批次继续、末尾汇总 | 是 |
-| `pm resolve <planId> --item N --keep src\|dst\|both` | 裁决计划中标 `NEEDS-DECISION` 的冲突项（both = 新名并存） | 改计划 |
-| `pm trash list / empty` | 隔离区查看（manifest ∪ journal ∪ 实际目录并集，孤儿标 UNREGISTERED）/ **唯一的最终清除入口**：逐项列出、二次确认，只 unlink 确认清单里逐项可见的条目，禁止整删目录树 | empty 时 |
+| `pm apply <planId> [--only 3,7-9]` | 执行（或部分执行）已存的计划；conflict 项只停该项、批次继续、末尾汇总。**P2.1**：执行 root 按计划 `rootId` 重新发现绑定（Exec 拿锁后再验一次）；`--only` 自动扩到复合组闭包；clean 计划执行前逐项重验三副本（真实重 hash），不过的降级暂停——即时 `--apply` 因见证 hash 刚在同进程完成而免此步 | 是 |
+| `pm resolve <planId> --item N --keep src\|dst\|both` | 裁决计划中标 `NEEDS-DECISION` 的冲突项（both = 新名并存）。**P2.1**：`--keep` 只接受独立的 NEEDS-DECISION Copy（复合组成员不可单独裁决）；skip/unskip 扩到全组；`--keep src` 追加的 supersede 对共享组 id | 改计划 |
+| `pm trash list / empty` | 隔离区查看（manifest ∪ journal ∪ 实际目录并集，孤儿标 UNREGISTERED）/ **唯一的最终清除入口**：逐项列出、二次确认，只 unlink 确认清单里逐项可见的条目，禁止整删目录树。**P2.1（评审 cx-3 终极屏障）**：reason 为 `clean-staging` 的条目在永久删除前按当前 catalog + 真实重 hash 再确认「Raw/成片 + 备份盘」各存一份同 sha 副本，确认不了 HELD 不删 | empty 时 |
 | `pm undo --last [n]` | 由 journal 生成反向计划：**仅对有 Done 的 op**；执行前逐项校验现盘内容 == journal 指纹，不符即拒绝并报告；supersede 的反向 = 从 trash 还原 victim 回原位（新副本转 quarantine） | apply 时 |
 | `pm serve` | 起本地 JSON API（127.0.0.1 随机端口 + session token），供 GUI/skill 消费 | 经同一 Plan/Exec |
 | `pm ui` | 启动 serve 并拉起 GUI 桌面程序（P4 交付） | 同上 |
@@ -317,11 +324,20 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 ### 6.5 supersede 复合（vault DRIFT / 备份盘更新共用，唯一的「替换」形态）
 
 ```
+计划形态（P2.1 落锤，评审 cx-2/cx-4/cx-5）：[Quarantine, Copy] 两条目共享
+同一 group id，是不可拆分单元——--only / resolve 的任何选择自动扩到全组。
+
 ① Quarantine{victim=dst, reason="supersede:<planId>"} → .pm/trash/<ts>/…（§6.3）
 ② ① 的 Done 持久化后，才写 ② Copy{src, dst, expectedSha} 的 Intent（§6.1）
    ——①之后 dst 已不存在，②在步 2 走「不存在→继续」：全过程无覆盖写
-③ ②失败 → doctor 从 trash 原路复位 victim
-undo：从 trash 还原 victim 回 dst，新副本转 quarantine
+③ ②任何非成功结果 → Exec **同批自动复位**：journaled rename（oid 加 ~r 后缀，
+   Intent+Done 齐全）把 victim 从 trash 移回原位；复位成功后 ① 的结果改写为
+   未生效（catalog 不误删条目），复位被占位挡住则如实报告、旧字节留 trash。
+   doctor 的 C4 检查对「已被 journaled 复位」的隔离 Done 豁免（Q-RESTORED）。
+崩溃恢复：①与②之间进程死亡 → doctor 报 C1「重跑原计划」；重跑时 ① 幂等
+   （victim 不在原位而本计划 trash 有内容相符文件 → 视为已隔离，续跑 ②）。
+undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成的 supersede 反向 =
+   从 trash 还原 victim 回 dst，新副本转 quarantine。
 ```
 
 ### 6.6 介质级验证（I3b）
@@ -346,8 +362,11 @@ undo：从 trash 还原 victim 回 dst，新副本转 quarantine
   事件夹直接位于 `Raw\` 下无年份层；计划器两种布局都接受，年份一律由事件名
   `YY-` 推导，显式年份层与推导不一致 → 不猜，报 unrecognized。）
 - 事件名按 canonical scheme（§8 Scheme A）规范化后落位；侧车跟随；
-  计划期校验同批目标唯一性（两个源撞同一目标 → 整组拒绝）；生成计划前先做
-  暂存区新鲜度守卫（与索引不一致 → 先 pm scan，不基于过期 catalog 出计划）。
+  计划期校验同批目标唯一性（两个源撞同一目标 → 连同**同目录同 stem 侧车**
+  整组拒绝，评审 mj-3）；目标键一律 **case-fold** 比较（NTFS 语义，评审
+  mj-2）；事件名先剥可选 `-Raw` 后缀（大小写不敏感）再验地点非空——
+  `26-04--Raw`（空地点）与 `26-04-Raw`（裸后缀，歧义）都拒绝（评审 mj-1）；
+  生成计划前先做暂存区新鲜度守卫（与索引不一致 → 先 pm scan）。
 - 老事件返修（如 `Processed\23-04-EU`）：逐文件走 §6.1——同 sha skip、
   不同 sha 标 `NEEDS-DECISION` 交 `pm resolve`。
 - 归档后 staging 原文件**原地不动**；`pm status` 依据**已复验的** Done 标记
@@ -561,3 +580,11 @@ ingest 拆步、status 新鲜度头行、报告规格 §5.1）、vault 对接（
 UNPUSHABLE、RENAME=BLOCKED、I11 gitignore）、依赖清单（Win32/file-io/JuicyPixels/
 process + P0 冒烟）、性能表（介质分列 + 首备/import 行 + fsync/verify 分项）。
 完整评审原文：`docs/reviews/2026-08-22-design-attack.md`。
+
+2026-08-23 P2 实现独立评审（codex gpt-5.6-sol，对 commit b0a1363）：12 条发现
+（5 critical / 6 major / 1 minor）逐条核实成立，verdict 不放行 → **P2.1 全部
+修复**：Plan 携带 root UUID + 复合组（cx-1/2/4/5，§3/§5/§6.5）、clean 执行期
+三副本重验 + trash empty 终极屏障（cx-3）、见证真实重 hash（mj-6）、目标键
+case-fold + stem 组拒绝（mj-2/3）、Names 空地点/裸后缀拒绝（mj-1）、归档层限
+Raw/成片（mj-5）、backup init 嵌套检查 case-fold（mj-4）、FFI 调用约定 CPP 宏
+（mn-1）。评审归档：`docs/reviews/2026-08-23-p2-codex-review.md`。

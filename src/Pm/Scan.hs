@@ -8,6 +8,7 @@ module Pm.Scan
   , StatEntry (..)
   , scanRoot
   , listTree
+  , freshnessSweep
   , maxPathLen
   ) where
 
@@ -81,6 +82,31 @@ listTree root = go ""
                     else go relPath
                 else pure ([relPath], [])
     pure (concatMap fst results, concatMap snd results)
+
+-- | Stat-only freshness comparison of a directory tree against a catalog
+-- slice keyed by root-relative paths. @relPrefix@ narrows the walk to one
+-- subtree (\"\" = whole root); the catalog slice must be pre-filtered to the
+-- same subtree by the caller. Returns (new, changed, gone, readErrors).
+-- Shared by pm status（全库核对）与 import/clean 的暂存区守卫。
+freshnessSweep :: FilePath -> FilePath -> Map.Map FilePath Entry -> IO (Int, Int, Int, Int)
+freshnessSweep root relPrefix catSlice = do
+  let base = if null relPrefix then root else root </> relPrefix
+  ex <- doesDirectoryExist base
+  (files, errs) <- if ex then listTree base else pure ([], [])
+  snaps <- forM files $ \rel -> do
+    r <- try (statSnap (base </> rel)) :: IO (Either SomeException StatSnap)
+    pure (if null relPrefix then rel else relPrefix </> rel, r)
+  let disk = Map.fromList [(rel, s) | (rel, Right s) <- snaps]
+      newN = Map.size (disk `Map.difference` catSlice)
+      goneN = Map.size (catSlice `Map.difference` disk)
+      changedN =
+        length
+          [ ()
+          | (rel, s) <- Map.toList disk
+          , Just e <- [Map.lookup rel catSlice]
+          , enSize e /= ssSize s || enMtimeNs e /= ssMtimeNs s
+          ]
+  pure (newN, changedN, goneN, length errs)
 
 scanRoot :: ScanOpts -> Maybe Catalog -> Text -> FilePath -> IO ScanResult
 scanRoot opts oldCat rootId root = do

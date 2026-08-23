@@ -42,7 +42,7 @@ import System.Directory
   )
 import System.FilePath (isRelative, splitDirectories, takeDirectory, takeExtension, takeFileName, (</>))
 
-import Pm.Config (pmDir)
+import Pm.Config (pmDir, readRootInfo)
 import Pm.Hash
 import Pm.Journal
 import Pm.Lock (withRootLock)
@@ -74,10 +74,15 @@ data ExecEnv = ExecEnv
     -- 重建）；备份路径必须 Barrier（DESIGN.md §9）—— 备份盘是可移动介质，
     -- 打印结果后用户随时可能拔盘，Done 必须在汇报前已落盘。
     -- Rename/Quarantine 的 Done 永远 Barrier，不受此字段影响。
+  , eeExpectRootId :: Maybe Text
+    -- ^ 评审 cx-1：拿到锁之后、动盘之前复验 root-id.json 的 UUID。盘符会
+    -- 漂移（备份盘 E: → F:），路径不是身份；不符即整批拒绝执行。
+    -- Nothing = 跳过（测试用临时 root 无标识）。
   }
 
 defaultExecEnv :: ExecEnv
-defaultExecEnv = ExecEnv {eeCheckpoint = \_ -> pure (), eeDoneSync = Buffered}
+defaultExecEnv =
+  ExecEnv {eeCheckpoint = \_ -> pure (), eeDoneSync = Buffered, eeExpectRootId = Nothing}
 
 data ItemOutcome
   = ODone {oSha :: Maybe Text, oDstStat :: Maybe StatSnap, oTrashRel :: Maybe FilePath}
@@ -101,20 +106,112 @@ tmpNameFor :: Int -> FilePath -> FilePath
 tmpNameFor ix dstRel = show ix <> "-" <> takeFileName dstRel
 
 -- | Execute a plan's pending items under the root's exclusive lock.
--- Left = lock busy. A checkpoint exception (test crash) propagates out with
--- the journal handle closed by bracket — exactly a process death.
+-- Left = lock busy \/ root 身份不符. A checkpoint exception (test crash)
+-- propagates out with the journal handle closed by bracket — exactly a
+-- process death.
+--
+-- 组语义（评审 cx-2）：同 'piGroup' 的条目是一个语义单元。组内任一项没有
+-- 成功（DONE\/同内容 SKIP 之外的一切结果）→ 组内其余项不再执行，且组内
+-- **已执行的 Quarantine 立即自动复位**（journaled rename，trash → 原位）；
+-- 复位成功的 Quarantine 结果被改写，catalog 回写不会误删条目。
 execPlan :: ExecEnv -> Plan -> IO (Either String [(PlanItem, ItemOutcome)])
 execPlan env plan = do
   let root = plRootPath plan
-  r <- withRootLock root $
-    withJournal root $ \j -> do
-      outs <- mapM (execItem env root j (plId plan)) (plItems plan)
-      now <- getCurrentTime
-      jAppend j Barrier (JCleanShutdown now)
-      pure outs
+  r <- withRootLock root $ do
+    ridOk <- case eeExpectRootId env of
+      Nothing -> pure (Right ())
+      Just rid -> do
+        mi <- readRootInfo root
+        pure $ case mi of
+          Just info
+            | riId info == rid -> Right ()
+            | otherwise ->
+                Left
+                  ( "root 标识不符（计划期望 "
+                      <> T.unpack rid
+                      <> "，盘上是 "
+                      <> T.unpack (riId info)
+                      <> "），拒绝执行——路径不是身份（cx-1）"
+                  )
+          Nothing -> Left ("root 缺 .pm/root-id.json（" <> root <> "），拒绝执行")
+    case ridOk of
+      Left e -> pure (Left e)
+      Right () -> withJournal root $ \j -> do
+        (outs, restoredIxs) <- execItems env root j (plId plan) (plItems plan)
+        now <- getCurrentTime
+        jAppend j Barrier (JCleanShutdown now)
+        let final =
+              [ if piIx it `elem` restoredIxs then (it, restoredMark) else (it, out)
+              | (it, out) <- zip (plItems plan) outs
+              ]
+        pure (Right final)
   pure $ case r of
     Nothing -> Left "另一个 pm 实例正持有该 root 的锁（I10），稍后重试"
-    Just outs -> Right (zip (plItems plan) outs)
+    Just x -> x
+ where
+  -- 复位成功后该 Quarantine 视同未生效：不能报 ODone，否则 catalog 回写
+  -- 会删掉一个实际已回到原位的条目。
+  restoredMark = OFailed "已隔离但组内后续项失败 → victim 已自动复位（组未生效）"
+
+-- | Walk items in order with group awareness. Returns per-item outcomes plus
+-- the ixs of quarantine items that were auto-restored.
+execItems :: ExecEnv -> FilePath -> Journal -> Text -> [PlanItem] -> IO ([ItemOutcome], [Int])
+execItems env root j pid = go [] [] []
+ where
+  go _ _ restored [] = pure ([], restored)
+  go abortedGs quars restored (it : rest) = case piGroup it of
+    Just g
+      | g `elem` abortedGs -> do
+          (outs, r') <- go abortedGs quars restored rest
+          pure (ONotExecuted : outs, r')
+    mg -> do
+      out <- execItem env root j pid it
+      case mg of
+        Nothing -> do
+          (outs, r') <- go abortedGs quars restored rest
+          pure (out : outs, r')
+        Just g
+          | groupOk out -> do
+              let quars' = case (piOp it, out) of
+                    (OpQuarantine {}, ODone _ _ (Just tr)) -> (g, it, tr) : quars
+                    _ -> quars
+              (outs, r') <- go abortedGs quars' restored rest
+              pure (out : outs, r')
+          | otherwise -> do
+              -- 组内失败：逆序复位本组已隔离的 victim
+              let mine = [q | q@(g', _, _) <- quars, g' == g]
+              results <- mapM (restoreQuarantine env root j pid) mine
+              let notes = concatMap fst results
+                  newlyRestored = [piIx qit | ((_, ok'), (_, qit, _)) <- zip results mine, ok']
+                  out' = annotate out notes
+              (outs, r') <- go (g : abortedGs) quars (restored <> newlyRestored) rest
+              pure (out' : outs, r')
+  groupOk ODone {} = True
+  groupOk OSkippedIdentical = True
+  groupOk _ = False
+  annotate (OConflict m) notes | not (null notes) = OConflict (m <> notes)
+  annotate (OFailed m) notes | not (null notes) = OFailed (m <> notes)
+  annotate o _ = o
+
+-- | Journaled in-batch rollback of one executed quarantine: rename the file
+-- from @.pm\/trash\/@ back to its original place（§6.5 ②失败 → 复位）. Goes
+-- through 'execRename' so Intent\/Done land in the journal and doctor's
+-- restore-aware C4 check can pair them. Returns (note, restoredOk).
+restoreQuarantine :: ExecEnv -> FilePath -> Journal -> Text -> (Int, PlanItem, FilePath) -> IO (String, Bool)
+restoreQuarantine env root j pid (_, qit, trashRel) = do
+  let restoreOp =
+        OpRename
+          (".pm" </> "trash" </> trashRel)
+          (opVictimRel (piOp qit))
+          (FpFileSha (opVictimSha (piOp qit)))
+      oid = opId pid (piIx qit) <> "~r"
+  out <- execRename env root j oid restoreOp
+  pure $ case out of
+    ODone {} -> ("；旧目标已自动复位", True)
+    other ->
+      ( "；自动复位未成功(" <> outcomeLabel other <> ")，旧字节仍在 .pm/trash/" <> trashRel
+      , False
+      )
 
 execItem :: ExecEnv -> FilePath -> Journal -> Text -> PlanItem -> IO ItemOutcome
 execItem env root j pid item = case piStatus item of
@@ -251,17 +348,28 @@ execRename env root j oid op = do
 execQuarantine :: ExecEnv -> FilePath -> Journal -> Text -> Text -> Op -> IO ItemOutcome
 execQuarantine env root j oid pid op = do
   let victimAbs = root </> opVictimRel op
+      trashRel = T.unpack pid </> opVictimRel op
+      trashAbs = trashDir root </> trashRel
   ex <- doesFileExist victimAbs
   if not ex
-    then pure (OConflict "victim 不存在")
+    then do
+      -- 同一计划重跑（崩溃恢复，评审 cx-2）：victim 已不在原位、但本计划的
+      -- trash 位置有内容相符的文件 → 该项上次已执行，按已完成继续（组内
+      -- 后续 Copy 得以续跑）。journal 不重写：缺失的 Done 由 doctor 补记。
+      tex <- doesFileExist trashAbs
+      if tex
+        then do
+          tsha <- sha256File trashAbs
+          if tsha == opVictimSha op
+            then pure (ODone (Just (opVictimSha op)) Nothing (Just trashRel))
+            else pure (OConflict "victim 不在原位且本计划 trash 内容不符，需人工核查")
+        else pure (OConflict "victim 不存在")
     else do
       vsha <- sha256File victimAbs
       if vsha /= opVictimSha op
         then pure (OConflict "victim 内容与计划时不符（不动）")
         else do
           now0 <- getCurrentTime
-          let trashRel = T.unpack pid </> opVictimRel op
-              trashAbs = trashDir root </> trashRel
           appendManifest
             root
             TrashRecord
