@@ -538,6 +538,13 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 
 ## 14. 风险与对策
 
+**威胁模型（P2.3 明文化）**：pm 防**崩溃/掉电/介质错误/并发良性进程**
+（Lightroom、资源管理器等），不防同一台机器上恶意进程的毫秒级 check-use
+竞争（TOCTOU 攻击）——后者需要句柄级 FILE_ID 校验与全程句柄持有，属安全
+软件范畴。设计保证：即使此类窗口被击中，字节也只会进 trash 而非消失，且
+`pm trash empty` 在永久删除前重验三副本（终极屏障）。逐项分析见
+`docs/reviews/2026-08-23-p2-codex-review.md` 三轮章节。
+
 | 风险 | 对策 |
 |---|---|
 | **Windows 输出编码（ACP=936）**：GHC 默认 CP936，emoji/勾号直接崩进程、重定向输出 GBK 字节（本机已实测复现） | main 首行 `hSetEncoding stdout/stderr utf8`；`--json` 走 ByteString 直写绕开编码器与 CRLF；console 场景 `SetConsoleOutputCP(65001)`；§13 编码回归测试 |
@@ -600,3 +607,9 @@ fail-closed（含 --apply 即时路径）、clean 即时路径同走执行期重
 旁路封堵）、doctor/undo 复位配对改顺序感知 + trash empty 按 trashRel 去重
 （新 major）、foldPath 补 normalise（mj-2）、backup init 改
 canonicalizePath（mj-4）。
+
+同日 codex 三轮聚焦复审（对 c663a48）→ **P2.3 收口**：execPlan 内核自卫
+（有身份 root 拒无身份计划）、doctor 悬挂判定改末事件（重跑次序感知）、
+stem 组键改规范化目标路径、bindExecRoot 身份优先（kind 无关）、backup
+采纳前复验配置 UUID、init 写前重 canonicalize；对抗性 TOCTOU 类按 §14
+威胁模型「缓解+记录+交用户裁定」处置。逐项处置表见评审归档三轮章节。

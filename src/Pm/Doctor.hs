@@ -61,9 +61,6 @@ renderFinding f =
   sevTag Warn = "  ⚠"
   sevTag Bad = "  ✗"
 
-data Terminal = TDone (Maybe Text) (Maybe FilePath) | TFailed
-  deriving (Show, Eq)
-
 -- | Returns (findings, exit code). Repairs (when requested) happen inside.
 runDoctor :: FilePath -> DoctorOpts -> IO ([Finding], Int)
 runDoctor root opts = do
@@ -76,21 +73,27 @@ runDoctor root opts = do
             ""
         | w <- jwarns
         ]
-      intents = Map.fromList [(jeOpId e, jeOp e) | e@JIntent {} <- entries]
-      terminals =
-        Map.fromList $
-          mapMaybe
-            ( \e -> case e of
-                JDone i s t _ -> Just (i, TDone s t)
-                JFailed i _ _ -> Just (i, TFailed)
-                _ -> Nothing
-            )
-            entries
+      -- P2.3（复审三轮）：pending 判定**次序感知**——同 oid 重跑会多次出现
+      -- Intent/Terminal，一个 oid 是否悬挂由其**最后一个事件**决定（末事件
+      -- 是 Intent → pending）。旧的全局差集会让上一轮的 terminal 吞掉本轮
+      -- 崩溃留下的新 Intent（复位重跑反例）。
+      opState =
+        foldl
+          ( \m e -> case e of
+              JIntent i op _ -> Map.insert i (op, True) m
+              JDone i _ _ _ -> Map.adjust (\(op, _) -> (op, False)) i m
+              JFailed i _ _ -> Map.adjust (\(op, _) -> (op, False)) i m
+              _ -> m
+          )
+          Map.empty
+          entries
+      intents = fmap fst opState
       -- Done entries after the LAST clean-shutdown marker = the verification
       -- window for an interrupted batch (§6.4).
       afterClean = lastSegment entries
       donesAfterClean = [(jeOpId e, jeVerifiedSha e, jeTrashRel e) | e@JDone {} <- afterClean]
-      pending = Map.toList (intents `Map.difference` terminals)
+      -- pending = 末事件为 Intent 的 oid（见上 opState 的次序感知语义）
+      pending = [(i, op) | (i, (op, True)) <- Map.toList opState]
       -- Exec 组内自动复位（§6.5）/undo 复位会把隔离文件从 trash 移回原位，
       -- 且该 rename 有自己的 Intent+Done。P2.2（复审新发现）：豁免必须
       -- **顺序感知**——只有当 oid 的最后一次 Done 之后还有对应 ~r 复位 Done

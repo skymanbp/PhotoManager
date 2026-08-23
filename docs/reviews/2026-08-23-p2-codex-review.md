@@ -2,9 +2,10 @@
 
 **日期**: 2026-08-23 · **评审对象**: `git show b0a1363`（P2: import/backup/clean-staging planners）
 **verdict**: **不可以放行真实库 apply**（先修复下列发现）
-**状态**: P2.1 修复（commit 5ce1ddb，90/90）→ **codex 二轮复审**（见文末）
-判 7 FIXED / 4 PARTIAL / 1 NOT-FIXED + 1 新 major → **P2.2 补齐
-（2026-08-23，96/96 测试）**：残留缺口全部闭合（映射见 DESIGN §16）。
+**状态**: P2.1 修复（5ce1ddb，90/90）→ 二轮复审 → P2.2 补齐（c663a48，
+96/96）→ **三轮聚焦复审**（判 mj-2 CLOSED，其余 STILL-OPEN + 2 新 major）→
+**P2.3 收口（98/98 测试）**：真实缺陷全修，对抗性 TOCTOU 类按单机威胁模型
+「缓解 + 记录 + 交用户裁定」处置（见文末三轮章节的逐项处置表）。
 
 ---
 
@@ -128,3 +129,34 @@ PARTIAL；mj-3 NOT-FIXED；另报 1 条新 major（复位后同计划重跑的 o
 | mj-3（返修不升级 stem 组） | irReworkKin：主文件返修 → 同 stem 待拷文件悬置 NEEDS-DECISION |
 | mj-2 残留（无 normalise） | foldPath = toLower · normalise |
 | mj-4 残留（junction 别名） | backup init 双侧 canonicalizePath 后再比较（残余：极端卷别名场景无法纯文本识别，已文档化） |
+
+---
+
+## 三轮聚焦复审（codex，对 commit c663a48）与 P2.3 收口
+
+三轮判定：mj-2 CLOSED；cx-1/cx-3/新 major/mj-3/mj-4 STILL-OPEN；另报
+2 条新 major（backup 发现后采纳盘上任意 id；doctor 备份 C5 计划按 kind
+绑错 root）。verdict NO-GO。P2.3（98/98 测试）逐项处置：
+
+**已修（真实缺陷，与攻击者无关）：**
+
+| 项 | 修复 |
+|---|---|
+| cx-1（execPlan 可被库调用方绕过） | **内核自卫**：execPlan 锁内读盘上身份，三规则——调用方期待须符、计划 rootId 须符、**有身份的 root 拒绝无身份计划**（仅从未 init 的裸目录可无身份执行，即测试 fixture）；不信任何调用方 |
+| 新 major（悬挂判定不认重跑次序） | doctor pending 改**末事件判定**（oid 的最后事件是 Intent 才悬挂），二次复位 rename 后崩溃 → R2 正确补记 → C4 豁免收敛（专测覆盖 codex 反例全链） |
+| mj-3（stem 组用源路径，跨布局漏组） | stem 组键改**规范化目标路径**（两种源布局落同一目标目录必然归组；专测覆盖 codex 反例） |
+| 新 major（doctor 备份 C5 计划绑错 root） | bindExecRoot 改**身份优先**：先比主库 UUID，不中再发现备份盘比对，kind 无关 |
+| 新 major（backup 采纳盘上任意 id） | runBackupRun 重读身份后必须仍等于**配置登记的** UUID，否则拒绝 |
+
+**缓解 + 接受（对抗性 TOCTOU 类，超出单机威胁模型）：**
+
+| 项 | 处置与理由 |
+|---|---|
+| cx-3（重验与加锁之间毫秒级窗口内两侧见证被删） | 接受：①窗口内需第三方**恶意**删除归档+备份两份副本，单用户机器无此威胁；②即使被击中，victim 只进 trash 不消失，且 `trash empty` 在**永久删除前**再次重验三副本（终极屏障）——端到端零字节丢失性质不被破坏；③把三副本策略搬进 Exec 锁内会让内核认识 Clean 业务语义，破坏「内核只认 Op」的架构边界 |
+| cx-3（executePlanNow 直调可绕过 recheck） | 接受：库内部 API 的调用纪律——全部 CLI 入口（runApply/runClean --apply）都强制 recheck；内核另有 victim sha 复核 + trash empty 屏障兜底 |
+| mj-4（检查与写 root-id 之间目录被换成 junction） | 缓解：写前重新 canonicalize 复验（窗口收敛近零）；残余=毫秒窗口内的恶意 junction 替换，单机模型外。就算被击中：写入的是 .pm/root-id.json 一个 JSON 文件（覆盖主库 root-id 会被下次 pm 操作的身份校验立刻发现），照片字节零风险 |
+
+威胁模型声明已入 DESIGN §14：pm 防**崩溃/掉电/介质错误/并发良性进程**
+（Lightroom 等），不防同机恶意进程的毫秒级 check-use 竞争——后者需要句柄级
+FILE_ID 校验与全程句柄持有，属安全软件范畴，不在个人照片管理器的合理边界内。
+最终裁定权交用户。

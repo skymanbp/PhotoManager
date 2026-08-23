@@ -444,20 +444,29 @@ groupSemanticsTests =
           newC @?= "NEW!"
           oldC <- readFile (trashDir root </> T.unpack (plId plan) </> "成片" </> "a.jpg")
           oldC @?= "OLD"
-    , testCase "cx-1: eeExpectRootId 不符 → 整批拒绝；相符 → 执行" $
+    , testCase "cx-1: 内核自卫——期待不符拒绝；有身份 root 拒无身份计划；全符执行" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"
           createDirectoryIfMissing True root
           now <- getCurrentTime
           writeRootInfo root (RootInfo "rid-A" RoleMain now Nothing)
           op <- mkCopyOp (dir </> "s.jpg") "DATA" ("相册" </> "a.jpg")
-          plan <- mkPlanIO root [op]
-          r <- execPlan defaultExecEnv {eeExpectRootId = Just "rid-B"} plan
+          plan0 <- mkPlanIO root [op]
+          -- ① 调用方期待与盘上不符 → 拒绝
+          r <- execPlan defaultExecEnv {eeExpectRootId = Just "rid-B"} plan0
           case r of
             Left msg -> assertBool msg ("root 标识不符" `elemSubstr` msg)
             Right _ -> assertFailure "expected refusal on rootId mismatch"
+          -- ② P2.3 内核自卫：有身份的 root 拒绝无 rootId 的计划（即使调用方
+          --    不带任何期待——不信任何调用方）
+          r1 <- execPlan defaultExecEnv plan0
+          case r1 of
+            Left msg -> assertBool msg ("无 rootId" `elemSubstr` msg)
+            Right _ -> assertFailure "expected kernel refusal of rootless plan"
           dstEx <- doesFileExist (root </> "相册" </> "a.jpg")
           dstEx @?= False
+          -- ③ 计划带匹配 rootId + 期待一致 → 执行
+          let plan = plan0 {plRootId = Just "rid-A"}
           r2 <- execPlan defaultExecEnv {eeExpectRootId = Just "rid-A"} plan
           case r2 of
             Right [(_, ODone {})] -> pure ()
@@ -500,6 +509,14 @@ p22Tests =
         (irCopy rep, length (irRework rep), length (irReworkKin rep)) @?= ([], 1, 1)
         let sts = [piStatus it | it <- importPlanItems "R:" rep]
         length [() | StNeedsDecision _ <- sts] @?= 2
+    , testCase "P2.3(mj-3v3): 跨源布局同目标 stem 组——返修主文件悬置另一布局的侧车" $ do
+        -- codex 三轮反例：主文件走 Raw\事件 布局、侧车走 Raw\年\事件-Raw 布局，
+        -- 两者落同一目标目录；源路径分组会漏，目标路径分组必须抓到。
+        let master = mkE ("To-Be-Sync'd" </> "Raw" </> "26-06-R66" </> "E.ARW") "new"
+            side = mkE ("To-Be-Sync'd" </> "Raw" </> "2026" </> "26-06-R66-Raw" </> "E.xmp") "sc"
+            dstOld = mkE ("Raw" </> "2026" </> "26-06-R66-Raw" </> "E.ARW") "old"
+            rep = planImport (mkCat [master, side, dstOld])
+        (irCopy rep, length (irRework rep), length (irReworkKin rep)) @?= ([], 1, 1)
     , testCase "P2.2: 复位后同计划重跑成功——第二次隔离不被误豁免，undo 可用" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"

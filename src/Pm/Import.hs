@@ -101,12 +101,13 @@ planImport cat =
       catByFold = Map.fromList [(foldPath (enPath e), e) | e <- Map.elems (catEntries cat)]
       dstCount = Map.fromListWith (+) [(foldPath dst, 1 :: Int) | (_, dst) <- mapped]
       collided (_, dst) = Map.findWithDefault 0 (foldPath dst) dstCount > 1
-      -- 评审 mj-3：撞名升级到「同目录同 stem 组」——被拒文件的侧车
-      -- (.xmp/.acr 同 stem) 一起进 dup 桶，绝不产生孤立侧车（§7 侧车跟随）。
-      stemKey rel = (foldPath (takeDirectory rel), foldPath (takeBaseName rel))
+      -- 评审 mj-3（P2.3 收口）：stem 组按**规范化目标路径**分组，不按源路径
+      -- ——两种被接受的源布局（Raw\事件 与 Raw\年\事件-Raw）落到同一目标
+      -- 目录，源路径分组会漏掉跨布局的同 stem 侧车。撞名/返修升级都用它。
+      stemKey dst = (foldPath (takeDirectory dst), foldPath (takeBaseName dst))
       collStems =
-        Set.fromList [stemKey (enPath e) | m@(e, _) <- mapped, collided m]
-      isDup m@(e, _) = collided m || stemKey (enPath e) `Set.member` collStems
+        Set.fromList [stemKey dst | m@(_, dst) <- mapped, collided m]
+      isDup m@(_, dst) = collided m || stemKey dst `Set.member` collStems
       dups = filter isDup mapped
       uniq = filter (not . isDup) mapped
       classify (e, dst) = case Map.lookup (foldPath dst) catByFold of
@@ -115,12 +116,12 @@ planImport cat =
           | enSha archived == enSha e -> (Nothing, Just (enPath e, dst), Nothing)
           | otherwise -> (Nothing, Nothing, Just (e, dst))
       classified = map classify uniq
-      -- 复审 mj-3：返修同样升级到 stem 组——主文件 NEEDS-DECISION 时，其同
-      -- 目录同 stem 的待拷侧车不得先行落位（先拷会产生孤立侧车；裁决 keep
-      -- both 改名时更会指错主文件）。
+      -- 复审 mj-3：返修同样升级到 stem 组（按目标路径）——主文件
+      -- NEEDS-DECISION 时，其同目标目录同 stem 的待拷侧车不得先行落位
+      -- （先拷会产生孤立侧车；裁决 keep both 改名时更会指错主文件）。
       reworkStems =
-        Set.fromList [stemKey (enPath e) | (_, _, Just (e, _)) <- classified]
-      inReworkKin (e, _) = stemKey (enPath e) `Set.member` reworkStems
+        Set.fromList [stemKey dst | (_, _, Just (_, dst)) <- classified]
+      inReworkKin (_, dst) = stemKey dst `Set.member` reworkStems
    in ImportReport
         { irCopy = [c | (Just c, _, _) <- classified, not (inReworkKin c)]
         , irAlready = [a | (_, Just a, _) <- classified]

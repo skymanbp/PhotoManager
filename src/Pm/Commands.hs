@@ -532,9 +532,16 @@ runBackupInit path cfg = do
               fs <- case abs' of
                 (c : _) -> volumeFsType c
                 _ -> pure Nothing
-              writeRootInfo abs' (RootInfo rid RoleBackup now fs)
-              putStrLn ("✓ 备份 root 标识已创建: " <> T.unpack rid <> maybe "" (\t -> "（" <> T.unpack t <> "）") fs)
-              register abs' rid
+              -- P2.3（mj-4 残余缓解）：写身份文件前把路径再 canonicalize
+              -- 复验一次，检查期与写入期之间被换成 junction 的窗口收敛到
+              -- 近零（单机模型下的剩余风险已在评审归档记录）。
+              abs2 <- canonicalizePath abs'
+              if map toLower (normalise abs2) /= map toLower (normalise abs')
+                then putStrLn ("路径在检查后发生变化（" <> abs' <> " → " <> abs2 <> "），拒绝") >> pure 2
+                else do
+                  writeRootInfo abs' (RootInfo rid RoleBackup now fs)
+                  putStrLn ("✓ 备份 root 标识已创建: " <> T.unpack rid <> maybe "" (\t -> "（" <> T.unpack t <> "）") fs)
+                  register abs' rid
  where
   register abs' rid = do
     let sub = snd (splitDrive abs')
@@ -554,6 +561,11 @@ runBackupRun go mworkers cfg = do
       case (minfo, mMain) of
         (Nothing, _) -> putStrLn "备份 root 标识读取失败（发现后被移除？）" >> pure 2
         (_, Nothing) -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
+        -- P2.3（复审三轮新发现）：发现后重读到的身份必须仍等于**配置登记的**
+        -- UUID——不采纳盘上任意 id（发现与使用之间路径/卷可能被换）。
+        (Just info, _)
+          | cfgBackupId cfg /= Just (riId info) ->
+              putStrLn "备份 root 身份在发现后发生变化（与配置登记不符），拒绝" >> pure 2
         (Just info, Just mainCat) -> do
           putStrLn ("备份盘: " <> broot <> maybe "" (\t -> "（" <> T.unpack t <> "）") (riFsType info))
           (oldBak, bwarns) <- loadCatalog broot

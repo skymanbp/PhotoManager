@@ -6,8 +6,9 @@
 -- (DESIGN.md §6.4, §13), undo round-trips, and the instance lock.
 module KernelTests (kernelTests) where
 
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, throwIO, try)
 import Control.Monad (when)
+import Data.IORef (atomicModifyIORef', newIORef)
 import Data.Time (getCurrentTime)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
@@ -475,6 +476,44 @@ doctorTests =
           createDirectoryIfMissing True root
           (fs, code) <- runDoctor root (DoctorOpts False False)
           ([(fRow f, fSeverity f) | f <- fs, fSeverity f >= Warn], code) @?= ([], 0)
+    , testCase "P2.3: 二次复位在 rename 后崩溃 → 次序感知 R2 补记，repair 后收敛" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+          createDirectoryIfMissing True (root </> "成片")
+          writeFile (root </> "成片" </> "a.jpg") "OLD"
+          oldSha <- sha256File (root </> "成片" </> "a.jpg")
+          op <- mkCopyOp (dir </> "s.jpg") "NEW!" ("成片" </> "a.jpg")
+          writeFile (dir </> "s.jpg") "NEW!X" -- 源前提破坏 → Copy 每轮都冲突
+          plan <-
+            mkGroupPlanIO
+              root
+              [ (OpQuarantine ("成片" </> "a.jpg") oldSha "supersede:test", Just 0)
+              , (op, Just 0)
+              ]
+          -- 计数 CpRenAfterMove：第 1 次（第一轮复位）放行，第 2 次（第二轮
+          -- 复位 rename 已落盘、Done 未写）注入崩溃 = codex 三轮反例
+          ref <- newIORef (0 :: Int)
+          let env =
+                defaultExecEnv
+                  { eeCheckpoint = \c -> when (c == CpRenAfterMove) $ do
+                      n <- atomicModifyIORef' ref (\k -> (k + 1, k + 1))
+                      when (n == 2) (throwIO (userError "inject-crash"))
+                  }
+          r1 <- execPlan env plan
+          case r1 of
+            Right [(_, OFailed _), (_, OConflict _)] -> pure ()
+            other -> assertFailure ("round1: " <> show other)
+          runCrash env plan -- 第二轮：幂等隔离→冲突→复位 rename 后崩溃
+          back <- readFile (root </> "成片" </> "a.jpg")
+          back @?= "OLD" -- victim 已在原位（复位生效，仅 Done 缺失）
+          rows <- doctorRows root
+          -- 旧全局差集会让第一轮的 ~r Done 吞掉第二轮悬挂的 ~r Intent；
+          -- 次序感知必须报 R2（可补记），此刻 C4 报告但不动盘
+          assertBool ("expected R2 in " <> show rows) (any (\(t, _) -> t == "R2") rows)
+          assertBool ("expected C4 in " <> show rows) (("C4", Bad) `elem` rows)
+          _ <- runDoctor root (DoctorOpts False True) -- --repair 补记 ~r Done
+          rows2 <- doctorRows root
+          [r | r@(_, sev) <- rows2, sev == Bad] @?= []
     ]
 
 undoTests :: TestTree

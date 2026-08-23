@@ -130,12 +130,19 @@ savePlanAndMaybeRunWith preExec go plan = do
 
 -- | 评审 cx-1：执行 root 由 UUID 重新发现并绑定，绝不信计划里存的盘符路径
 -- （备份盘可能换盘符重挂，旧盘符可能已属于别的卷）。
+-- P2.3（复审三轮新发现）：绑定按**身份**而非计划 kind——doctor 在备份 root
+-- 上生成的 C5 修复计划 kind 是 doctor-c5-quarantine，按 kind 分支会把它错绑
+-- 到主库（fail-closed 会拒绝，但计划就永远执行不了）。规则：先比主库 UUID，
+-- 不中再发现备份盘比对；都不中 → 拒绝。
 bindExecRoot :: Config -> Plan -> T.Text -> IO (Either String Plan)
-bindExecRoot cfg plan rid
-  | plKind plan == "backup" = do
+bindExecRoot cfg plan rid = do
+  let mroot = cfgMainPath cfg
+  mMain <- readRootInfo mroot
+  if (riId <$> mMain) == Just rid
+    then pure (Right plan {plRootPath = mroot})
+    else do
       er <- discoverBackupRoot cfg
       case er of
-        Left msg -> pure (Left ("备份计划需要备份盘在线: " <> msg))
         Right broot -> do
           minfo <- readRootInfo broot
           case minfo of
@@ -144,24 +151,17 @@ bindExecRoot cfg plan rid
                   when (broot /= plRootPath plan) $
                     putStrLn ("· 备份盘挂载点已变: " <> plRootPath plan <> " → " <> broot <> "（按 UUID 重新绑定）")
                   pure (Right plan {plRootPath = broot})
-            _ -> pure (Left "发现的备份盘 root 标识与计划不符，拒绝执行")
-  | otherwise = do
-      let mroot = cfgMainPath cfg
-      minfo <- readRootInfo mroot
-      case minfo of
-        Just info
-          | riId info == rid -> pure (Right plan {plRootPath = mroot})
-          | otherwise ->
-              pure
-                ( Left
-                    ( "主库 root 标识与计划不符（计划 "
-                        <> T.unpack rid
-                        <> "，主库 "
-                        <> T.unpack (riId info)
-                        <> "），拒绝执行"
-                    )
+            _ ->
+              pure (Left ("计划 rootId 与主库、已发现备份盘均不符（" <> T.unpack rid <> "），拒绝执行"))
+        Left msg ->
+          pure
+            ( Left
+                ( "计划 rootId 与主库不符（"
+                    <> T.unpack rid
+                    <> "），备份盘也不可用: "
+                    <> msg
                 )
-        Nothing -> pure (Left "主库缺 .pm/root-id.json → pm init")
+            )
 
 -- | 评审 cx-3：clean 计划在**每次执行前**逐项重验三副本（当前 catalog 定位
 -- 见证 + 真实重 hash），不过的降级 NEEDS-DECISION——计划生成与执行之间的

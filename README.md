@@ -49,6 +49,9 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   评审归档 docs/reviews/2026-08-23-p2-codex-review.md）
 - P2.2 ✅ codex 二轮复审补齐（返修 stem 组悬置、无 rootId 全路径 fail-closed、
   clean --apply 同走执行期重验、复位配对顺序感知 + trash 去重）
+- P2.3 ✅ codex 三轮收口（execPlan 内核自卫、doctor 悬挂判定末事件化、
+  stem 组按目标路径、bindExecRoot 身份优先；TOCTOU 类按 DESIGN §14
+  威胁模型处置，裁定权在用户）
 - P3 vault status/push + names + versions
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接

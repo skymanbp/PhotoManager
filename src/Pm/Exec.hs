@@ -118,22 +118,34 @@ execPlan :: ExecEnv -> Plan -> IO (Either String [(PlanItem, ItemOutcome)])
 execPlan env plan = do
   let root = plRootPath plan
   r <- withRootLock root $ do
-    ridOk <- case eeExpectRootId env of
-      Nothing -> pure (Right ())
-      Just rid -> do
-        mi <- readRootInfo root
-        pure $ case mi of
-          Just info
-            | riId info == rid -> Right ()
-            | otherwise ->
-                Left
-                  ( "root 标识不符（计划期望 "
-                      <> T.unpack rid
-                      <> "，盘上是 "
-                      <> T.unpack (riId info)
-                      <> "），拒绝执行——路径不是身份（cx-1）"
-                  )
-          Nothing -> Left ("root 缺 .pm/root-id.json（" <> root <> "），拒绝执行")
+    -- P2.3 内核自卫（复审三轮 cx-1）：不信任何调用方。锁内读盘上身份，
+    -- 三条规则缺一不可：①调用方声明的期待必须与盘上一致；②计划自带的
+    -- rootId 必须与盘上一致；③**有身份的 root 拒绝执行无身份计划**——
+    -- 只有从未 init 过的裸目录（测试 fixture）才允许无身份执行。
+    mi <- readRootInfo root
+    let diskId = riId <$> mi
+        ridOk
+          | Just e <- eeExpectRootId env
+          , diskId /= Just e =
+              Left
+                ( "root 标识不符（期待 " <> T.unpack e <> "，盘上是 "
+                    <> maybe "<无标识>" T.unpack diskId
+                    <> "），拒绝执行——路径不是身份（cx-1）"
+                )
+          | Just rid <- plRootId plan
+          , diskId /= Just rid =
+              Left
+                ( "计划 rootId 与盘上身份不符（计划 " <> T.unpack rid <> "，盘上 "
+                    <> maybe "<无标识>" T.unpack diskId
+                    <> "），拒绝执行"
+                )
+          | Nothing <- plRootId plan
+          , Just d <- diskId =
+              Left
+                ( "该 root 已有身份（" <> T.unpack d
+                    <> "），拒绝执行无 rootId 的计划（fail-closed，内核级）"
+                )
+          | otherwise = Right ()
     case ridOk of
       Left e -> pure (Left e)
       Right () -> withJournal root $ \j -> do
