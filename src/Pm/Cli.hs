@@ -10,8 +10,10 @@ module Pm.Cli
   , renderPlanBrief
   , executePlanNow
   , savePlanAndMaybeRun
+  , savePlanAndMaybeRunWith
   , bindExecRoot
   , recheckCleanPlan
+  , recheckCleanItems
   , applyOnlyToPlan
   , parseOnly
   , stagingFresh
@@ -72,8 +74,17 @@ renderPlanBrief plan = do
 
 -- | 执行一个计划并回写其 root 的 catalog。备份计划的 Copy Done 走 Barrier
 -- （可移动介质，§9）；执行 root 的 UUID 在锁内复验（cx-1）。
+-- P2.2 fail-closed（复审 cx-1 残留）：CLI 层一律拒绝执行无 rootId 的计划，
+-- 包括 --apply 即时路径——root 没有身份就没有执行资格，没有例外。
 executePlanNow :: Plan -> IO Int
-executePlanNow plan = do
+executePlanNow plan = case plRootId plan of
+  Nothing -> do
+    putStrLn "计划缺 root 标识，拒绝执行（cx-1 fail-closed）→ pm init 建立 root 标识后重新生成计划"
+    pure 2
+  Just _ -> executePlanNow' plan
+
+executePlanNow' :: Plan -> IO Int
+executePlanNow' plan = do
   let root = plRootPath plan
       env =
         defaultExecEnv
@@ -102,13 +113,20 @@ executePlanNow plan = do
   isBad _ = False
 
 savePlanAndMaybeRun :: GoOpts -> Plan -> IO Int
-savePlanAndMaybeRun go plan = do
+savePlanAndMaybeRun = savePlanAndMaybeRunWith pure
+
+-- | 同上，但确认后、执行前先过 @preExec@ 钩子（P2.2：`pm clean staging
+-- --apply` 的即时路径也要走执行期三副本重验，复审 cx-3 旁路封堵）。
+savePlanAndMaybeRunWith :: (Plan -> IO Plan) -> GoOpts -> Plan -> IO Int
+savePlanAndMaybeRunWith preExec go plan = do
   fp <- savePlan plan
   renderPlanBrief plan
   putStrLn ("计划已存 " <> fp)
   putStrLn ("执行: pm apply " <> T.unpack (plId plan))
   ok <- confirm go
-  if ok then executePlanNow plan else pure 1
+  if ok
+    then preExec plan >>= executePlanNow
+    else pure 1
 
 -- | 评审 cx-1：执行 root 由 UUID 重新发现并绑定，绝不信计划里存的盘符路径
 -- （备份盘可能换盘符重挂，旧盘符可能已属于别的卷）。
@@ -145,10 +163,10 @@ bindExecRoot cfg plan rid
                 )
         Nothing -> pure (Left "主库缺 .pm/root-id.json → pm init")
 
--- | 评审 cx-3：clean 计划在执行前逐项重验三副本（当前 catalog 定位见证 +
--- 真实重 hash），不过的降级 NEEDS-DECISION——计划生成与执行之间隔着任意长
--- 的时间，世界会变。即时 `pm clean staging --apply` 免此步（见证 hash 刚在
--- 同进程完成，DESIGN §5）。
+-- | 评审 cx-3：clean 计划在**每次执行前**逐项重验三副本（当前 catalog 定位
+-- 见证 + 真实重 hash），不过的降级 NEEDS-DECISION——计划生成与执行之间的
+-- 世界会变。P2.2 起没有豁免路径：`pm apply` 与 `pm clean staging --apply`
+-- 即时执行都走这里（旁路封堵）。
 recheckCleanPlan :: Config -> Plan -> IO Plan
 recheckCleanPlan cfg plan = do
   let mroot = cfgMainPath cfg
@@ -158,32 +176,37 @@ recheckCleanPlan cfg plan = do
     (Just mainCat, Right broot) -> do
       (mBak, _) <- loadCatalog broot
       case mBak of
-        Nothing -> demoteAll "备份盘无索引 → 先 pm backup"
-        Just bakCat -> do
-          items' <- forM (plItems plan) $ \it -> case (piStatus it, piOp it) of
-            (StPending, OpQuarantine v sha _) -> do
-              ok <- threeCopiesStillExist mroot mainCat broot bakCat sha
-              if ok
-                then pure it
-                else do
-                  putStrLn ("  ⚠ 执行期三副本复验不过，该项暂停: " <> v)
-                  pure it {piStatus = StNeedsDecision "执行期三副本复验不过 → pm scan / pm backup 后重新生成清理计划"}
-            _ -> pure it
-          pure plan {plItems = items'}
-    (Nothing, _) -> demoteAll "主库无索引"
-    (_, Left msg) -> demoteAll ("备份盘不在线: " <> msg)
- where
-  demoteAll why = do
-    putStrLn ("⚠ 无法复验三副本（" <> why <> "），全部待执行项暂停")
-    pure
-      plan
-        { plItems =
-            [ if piStatus it == StPending
-                then it {piStatus = StNeedsDecision (T.pack ("执行期无法复验三副本: " <> why))}
-                else it
-            | it <- plItems plan
-            ]
-        }
+        Nothing -> demoteAllClean plan "备份盘无索引 → 先 pm backup"
+        Just bakCat -> recheckCleanItems mroot mainCat broot bakCat plan
+    (Nothing, _) -> demoteAllClean plan "主库无索引"
+    (_, Left msg) -> demoteAllClean plan ("备份盘不在线: " <> msg)
+
+-- | 可测核心：给定已解析的两侧 root+catalog，逐项重验并降级。
+recheckCleanItems :: FilePath -> Catalog -> FilePath -> Catalog -> Plan -> IO Plan
+recheckCleanItems mroot mainCat broot bakCat plan = do
+  items' <- forM (plItems plan) $ \it -> case (piStatus it, piOp it) of
+    (StPending, OpQuarantine v sha _) -> do
+      ok <- threeCopiesStillExist mroot mainCat broot bakCat sha
+      if ok
+        then pure it
+        else do
+          putStrLn ("  ⚠ 执行期三副本复验不过，该项暂停: " <> v)
+          pure it {piStatus = StNeedsDecision "执行期三副本复验不过 → pm scan / pm backup 后重新生成清理计划"}
+    _ -> pure it
+  pure plan {plItems = items'}
+
+demoteAllClean :: Plan -> String -> IO Plan
+demoteAllClean plan why = do
+  putStrLn ("⚠ 无法复验三副本（" <> why <> "），全部待执行项暂停")
+  pure
+    plan
+      { plItems =
+          [ if piStatus it == StPending
+              then it {piStatus = StNeedsDecision (T.pack ("执行期无法复验三副本: " <> why))}
+              else it
+          | it <- plItems plan
+          ]
+      }
 
 -- | --only 选择展开为复合组闭包（评审 cx-2：supersede 配对不可拆）。
 -- Left = 语法错误；Right (plan', 因组闭包追加的序号)。

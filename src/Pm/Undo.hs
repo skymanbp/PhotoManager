@@ -10,7 +10,6 @@ module Pm.Undo
   ) where
 
 import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
@@ -34,14 +33,7 @@ buildUndoPlan root n = do
     [] -> do
       let intents = Map.fromList [(jeOpId e, jeOp e) | e@JIntent {} <- entries]
           allDones = [(jeOpId e, jeVerifiedSha e, jeTrashRel e) | e@JDone {} <- entries]
-          restoredBases =
-            Set.fromList [T.dropEnd 2 oid | (oid, _, _) <- allDones, "~r" `T.isSuffixOf` oid]
-          dones =
-            [ d
-            | d@(oid, _, _) <- allDones
-            , not ("~r" `T.isSuffixOf` oid)
-            , not (oid `Set.member` restoredBases)
-            ]
+          dones = cancelRestores allDones
           lastN = reverse (drop (length dones - n) dones)
       if null lastN
         then pure (Left "journal 中没有可撤销的已完成操作")
@@ -62,6 +54,22 @@ buildUndoPlan root n = do
                   , plCreated = now
                   , plItems = [PlanItem i op StPending Nothing | (i, op) <- zip [0 ..] ops]
                   }
+
+-- | 顺序感知的复位配对（P2.2，复审新发现）：每个 @oid~r@ 复位 Done 只取消
+-- **紧邻其前最近一次**同 oid 的 Done——同一计划复位后重跑成功时，第二次
+-- 真实隔离必须保持可撤销。全局「见 ~r 即整体剔除」会把后一次也吞掉。
+cancelRestores
+  :: [(Text, Maybe Text, Maybe FilePath)]
+  -> [(Text, Maybe Text, Maybe FilePath)]
+cancelRestores = reverse . go []
+ where
+  go acc [] = acc -- acc 为倒序（最近在前）
+  go acc (d@(oid, _, _) : rest) = case T.stripSuffix "~r" oid of
+    Just base -> go (dropMostRecent base acc) rest -- ~r 自身不可撤销
+    Nothing -> go (d : acc) rest
+  dropMostRecent base acc = case break (\(o, _, _) -> o == base) acc of
+    (pre, _ : post) -> pre <> post
+    (pre, []) -> pre
 
 reverseOp
   :: Map.Map Text Op

@@ -47,6 +47,8 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
 - P2.1 ✅ codex 评审 12 项修复（计划带 root UUID + supersede 复合组自动复位、
   clean 执行期三副本重验 + trash 屏障、目标键 case-fold、Names 边角；
   评审归档 docs/reviews/2026-08-23-p2-codex-review.md）
+- P2.2 ✅ codex 二轮复审补齐（返修 stem 组悬置、无 rootId 全路径 fail-closed、
+  clean --apply 同走执行期重验、复位配对顺序感知 + trash 去重）
 - P3 vault status/push + names + versions
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接

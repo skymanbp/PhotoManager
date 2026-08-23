@@ -25,7 +25,7 @@ module Pm.Import
 import Data.Char (isDigit, toLower)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import System.FilePath (joinPath, splitDirectories, takeBaseName, takeDirectory, (</>))
+import System.FilePath (joinPath, normalise, splitDirectories, takeBaseName, takeDirectory, (</>))
 
 import Pm.Names (canonProcessedEvent, canonRawEvent)
 import Pm.Op
@@ -45,12 +45,15 @@ data ImportReport = ImportReport
     -- ^ (srcRel, dstRel) — dst 同 sha，已归档冗余
   , irRework :: [(Entry, FilePath)]
     -- ^ (staging entry, dstRel) — dst 存在但 sha 不同 → NEEDS-DECISION
+  , irReworkKin :: [(Entry, FilePath)]
+    -- ^ 复审 mj-3：同目录同 stem 组里有成员在返修 → 组内其余待拷文件一并
+    -- 悬置为 NEEDS-DECISION（侧车必须跟随其主文件的裁决，绝不先行落位）
   , irPendingEdit :: [FilePath]
     -- ^ 待修改\\ 下的文件，import 不碰（§7）
   , irUnrecognized :: [FilePath]
     -- ^ 布局或事件名解析失败，只报告不猜
   , irDupTarget :: [(FilePath, FilePath)]
-    -- ^ (srcRel, dstRel) — 两个源映射到同一目标，整组拒绝
+    -- ^ (srcRel, dstRel) — 两个源映射到同一目标，连同 stem 组整组拒绝
   }
   deriving (Show, Eq)
 
@@ -112,29 +115,40 @@ planImport cat =
           | enSha archived == enSha e -> (Nothing, Just (enPath e, dst), Nothing)
           | otherwise -> (Nothing, Nothing, Just (e, dst))
       classified = map classify uniq
+      -- 复审 mj-3：返修同样升级到 stem 组——主文件 NEEDS-DECISION 时，其同
+      -- 目录同 stem 的待拷侧车不得先行落位（先拷会产生孤立侧车；裁决 keep
+      -- both 改名时更会指错主文件）。
+      reworkStems =
+        Set.fromList [stemKey (enPath e) | (_, _, Just (e, _)) <- classified]
+      inReworkKin (e, _) = stemKey (enPath e) `Set.member` reworkStems
    in ImportReport
-        { irCopy = [c | (Just c, _, _) <- classified]
+        { irCopy = [c | (Just c, _, _) <- classified, not (inReworkKin c)]
         , irAlready = [a | (_, Just a, _) <- classified]
         , irRework = [r | (_, _, Just r) <- classified]
+        , irReworkKin = [c | (Just c, _, _) <- classified, inReworkKin c]
         , irPendingEdit = pendingEdit
         , irUnrecognized = unrecognized
         , irDupTarget = [(enPath e, dst) | (e, dst) <- dups]
         }
 
--- | Windows-semantics comparison key（评审 mj-2）：case-fold 全路径。
+-- | Windows-semantics comparison key（评审 mj-2）：normalise + case-fold。
 foldPath :: FilePath -> FilePath
-foldPath = map toLower
+foldPath = map toLower . normalise
 
 -- | Plan items for the actionable part of the report. @root@ is the main
 -- library root (staging lives inside it) — sources become absolute here.
 importPlanItems :: FilePath -> ImportReport -> [PlanItem]
 importPlanItems root rep =
-  [PlanItem ix op st Nothing | (ix, (op, st)) <- zip [0 ..] (copies <> reworks)]
+  [PlanItem ix op st Nothing | (ix, (op, st)) <- zip [0 ..] (copies <> reworks <> kins)]
  where
   copies = [(mkCopy e dst, StPending) | (e, dst) <- irCopy rep]
   reworks =
     [ (mkCopy e dst, StNeedsDecision "目标已存在且内容不同（返修）→ pm resolve --keep src|dst|both")
     | (e, dst) <- irRework rep
+    ]
+  kins =
+    [ (mkCopy e dst, StNeedsDecision "同 stem 主文件返修待裁决，侧车/同组文件悬置（mj-3）")
+    | (e, dst) <- irReworkKin rep
     ]
   mkCopy e dst =
     OpCopy

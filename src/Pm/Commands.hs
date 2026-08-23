@@ -18,6 +18,7 @@ module Pm.Commands
   , runUndoCmd
   , runApply
   , runResolve
+  , resolveKeep
   , runImport
   , runBackupInit
   , runBackupRun
@@ -26,12 +27,13 @@ module Pm.Commands
 
 import Control.Monad (forM, forM_, unless, when)
 import Data.Char (toLower)
-import Data.List (isPrefixOf)
+import Data.Function (on)
+import Data.List (isPrefixOf, nubBy)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Data.Time (diffUTCTime, getCurrentTime)
 import GHC.Conc (getNumProcessors)
-import System.Directory (doesDirectoryExist, doesFileExist, makeAbsolute, removeFile)
+import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, makeAbsolute, removeFile)
 import System.FilePath (normalise, splitDirectories, splitDrive, splitExtension, (</>))
 import Text.Printf (printf)
 
@@ -236,7 +238,10 @@ runTrash cfg tc root = do
               (_, Left msg) -> pure ([], [(r, "备份盘不在线: " <> msg) | (r, _) <- cleanRecs])
       forM_ heldClean $ \(r, why) ->
         putStrLn ("  HELD(不删) " <> trTrashRel r <> " —— " <> why)
-      let purgeable = plainRecs <> purgeableClean
+      -- P2.2（复审新发现）：同计划复位后重跑会为同一 trashRel 追加第二条
+      -- manifest 记录（append-only 历史）——按 trashRel 去重，一个文件只
+      -- unlink 一次，避免第二次 removeFile 因文件已不存在而炸掉整个批次。
+      let purgeable = nubBy ((==) `on` (trTrashRel . fst)) (plainRecs <> purgeableClean)
       if null purgeable
         then putStrLn "隔离区没有可清除的已登记条目" >> pure (if null heldClean then 0 else 1)
         else do
@@ -474,32 +479,38 @@ runImport go cfg = do
               putStrLn "✓ 暂存区无需归档"
               pure (if null (irUnrecognized rep) && null (irDupTarget rep) then 0 else 1)
             else do
-              pid <- newPlanId
-              now <- getCurrentTime
               minfo <- readRootInfo root
-              savePlanAndMaybeRun
-                go
-                Plan
-                  { plId = pid
-                  , plKind = "import"
-                  , plRootPath = root
-                  , plRootId = riId <$> minfo
-                  , plCreated = now
-                  , plItems = items
-                  }
+              case minfo of
+                -- P2.2 fail-closed（复审 cx-1 残留）：root 无身份就不出计划，
+                -- 而不是造一个 rootId=Nothing 的计划再依赖下游拒绝。
+                Nothing -> putStrLn ("主库缺 .pm/root-id.json → 先 pm init --main " <> root) >> pure 2
+                Just info -> do
+                  pid <- newPlanId
+                  now <- getCurrentTime
+                  savePlanAndMaybeRun
+                    go
+                    Plan
+                      { plId = pid
+                      , plKind = "import"
+                      , plRootPath = root
+                      , plRootId = Just (riId info)
+                      , plCreated = now
+                      , plItems = items
+                      }
 
 -- ─── backup ─────────────────────────────────────────────────────────────────
 
 runBackupInit :: FilePath -> Config -> IO Int
 runBackupInit path cfg = do
-  abs' <- makeAbsolute path
-  let mainPath = cfgMainPath cfg
-      -- 评审 mj-4：NTFS 大小写不敏感——嵌套检查按 case-fold + normalise 的
-      -- 组件序列做祖先判断，D:\PHOTOGRAPHY\Bak 不能绕过。
-      canonParts p = map (map toLower) (splitDirectories (normalise p))
+  -- 评审 mj-4（P2.2 收紧）：canonicalizePath 解析已存在前缀的 junction/
+  -- symlink 与真实大小写，再按 case-fold 组件做祖先判断——文本级
+  -- normalise 挡不住主库别名路径（如经 junction 指向主库）。
+  abs' <- canonicalizePath =<< makeAbsolute path
+  mainC <- canonicalizePath (cfgMainPath cfg)
+  let canonParts p = map (map toLower) (splitDirectories (normalise p))
       nested a b = canonParts a `isPrefixOf` canonParts b
-  if nested mainPath abs' || nested abs' mainPath
-    then putStrLn ("备份路径与主库嵌套（" <> abs' <> " vs " <> mainPath <> "），拒绝") >> pure 2
+  if nested mainC abs' || nested abs' mainC
+    then putStrLn ("备份路径与主库嵌套（" <> abs' <> " vs " <> mainC <> "），拒绝") >> pure 2
     else do
       gitEx <- doesDirectoryExist (abs' </> ".git")
       if gitEx
@@ -626,16 +637,23 @@ runClean go cfg = do
                       putStrLn "无可清理项"
                       pure (if null held then 0 else 1)
                     else do
-                      pid <- newPlanId
-                      now <- getCurrentTime
                       minfo <- readRootInfo root
-                      savePlanAndMaybeRun
-                        go
-                        Plan
-                          { plId = pid
-                          , plKind = "clean-staging"
-                          , plRootPath = root
-                          , plRootId = riId <$> minfo
-                          , plCreated = now
-                          , plItems = items
-                          }
+                      case minfo of
+                        -- P2.2 fail-closed（复审 cx-1 残留）：同 runImport。
+                        Nothing -> putStrLn ("主库缺 .pm/root-id.json → 先 pm init --main " <> root) >> pure 2
+                        Just info -> do
+                          pid <- newPlanId
+                          now <- getCurrentTime
+                          -- P2.2（复审 cx-3 旁路封堵）：--apply 即时路径同样在
+                          -- 确认后、执行前重验三副本，与 pm apply 无差别。
+                          savePlanAndMaybeRunWith
+                            (recheckCleanPlan cfg)
+                            go
+                            Plan
+                              { plId = pid
+                              , plKind = "clean-staging"
+                              , plRootPath = root
+                              , plRootId = Just (riId info)
+                              , plCreated = now
+                              , plItems = items
+                              }

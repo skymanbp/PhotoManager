@@ -13,7 +13,7 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, setModificationTime)
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
@@ -21,17 +21,19 @@ import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck (chooseInt, elements, forAll, listOf1, suchThat, testProperty, (.&&.), (===))
 
 import Pm.Clean
-import Pm.Config (writeRootInfo)
+import Pm.Cli (bindExecRoot, recheckCleanItems)
+import Pm.Commands (TrashCmd (..), resolveKeep, runTrash)
+import Pm.Config (Config (..), writeRootInfo)
 import Pm.Diff
 import Pm.Doctor (Severity (..))
 import Pm.Exec
-import Pm.Hash (sha256File)
+import Pm.Hash (nsToUtc, sha256File)
 import Pm.Import
 import Pm.Names
 import Pm.Journal (Sync (..))
 import Pm.Op
 import Pm.Plan
-import Pm.Trash (TrashRecord (..), TrashView (..), trashDir, trashView)
+import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, trashDir, trashView)
 import Pm.Types
 import Pm.Undo (buildUndoPlan)
 
@@ -40,7 +42,7 @@ import TestUtil
 plannerTests :: TestTree
 plannerTests =
   testGroup
-    "计划器 (P2/P2.1)"
+    "计划器 (P2/P2.1/P2.2)"
     [ namesTests
     , importTests
     , diffTests
@@ -48,6 +50,7 @@ plannerTests =
     , cleanTests
     , groupSemanticsTests
     , planFormatTests
+    , p22Tests
     ]
 
 -- ─── Names（§8 子集 + mj-1 边角） ───────────────────────────────────────────
@@ -481,6 +484,136 @@ planFormatTests =
         case eitherDecodeStrict (BSL.toStrict (encode plan')) :: Either String Plan of
           Right p -> (plRootId p, map piGroup (plItems p)) @?= (Just "rid-42", [Just 7])
           Left e -> assertFailure e
+    ]
+
+-- ─── P2.2（复审二轮修复） ───────────────────────────────────────────────────
+
+p22Tests :: TestTree
+p22Tests =
+  testGroup
+    "P2.2 (复审二轮)"
+    [ testCase "mj-3v2: 返修主文件 → 同 stem 侧车悬置（不入 irCopy）" $ do
+        let master = mkE ("To-Be-Sync'd" </> "Raw" </> "26-06-R66" </> "E.ARW") "new"
+            side = mkE ("To-Be-Sync'd" </> "Raw" </> "26-06-R66" </> "E.xmp") "sidecar"
+            dstOld = mkE ("Raw" </> "2026" </> "26-06-R66-Raw" </> "E.ARW") "old"
+            rep = planImport (mkCat [master, side, dstOld])
+        (irCopy rep, length (irRework rep), length (irReworkKin rep)) @?= ([], 1, 1)
+        let sts = [piStatus it | it <- importPlanItems "R:" rep]
+        length [() | StNeedsDecision _ <- sts] @?= 2
+    , testCase "P2.2: 复位后同计划重跑成功——第二次隔离不被误豁免，undo 可用" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+          createDirectoryIfMissing True (root </> "成片")
+          writeFile (root </> "成片" </> "a.jpg") "OLD"
+          oldSha <- sha256File (root </> "成片" </> "a.jpg")
+          op <- mkCopyOp (dir </> "s.jpg") "NEW!" ("成片" </> "a.jpg")
+          let origMt = case op of
+                OpCopy _ _ _ _ mt -> mt
+                _ -> 0
+          -- 篡改源（size 变）→ 第一轮 Copy 必然冲突 → 自动复位
+          writeFile (dir </> "s.jpg") "NEW!X"
+          plan <-
+            mkGroupPlanIO
+              root
+              [ (OpQuarantine ("成片" </> "a.jpg") oldSha "supersede:test", Just 0)
+              , (op, Just 0)
+              ]
+          rs1 <- execOk plan
+          case map snd rs1 of
+            [OFailed _, OConflict _] -> pure ()
+            other -> assertFailure ("round1: " <> show other)
+          back <- readFile (root </> "成片" </> "a.jpg")
+          back @?= "OLD"
+          -- 修好源（内容与 mtime 还原到计划前提）→ 第二轮重跑同一计划
+          writeFile (dir </> "s.jpg") "NEW!"
+          setModificationTime (dir </> "s.jpg") (nsToUtc origMt)
+          rs2 <- execOk plan
+          map (outcomeLabel . snd) rs2 @?= ["DONE", "DONE"]
+          newC <- readFile (root </> "成片" </> "a.jpg")
+          newC @?= "NEW!"
+          let trashFile = trashDir root </> T.unpack (plId plan) </> "成片" </> "a.jpg"
+          oldC <- readFile trashFile
+          oldC @?= "OLD"
+          -- 制造验证窗口（去 CleanShutdown）：trash 完好 → 无 Bad
+          es <- journalEntries root
+          truncateJournalTo root (filter (not . isClean) es)
+          rows0 <- doctorRows root
+          [r | r@(_, sev) <- rows0, sev == Bad] @?= []
+          -- undo 顺序感知：第二轮的 Q+C 仍可撤销（旧全局豁免会吞掉）
+          ur <- buildUndoPlan root 2
+          case ur of
+            Right up -> length (plItems up) @?= 2
+            Left msg -> assertFailure msg
+          -- 尖锐断言：外力删掉 trash 文件 → 第二次隔离的 Done 必须报 C4，
+          -- 不得被第一轮的 ~r 复位记录豁免
+          removeFile trashFile
+          rows1 <- doctorRows root
+          assertBool ("expected C4 after trash loss, got " <> show rows1)
+            (("C4", Bad) `elem` rows1)
+    , testCase "P2.2: 同 trashRel 双 manifest 记录 → trash empty 去重一次清除" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+              rel = "p" </> "v.jpg"
+          createDirectoryIfMissing True (trashDir root </> "p")
+          writeFile (trashDir root </> rel) "V"
+          now <- getCurrentTime
+          let rec1 = TrashRecord "v.jpg" rel "aa" "supersede:test" "p" now
+          appendManifest root rec1
+          appendManifest root rec1
+          let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+          code <- runTrash cfg (TrashEmpty True) root
+          code @?= 0
+          ex <- doesFileExist (trashDir root </> rel)
+          ex @?= False
+    , testCase "P2.2: recheckCleanItems 执行期见证退化 → 全项降级" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let mroot = dir </> "main"
+              broot = dir </> "bak"
+          createDirectoryIfMissing True (mroot </> "To-Be-Sync'd" </> "Processed" </> "26-06-R66")
+          createDirectoryIfMissing True (mroot </> "成片")
+          createDirectoryIfMissing True (broot </> "成片")
+          writeFile (mroot </> "To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "c.jpg") "K7"
+          writeFile (mroot </> "成片" </> "c.jpg") "K7"
+          writeFile (broot </> "成片" </> "c.jpg") "K7"
+          mcat <- scanQuiet "m" mroot
+          bcat <- scanQuiet "b" broot
+          let rep = planClean mcat bcat
+          plan <- mkCleanPlan mroot (cleanPlanItems (clEligible rep))
+          length (plItems plan) @?= 1
+          -- 计划保存后世界变了：备份见证退化
+          writeFile (broot </> "成片" </> "c.jpg") "XX"
+          plan' <- recheckCleanItems mroot mcat broot bcat plan
+          case map piStatus (plItems plan') of
+            [StNeedsDecision _] -> pure ()
+            other -> assertFailure ("expected demotion, got " <> show other)
+    , testCase "P2.2: bindExecRoot 主库 UUID 校验 + 重绑定" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+          createDirectoryIfMissing True root
+          now <- getCurrentTime
+          writeRootInfo root (RootInfo "rid-A" RoleMain now Nothing)
+          let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+          plan0 <- mkPlanIO (dir </> "stale-path") []
+          let plan = plan0 {plKind = "import"}
+          r <- bindExecRoot cfg plan "rid-A"
+          case r of
+            Right p -> plRootPath p @?= root -- 重绑定到当前主库路径
+            Left e -> assertFailure e
+          r2 <- bindExecRoot cfg plan "rid-B"
+          case r2 of
+            Left msg -> assertBool msg ("不符" `elemSubstr` msg)
+            Right _ -> assertFailure "expected mismatch refusal"
+    , testCase "P2.2: --keep 拒绝复合组成员与非待裁决条目" $ do
+        gplan <- mkGroupPlanIO "R:" [(OpCopy "S:x" "a" "bb" 1 0, Just 0)]
+        c1 <- case plItems gplan of
+          [it] -> resolveKeep gplan it "dst"
+          _ -> assertFailure "one item expected" >> pure 99
+        c1 @?= 2
+        splan <- mkPlanIO "R:" [OpCopy "S:x" "a" "bb" 1 0] -- StPending，非待裁决
+        c2 <- case plItems splan of
+          [it] -> resolveKeep splan it "dst"
+          _ -> assertFailure "one item expected" >> pure 99
+        c2 @?= 2
     ]
 
 -- 本地小工具：直接给 Plan 构造记录（备份/清理 e2e 用）

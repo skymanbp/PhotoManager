@@ -2,10 +2,9 @@
 
 **日期**: 2026-08-23 · **评审对象**: `git show b0a1363`（P2: import/backup/clean-staging planners）
 **verdict**: **不可以放行真实库 apply**（先修复下列发现）
-**状态**: **P2.1 已全部修复（2026-08-23，90/90 测试）**——cx-1/2/4/5 = Plan
-rootId + 复合组闭包 + 组内自动复位 + 幂等重跑；cx-3 = 执行期三副本重验 +
-trash empty 屏障；mj-1..6 与 mn-1 逐项落地（映射见 DESIGN §16）。修复后送
-codex 复审。
+**状态**: P2.1 修复（commit 5ce1ddb，90/90）→ **codex 二轮复审**（见文末）
+判 7 FIXED / 4 PARTIAL / 1 NOT-FIXED + 1 新 major → **P2.2 补齐
+（2026-08-23，96/96 测试）**：残留缺口全部闭合（映射见 DESIGN §16）。
 
 ---
 
@@ -100,7 +99,7 @@ conflict（I5 兜底）、trash 可还原状态、或落错卷的多余拷贝；
 - **backup / clean staging**：cx-1/cx-2/cx-3 直接命中其核心路径，**修复前
   不应在真实备份盘上执行**（备份盘本就未挂载，天然冻结）。
 
-## P2.1 修复方案骨架（待用户批准后执行）
+## P2.1 修复方案骨架（已执行，commit 5ce1ddb）
 
 1. Plan 结构升级：`plRootId`（UUID）+ item `piGroup`（复合组 ID）；apply 按
    UUID 重发现 root、`--only`/resolve 按组闭包（吃掉 cx-1/2/4/5）。
@@ -110,3 +109,22 @@ conflict（I5 兜底）、trash 可还原状态、或落错卷的多余拷贝；
 4. Import 键规范化 + 组级 dup 拒绝 + Names 空地点修复（mj-1/2/3）。
 5. backup init 祖先判断规范化（mj-4）；archiveBySha 收紧 Raw/成片（mj-5）；
    FFI CPP 宏（mn-1）。
+
+---
+
+## 二轮复审（codex，对 commit 5ce1ddb）与 P2.2 收口
+
+判定：cx-4/cx-5/mj-1/mj-5/mj-6/mn-1 FIXED；cx-1/cx-2/cx-3/mj-2/mj-4
+PARTIAL；mj-3 NOT-FIXED；另报 1 条新 major（复位后同计划重跑的 oid/trashRel
+复用会污染 doctor 豁免、undo 剔除与 trash 生命周期）。verdict 仍不放行。
+
+**P2.2 修复（96/96 测试，含 6 个新用例）**：
+
+| 缺口 | 修复 |
+|---|---|
+| cx-1 残留（--apply 即时路径可带 rootId=Nothing 执行） | runImport/runClean 无 root-id 拒绝出计划；executePlanNow 对 rootId=Nothing 一律拒绝（fail-closed 无例外） |
+| cx-3 残留（clean --apply 绕过执行期重验） | savePlanAndMaybeRunWith 钩子：即时路径确认后同走 recheckCleanPlan |
+| 新 major（复位后重跑的记录复用） | doctor 豁免与 undo 剔除改**顺序感知**（~r 只配对紧邻其前最近一次同 oid Done）；trash empty 按 trashRel 去重。测试含尖锐断言：重跑后删 trash 文件 → 第二次隔离必须报 C4 |
+| mj-3（返修不升级 stem 组） | irReworkKin：主文件返修 → 同 stem 待拷文件悬置 NEEDS-DECISION |
+| mj-2 残留（无 normalise） | foldPath = toLower · normalise |
+| mj-4 残留（junction 别名） | backup init 双侧 canonicalizePath 后再比较（残余：极端卷别名场景无法纯文本识别，已文档化） |

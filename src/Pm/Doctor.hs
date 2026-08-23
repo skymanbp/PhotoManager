@@ -17,7 +17,6 @@ module Pm.Doctor
 import Control.Monad (filterM, forM, forM_, unless, when)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
-import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
@@ -93,17 +92,20 @@ runDoctor root opts = do
       donesAfterClean = [(jeOpId e, jeVerifiedSha e, jeTrashRel e) | e@JDone {} <- afterClean]
       pending = Map.toList (intents `Map.difference` terminals)
       -- Exec 组内自动复位（§6.5）/undo 复位会把隔离文件从 trash 移回原位，
-      -- 且该 rename 有自己的 Intent+Done。这些 trash 源路径要从 C4 的
-      -- 「Done 目标应仍在」检查中排除，否则复位会被误报为 CORRUPT。
-      restoredFrom =
-        Set.fromList
-          [ opOldRel op
-          | (oid, op@OpRename {}) <- Map.toList intents
-          , Just (TDone _ _) <- [Map.lookup oid terminals] -- Failed 的复位没动文件，不豁免
-          ]
+      -- 且该 rename 有自己的 Intent+Done。P2.2（复审新发现）：豁免必须
+      -- **顺序感知**——只有当 oid 的最后一次 Done 之后还有对应 ~r 复位 Done
+      -- 时，trash 目标缺席才是复位所致；同计划复位后重跑成功的第二次隔离
+      -- （Done 晚于旧 ~r）仍须核查，全局豁免会把它吞掉。
+      lastDonePos =
+        Map.fromListWith
+          max
+          [(jeOpId e, p) | (p, e@JDone {}) <- zip [0 :: Int ..] entries]
+      restoredAfterLastDone oid = case (Map.lookup oid lastDonePos, Map.lookup (oid <> "~r") lastDonePos) of
+        (Just q, Just r) -> r > q
+        _ -> False
 
   pendingFindings <- concat <$> mapM (classifyPending root) pending
-  c4Findings <- concat <$> mapM (verifyDone root intents restoredFrom) donesAfterClean
+  c4Findings <- concat <$> mapM (verifyDone root intents restoredAfterLastDone) donesAfterClean
 
   -- Trash reconciliation (Q1 + purged records)
   tv <- trashView root
@@ -226,17 +228,18 @@ verifyFp p (FpDir s) = do
   if isD then (== s) <$> dirFingerprint p else pure False
 
 -- C4: an interrupted batch's Done claims re-verified against disk.
--- @restoredFrom@ = trash 源路径集合，其文件已被 journaled 复位 rename 移走
--- （§6.5 自动复位 / undo）——对应的 Quarantine Done 不再检查 trash 目标。
-verifyDone :: FilePath -> Map.Map Text Op -> Set.Set FilePath -> (Text, Maybe Text, Maybe FilePath) -> IO [Finding]
-verifyDone root intents restoredFrom (oid, msha, mtrash) =
+-- @restoredAfter oid@ = 该 oid 的最后一次 Done 之后存在对应 ~r 复位 Done
+-- （§6.5 自动复位 / P2.2 顺序感知配对）——此时 trash 目标缺席是复位所致，
+-- 免于 C4；否则照常核查。
+verifyDone :: FilePath -> Map.Map Text Op -> (Text -> Bool) -> (Text, Maybe Text, Maybe FilePath) -> IO [Finding]
+verifyDone root intents restoredAfter (oid, msha, mtrash) =
   case Map.lookup oid intents of
     Nothing -> pure [Finding "C3" Info (T.unpack oid <> ": Done 无对应 Intent（journal 头部轮转或跨批），跳过") ""]
     Just op -> case (op, msha) of
       (OpCopy _ dstRel _ _ _, Just sha) -> checkTarget (root </> dstRel) dstRel sha
       (OpQuarantine _ _ _, Just sha)
         | Just trashRel <- mtrash ->
-            if (".pm" </> "trash" </> trashRel) `Set.member` restoredFrom
+            if restoredAfter oid
               then
                 pure
                   [Finding "Q-RESTORED" Info (T.unpack oid <> ": 隔离后已被 journaled 复位（" <> trashRel <> "），无需核查") ""]

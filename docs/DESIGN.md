@@ -215,7 +215,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、别名登记、同批目标唯一性校验） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
 | `pm doctor [--deep]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash；每次体检轮转复验 1/N 全库（--deep 全量） | 否 |
-| `pm apply <planId> [--only 3,7-9]` | 执行（或部分执行）已存的计划；conflict 项只停该项、批次继续、末尾汇总。**P2.1**：执行 root 按计划 `rootId` 重新发现绑定（Exec 拿锁后再验一次）；`--only` 自动扩到复合组闭包；clean 计划执行前逐项重验三副本（真实重 hash），不过的降级暂停——即时 `--apply` 因见证 hash 刚在同进程完成而免此步 | 是 |
+| `pm apply <planId> [--only 3,7-9]` | 执行（或部分执行）已存的计划；conflict 项只停该项、批次继续、末尾汇总。**P2.1/P2.2**：执行 root 按计划 `rootId` 重新发现绑定（Exec 拿锁后再验一次；无 rootId 的计划 CLI 层 fail-closed 拒绝，含 --apply 即时路径）；`--only` 自动扩到复合组闭包；clean 计划**每次执行前**逐项重验三副本（真实重 hash），不过的降级暂停——`pm apply` 与 `clean --apply` 即时路径无差别，无豁免 | 是 |
 | `pm resolve <planId> --item N --keep src\|dst\|both` | 裁决计划中标 `NEEDS-DECISION` 的冲突项（both = 新名并存）。**P2.1**：`--keep` 只接受独立的 NEEDS-DECISION Copy（复合组成员不可单独裁决）；skip/unskip 扩到全组；`--keep src` 追加的 supersede 对共享组 id | 改计划 |
 | `pm trash list / empty` | 隔离区查看（manifest ∪ journal ∪ 实际目录并集，孤儿标 UNREGISTERED）/ **唯一的最终清除入口**：逐项列出、二次确认，只 unlink 确认清单里逐项可见的条目，禁止整删目录树。**P2.1（评审 cx-3 终极屏障）**：reason 为 `clean-staging` 的条目在永久删除前按当前 catalog + 真实重 hash 再确认「Raw/成片 + 备份盘」各存一份同 sha 副本，确认不了 HELD 不删 | empty 时 |
 | `pm undo --last [n]` | 由 journal 生成反向计划：**仅对有 Done 的 op**；执行前逐项校验现盘内容 == journal 指纹，不符即拒绝并报告；supersede 的反向 = 从 trash 还原 victim 回原位（新副本转 quarantine） | apply 时 |
@@ -333,7 +333,10 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 ③ ②任何非成功结果 → Exec **同批自动复位**：journaled rename（oid 加 ~r 后缀，
    Intent+Done 齐全）把 victim 从 trash 移回原位；复位成功后 ① 的结果改写为
    未生效（catalog 不误删条目），复位被占位挡住则如实报告、旧字节留 trash。
-   doctor 的 C4 检查对「已被 journaled 复位」的隔离 Done 豁免（Q-RESTORED）。
+   doctor 的 C4 豁免与 undo 的净零剔除都是**顺序感知**的（P2.2）：~r 只配对
+   紧邻其前最近一次同 oid 的 Done——复位后同计划重跑成功产生的第二次隔离
+   （Done 晚于旧 ~r）照常核查、照常可撤销；trash empty 对同 trashRel 的多条
+   manifest 历史记录按路径去重，一个文件只 unlink 一次。
 崩溃恢复：①与②之间进程死亡 → doctor 报 C1「重跑原计划」；重跑时 ① 幂等
    （victim 不在原位而本计划 trash 有内容相符文件 → 视为已隔离，续跑 ②）。
 undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成的 supersede 反向 =
@@ -363,8 +366,10 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `YY-` 推导，显式年份层与推导不一致 → 不猜，报 unrecognized。）
 - 事件名按 canonical scheme（§8 Scheme A）规范化后落位；侧车跟随；
   计划期校验同批目标唯一性（两个源撞同一目标 → 连同**同目录同 stem 侧车**
-  整组拒绝，评审 mj-3）；目标键一律 **case-fold** 比较（NTFS 语义，评审
-  mj-2）；事件名先剥可选 `-Raw` 后缀（大小写不敏感）再验地点非空——
+  整组拒绝，评审 mj-3）；**返修同样升级到 stem 组**（P2.2 mj-3v2：主文件
+  NEEDS-DECISION 时其同 stem 待拷文件悬置为 NEEDS-DECISION，绝不先行落位
+  产生孤立侧车）；目标键一律 **normalise + case-fold** 比较（NTFS 语义，
+  评审 mj-2）；事件名先剥可选 `-Raw` 后缀（大小写不敏感）再验地点非空——
   `26-04--Raw`（空地点）与 `26-04-Raw`（裸后缀，歧义）都拒绝（评审 mj-1）；
   生成计划前先做暂存区新鲜度守卫（与索引不一致 → 先 pm scan）。
 - 老事件返修（如 `Processed\23-04-EU`）：逐文件走 §6.1——同 sha skip、
@@ -588,3 +593,10 @@ process + P0 冒烟）、性能表（介质分列 + 首备/import 行 + fsync/ve
 case-fold + stem 组拒绝（mj-2/3）、Names 空地点/裸后缀拒绝（mj-1）、归档层限
 Raw/成片（mj-5）、backup init 嵌套检查 case-fold（mj-4）、FFI 调用约定 CPP 宏
 （mn-1）。评审归档：`docs/reviews/2026-08-23-p2-codex-review.md`。
+
+同日 codex 二轮复审（对 5ce1ddb）：7 FIXED / 4 PARTIAL / 1 NOT-FIXED +
+1 新 major → **P2.2 补齐**：返修 stem 组悬置（mj-3v2）、无 rootId 全路径
+fail-closed（含 --apply 即时路径）、clean 即时路径同走执行期重验（cx-3
+旁路封堵）、doctor/undo 复位配对改顺序感知 + trash empty 按 trashRel 去重
+（新 major）、foldPath 补 normalise（mj-2）、backup init 改
+canonicalizePath（mj-4）。
