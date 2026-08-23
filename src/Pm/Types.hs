@@ -1,0 +1,140 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+-- | Core domain types shared by every pm module (DESIGN.md §3).
+module Pm.Types
+  ( RootRole (..)
+  , RootInfo (..)
+  , FileKind (..)
+  , Entry (..)
+  , Catalog (..)
+  , classifyExt
+  , entryMap
+  ) where
+
+import Data.Aeson
+import Data.Char (toLower)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Text (Text)
+import Data.Time (UTCTime)
+
+data RootRole = RoleMain | RoleBackup | RoleVault
+  deriving (Show, Eq)
+
+instance ToJSON RootRole where
+  toJSON RoleMain = "main"
+  toJSON RoleBackup = "backup"
+  toJSON RoleVault = "vault"
+
+instance FromJSON RootRole where
+  parseJSON = withText "RootRole" $ \t -> case t of
+    "main" -> pure RoleMain
+    "backup" -> pure RoleBackup
+    "vault" -> pure RoleVault
+    _ -> fail ("unknown root role: " <> show t)
+
+-- | Contents of @\<root\>\/.pm\/root-id.json@ — identifies a root by UUID,
+-- never by drive letter (DESIGN.md §9).
+data RootInfo = RootInfo
+  { riId :: Text
+  , riRole :: RootRole
+  , riCreated :: UTCTime
+  }
+  deriving (Show, Eq)
+
+instance ToJSON RootInfo where
+  toJSON r = object ["id" .= riId r, "role" .= riRole r, "created" .= riCreated r]
+
+instance FromJSON RootInfo where
+  parseJSON = withObject "RootInfo" $ \o ->
+    RootInfo <$> o .: "id" <*> o .: "role" <*> o .: "created"
+
+data FileKind = KindPhoto | KindSidecar | KindMeta
+  deriving (Show, Eq)
+
+instance ToJSON FileKind where
+  toJSON KindPhoto = "photo"
+  toJSON KindSidecar = "sidecar"
+  toJSON KindMeta = "meta"
+
+instance FromJSON FileKind where
+  parseJSON = withText "FileKind" $ \t -> case t of
+    "photo" -> pure KindPhoto
+    "sidecar" -> pure KindSidecar
+    "meta" -> pure KindMeta
+    _ -> fail ("unknown file kind: " <> show t)
+
+-- | Extension classification is case-folded everywhere: the real library mixes
+-- @.jpg@/@.JPG@ about half and half (DESIGN.md §1.1).
+classifyExt :: FilePath -> FileKind
+classifyExt ext = case map toLower ext of
+  ".arw" -> KindPhoto
+  ".jpg" -> KindPhoto
+  ".jpeg" -> KindPhoto
+  ".png" -> KindPhoto
+  ".dng" -> KindPhoto
+  ".tif" -> KindPhoto
+  ".tiff" -> KindPhoto
+  ".psd" -> KindPhoto
+  ".heic" -> KindPhoto
+  ".xmp" -> KindSidecar
+  ".acr" -> KindSidecar
+  _ -> KindMeta
+
+-- | One indexed file. @enPath@ is relative to its root, native separators.
+-- @enMtimeNs@ is whatever this root's own stat returned — it is a cache
+-- invalidation key local to the root and is never compared across roots
+-- (DESIGN.md §3).
+data Entry = Entry
+  { enPath :: FilePath
+  , enSize :: Integer
+  , enMtimeNs :: Integer
+  , enSha :: Text
+  , enKind :: FileKind
+  }
+  deriving (Show, Eq)
+
+instance ToJSON Entry where
+  toJSON e = object
+    [ "path" .= enPath e
+    , "size" .= enSize e
+    , "mtimeNs" .= enMtimeNs e
+    , "sha256" .= enSha e
+    , "kind" .= enKind e
+    ]
+
+instance FromJSON Entry where
+  parseJSON = withObject "Entry" $ \o ->
+    Entry
+      <$> o .: "path"
+      <*> o .: "size"
+      <*> o .: "mtimeNs"
+      <*> o .: "sha256"
+      <*> o .: "kind"
+
+-- | Snapshot of one root. The snapshot is a rebuildable cache; the journal is
+-- the durable layer (DESIGN.md §3). Entries are serialized as a list and
+-- re-keyed on load.
+data Catalog = Catalog
+  { catRootId :: Text
+  , catScanned :: UTCTime
+  , catEntries :: Map FilePath Entry
+  }
+  deriving (Show, Eq)
+
+instance ToJSON Catalog where
+  toJSON c = object
+    [ "rootId" .= catRootId c
+    , "scanned" .= catScanned c
+    , "entries" .= Map.elems (catEntries c)
+    ]
+
+instance FromJSON Catalog where
+  parseJSON = withObject "Catalog" $ \o -> do
+    rid <- o .: "rootId"
+    ts <- o .: "scanned"
+    es <- o .: "entries"
+    pure (Catalog rid ts (entryMap es))
+
+entryMap :: [Entry] -> Map FilePath Entry
+entryMap es = Map.fromList [(enPath e, e) | e <- es]
