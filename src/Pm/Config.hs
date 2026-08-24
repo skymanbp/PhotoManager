@@ -12,6 +12,7 @@ module Pm.Config
   , renderConfig
   , readRootInfo
   , requireRole
+  , requireMain
   , writeRootInfo
   , freshRootId
   , pmDir
@@ -138,6 +139,12 @@ requireRole role root = do
       | riRole info == role -> Right info
       | otherwise ->
           Left (root <> " 是 " <> show (riRole info) <> " root，不是 " <> show role <> "，拒绝以该身份操作（检查配置路径）")
+
+-- | 配置的主库路径必须是 RoleMain root（P3b-6 复审 B1：scan\/import\/clean\/
+-- names 之外，vault 比对源、备份源、doctor\/trash\/undo 的默认 root、
+-- @init --force@ 同样以「主库」身份读写该路径，全部收口到此）。
+requireMain :: Config -> IO (Either String RootInfo)
+requireMain = requireRole RoleMain . cfgMainPath
 
 -- | 侧缓存目录的成对覆盖写（catalog.json + meta.json）。备份盘缓存与
 -- vault 缓存共用：都是可重建的展示\/加速缓存，纯覆盖写即可——耐久层在

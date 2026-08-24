@@ -162,3 +162,44 @@ I5 不覆盖；gitStepsLines 纯字符串（pm 零 git 执行）;六态算法/�
 - junction 别名 vault 路径的守卫行为未自动化测试。
 - 目录指纹不含内容 hash（见 B2）。
 - 落位后复核异常路径仍未做故障注入（同首轮记录）。
+
+---
+
+# 三轮复审（2026-08-24，`codex exec -s read-only` 直跑，对 d8e6d6d..e7288ae）
+
+- 取结果：直跑三次（review3/3b/3c）模型自述只有等待/协作类工具、无 `exec`，
+  零命令执行空跑；改为重试循环（读事件流 `command_execution` 计数，命中即
+  取结果），第 1 次重试即真跑：132 次命令执行、约 13 分钟。原文存 scratchpad
+  `review3-final.md`（不入仓）。
+- verdict：**NO-GO**——A4/A6/B2/B3 FIXED，B4 反驳被接受；A1/A2/A3/B1 PARTIAL
+  + 1 major + 1 minor。逐条对照源码核实**全部成立**（A2 另以 git 2.52
+  `check-ignore` 实证），同轮修复（P3b-6，144/144，零 GHC 警告）。
+
+## 逐条
+
+| # | 复审判定 | 残留（codex） | 核实 | P3b-6 处置 |
+|---|---|---|---|---|
+| A1 | PARTIAL | 空槽只查 `doesFileExist`（目录/失效 reparse point 占槽 → 反复选槽 1、move 必败）；`Plan` 反序列化不校验 id，`plId="job~d7"` 时 Trash `splitOn "~d"` 与 Undo `isInfixOf "~d"` 互相错判 | 成立（Exec.hs:276 / Plan.hs:98 / Trash.hs:82 / Undo.hs:73 原文如此） | `Pm.Op.opIdParts` 严格解析 `<pid>#<ix>[~r|~d<N>]`（Trash/Undo/Doctor 共用）；`isValidPlanId` 在 loadPlan（含文件内 id≠文件名、格式不合不触盘）与 execPlan 双重把关；空槽改 `doesPathExist`。测试：解析矩阵、`job~d7` 执行/装载拒绝、目录占槽 1 → 用槽 2 |
+| A2 | PARTIAL | 反规则只拒含 `.pm` 字面的 `!` 行；`!.[p]m/` + `!.[p]m/**` 可重新包含 | 成立——scratch 仓 git 2.52.0.windows.1 `check-ignore -q .pm/probe`：`!.[p]m/**`、`!.p\m/**`、`!.?m/**`、`!.*/**` 四种皆 exit 1 且 `git status` 列出 `?? .pm/probe`；字面 `!README.md` 仍 ignored | `!` 行含 `.pm`（case-fold）或任一 `* ? [ \` 即拒绝（pm 不实现 wildmatch，fail-closed）。真实 vault `.gitignore` 无 `!` 行，不受影响。测试：四种通配 + `!.PM` 拒绝、字面无关反规则放行 |
+| A3 | PARTIAL | marker role 改成 RoleMain 跳过守卫；删 marker 后 `execPlan defaultExecEnv` 走「裸目录」放行 | 成立（Exec.hs:143/157 原文如此） | 内核拒绝一切无身份 root（fixture 改 `ensureTestRoot` 先写标识）；`pmIgnoreGuard role` 对所有 role 无条件执行；另加**取锁前**零写入预检——`withRootLock` 会先建 `.pm/lock`，git 树污染不该始于锁文件。测试：匿名 root 拒绝且 `.pm/` 不存在；RoleMain marker + git 树无 ignore → I11 |
+| A4 | FIXED | — | — | — |
+| A6 | FIXED | — | — | — |
+| B1 | PARTIAL | `runInit --force` 沿用任意 role marker；`computeVault` 以 cfgMainPath 为相册源并写 vault-cache；`runBackupRun` 以之为备份源；`pickRoot SelMain` 不校验 role | 成立（Commands.hs:109/159/598、Vault.hs:297 原文如此） | `Pm.Config.requireMain` 收口四入口；`initPreflight` 遇非 RoleMain 标识拒绝（`--force` 不改写身份）。测试：pickRoot 备份 root → exit 2；computeVault 无标识/备份 role → 2、主库 → 0；initPreflight 备份 root 拒绝。`pm backup` 分支依赖盘符发现，未加自动化（同一行 `requireMain` 调用） |
+| B2 | FIXED | — | — | — |
+| B3 | FIXED | — | — | — |
+| B4 | 反驳被接受 | — | — | — |
+| major | — | `pm init --main` 无 I11 守卫；`backup init` 只查本目录 `.git` 目录（漏 `.git` 文件与祖先仓） | 成立（Commands.hs:128/553 原文如此） | `initPreflight` / `backupInitPreflight` 走同一 `pmIgnoreGuard`，在写配置/标识之前。测试：git 树无 ignore 拒绝；`.git` 文件拒绝；与主库嵌套拒绝；合规放行 |
+| minor | — | `dirFingerprint` 跟随 junction，指回祖先无限递归；reparse 目录记成普通 `d` | 成立（`doesDirectoryExist` 对 junction 返回 True，directory-1.3.8.5） | `pathIsSymbolicLink` 命中记 `l` 条目不跟随（与 Scan.listTree 同策略）。测试：`mklink /J ev\loop → ev` 后指纹终止、确定、去链接后复原。真实库无 reparse point，既有 names 计划指纹不变（重生成逐项比对） |
+
+## 附带
+
+- `Pm.Commands` 触及 750 行文件预算 → 备份命令（`BackupCmd` / `runBackupInit` /
+  `backupInitPreflight` / `runBackupRun`）拆到 `Pm.BackupCmd`，Commands 再导出，
+  Main 不动。
+- 三轮均未采纳「目录指纹加内容 hash」——用户裁定保持 stat 级递归（2026-08-24）。
+
+## 残余与未自动化项
+
+- `pm backup` 的 requireMain 分支无自动化测试（需盘符发现 fixture）。
+- 位移槽位封顶 99；落位后复核异常路径未做故障注入（沿前两轮记录）。
+- junction 别名 vault 路径的守卫行为（`canonicalizePath` 一行）仍未自动化。

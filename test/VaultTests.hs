@@ -150,6 +150,7 @@ sampleDiff =
     , ("urban", Map.empty)
     ]
 
+-- 路径只是 JSON 值形状样本（占位盘符，不指向真实档案 vault）。
 sampleJson :: BSLC.ByteString
 sampleJson =
   renderVaultJson
@@ -226,9 +227,15 @@ mkVaultCfg root vdir =
 writeF :: FilePath -> String -> IO ()
 writeF fp s = createDirectoryIfMissing True (takeDirectory fp) >> writeFile fp s
 
+-- | 主库 root 标识（P3b-6 复审 B1：computeVault 以主库身份读 相册/写 vault-cache，
+-- 缺 RoleMain 标识 → exit 2；IO 用例先建标识）。
+mkMain :: FilePath -> IO ()
+mkMain root = writeRootInfo root (RootInfo "main-rid" RoleMain t0 Nothing)
+
 caseIoInSync :: IO ()
 caseIoInSync = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"; vdir = tmp </> "vault"
+  mkMain root
   writeF (root </> "相册" </> "a.jpg") "AAA"
   writeF (vdir </> "landscape" </> "a.jpg") "AAA"
   createDirectoryIfMissing True (vdir </> "portrait")
@@ -239,6 +246,7 @@ caseIoInSync = withSystemTempDirectory "pm-vault" $ \tmp -> do
 caseIoNewExit1 :: IO ()
 caseIoNewExit1 = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"; vdir = tmp </> "vault"
+  mkMain root
   -- .Jpg 混合大小写扩展名：legacy 会静默丢弃，pm case-fold 收录（有意偏离）
   writeF (root </> "相册" </> "x.Jpg") "XXX"
   createDirectoryIfMissing True (vdir </> "landscape")
@@ -249,13 +257,14 @@ caseIoMissingSource :: IO ()
 caseIoMissingSource = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"; vdir = tmp </> "vault"
   createDirectoryIfMissing True (vdir </> "landscape")
-  createDirectoryIfMissing True root -- 相册 子目录不存在
+  mkMain root -- root 有标识，但 相册 子目录不存在
   code <- runVaultStatus False (mkVaultCfg root vdir)
   code @?= 2
 
 caseIoCacheDrift :: IO ()
 caseIoCacheDrift = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"; vdir = tmp </> "vault"
+  mkMain root
   writeF (root </> "相册" </> "a.jpg") "AAA"
   writeF (vdir </> "landscape" </> "a.jpg") "AAA"
   code1 <- runVaultStatus False (mkVaultCfg root vdir)
@@ -299,6 +308,7 @@ casePushI11 = withSystemTempDirectory "pm-vault" $ \tmp -> do
 casePushNewLands :: IO ()
 casePushNewLands = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"; vdir = tmp </> "vault"
+  mkMain root
   writeF (root </> "相册" </> "a.jpg") "AAA"
   createDirectoryIfMissing True (vdir </> "landscape")
   code <- runVaultPush execNow (Just "landscape") ["a.jpg"] (mkVaultCfg root vdir)
@@ -313,6 +323,7 @@ casePushRefusals :: IO ()
 casePushRefusals = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"; vdir = tmp </> "vault"
       cfg = mkVaultCfg root vdir
+  mkMain root
   writeF (root </> "相册" </> "p.png") "PNG"
   writeF (root </> "相册" </> "ok.jpg") "OK"
   writeF (vdir </> "landscape" </> "ok.jpg") "OK"
@@ -331,6 +342,7 @@ casePushDriftSupersede :: IO ()
 casePushDriftSupersede = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"; vdir = tmp </> "vault"
       cfg = mkVaultCfg root vdir
+  mkMain root
   writeF (root </> "相册" </> "d.jpg") "NEWBYTES"
   writeF (vdir </> "landscape" </> "d.jpg") "OLDBYTES"
   ref <- newIORef Nothing
@@ -436,6 +448,7 @@ caseApplyI11Recheck = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"
       vdir = tmp </> "vault"
       cfg = mkVaultCfg root vdir
+  mkMain root
   writeF (root </> "相册" </> "n.jpg") "NN"
   createDirectoryIfMissing True (vdir </> "landscape")
   createDirectoryIfMissing True (vdir </> ".git")
@@ -484,6 +497,7 @@ caseCacheIdentitySwap = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"
       va = tmp </> "va"
       vb = tmp </> "vb"
+  mkMain root
   writeF (root </> "相册" </> "a.jpg") "BBBB"
   writeF (va </> "landscape" </> "a.jpg") "AAAA" -- 与源不同 → A 下是 DRIFT
   writeF (vb </> "landscape" </> "a.jpg") "BBBB" -- 与源相同 → B 下应 OK

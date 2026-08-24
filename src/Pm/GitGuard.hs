@@ -1,12 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | I11 守卫核心（内核级）：vault 是 git 工作树，pm 的 @.pm\/@ 必须被有效
--- 忽略才允许在其中建 root、写 journal\/tmp\/trash。放在独立的小模块里是为了
--- 让 'Pm.Exec' 在执行锁内**无条件**调用（P3b-5 复审 #3：只靠可覆盖的
+-- | I11 守卫核心（内核级）：任何 root 若处于 git 工作树内，pm 的 @.pm\/@ 必须
+-- 被有效忽略才允许在其中建 root、写 journal\/tmp\/trash。放在独立的小模块里
+-- 是为了让 'Pm.Exec' 在执行锁内**无条件**调用（P3b-5 复审 #3：只靠可覆盖的
 -- ExecEnv 钩子，库层调用者一个 @execPlan defaultExecEnv@ 就绕过去了），
--- 同时 'Pm.Vault' 在建 root 前也走同一函数。pm 不执行 git（I9）。
+-- 'Pm.Vault' 建 vault root、'Pm.Commands' 的 init\/backup init 建主库\/备份
+-- root 前都走同一函数（P3b-6 复审：守卫只按 role 运行会被改写 role 绕过，
+-- 且 init 入口原先无守卫）。pm 不执行 git（I9）。
 module Pm.GitGuard
-  ( vaultIgnoreGuard
+  ( pmIgnoreGuard
+  , vaultIgnoreGuard
   , findGitAncestor
   ) where
 
@@ -15,6 +18,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist)
 import System.FilePath (takeDirectory, (</>))
+
+import Pm.Types (RootRole (..))
 
 -- | 三种 git 语境全覆盖：
 --
@@ -25,16 +30,19 @@ import System.FilePath (takeDirectory, (</>))
 --
 -- 路径先 'canonicalizePath'（P3b-5 复审 #2：配置路径若是 junction\/symlink
 -- 别名，词法父链看不到真实目标的祖先 .git）。.gitignore 检查是文本级白名单：
--- 必须存在恰好 @.pm\/@ 的行，且不允许任何含 @.pm@ 的反规则（@!@ 行；
--- 比较 case-fold——Windows 默认 core.ignorecase，@!.PM\/@ 同样重新包含）。
-vaultIgnoreGuard :: FilePath -> IO (Either String ())
-vaultIgnoreGuard vaultDir0 = do
-  vaultDir <- canonicalizePath vaultDir0
-  gitDir <- doesDirectoryExist (vaultDir </> ".git")
-  gitFile <- doesFileExist (vaultDir </> ".git")
+-- 必须存在恰好 @.pm\/@ 的行，且 @!@ 反规则只允许**纯字面且不含 .pm** 的行
+-- （case-fold——Windows 默认 core.ignorecase）。P3b-6 复审 A2：含通配符
+-- @*@ @?@ @[@ 或转义 @\\@ 的反规则不含 @.pm@ 字面也能重新包含它（实测 git
+-- 2.52：@!.[p]m\/**@、@!.p\\m\/**@、@!.?m\/**@、@!.*\/**@ 都让 @.pm\/probe@
+-- 变回未忽略），pm 不实现 wildmatch，一律拒绝。
+pmIgnoreGuard :: RootRole -> FilePath -> IO (Either String ())
+pmIgnoreGuard role dir0 = do
+  dir <- canonicalizePath dir0
+  gitDir <- doesDirectoryExist (dir </> ".git")
+  gitFile <- doesFileExist (dir </> ".git")
   if gitDir || gitFile
     then do
-      let igFp = vaultDir </> ".gitignore"
+      let igFp = dir </> ".gitignore"
       ex <- doesFileExist igFp
       if not ex
         then pure (Left (i11Msg igFp "无 .gitignore"))
@@ -42,27 +50,46 @@ vaultIgnoreGuard vaultDir0 = do
           raw <- BS.readFile igFp
           let ls = map T.strip (T.lines (TE.decodeUtf8Lenient raw))
               hasRule = ".pm/" `elem` ls
-              negations = [l | l <- ls, "!" `T.isPrefixOf` l, ".pm" `T.isInfixOf` T.toLower l]
+              risky l =
+                let f = T.toLower l
+                 in ".pm" `T.isInfixOf` f || T.any (`elem` ("*?[\\" :: String)) f
+              negations = [l | l <- ls, "!" `T.isPrefixOf` l, risky l]
           case (hasRule, negations) of
             (False, _) -> pure (Left (i11Msg igFp "缺 `.pm/` 行"))
             (True, _ : _) ->
-              pure (Left (i11Msg igFp ("存在可能重新包含 .pm 的反规则: " <> T.unpack (T.intercalate ", " negations))))
+              pure
+                ( Left
+                    ( i11Msg
+                        igFp
+                        ( "存在可能重新包含 .pm 的反规则（含 .pm 或通配符 * ? [ \\）: "
+                            <> T.unpack (T.intercalate ", " negations)
+                        )
+                    )
+                )
             (True, []) -> pure (Right ())
     else do
-      manc <- findGitAncestor vaultDir
+      manc <- findGitAncestor dir
       case manc of
         Just anc ->
           pure
             ( Left
-                ( "I11: vault 位于上层 git 仓库内部（" <> anc
+                ( "I11: " <> label <> " root 位于上层 git 仓库内部（" <> anc
                     <> "）且自身不是仓根——.pm 的忽略状态由祖先 ignore 链决定，pm 不解析完整 gitignore 语义，拒绝（fail-closed）"
                 )
             )
         Nothing -> pure (Right ())
  where
+  label = case role of
+    RoleMain -> "主库"
+    RoleBackup -> "备份"
+    RoleVault -> "vault"
   i11Msg igFp why =
-    "I11: vault 是 git 工作树且 .gitignore 未有效覆盖 `.pm/`（" <> why
-      <> "）—— 先经用户确认修正 " <> igFp <> "（恰含 `.pm/` 行、无 .pm 反规则），再运行"
+    "I11: " <> label <> " root 是 git 工作树且 .gitignore 未有效覆盖 `.pm/`（" <> why
+      <> "）—— 先经用户确认修正 " <> igFp <> "（恰含 `.pm/` 行；`!` 反规则不得含 .pm 或通配符），再运行"
+
+-- | vault 角色的守卫（历史入口名，语义 = 'pmIgnoreGuard' RoleVault）。
+vaultIgnoreGuard :: FilePath -> IO (Either String ())
+vaultIgnoreGuard = pmIgnoreGuard RoleVault
 
 -- | 从 start 的父目录向上找持有 .git（目录或文件）的祖先（start 须已规范化）。
 findGitAncestor :: FilePath -> IO (Maybe FilePath)

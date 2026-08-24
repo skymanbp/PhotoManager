@@ -6,6 +6,7 @@ module TestUtil
   ( mkCopyOp
   , mkPlanIO
   , mkGroupPlanIO
+  , ensureTestRoot
   , injectAt
   , runCrash
   , execOk
@@ -25,12 +26,14 @@ module TestUtil
 
 import Control.Exception (SomeException, throwIO, try)
 import Control.Monad (forM_, when)
+import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime (..), fromGregorian, getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist)
 import System.FilePath (takeDirectory)
 import Test.Tasty.HUnit
 
+import Pm.Config (readRootInfo, writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity, runDoctor)
 import Pm.Exec
 import Pm.Hash
@@ -49,16 +52,35 @@ mkCopyOp srcAbs content dstRel = do
   s <- statSnap srcAbs
   pure (OpCopy srcAbs dstRel sha (ssSize s) (ssMtimeNs s))
 
+-- | 测试 root 身份（P3b-6 复审 A3：内核不再放行匿名 root）。root 目录已存在
+-- → 确保带 role 标识并返回其 UUID（已有标识则沿用，不改写 role）；目录不
+-- 存在（纯计划 fixture，如 \"R:\"）→ Nothing，计划 rootId 留空——这类计划
+-- 从不执行。
+ensureTestRoot :: RootRole -> FilePath -> IO (Maybe Text)
+ensureTestRoot role root = do
+  ex <- doesDirectoryExist root
+  if not ex
+    then pure Nothing
+    else do
+      m <- readRootInfo root
+      case m of
+        Just i -> pure (Just (riId i))
+        Nothing -> do
+          now <- getCurrentTime
+          writeRootInfo root (RootInfo "test-root" role now Nothing)
+          pure (Just "test-root")
+
 mkPlanIO :: FilePath -> [Op] -> IO Plan
 mkPlanIO root ops = do
   pid <- newPlanId
   now <- getCurrentTime
+  rid <- ensureTestRoot RoleMain root
   pure
     Plan
       { plId = pid
       , plKind = "test"
       , plRootPath = root
-      , plRootId = Nothing -- 测试临时 root 无标识；execPlan 仅在 eeExpectRootId 给定时校验
+      , plRootId = rid
       , plCreated = now
       , plItems = [PlanItem i op StPending Nothing | (i, op) <- zip [0 ..] ops]
       }
@@ -68,12 +90,13 @@ mkGroupPlanIO :: FilePath -> [(Op, Maybe Int)] -> IO Plan
 mkGroupPlanIO root ops = do
   pid <- newPlanId
   now <- getCurrentTime
+  rid <- ensureTestRoot RoleMain root
   pure
     Plan
       { plId = pid
       , plKind = "test"
       , plRootPath = root
-      , plRootId = Nothing
+      , plRootId = rid
       , plCreated = now
       , plItems = [PlanItem i op StPending g | (i, (op, g)) <- zip [0 ..] ops]
       }

@@ -1,5 +1,5 @@
 name: photo-manager
-version: 0.3.3
+version: 0.3.4
 synopsis: Safety-first photo library manager (pm)
 description: See docs/DESIGN.md
 license: Apache-2.0
@@ -51,6 +51,7 @@ tests:
     - -threaded
     dependencies:
     - photo-manager
+    - process
     - tasty
     - tasty-hunit
     - tasty-quickcheck

@@ -36,14 +36,16 @@ import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
   , doesFileExist
+  , doesPathExist
   , listDirectory
+  , pathIsSymbolicLink
   , removeFile
   , setModificationTime
   )
 import System.FilePath (isRelative, splitDirectories, takeDirectory, takeExtension, takeFileName, (</>))
 
 import Pm.Config (pmDir, readRootInfo)
-import Pm.GitGuard (vaultIgnoreGuard)
+import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Hash
 import Pm.Journal
 import Pm.Lock (withRootLock)
@@ -117,45 +119,64 @@ tmpNameFor ix dstRel = show ix <> "-" <> takeFileName dstRel
 -- 复位成功的 Quarantine 结果被改写，catalog 回写不会误删条目。
 execPlan :: ExecEnv -> Plan -> IO (Either String [(PlanItem, ItemOutcome)])
 execPlan env plan = do
+  -- P3b-6：取锁本身会创建 .pm/lock——无身份或 I11 不过的 root 连锁文件都
+  -- 不该落下（git 工作树污染正是 I11 要防的），先做一次零写入预检；锁内
+  -- 再按同一规则复检（预检与取锁之间被改仍整批拒绝）。
+  pre <- readRootInfo (plRootPath plan)
+  preOk <- case pre of
+    Nothing -> pure (Left noIdentityMsg)
+    Just info -> pmIgnoreGuard (riRole info) (plRootPath plan)
+  either (pure . Left) (const (execPlan' env plan)) preOk
+
+noIdentityMsg :: String
+noIdentityMsg =
+  "root 无身份（缺 .pm/root-id.json），拒绝执行（fail-closed，内核级）→ 先 pm init / pm backup init 建立标识"
+
+execPlan' :: ExecEnv -> Plan -> IO (Either String [(PlanItem, ItemOutcome)])
+execPlan' env plan = do
   let root = plRootPath plan
   r <- withRootLock root $ do
     -- P2.3 内核自卫（复审三轮 cx-1）：不信任何调用方。锁内读盘上身份，
-    -- 三条规则缺一不可：①调用方声明的期待必须与盘上一致；②计划自带的
-    -- rootId 必须与盘上一致；③**有身份的 root 拒绝执行无身份计划**——
-    -- 只有从未 init 过的裸目录（测试 fixture）才允许无身份执行。
+    -- 规则缺一不可：①root 必须有身份（P3b-6 复审 A3：此前「从未 init 的裸
+    -- 目录可无身份执行」是给测试 fixture 留的口子，库层调用者删掉 marker
+    -- 就能走进去——fixture 改为先写 root-id）；②计划 id 须为生成格式
+    -- （A1：id 参与 opId/tmp/trash 路径推导）；③调用方声明的期待须与盘上
+    -- 一致；④计划自带的 rootId 须与盘上一致，且不得缺席。
     mi <- readRootInfo root
-    let diskId = riId <$> mi
-        ridOk
-          | Just e <- eeExpectRootId env
-          , diskId /= Just e =
-              Left
-                ( "root 标识不符（期待 " <> T.unpack e <> "，盘上是 "
-                    <> maybe "<无标识>" T.unpack diskId
-                    <> "），拒绝执行——路径不是身份（cx-1）"
-                )
-          | Just rid <- plRootId plan
-          , diskId /= Just rid =
-              Left
-                ( "计划 rootId 与盘上身份不符（计划 " <> T.unpack rid <> "，盘上 "
-                    <> maybe "<无标识>" T.unpack diskId
-                    <> "），拒绝执行"
-                )
-          | Nothing <- plRootId plan
-          , Just d <- diskId =
-              Left
-                ( "该 root 已有身份（" <> T.unpack d
-                    <> "），拒绝执行无 rootId 的计划（fail-closed，内核级）"
-                )
-          | otherwise = Right ()
+    let ridOk = case mi of
+          Nothing -> Left noIdentityMsg
+          Just info
+            | not (isValidPlanId (plId plan)) ->
+                Left
+                  ( "计划 id 不符合生成格式（" <> T.unpack (plId plan)
+                      <> "），拒绝执行——id 参与 opId/tmp/trash 路径推导"
+                  )
+            | Just e <- eeExpectRootId env
+            , riId info /= e ->
+                Left
+                  ( "root 标识不符（期待 " <> T.unpack e <> "，盘上是 " <> T.unpack (riId info)
+                      <> "），拒绝执行——路径不是身份（cx-1）"
+                  )
+            | Just rid <- plRootId plan
+            , riId info /= rid ->
+                Left
+                  ( "计划 rootId 与盘上身份不符（计划 " <> T.unpack rid <> "，盘上 " <> T.unpack (riId info)
+                      <> "），拒绝执行"
+                  )
+            | Nothing <- plRootId plan ->
+                Left
+                  ( "该 root 已有身份（" <> T.unpack (riId info)
+                      <> "），拒绝执行无 rootId 的计划（fail-closed，内核级）"
+                  )
+            | otherwise -> Right info
     case ridOk of
       Left e -> pure (Left e)
-      Right () -> do
-        -- P3b-5 复审 #3（内核自卫）：vault root 的 I11 重检不经可覆盖的
-        -- ExecEnv 钩子，按盘上 role 无条件执行——锁内、journal/tmp/trash
-        -- 任何写入之前；计划生成与执行之间 .gitignore 被改则整批拒绝。
-        pf <- case mi of
-          Just info | riRole info == RoleVault -> vaultIgnoreGuard root
-          _ -> pure (Right ())
+      Right info -> do
+        -- P3b-5 复审 #3 / P3b-6 复审 A3（内核自卫）：I11 重检不经可覆盖的
+        -- ExecEnv 钩子，且对**所有** role 无条件执行（只查 RoleVault 会被
+        -- 改写 marker role 绕过）——锁内、journal/tmp/trash 任何写入之前；
+        -- 计划生成与执行之间 .gitignore 被改则整批拒绝。
+        pf <- pmIgnoreGuard (riRole info) root
         case pf of
           Left e -> pure (Left (e <> "（执行期重检，整批拒绝）"))
           Right () -> withJournal root $ \j -> do
@@ -233,7 +254,7 @@ restoreQuarantine env root j pid (_, qit, trashRel) = do
           (".pm" </> "trash" </> trashRel)
           victimRel
           (FpFileSha (opVictimSha (piOp qit)))
-      oid = opId pid (piIx qit) <> "~r"
+      oid = restoreOpId pid (piIx qit)
   occ <- doesFileExist victimAbs
   (dispOk, dispNote) <-
     if not occ
@@ -245,7 +266,7 @@ restoreQuarantine env root j pid (_, qit, trashRel) = do
           Right osha -> do
             -- 位移目录带尝试序号（P3b-5 复审 #1）：同计划重跑可能再次位移，
             -- 固定路径会与上次残留撞车。
-            mslot <- freeDisplacedSlot (opId pid (piIx qit)) victimRel
+            mslot <- freeDisplacedSlot pid (piIx qit) victimRel
             case mslot of
               Nothing -> pure (False, "；位移隔离槽位耗尽(99)，不动占位者")
               Just (doid, n) -> do
@@ -266,14 +287,16 @@ restoreQuarantine env root j pid (_, qit, trashRel) = do
           , False
           )
  where
-  -- 第一个盘上尚不存在的 ~d<N> 位移槽（N 从 1 起，封顶 99）
-  freeDisplacedSlot base victimRel = go (1 :: Int)
+  -- 第一个盘上尚不存在的 ~d<N> 位移槽（N 从 1 起，封顶 99）。P3b-6 复审 A1：
+  -- 「存在」= 任何路径条目（文件/目录/reparse point → doesPathExist）；只看
+  -- doesFileExist 会在槽位被同名目录占住时反复选中它、后续 move 必败。
+  freeDisplacedSlot pid' ix victimRel = go (1 :: Int)
    where
     go n
       | n > 99 = pure Nothing
       | otherwise = do
-          let doid = base <> "~d" <> T.pack (show n)
-          ex <- doesFileExist (trashDir root </> quarTrashRel doid victimRel)
+          let doid = displacedOpId pid' ix n
+          ex <- doesPathExist (trashDir root </> quarTrashRel doid victimRel)
           if ex then go (n + 1) else pure (Just (doid, n))
 
 execItem :: ExecEnv -> FilePath -> Journal -> Text -> PlanItem -> IO ItemOutcome
@@ -495,12 +518,18 @@ dirFingerprint dir = do
     fmap concat . forM names $ \n -> do
       let relN = if null rel then n else rel </> n
           absN = dir </> relN
-      isD <- doesDirectoryExist absN
-      if isD
-        then (("d\t" <> relN <> "\t-1\t0") :) <$> walk relN
+      -- P3b-6 复审 minor：symlink/junction 记为 l 条目、**不跟随**——指回祖先
+      -- 的 junction 会无限递归；Scan.listTree 对 reparse point 同策略。
+      isLink <- pathIsSymbolicLink absN
+      if isLink
+        then pure ["l\t" <> relN <> "\t-1\t0"]
         else do
-          s <- statSnap absN
-          pure ["f\t" <> relN <> "\t" <> show (ssSize s) <> "\t" <> show (ssMtimeNs s)]
+          isD <- doesDirectoryExist absN
+          if isD
+            then (("d\t" <> relN <> "\t-1\t0") :) <$> walk relN
+            else do
+              s <- statSnap absN
+              pure ["f\t" <> relN <> "\t" <> show (ssSize s) <> "\t" <> show (ssMtimeNs s)]
 
 -- | Fold executed outcomes back into the mutated root's catalog. A directory
 -- rename rewrites the path prefix of every entry beneath it.

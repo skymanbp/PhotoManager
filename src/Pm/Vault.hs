@@ -49,7 +49,7 @@ import System.FilePath (splitDirectories, takeExtension, (</>))
 import Text.Printf (printf)
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (Config (..), pmDir, readJsonMaybe, readRootInfo, writeRootInfo, writeSideCache, freshRootId)
+import Pm.Config (Config (..), pmDir, readJsonMaybe, readRootInfo, requireMain, writeRootInfo, writeSideCache, freshRootId)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
@@ -294,6 +294,14 @@ computeVault quiet cfg = case cfgVaultPath cfg of
   Nothing ->
     pure (Left ("配置无 vault 路径 → pm init --main <主库> --vault <展示集路径>（或手动补 config.toml 的 [vault] path）", 2))
   Just vaultDir -> do
+    -- P3b-6 复审 B1：相册源与 vault-cache 都以「主库」身份读写 cfgMainPath，
+    -- 指向备份/vault root 时不得放行。
+    em <- requireMain cfg
+    either (\msg -> pure (Left (msg, 2))) (\_ -> computeVault' quiet cfg vaultDir) em
+
+-- | 'computeVault' 主体（主库身份已验）。
+computeVault' :: Bool -> Config -> FilePath -> IO (Either (String, Int) VaultReport)
+computeVault' quiet cfg vaultDir = do
     let root = cfgMainPath cfg
         srcDir = root </> "相册"
     okSrc <- doesDirectoryExist srcDir

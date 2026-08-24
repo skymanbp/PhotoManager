@@ -8,6 +8,7 @@ module Pm.Plan
   , PlanItem (..)
   , ItemStatus (..)
   , newPlanId
+  , isValidPlanId
   , planPath
   , savePlan
   , loadPlan
@@ -19,6 +20,7 @@ import Crypto.Random (getRandomBytes)
 import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
+import Data.Char (isDigit)
 import Data.List (nub, sort)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -107,6 +109,23 @@ newPlanId = do
       hex = concatMap (printf "%02x") (BS.unpack bytes)
   pure (T.pack (ts <> "-" <> hex))
 
+-- | 'newPlanId' 的生成格式 @YYYYMMDD-HHMMSS-hex6@（hex 小写）。计划文件是可手
+-- 编的外部输入，而 id 参与 opId\/tmp\/trash 路径推导：不合格式的 id（如含
+-- @~d@、@#@、路径分隔符）在装载（'loadPlan'）与执行（'Pm.Exec.execPlan'）两处
+-- 都拒绝（P3b-6 复审 A1）。
+isValidPlanId :: Text -> Bool
+isValidPlanId t = case T.splitOn "-" t of
+  [d, hms, hex] ->
+    T.length d == 8
+      && T.all isDigit d
+      && T.length hms == 6
+      && T.all isDigit hms
+      && T.length hex == 6
+      && T.all isHexLower hex
+  _ -> False
+ where
+  isHexLower c = isDigit c || (c >= 'a' && c <= 'f')
+
 plansDir :: FilePath -> FilePath
 plansDir root = pmDir root </> "plans"
 
@@ -121,13 +140,24 @@ savePlan p = do
   BSL.writeFile fp (encode p)
   pure fp
 
+-- | 装载前先验 id 格式（也挡住 @..\\x@ 之类拼进 'planPath' 的路径穿越），装载
+-- 后再验文件内 id 与文件名一致。
 loadPlan :: FilePath -> Text -> IO (Either String Plan)
-loadPlan root pid = do
-  let fp = planPath root pid
-  exists <- doesFileExist fp
-  if not exists
-    then pure (Left ("计划不存在: " <> fp))
-    else eitherDecodeFileStrict fp
+loadPlan root pid
+  | not (isValidPlanId pid) =
+      pure (Left ("计划 id 不符合生成格式（" <> T.unpack pid <> "，应为 YYYYMMDD-HHMMSS-hex6），拒绝装载"))
+  | otherwise = do
+      let fp = planPath root pid
+      exists <- doesFileExist fp
+      if not exists
+        then pure (Left ("计划不存在: " <> fp))
+        else do
+          r <- eitherDecodeFileStrict fp
+          pure $ case r of
+            Right p
+              | plId p /= pid ->
+                  Left ("计划文件内 id（" <> T.unpack (plId p) <> "）与文件名（" <> T.unpack pid <> "）不符，拒绝装载")
+            other -> other
 
 renderPlan :: Plan -> [String]
 renderPlan p =

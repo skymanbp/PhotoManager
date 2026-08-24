@@ -61,17 +61,20 @@ buildUndoPlan root n = do
 -- P3b-5 复审 #1：组回滚的占位者位移隔离（@oid~d\<N\>@）是内核内部事务的
 -- 一部分，永不进入用户可撤销序列——否则 undo 会试图把占位者搬回已由
 -- victim 占据的原位。占位者本身仍在 trash（manifest 可查）。
+-- P3b-6 复审 A1：后缀用 'opIdParts' 严格解析（不再 @isInfixOf "~d"@——planId
+-- 含 @~d@ 时正常操作会被整体剔出 undo）；解析不出的 oid 不是 pm 生成的，
+-- 不可撤销（fail-closed）。
 cancelRestores
   :: [(Text, Maybe Text, Maybe FilePath)]
   -> [(Text, Maybe Text, Maybe FilePath)]
 cancelRestores = reverse . go []
  where
   go acc [] = acc -- acc 为倒序（最近在前）
-  go acc (d@(oid, _, _) : rest) = case T.stripSuffix "~r" oid of
-    Just base -> go (dropMostRecent base acc) rest -- ~r 自身不可撤销
-    Nothing
-      | "~d" `T.isInfixOf` oid -> go acc rest -- 位移隔离：内部事务，不可撤销
-      | otherwise -> go (d : acc) rest
+  go acc (d@(oid, _, _) : rest) = case opIdParts oid of
+    Just (pid, ix, SfxRestore) -> go (dropMostRecent (opId pid ix) acc) rest -- ~r 自身不可撤销
+    Just (_, _, SfxDisplaced _) -> go acc rest -- 位移隔离：内部事务，不可撤销
+    Just (_, _, SfxPlain) -> go (d : acc) rest
+    Nothing -> go acc rest
   dropMostRecent base acc = case break (\(o, _, _) -> o == base) acc of
     (pre, _ : post) -> pre <> post
     (pre, []) -> pre
