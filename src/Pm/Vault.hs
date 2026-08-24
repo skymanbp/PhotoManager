@@ -471,6 +471,9 @@ ensureVaultRoot vaultDir = do
               pure (Left ("该路径已是 " <> show (riRole info) <> " root，拒绝作为 vault root"))
         RootCorrupt e ->
           pure (Left (vaultDir <> " 的 .pm/root-id.json 存在但无法解析（" <> e <> "），拒绝改写——人工核查"))
+        -- P3b-12（九轮复审 major）：建立身份的入口天然走不了 requireWritable，
+        -- .pm 是 junction 时会在库外建 root-id.json。闸在 readRootState 里。
+        RootUntrusted m -> pure (Left m)
         RootAbsent -> do
           rid <- freshRootId
           now <- getCurrentTime

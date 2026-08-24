@@ -22,13 +22,14 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import Data.Text (Text)
 import Data.Time (UTCTime)
+import Control.Exception (bracket)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
 import System.IO
 
 import Pm.Config (pmDir)
 import Pm.Op (Op)
-import Pm.Win (flushHandleToDisk)
+import Pm.Win (flushHandleToDisk, openStateAppend)
 
 data Sync = Barrier | Buffered
 
@@ -66,10 +67,15 @@ newtype Journal = Journal Handle
 journalPath :: FilePath -> FilePath
 journalPath root = pmDir root </> "journal.ndjson"
 
+-- | P3b-12（九轮复审 major，探针实证）：journal 是 append-only 的耐久层，
+-- 名字固定。把 @.pm\/journal.ndjson@ 预置成库外文件的 hardlink 后，
+-- @AppendMode@ 追加**真的写到了库外对象**上（hardlink 不是 reparse point，
+-- 逐级下降与 canonical 都看不见它）。'openStateAppend' 打开后立刻查 link
+-- count，\>1 即关闭并拒绝——AppendMode 不截断，所以此时尚未写入任何字节。
 withJournal :: FilePath -> (Journal -> IO a) -> IO a
 withJournal root act = do
   createDirectoryIfMissing True (pmDir root)
-  withBinaryFile (journalPath root) AppendMode (act . Journal)
+  bracket (openStateAppend (journalPath root)) hClose (act . Journal)
 
 jAppend :: Journal -> Sync -> JEntry -> IO ()
 jAppend (Journal h) sync e = do

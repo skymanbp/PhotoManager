@@ -370,6 +370,9 @@ execItem env root j pid item = case piStatus item of
 --
 -- 尚不存在的目标不影响判定（'resolveUnder' 对缺失分量返回拼接路径），
 -- 因此 rename 到新名、copy 进新目录不会被误拒。
+-- P3b-12（九轮复审 major）：@.pm@ 排除判定改为三态并只接受明确的
+-- @Just False@。此前 'pathAtOrUnder' 解析失败返回 False，取反后成了"不在
+-- @.pm@ 里 → 放行"，是结构性 fail-open。
 confinedUser :: FilePath -> [FilePath] -> IO Bool
 confinedUser root rels = and <$> mapM one rels
  where
@@ -377,12 +380,23 @@ confinedUser root rels = and <$> mapM one rels
     m <- resolveUnder root rel
     case m of
       Nothing -> pure False
-      Just p -> not <$> pathAtOrUnder (pmDir root) p
+      Just p -> (== Just False) <$> pathAtOrUnder (pmDir root) p
 
 -- | @.pm@ 内部落位点（隔离目标）：从 root 起全程下降，@.pm@ 与 @trash@ 这两级
 -- 同样必须是真名——这正是八轮 critical 的攻击面。
 confinedTrash :: FilePath -> FilePath -> IO Bool
 confinedTrash root rel = isJust <$> resolveUnder root (".pm" </> pmSubTrash </> rel)
+
+-- | pm **自建**的 @.pm\/tmp\/\<planId\>\/\<name\>@ 落位点。
+--
+-- P3b-12（九轮复审 critical，探针实证）：'Pm.Config.requirePmTrusted' 只走
+-- @.pm@ 与 @.pm\/tmp@ 这些**固定**层，而 planId 那一层是运行时构造的。实测：
+-- 把 @.pm\/tmp\/\<planId\>@ 预置成指向库外的 junction、并在库外放一个同名的
+-- 确定性 tmp 文件后，'Pm.Win.openFreshBinary' 的残留 unlink **删掉了那个库外
+-- 文件**。动态层必须逐次验——固定层的闸覆盖不到它。
+confinedTmp :: FilePath -> Text -> FilePath -> IO Bool
+confinedTmp root pid name =
+  isJust <$> resolveUnder root (".pm" </> pmSubTmp </> T.unpack pid </> name)
 
 escapeOutcome :: ItemOutcome
 escapeOutcome = OConflict "路径逐级解析后不在 root/.pm\\trash 之内（junction/别名/短名？），拒绝执行"
@@ -412,61 +426,79 @@ execCopy' env root j oid ix op = do
                 then pure OSkippedIdentical
                 else pure (OConflict "目标已存在且内容不同（I5：不覆盖）")
             else do
-              eeCheckpoint env CpCopyAfterDstCheck
-              t1 <- getCurrentTime
-              jAppend j Barrier (JIntent oid op t1)
-              eeCheckpoint env CpCopyAfterIntent
-              let tdir = tmpDirFor root (planIdOf oid)
-                  tmp = tdir </> tmpNameFor ix (opDstRel op)
-              createDirectoryIfMissing True tdir
-              wsha <- copyFileHashed (opSrcAbs op) tmp
-              eeCheckpoint env CpCopyAfterTmp
-              rsha <- sha256File tmp
-              if wsha /= opSha op || rsha /= opSha op
-                then do
-                  -- §6.1 footnote: the one permitted unlink — our own tmp
-                  -- file that never got renamed into place.
-                  removeFile tmp
-                  tf <- getCurrentTime
-                  jAppend j Barrier (JFailed oid ("hash 失配 write=" <> wsha <> " reread=" <> rsha) tf)
-                  pure (OFailed "hash 失配（写入逻辑或介质问题），该项中止")
+              let pid' = planIdOf oid
+                  tname = tmpNameFor ix (opDstRel op)
+                  tdir = tmpDirFor root pid'
+                  tmp = tdir </> tname
+              -- 动态 planId 层的逐级校验（P3b-12 九轮 critical）：固定层的
+              -- requirePmTrusted 覆盖不到它，而 copyFileHashed 的残留 unlink
+              -- 会沿这一层的 junction 删掉库外同名文件（实测）。
+              okTmp <- confinedTmp root pid' tname
+              if not okTmp
+                then pure escapeOutcome
                 else do
-                  setModificationTime tmp (nsToUtc (opSrcMtimeNs op))
-                  eeCheckpoint env CpCopyAfterFlush
-                  createDirectoryIfMissing True (takeDirectory dstAbs)
-                  mvE <- try (moveFileNoReplace tmp dstAbs) :: IO (Either IOException ())
-                  case mvE of
-                    Left e -> do
-                      raced <- doesFileExist dstAbs
-                      tf <- getCurrentTime
-                      if raced
-                        then do
-                          jAppend j Barrier (JFailed oid "DstAppearedDuringWrite" tf)
-                          pure (OConflict "写入窗口内目标被第三方创建；tmp 保留，交 pm doctor")
-                        else do
-                          jAppend j Barrier (JFailed oid ("落位失败: " <> T.pack (show e)) tf)
-                          pure (OFailed ("落位 rename 失败: " <> show e))
-                    Right () -> do
-                      -- P3b-4 评审 #1：落位后复核的 stat/hash 异常必须留在
-                      -- 本项内变成 OFailed——逃逸出去会绕过组回滚（复位不跑）。
-                      verE <-
-                        try ((,) <$> statSnap dstAbs <*> sha256File dstAbs)
-                          :: IO (Either IOException (StatSnap, Text))
-                      case verE of
-                        Left e -> do
-                          tf <- getCurrentTime
-                          jAppend j Barrier (JFailed oid ("落位后复核异常: " <> T.pack (show e)) tf)
-                          pure (OFailed ("落位后复核异常（交 pm doctor）: " <> show e))
-                        Right (post, psha)
-                          | psha /= opSha op -> do
-                              tf <- getCurrentTime
-                              jAppend j Barrier (JFailed oid "post-move verify failed" tf)
-                              pure (OFailed "落位后复核失败（矩阵 C5，交 pm doctor）")
-                          | otherwise -> do
-                              eeCheckpoint env CpCopyAfterMove
-                              td <- getCurrentTime
-                              jAppend j (eeDoneSync env) (JDone oid (Just (opSha op)) Nothing td)
-                              pure (ODone (Just (opSha op)) (Just post) Nothing)
+                  eeCheckpoint env CpCopyAfterDstCheck
+                  t1 <- getCurrentTime
+                  jAppend j Barrier (JIntent oid op t1)
+                  eeCheckpoint env CpCopyAfterIntent
+                  createDirectoryIfMissing True tdir
+                  -- 目录创建之后再验一次：createDirectoryIfMissing 与写入之间
+                  -- 是 P3b-11 起就记录的 TOCTOU 窗口，这一次复检把它收窄到
+                  -- "创建后立刻"（§14 单机模型内的残余，见归档）。
+                  okTmp2 <- confinedTmp root pid' tname
+                  if not okTmp2 then pure escapeOutcome else execCopyTmp env root j oid op tmp
+
+execCopyTmp :: ExecEnv -> FilePath -> Journal -> Text -> Op -> FilePath -> IO ItemOutcome
+execCopyTmp env root j oid op tmp = do
+  let dstAbs = root </> opDstRel op
+  wsha <- copyFileHashed (opSrcAbs op) tmp
+  eeCheckpoint env CpCopyAfterTmp
+  rsha <- sha256File tmp
+  if wsha /= opSha op || rsha /= opSha op
+    then do
+      -- §6.1 footnote: the one permitted unlink — our own tmp
+      -- file that never got renamed into place.
+      removeFile tmp
+      tf <- getCurrentTime
+      jAppend j Barrier (JFailed oid ("hash 失配 write=" <> wsha <> " reread=" <> rsha) tf)
+      pure (OFailed "hash 失配（写入逻辑或介质问题），该项中止")
+    else do
+      setModificationTime tmp (nsToUtc (opSrcMtimeNs op))
+      eeCheckpoint env CpCopyAfterFlush
+      createDirectoryIfMissing True (takeDirectory dstAbs)
+      mvE <- try (moveFileNoReplace tmp dstAbs) :: IO (Either IOException ())
+      case mvE of
+        Left e -> do
+          raced <- doesFileExist dstAbs
+          tf <- getCurrentTime
+          if raced
+            then do
+              jAppend j Barrier (JFailed oid "DstAppearedDuringWrite" tf)
+              pure (OConflict "写入窗口内目标被第三方创建；tmp 保留，交 pm doctor")
+            else do
+              jAppend j Barrier (JFailed oid ("落位失败: " <> T.pack (show e)) tf)
+              pure (OFailed ("落位 rename 失败: " <> show e))
+        Right () -> do
+          -- P3b-4 评审 #1：落位后复核的 stat/hash 异常必须留在
+          -- 本项内变成 OFailed——逃逸出去会绕过组回滚（复位不跑）。
+          verE <-
+            try ((,) <$> statSnap dstAbs <*> sha256File dstAbs)
+              :: IO (Either IOException (StatSnap, Text))
+          case verE of
+            Left e -> do
+              tf <- getCurrentTime
+              jAppend j Barrier (JFailed oid ("落位后复核异常: " <> T.pack (show e)) tf)
+              pure (OFailed ("落位后复核异常（交 pm doctor）: " <> show e))
+            Right (post, psha)
+              | psha /= opSha op -> do
+                  tf <- getCurrentTime
+                  jAppend j Barrier (JFailed oid "post-move verify failed" tf)
+                  pure (OFailed "落位后复核失败（矩阵 C5，交 pm doctor）")
+              | otherwise -> do
+                  eeCheckpoint env CpCopyAfterMove
+                  td <- getCurrentTime
+                  jAppend j (eeDoneSync env) (JDone oid (Just (opSha op)) Nothing td)
+                  pure (ODone (Just (opSha op)) (Just post) Nothing)
 
 -- ─── Rename (§6.2) ──────────────────────────────────────────────────────────
 

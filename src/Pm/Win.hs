@@ -29,31 +29,40 @@ module Pm.Win
   , moveFileNoReplace
   , pathUnder
   , pathAtOrUnder
-  , isReparsePoint
+  , isNameSurrogate
   , resolveUnder
   , openExclusiveBinary
   , openFreshBinary
+  , openStateAppend
+  , handleIsSingleLink
   , suppressCriticalErrorDialogs
   , DriveKind (..)
   , listCandidateDrives
   , volumeFsType
   ) where
 
-import Control.Exception (SomeException, catch, try)
+import Control.Exception (SomeException, catch, onException, try)
 import Control.Monad (when)
-import Data.Bits (testBit)
+import Data.Bits (testBit, (.&.))
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Word (Word32)
+import Data.Word (Word32, Word8)
 import Foreign.Marshal.Alloc (allocaBytes)
-import Foreign.Ptr (Ptr, nullPtr)
-import System.Directory (canonicalizePath, doesPathExist, pathIsSymbolicLink, removeFile)
+import Foreign.Ptr (Ptr, intPtrToPtr, nullPtr)
+import Foreign.Storable (peekByteOff)
+import System.Directory (canonicalizePath, doesPathExist, removeFile)
 import System.FilePath (splitDirectories, (</>))
 import System.IO
 import qualified System.Win32.Console as Win32Console
 import qualified System.Win32.File as Win32File
 import System.Win32.Types (LPTSTR, hANDLEToHandle, peekTString, withHandleToHANDLE, withTString)
+
+foreign import WINDOWS_CCONV unsafe "windows.h FindFirstFileW"
+  c_FindFirstFileW :: LPTSTR -> Ptr Word8 -> IO (Ptr ())
+
+foreign import WINDOWS_CCONV unsafe "windows.h FindClose"
+  c_FindClose :: Ptr () -> IO Bool
 
 -- | Must run before any output (DESIGN.md §14 编码风险).
 setupConsole :: IO ()
@@ -106,11 +115,14 @@ pathUnder base p = do
   -- NTFS 不分大小写：比较前统一折叠（同 Pm.Op.normComp 的大小写策略）
   comps = map (map toLower) . splitDirectories
 
--- | @pathAtOrUnder base p@ = @p@ 解析后**是** @base@ 本身或落在其内。
--- 'pathUnder' 的非严格版：用于**排除**判定（「目标不得落进 .pm」——落在
--- @.pm@ 本身也必须拒绝）。同样 fail-closed，但语义相反：解析不出来时返回
--- False 表示"不能确证它在里面"，调用点因此要把它用在**排除**而非**准入**上。
-pathAtOrUnder :: FilePath -> FilePath -> IO Bool
+-- | @pathAtOrUnder base p@ = @p@ 解析后**是** @base@ 本身或落在其内；
+-- 解析不出来时是 @Nothing@（"答不上来"）。
+--
+-- P3b-12（九轮复审 major）：此前返回 @Bool@，解析失败按 False。它被用在
+-- **排除**判定上（@not \<$\> pathAtOrUnder@），于是"答不上来"变成了"不在
+-- @.pm@ 里，放行"——结构性 fail-open。三态把这个歧义消掉：调用点必须显式
+-- 决定 @Nothing@ 怎么算，而 'Pm.Exec.confinedUser' 只接受明确的 @Just False@。
+pathAtOrUnder :: FilePath -> FilePath -> IO (Maybe Bool)
 pathAtOrUnder base p = do
   eb <- try (canonicalizePath base) :: IO (Either SomeException FilePath)
   ep <- try (canonicalizePath p) :: IO (Either SomeException FilePath)
@@ -118,18 +130,86 @@ pathAtOrUnder base p = do
     (Right b, Right q) ->
       let bs = comps b
           qs = comps q
-       in length qs >= length bs && take (length bs) qs == bs
-    _ -> False
+       in Just (length qs >= length bs && take (length bs) qs == bs)
+    _ -> Nothing
  where
   comps = map (map toLower) . splitDirectories
 
--- | 该名字自身是否 reparse point（junction \/ symlink \/ mount point）。
--- **悬空** junction 也是 True（实测：'doesPathExist' 为 False 而
--- 'pathIsSymbolicLink' 为 True），所以必须先问它再问存在性。查询本身失败
--- （名字不存在）按 False，由调用方的存在性判断接手。
-isReparsePoint :: FilePath -> IO Bool
-isReparsePoint p =
-  either (const False) id <$> (try (pathIsSymbolicLink p) :: IO (Either SomeException Bool))
+-- | 该名字是否是**会改变名字解析**的 reparse point —— 即 name surrogate
+-- （junction \/ symlink \/ mount point）。
+--
+-- P3b-12（九轮复审 major）：此前用 'pathIsSymbolicLink'，它只问"有没有
+-- reparse 属性"。Windows 上 OneDrive 云占位、Dedup、WIM-boot 等**也**是
+-- reparse point，但它们不改变"这个名字指向哪个对象"——一律拒绝会让 pm 在
+-- 这类卷上整个不可用（九轮点出的可用性回归；本机造不出这类对象，故按
+-- 规范判定而非探针）。判据改为 reparse tag 的 name-surrogate 位：
+-- @IO_REPARSE_TAG_MOUNT_POINT@ (0xA0000003) 与 @IO_REPARSE_TAG_SYMLINK@
+-- (0xA000000C) 都置了它，云占位\/Dedup 没有。
+--
+-- 有 reparse 属性但读不出 tag → True（fail-closed：读不出就当它会重定向）。
+-- 名字不存在 → False，由调用方的存在性判断接手。**悬空** junction 仍是 True
+-- （属性查询在悬空时照样返回，实测）。
+isNameSurrogate :: FilePath -> IO Bool
+isNameSurrogate p = do
+  ea <- try (Win32File.getFileAttributes p) :: IO (Either SomeException Win32File.FileAttributeOrFlag)
+  case ea of
+    Left _ -> pure False -- 名字不存在 / 查不到属性
+    Right attrs
+      | attrs .&. Win32File.fILE_ATTRIBUTE_REPARSE_POINT == 0 -> pure False
+      | otherwise -> do
+          mt <- reparseTag p
+          pure $ case mt of
+            Nothing -> True -- 是 reparse 但读不出 tag → 保守拒绝
+            Just tag -> tag .&. ioReparseTagNameSurrogate /= 0
+
+-- | @FindFirstFileW@ 的 @WIN32_FIND_DATAW.dwReserved0@ 就是 reparse tag
+-- （偏移 36：属性 4 + 三个 FILETIME 24 + 两个 size DWORD 8）。Win32 包不暴露
+-- 该字段，故自行声明；结构体 592 字节，只读这一个 DWORD。
+reparseTag :: FilePath -> IO (Maybe Word32)
+reparseTag p =
+  allocaBytes findDataBytes $ \buf ->
+    withTString p $ \wp -> do
+      h <- c_FindFirstFileW wp buf
+      if h == intPtrToPtr (-1)
+        then pure Nothing
+        else do
+          tag <- peekByteOff buf 36
+          _ <- c_FindClose h
+          pure (Just tag)
+ where
+  findDataBytes = 592
+
+ioReparseTagNameSurrogate :: Word32
+ioReparseTagNameSurrogate = 0x20000000
+
+-- | 状态文件（@.pm@ 内 journal \/ manifest \/ plan \/ 侧缓存）的 hardlink 判定：
+-- link count \> 1 表示这个名字与别处的某个目录项指向**同一个文件对象**。
+--
+-- P3b-12（九轮复审 major，探针实证）：hardlink 既不是 reparse point 也不改
+-- canonical 路径，'resolveUnder' 与 canonical 判定都看不见它；实测把
+-- @.pm\/journal.ndjson@ 预置成库外文件的 hardlink 后，@AppendMode@ 追加与
+-- 覆盖写**都写到了库外对象**上。@CREATE_NEW@ 只能守"pm 自己新建"的名字，
+-- 守不住这些必须复用既有名字的状态文件——那条路径靠这里的 link count 守。
+handleIsSingleLink :: Handle -> IO Bool
+handleIsSingleLink h = do
+  r <- try (withHandleToHANDLE h Win32File.getFileInformationByHandle) :: IO (Either SomeException Win32File.BY_HANDLE_FILE_INFORMATION)
+  pure $ case r of
+    Right i -> Win32File.bhfiNumberOfLinks i <= 1
+    Left _ -> False -- 查不出就不写（fail-closed）
+
+-- | @.pm@ 内状态文件的受控打开：打开后**立刻**查 link count，\>1 即关闭并
+-- 拒绝。@AppendMode@ 不截断，所以"先打开再判"是安全的——判定失败时尚未写入
+-- 任何字节。截断语义（@WriteMode@）不得用此函数：那会在判定之前就毁掉内容，
+-- 覆盖写一律走"独占创建 tmp → 'moveFileNoReplace' 落位"。
+openStateAppend :: FilePath -> IO Handle
+openStateAppend fp = do
+  h <- openBinaryFile fp AppendMode
+  ok <- handleIsSingleLink h
+  if ok
+    then pure h
+    else do
+      hClose h
+      ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝写入——人工核查"))
 
 -- | @resolveUnder base rel@：从 @base@ 起沿 @rel@ **逐分量下降**，任一级是
 -- reparse point 即 Nothing；成功返回落点的绝对路径。
@@ -146,8 +226,13 @@ isReparsePoint p =
 -- 尚不存在的分量放行——其后不可能指向任何东西，且 pm 自己会创建它们，
 -- 因此 rename 到新名、copy 进新目录不会被误拒。
 --
--- 注意它**看不见 hardlink**（hardlink 不是 reparse point，实测
--- 'pathIsSymbolicLink' 为 False）：那条路径由 'openFreshBinary' 的独占创建守。
+-- 注意它**看不见 hardlink**（hardlink 不是 reparse point，实测）：pm 自建的
+-- 名字由 'openFreshBinary' 的独占创建守，必须复用的状态文件名由
+-- 'openStateAppend' 的 link count 守。
+--
+-- @base@ 本身只做 canonicalize，不查它是不是链接：root 由**用户**指定，把
+-- 库根放在 junction 上是合法用法。安全性依赖调用方一律以 root 为 base
+-- （P3b-12：九轮指出 P3b-11 的文档把这点写成了"含基准自身"，措辞已更正）。
 resolveUnder :: FilePath -> FilePath -> IO (Maybe FilePath)
 resolveUnder base rel = do
   eb <- try (canonicalizePath base) :: IO (Either SomeException FilePath)
@@ -162,7 +247,7 @@ resolveUnder base rel = do
     | c `elem` [".", "..", ""] = pure Nothing
     | otherwise = do
         let nxt = cur </> c
-        lnk <- isReparsePoint nxt
+        lnk <- isNameSurrogate nxt
         if lnk
           then pure Nothing
           else do
@@ -177,6 +262,9 @@ resolveUnder base rel = do
 -- 就覆盖了库外内容——实测库外文件真的变成了 pm 写的字节。hardlink 不是
 -- reparse point，'resolveUnder' 与 canonical 判定都看不见它；@CREATE_NEW@
 -- 是唯一能原子拒绝的语义（实测：普通文件与 hardlink 都被拒，库外内容完好）。
+-- P3b-12（九轮复审 minor）：raw HANDLE 到 Handle 的所有权转移期间加
+-- 'onException' —— 'hANDLEToHandle' 或 'hSetBinaryMode' 抛异常时原来会漏句柄
+-- （文件被 @FILE_SHARE_NONE@ 独占着，直到进程退出都没人能碰它）。
 openExclusiveBinary :: FilePath -> IO Handle
 openExclusiveBinary fp = do
   h <-
@@ -188,17 +276,23 @@ openExclusiveBinary fp = do
       Win32File.cREATE_NEW
       Win32File.fILE_ATTRIBUTE_NORMAL
       Nothing
-  hd <- hANDLEToHandle h
-  hSetBinaryMode hd True
+  hd <- hANDLEToHandle h `onException` Win32File.closeHandle h
+  hSetBinaryMode hd True `onException` hClose hd
   pure hd
 
 -- | 重跑安全的独占创建：先删掉同名残留（上次崩溃留下的 pm 自建 tmp），再
 -- 'openExclusiveBinary'。这一 unlink 是安全的：对 hardlink，@DeleteFileW@
 -- 只减掉一个目录项，库外原文件的内容不受影响（实测）；对 symlink 删的是链接
 -- 本体。残留若是目录则 removeFile 抛异常，整项 fail-closed 中止。
+--
+-- ⚠️ 它只在**父目录已被验过**时才安全：残留的 unlink 会沿父目录的 junction
+-- 走出库外（P3b-12 九轮 critical 实测：@.pm\/tmp\/\<planId\>@ 是 junction 时，
+-- 这个 unlink 删掉了库外的同名文件）。调用方必须先对**完整路径**做
+-- 'resolveUnder'。'Pm.Exec' 的 tmp 落位、'Pm.Catalog' 与 'Pm.Config' 的
+-- @.pm@ 顶层 tmp 都已如此。
 openFreshBinary :: FilePath -> IO Handle
 openFreshBinary fp = do
-  lnk <- isReparsePoint fp
+  lnk <- isNameSurrogate fp
   ex <- doesPathExist fp
   when (lnk || ex) (removeFile fp)
   openExclusiveBinary fp

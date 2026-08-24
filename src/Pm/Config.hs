@@ -30,6 +30,7 @@ module Pm.Config
   ) where
 
 import Control.Exception (IOException, bracket, try)
+import Control.Monad (when)
 import Crypto.Random (getRandomBytes)
 import Data.Aeson (eitherDecodeFileStrict)
 import qualified Data.Aeson as Aeson
@@ -177,19 +178,28 @@ readJsonMaybe fp = do
 -- | root 标识的三态（P3b-7 复审 major）：缺席与**损坏**必须区分——损坏（半写\/
 -- 手编坏 JSON）若按缺席处理，init\/backup init\/vault push 会用新 UUID 与新
 -- role 覆盖它，等于把一块备份盘的身份改写成主库。
-data RootIdState = RootAbsent | RootCorrupt String | RootPresent RootInfo
+-- P3b-12（九轮复审 major）：加第四态 'RootUntrusted'。`pm init` /
+-- `pm backup init` / 首次 `pm vault push` 建立身份时**还没有身份**，因此天然
+-- 走不了 'requireWritable' —— 九轮据此指出它们能在 `.pm` 是 junction 时到库外
+-- 读写 root-id.json。身份读取的唯一入口是 'readRootState'，把可信闸放进它，
+-- 这些 init 旁路连同 status / versions / 备份发现等只读入口一并覆盖。
+data RootIdState = RootAbsent | RootCorrupt String | RootUntrusted String | RootPresent RootInfo
   deriving (Show, Eq)
 
 readRootState :: FilePath -> IO RootIdState
 readRootState root = do
-  let fp = rootInfoPath root
-  exists <- doesFileExist fp
-  if not exists
-    then pure RootAbsent
-    else either RootCorrupt RootPresent <$> eitherDecodeFileStrict fp
+  tr <- requirePmTrusted root
+  case tr of
+    Left m -> pure (RootUntrusted m)
+    Right () -> do
+      let fp = rootInfoPath root
+      exists <- doesFileExist fp
+      if not exists
+        then pure RootAbsent
+        else either RootCorrupt RootPresent <$> eitherDecodeFileStrict fp
 
--- | 只读视图：Present → Just；缺席与损坏都是 Nothing（读者一律按「无身份」
--- fail-closed；要改写标识的入口必须用 'readRootState' 分辨损坏）。
+-- | 只读视图：Present → Just；缺席、损坏与**不可信**都是 Nothing（读者一律按
+-- 「无身份」fail-closed；要改写标识的入口必须用 'readRootState' 分辨这几态）。
 readRootInfo :: FilePath -> IO (Maybe RootInfo)
 readRootInfo root = do
   st <- readRootState root
@@ -201,19 +211,13 @@ readRootInfo root = do
 -- 按盘上 role 通过 I11 守卫。所有直接写 @.pm\/@ 的入口（计划保存、catalog\/
 -- 侧缓存写入、doctor --repair、trash empty、undo\/resolve）在写之前都走这里；
 -- Exec 在取锁前与锁内另有同规则复检。
+-- P3b-12：可信闸已下沉到 'readRootState'（它是身份读取的唯一入口，init 旁路
+-- 也走它），这里只需分派它的四态。
 requireWritable :: FilePath -> IO (Either String RootInfo)
 requireWritable root = do
-  -- 先问「.pm 家族本身是不是真的」——读 root-id.json 也会穿透 junction，
-  -- 身份判定必须建立在可信基准之上（P3b-11，八轮复审 critical）。
-  tr <- requirePmTrusted root
-  case tr of
-    Left e -> pure (Left e)
-    Right () -> requireWritable' root
-
-requireWritable' :: FilePath -> IO (Either String RootInfo)
-requireWritable' root = do
   st <- readRootState root
   case st of
+    RootUntrusted m -> pure (Left m)
     RootAbsent ->
       pure (Left (root <> " 缺 .pm/root-id.json → 先 pm init --main <主库>（备份盘用 pm backup init）"))
     RootCorrupt e ->
@@ -250,6 +254,16 @@ requireMain = requireRole RoleMain . cfgMainPath
 -- 绝不覆盖）。P3b-7 复审 major：此前覆盖写让损坏\/竞态 marker 可被改写身份。
 createRootInfo :: FilePath -> RootInfo -> IO (Either String ())
 createRootInfo root info = do
+  -- P3b-12（九轮复审 major）：纵深防御。三条建身份旁路已在 'readRootState'
+  -- 处被 'RootUntrusted' 拦下，但这个函数是公开 API，自身也必须问一次——
+  -- 否则 .pm 是 junction 时它会把标识原子地建到**库外**（测试实测过）。
+  tr <- requirePmTrusted root
+  case tr of
+    Left m -> pure (Left m)
+    Right () -> createRootInfo' root info
+
+createRootInfo' :: FilePath -> RootInfo -> IO (Either String ())
+createRootInfo' root info = do
   createDirectoryIfMissing True (pmDir root)
   bytes <- getRandomBytes 4
   let final = rootInfoPath root
@@ -277,11 +291,24 @@ writeRootInfo root info = do
 -- | 侧缓存目录的成对覆盖写（catalog.json + meta.json）。备份盘缓存与
 -- vault 缓存共用：都是可重建的展示\/加速缓存，纯覆盖写即可——耐久层在
 -- 别处（备份盘自己的 .pm、照片文件本身）。
+-- P3b-12（九轮复审 major）：覆盖写同样能被 hardlink 引到库外。侧缓存是可重建
+-- 的，但"可重建"不等于"可以写到别人的文件上"——与 'Pm.Plan.savePlan' 同款：
+-- 独占创建 tmp → 删旧 → no-replace 落位。
 writeSideCache :: Aeson.ToJSON meta => FilePath -> Catalog -> meta -> IO ()
 writeSideCache dir cat meta = do
   createDirectoryIfMissing True dir
-  BSL.writeFile (dir </> "catalog.json") (Aeson.encode cat)
-  BSL.writeFile (dir </> "meta.json") (Aeson.encode meta)
+  writeJsonReplacing (dir </> "catalog.json") (Aeson.encode cat)
+  writeJsonReplacing (dir </> "meta.json") (Aeson.encode meta)
+
+writeJsonReplacing :: FilePath -> BSL.ByteString -> IO ()
+writeJsonReplacing fp bytes = do
+  let tmp = fp <> ".tmp"
+  bracket (openFreshBinary tmp) hClose $ \h -> do
+    BSL.hPut h bytes
+    flushHandleToDisk h
+  old <- doesFileExist fp
+  when old (removeFile fp)
+  moveFileNoReplace tmp fp
 
 freshRootId :: IO Text
 freshRootId = do

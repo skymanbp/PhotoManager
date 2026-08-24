@@ -42,18 +42,26 @@ buildUndoPlan root n = do
           case sequence reversedOps of
             Left err -> pure (Left err)
             Right ops -> do
-              pid <- newPlanId
-              now <- getCurrentTime
+              -- P3b-12（九轮复审 minor）：身份缺席\/损坏\/不可信时不再生成一份
+              -- rootId 为空的计划——execPlan 必然拒绝它，但它已经被 savePlan
+              -- 写进 .pm/plans 了。生成完再过一次 validatePlan，与 loadPlan
+              -- 的入口校验对称。
               minfo <- readRootInfo root
-              pure . Right $
-                Plan
-                  { plId = pid
-                  , plKind = "undo"
-                  , plRootPath = root
-                  , plRootId = riId <$> minfo
-                  , plCreated = now
-                  , plItems = [PlanItem i op StPending Nothing | (i, op) <- zip [0 ..] ops]
-                  }
+              case minfo of
+                Nothing -> pure (Left (root <> " 无可用 root 标识（缺席/损坏/不可信），拒绝生成撤销计划"))
+                Just info -> do
+                  pid <- newPlanId
+                  now <- getCurrentTime
+                  let plan =
+                        Plan
+                          { plId = pid
+                          , plKind = "undo"
+                          , plRootPath = root
+                          , plRootId = Just (riId info)
+                          , plCreated = now
+                          , plItems = [PlanItem i op StPending Nothing | (i, op) <- zip [0 ..] ops]
+                          }
+                  pure (either (\e -> Left ("生成的撤销计划不合法: " <> e)) (const (Right plan)) (validatePlan plan))
 
 -- | 顺序感知的复位配对（P2.2，复审新发现）：每个 @oid~r@ 复位 Done 只取消
 -- **紧邻其前最近一次**同 oid 的 Done——同一计划复位后重跑成功时，第二次

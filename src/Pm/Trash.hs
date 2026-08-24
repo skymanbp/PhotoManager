@@ -18,7 +18,7 @@ module Pm.Trash
   , trashView
   ) where
 
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, bracket, try)
 import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -34,7 +34,7 @@ import System.IO.Error (isDoesNotExistError)
 
 import Pm.Config (pmDir, pmSubTrash)
 import Pm.Op (OpIdSuffix (..), opIdParts, relPathOk)
-import Pm.Win (flushHandleToDisk)
+import Pm.Win (flushHandleToDisk, openStateAppend)
 
 data TrashRecord = TrashRecord
   { trVictimRel :: FilePath -- original path relative to root
@@ -97,10 +97,12 @@ quarTrashRel :: Text -> FilePath -> Maybe FilePath
 quarTrashRel oid victim = (\(pid, _, sfx) -> quarDirFor pid sfx </> victim) <$> opIdParts oid
 
 -- | Write-ahead: flushed to disk before the victim moves (§6.3 step 1).
+-- P3b-12（九轮复审 major）：同 journal —— 固定名字的 append 目标可被预置成
+-- 库外对象的 hardlink，'openStateAppend' 的 link count 判定守这一条。
 appendManifest :: FilePath -> TrashRecord -> IO ()
 appendManifest root r = do
   createDirectoryIfMissing True (trashDir root)
-  withBinaryFile (manifestPath root) AppendMode $ \h -> do
+  bracket (openStateAppend (manifestPath root)) hClose $ \h -> do
     BSL.hPut h (encode r)
     BSL.hPut h "\n"
     flushHandleToDisk h
