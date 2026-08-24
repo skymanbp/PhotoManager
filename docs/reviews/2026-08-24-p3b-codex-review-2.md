@@ -127,7 +127,8 @@ junction（须由用例的设置阶段实际验证，失败则报告平台前提
 
 ## 残余（更新）
 
-- **"返回路径必须被使用"无用例**：设计已可行（见上），待做。其余同十四轮：
+- **"返回路径必须被使用"无用例**：设计已可行（见上）——**已于 P3b-18 做掉**
+  （见下节）。其余同十四轮：
 - **TOCTOU（check-use 窗口）**；`createRootInfo` post-mkdir 未重解析；
   `openExclusiveBinary` 缺外层 `mask`；`requirePmTrusted` 深度 1 枚举与使用点
   两个快照；`writeRootInfo` 裸覆盖写（仅 fixture）；`Pm.Scan` symlink 探测异常
@@ -138,3 +139,38 @@ junction（须由用例的设置阶段实际验证，失败则报告平台前提
 - **慢介质开销**：无超时，实测待用户插盘。
 - `tamperMark` 字符串哨兵；`opSrcAbs` 无 root 归属校验；`writeConfig` 普通
   覆盖写；备份盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU。
+
+---
+
+# P3b-18：十四轮 #3 残余闭合（非评审轮；用户裁定"等待期间做"）
+
+十六轮因 codex 用量上限中止、额度重置后重跑期间，按十五轮给的设计把"返回
+路径必须被使用"用例做掉。在独立 worktree（分支 `p3b18-returned-path`，基于
+ca260cb）开发，十六轮正在读的工作树零改动。
+
+## 用例：`caseCopyDstUsesResolvedPath`（StateGuardTests）
+
+| 步骤 | 内容 |
+|---|---|
+| 布置 | 库 A、诱饵库 B 各有 `.pm` 与相同身份 `m`；`rootLink` junction → A |
+| 执行 | 以 `rootLink` 为 root 跑一条 Copy（dst `相册/x.jpg`） |
+| 注入 | `CpCopyAfterFlush`（tmp 已写完并设好 mtime、落位 move 之前）：`removeDirectoryLink rootLink` + `mklink /J rootLink B` |
+| 断言 | `ODone`；`A/相册/x.jpg` 存在且内容正确；`B/相册/x.jpg` **不存在** |
+
+B 给同样的身份与目录结构是有意的：让重拼版实现能"顺利"落到 B，失败原因只
+可能是"用了哪条路径"，不混入别的拒绝理由。
+
+## 突变验证
+
+| 突变 | 结果 |
+|---|---|
+| `execCopy` 把传给 `execCopy'` 的 dst 改回 `root </> opDstRel op`（P3b-17 之前的形状） | **FAIL**（`doesFileExist (libA </> dstRel)` 得 False——文件沿改指后的 junction 落到了 B） |
+
+## 平台前提（十五轮标注为假设，本例实证）
+
+A 内 `journal.ndjson` 与 `lock` 的句柄打开期间，删除并重建 junction 成功；
+已打开的句柄继续指向 A 的对象，`JDone` / `JCleanShutdown` 都写进了 A 的
+journal。前提由检查点内直接执行验证——不允许则 mklink 非零退出抛异常，用例
+失败并暴露前提，而不是静默跳过。
+
+回归：190/190（+1），GHC 警告 0，pm 0.3.16。真实库只读四连待合并 main 后重跑。

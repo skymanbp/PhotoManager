@@ -11,7 +11,7 @@
 module StateGuardTests (stateGuardTests) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BSL
 import Data.List (isInfixOf)
@@ -27,12 +27,12 @@ import Test.Tasty.HUnit
 import Pm.Catalog (loadCatalog, saveCatalog)
 import Pm.Config (Config (..), pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
-import Pm.Exec (dirFingerprint)
+import Pm.Exec (Checkpoint (..), ExecEnv (..), ItemOutcome (..), defaultExecEnv, dirFingerprint, execPlan)
 import Pm.Hash (sha256File)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, withJournal)
 import Pm.Lock (withRootLock)
 import Pm.Op (Fingerprint (..), Op (..))
-import Pm.Plan (Plan (..), loadPlan, savePlan)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, savePlan)
 import Pm.Trash (TrashRecord (..), appendManifest, readManifest, trashDir)
 import Pm.Status (StatusOpts (..), runStatus)
 import Pm.Types (Catalog, RootInfo (..), RootRole (..))
@@ -55,6 +55,7 @@ stateGuardTests =
     , testCase "P3b-16 侧缓存失信 → pm status 报 ⚠ 且退出码 1（不再静默 exit 0）" caseStatusUntrustedCacheExit
     , testCase "P3b-17 FpDir 复位源是真实目录 → 必须落 R3（收窄成 doesFileExist 会错报 R2 并补假 Done）" caseRestoreSrcFpDir
     , testCase "P3b-17 FpFileSha + 目录占住载荷名 → 同样必须落 R3（触发不需要 FpDir）" caseRestoreSrcFpFile
+    , testCase "P3b-18 root 是 junction、落位前改指诱饵库 → Copy 只用解析返回的 dst 路径，落在原库" caseCopyDstUsesResolvedPath
     ]
 
 -- 本模块只需要 hardlink（/H）与文件 symlink（无开关）两种形态；目录 junction
@@ -430,6 +431,56 @@ assertRestoreSrcSeenAsPresent root = do
   _ <- runDoctor root (DoctorOpts False True)
   es <- journalEntries root
   assertBool ("--repair 不得补记 Done: " <> show (length es)) (not (any isDone es))
+
+-- ─── P3b-18（十四轮 #3 的缺口，十五轮给出的设计） ──────────────────────────
+
+-- | 此前没有用例钉住"限域助手**返回的路径必须被使用**"：把 Copy 的 dst 改回
+-- `root </> opDstRel` 重拼，现有用例照样绿——它们都是注入 junction 后让限域
+-- 返回 Nothing 提前退出，重拼分支根本不可达。
+--
+-- 十五轮读源码给出设计：'Pm.Win.resolveUnder' 只 canonicalize base、不对 base
+-- 调 probeName（把库根放在 junction 上是合法用法，Win.hs 注释明说）。于是：
+-- rootLink → A 时解析 dst，返回的是 A 的**真实**路径；在 'CpCopyAfterFlush'
+-- （tmp 已写完并设好 mtime、落位 move 之前）把 rootLink 改指诱饵库 B——
+-- 正确实现只用解析返回的路径，落在 A、B 零改动；把 dst 改回重拼的突变会沿
+-- 新指向落到 B。journal / lock 句柄在 A 内打开、之后只用句柄，不受改指影响。
+--
+-- 平台前提（十五轮标注为假设）：A 内 journal/lock 句柄打开时允许删除并重建
+-- 该 junction。由检查点内直接执行验证——不允许则 mklink 非零退出抛异常，
+-- 用例失败并暴露前提，而不是静默跳过。
+caseCopyDstUsesResolvedPath :: IO ()
+caseCopyDstUsesResolvedPath = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let libA = dir </> "A"
+      libB = dir </> "B"
+      rootLink = dir </> "rootLink"
+      dstRel = "相册" </> "x.jpg"
+  createDirectoryIfMissing True (pmDir libA)
+  createDirectoryIfMissing True (pmDir libB)
+  now <- getCurrentTime
+  writeRootInfo libA (RootInfo "m" RoleMain now Nothing)
+  -- 诱饵库给同样的身份与目录结构：让重拼版实现能"顺利"落到 B，失败原因
+  -- 只可能是"用了哪条路径"，不混入别的拒绝理由。
+  writeRootInfo libB (RootInfo "m" RoleMain now Nothing)
+  mkJunction rootLink libA
+  op <- mkCopyOp (dir </> "s.jpg") "SOURCE-BYTES" dstRel
+  pid <- newPlanId
+  let plan = Plan pid "test" rootLink (Just "m") now [PlanItem 0 op StPending Nothing]
+      env =
+        defaultExecEnv
+          { eeCheckpoint = \c ->
+              when (c == CpCopyAfterFlush) $ do
+                removeDirectoryLink rootLink
+                mkJunction rootLink libB
+          }
+  r <- execPlan env plan
+  case r of
+    Right [(_, ODone {})] -> pure ()
+    other -> assertFailure ("expected ODone, got " <> show other)
+  -- 落在 A（解析返回的真实路径），不在 B（改指后的重拼路径）
+  doesFileExist (libA </> dstRel) >>= (@?= True)
+  readFile (libA </> dstRel) >>= (@?= "SOURCE-BYTES")
+  doesFileExist (libB </> dstRel) >>= (@?= False)
+  removeDirectoryLink rootLink
 
 mkSCfg :: FilePath -> Config
 mkSCfg root = Config root Nothing Nothing Nothing Nothing Nothing
