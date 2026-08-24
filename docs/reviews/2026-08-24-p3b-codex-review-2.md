@@ -290,6 +290,58 @@ bind，warp `runSettingsSocket` 只在传入 socket 上 accept，不按 `setting
 - GUI 侧避免轮询 `fresh=1`；如需自动刷新加 single-flight/最小间隔。
 - 其余同十七轮清单。
 
+---
+
+# 第十九轮（P4-2/3 + 十八轮闭合，commit 7464780..da07eae；gpt-5.6-sol 独立评审）
+
+**verdict：GO**——"未发现 critical/major；两个新问题均为可恢复的 minor，不阻止
+合并并进入 GUI 开窗验收"（252 次探查）。
+
+- GUI 边界：Rust 壳层确实只有 spawn / api_info / kill 三件事——`lib.rs` 无
+  `std::fs`、无照片路径、唯一 `Command` 参数就是 `serve --exit-on-stdin-eof`。
+  `PM_EXE` 被控制时 GUI 以自身权限运行该程序（无 shell，非参数注入），§14 单机
+  同用户模型下不要求限制（能改启动环境的同用户本就能直接执行；正常 `pm ui`
+  强制写入自身绝对路径）。`api_info` 只对 `main` 窗口本地页面及同源本地 iframe
+  可调（capabilities 无 `remote`；它读了本地 tauri-2.11.5 与 wry-0.55.1 源码取证）；
+  CSP `script-src 'self'` 由 Tauri 注入 meta CSP。`CREATE_NO_WINDOW` 不改管道；
+  `Child` 持有未取出的 stdin 写端，进程死亡即关闭——与 500 ms 零残留冒烟吻合。
+- 页面：所有请求经唯一 `get()`，固定 `http://127.0.0.1:<port>` + Bearer，全部
+  GET；服务端字符串只进 `textContent` / `alt` / radio 属性，两处 `innerHTML` 都是
+  固定空串，无 XSS sink；无 form / 提交 / POST。
+- serve 变更：`race` 在 `bracket … close` 作用域内，取消或异常都会关 socket；
+  开关未启用时完全不进入 stdin 路径；`/api/vault/new` 与 `/api/vault/status`
+  共用同一把锁；`portOk` 在 bind 之前。
+- 文档：DESIGN §11 / README / REVIEW-LOG / 第二卷十八轮章节与代码一致，
+  `.gitignore` 覆盖 target 与 gen。
+
+## 逐条判定
+
+| 项 | 判定 |
+|---|---|
+| 1 十八轮闭合五项 | 全部 FIXED（互斥为进程内；无并发用例不构成阻断，已登记） |
+| 2 GUI 边界 | OK |
+| 3 页面 | ISSUE（minor：blob URL 不 revoke） |
+| 4 `pm ui` | OK（查找顺序、错误提示、env 覆盖 `PM_EXE`、退出码原样映射、`withCfg` 先行合理） |
+| 5 serve 变更 | OK |
+| 6 文档 | OK |
+
+## 新发现与处置
+
+| 严重级 | 位置 | 内容 | 处置 |
+|---|---|---|---|
+| minor | gui/ui/app.js | 反复进入分类页为所有原图创建新 blob URL，旧 DOM 清空但 URL 未释放，WebView 内存持续增长 | **已修**：记录每轮 URL，重建网格前逐个 `URL.revokeObjectURL` |
+| minor | src/Pm/Serve.hs / Config.hs writeSideCache | **跨进程**：GUI 的 serve 与另一个 `pm vault status`（或第二个 serve）同时刷新 `.pm/vault-cache` 时各有各的 MVar，却共用固定 `<final>.tmp`，`openFreshBinary` 可能抛冲突异常让一次请求或 CLI 刷新失败 | **登记为残余**：需跨进程句柄锁并把 catalog/meta 当同一临界区（只改随机 tmp 不够——两文件必须同代）。不触碰照片、缓存可重建 |
+
+合并前最小修复集：空。
+
+## 残余（十九轮起，新增）
+
+- **跨进程 vault-cache 刷新争用**（上表第二条）。
+- 十八轮登记项照旧：真开端口 raw HTTP 冒烟、`/api/plans` 合并与并发刷新用例、
+  写端点的 body 上限/执行超时、GUI 勿轮询 `fresh=1`。
+- 开窗验收时可用 DevTools 注入远程 `<script>` / 远程 iframe invoke 再确认 CSP 与
+  ACL 的运行时拒绝（十九轮建议）。
+
 ## 真实写入（用户裁定"全量执行"，2026-08-24）
 
 `pm apply 20260824-030200-0c238a`：6/6 → DONE，1071 ms。盘上核实
