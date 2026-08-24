@@ -107,8 +107,17 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   名单里，junction 化后 `pm vault status` 会替换库外的 catalog.json/meta.json；
   闸同时下沉到 loader（loadCatalog/readJournal/readManifest/loadPlan），覆盖
   status/versions/apply 这些命令层没盖住的读入口；侧缓存改 root-relative 受信
-  接口；reparse 探测改 Missing/Plain/Surrogate/Unknown 四态且 Unknown
-  fail-closed；176/176 测试）
+  接口；reparse 探测改四态（Unknown 的分辨在本轮仍靠 doesPathExist 二问，
+  十一轮指出并于 P3b-14 修正）；176/176 测试）
+- P3b-14 ✅ codex 十一轮复审收口（**`.pm` 状态文件的唯一受信取用口**：十一轮
+  实证「拼路径 → 校验字符串 → 按名字打开」三个洞——深度 2 的 manifest 文件
+  symlink 让 append 写进库外文件、读侧无 link count 让 hardlink 占名的
+  catalog/plan 被零警告载入、校验与打开是两次独立解析。readPmState/
+  withPmStateAppend/readSideCache 一口做完「完整路径逐级 resolveUnder → 只打开
+  一次 → 句柄查 link count → 同一句柄读写」，catalog/journal/manifest/plan/
+  root-id/侧缓存/lock 全部改道；probeName 的 Missing/Unknown 改读
+  GetLastError；`.pm` 是普通文件不再被当"尚不存在"；doctor 探测 Unknown
+  fail-closed 且删除前重验完整路径；测试拆出 StateGuardTests；181/181 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

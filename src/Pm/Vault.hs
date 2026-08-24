@@ -49,7 +49,7 @@ import System.FilePath (splitDirectories, takeExtension, (</>))
 import Text.Printf (printf)
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (Config (..), RootIdState (..), createRootInfo, freshRootId, pmDir, pmSubVaultCache, readJsonMaybe, readRootInfo, readRootState, requireMain, writeSideCache)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, freshRootId, pmDir, pmSubVaultCache, readRootInfo, readRootState, readSideCache, requireMain, writeSideCache)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
@@ -211,11 +211,14 @@ instance FromJSON VaultCacheMeta where
 vaultCacheDir :: FilePath -> FilePath
 vaultCacheDir mainRoot = pmDir mainRoot </> pmSubVaultCache
 
+-- P3b-14（十一轮复审 major）：同 'Pm.Backup.readBackupCacheMeta' —— 读侧改走
+-- 受信取用口。vault 缓存参与 sha 复用判定，读到库外字节会直接影响 push 前的
+-- 六态判定。
 readVaultCacheMeta :: FilePath -> IO (Maybe VaultCacheMeta)
-readVaultCacheMeta mainRoot = readJsonMaybe (vaultCacheDir mainRoot </> "meta.json")
+readVaultCacheMeta mainRoot = readSideCache mainRoot pmSubVaultCache "meta.json"
 
 readVaultCacheCatalog :: FilePath -> IO (Maybe Catalog)
-readVaultCacheCatalog mainRoot = readJsonMaybe (vaultCacheDir mainRoot </> "catalog.json")
+readVaultCacheCatalog mainRoot = readSideCache mainRoot pmSubVaultCache "catalog.json"
 
 writeVaultCache :: FilePath -> Catalog -> VaultCacheMeta -> IO (Either String ())
 writeVaultCache mainRoot = writeSideCache mainRoot pmSubVaultCache

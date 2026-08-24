@@ -27,14 +27,14 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, pathIsSymbolicLink)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, listDirectory, pathIsSymbolicLink)
 import System.FilePath ((</>))
 import System.IO
 import System.IO.Error (isDoesNotExistError)
 
-import Pm.Config (pmDir, pmSubTrash, requirePmTrusted)
+import Pm.Config (pmDir, pmSubTrash, readPmState, requirePmTrusted, withPmStateAppend)
 import Pm.Op (OpIdSuffix (..), opIdParts, relPathOk)
-import Pm.Win (flushHandleToDisk, openStateAppend)
+import Pm.Win (flushHandleToDisk)
 
 data TrashRecord = TrashRecord
   { trVictimRel :: FilePath -- original path relative to root
@@ -97,12 +97,19 @@ quarTrashRel :: Text -> FilePath -> Maybe FilePath
 quarTrashRel oid victim = (\(pid, _, sfx) -> quarDirFor pid sfx </> victim) <$> opIdParts oid
 
 -- | Write-ahead: flushed to disk before the victim moves (§6.3 step 1).
--- P3b-12（九轮复审 major）：同 journal —— 固定名字的 append 目标可被预置成
--- 库外对象的 hardlink，'openStateAppend' 的 link count 判定守这一条。
+--
+-- P3b-14（十一轮复审 **critical**，探针实证）：这里曾是整个 @.pm@ 里最危险的
+-- 一处。manifest 在深度 2（@.pm\/trash\/manifest.ndjson@），而可信闸只覆盖
+-- @.pm@ 的直接子项——@trash@ 是普通目录、闸放行，manifest 自身则直接按名字
+-- @openStateAppend@。把它做成指向库外文件的**文件 symlink** 后：symlink 的目标
+-- link count = 1，link count 判定通过，@AppendMode@ 跟随链接——实测真实的
+-- 'appendManifest' 把隔离记录**追加进了库外文件**。
+-- 修法是走 'withPmStateAppend'：先对完整相对路径做 resolveUnder（逐级下降会
+-- 认出末段的 symlink），再 'openStateAppend' 查 link count。两种失信各守一半。
 appendManifest :: FilePath -> TrashRecord -> IO ()
 appendManifest root r = do
   createDirectoryIfMissing True (trashDir root)
-  bracket (openStateAppend (manifestPath root)) hClose $ \h -> do
+  withPmStateAppend root (pmSubTrash </> "manifest.ndjson") $ \h -> do
     BSL.hPut h (encode r)
     BSL.hPut h "\n"
     flushHandleToDisk h
@@ -117,12 +124,14 @@ readManifest root = do
 
 readManifest' :: FilePath -> IO ([TrashRecord], [String])
 readManifest' root = do
-  let fp = manifestPath root
-  exists <- doesFileExist fp
-  if not exists
-    then pure ([], [])
-    else do
-      raw <- BS.readFile fp
+  -- 与 'appendManifest' 同口（P3b-14）：完整路径 resolveUnder + 句柄 link
+  -- count。manifest 决定 @pm trash empty@ unlink 哪些文件，读到库外内容与写到
+  -- 库外一样严重。
+  rd <- readPmState root (pmSubTrash </> "manifest.ndjson")
+  case rd of
+    Left m -> pure ([], [m])
+    Right Nothing -> pure ([], [])
+    Right (Just raw) -> do
       -- P3b-8 六轮复审 major（同类统一修）：manifest 与 journal/plan 一样是可
       -- 手编输入，trTrashRel 会被拼到 .pm/trash 上且 **pm trash empty 按它
       -- unlink**——路径非法的记录按损坏行剔除（fail-closed），绝不参与删除。

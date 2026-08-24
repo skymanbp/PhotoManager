@@ -521,3 +521,63 @@ verdict：**NO-GO**；收敛性判断：**未收敛**（它按提示明确回答
 - `catalog` 的 `tamperMark` 字符串哨兵；固定名 `catalog.json.tmp` 的并发竞态；
   `opSrcAbs` 不做 root 归属校验；`writeConfig` 普通覆盖写（在用户配置目录）。
 - `pm backup` 盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU。
+
+---
+
+# 第十一轮（复审 P3b-13，commit 45ae8a9；gpt-5.6-sol 独立评审）
+
+**verdict：NO-GO；收敛性：未收敛**——"深度 1 的白名单遗漏已消除，但深度 ≥2 的
+manifest/plan 及读侧 hardlink 仍可绕过可信闸；仍属『pm 信任自己拼出的 `.pm`
+子路径』同类缺口"。三条实证发现只有一个根因：pm 访问 `.pm` 的模式是
+「拼路径字符串 → 校验字符串 → 再**按名字**打开」——①校验只到深度 1；②字符串
+校验在原理上看不见 hardlink 而读侧没有 link count；③校验与打开是两次独立解析。
+
+## 探针实证（Probe11/11b，GHC 9.10 + Win11；对真实 pm 函数）
+
+| # | 形态 | 真实调用 | 结果 |
+|---|---|---|---|
+| A critical | `.pm/trash/manifest.ndjson` = 指向库外文件的**文件 symlink**（本机实测无需特权即可创建，此前各轮一直以为不行） | `appendManifest` | **追加进了库外文件**（`OUTSIDE-ORIGINAL` 之后多出 pm 的隔离记录）；`readManifest` 同路读回 1 条 |
+| B major | `.pm/catalog.json` = 库外快照的 hardlink | `requirePmTrusted` + `loadCatalog` | 闸 **PASSED**（hardlink 不是 reparse point），库外 catalog **零警告载入** |
+| C major | `.pm/plans/<id>.json` = hardlink / symlink（两种都试） | `loadPlan` | **两种形态都载入了库外计划**（apply 会照它执行） |
+| D minor | `.pm` 是**普通文件** | `requirePmTrusted` | **PASSED**（`doesDirectoryExist=False` 被当"尚不存在"） |
+| E 修法验证 | 完整路径 `resolveUnder` | — | symlink 形态 **Nothing（拦下）**；hardlink **Just（原理上不可见）**→ 只能靠句柄 link count |
+
+## 处置（P3b-14，全部先探针后修）
+
+| 发现 | codex 判定 | 实证 | 修复 |
+|---|---|---|---|
+| critical manifest 深层 symlink | 新发现（附验证方法） | Probe11 A 成立 | **唯一受信取用口** `Pm.Config.readPmState` / `withPmStateAppend`：完整相对路径逐级 `resolveUnder` → 只打开一次 → **句柄**上查 link count → 从同一句柄读写。`appendManifest`/`readManifest` 改道 |
+| major 读侧 hardlink | 新发现 | Probe11b B 成立 | 新增 `Pm.Win.openStateRead`（`openStateAppend` 的只读对偶）；catalog 三代、journal、root-id、plan、两侧缓存读全部走 `readPmState`。校验后**不按名字重开** |
+| major plan 深层链接 | 新发现 | Probe11b C 两形态都成立 | `loadPlan'` 走 `readPmState`；`savePlan` 落位前对完整路径 `resolveUnder`（拒绝抛 IOException，与 append 口径一致） |
+| minor `.pm` 非目录 | 新发现 | Probe11 D 成立 | `requirePmTrusted` 用 `probeName` 四态分判 `.pm` 自身：缺失=新库放行，非目录/查不出=拒绝 |
+| 1 深度分工 | PARTIAL | 成立 | 见上——深度 ≥2 的固定状态文件全部经受信口；`requirePmTrusted` 的 haddock 明确写出"作用域是深度 1，更深由取用口逐条验"的分工 |
+| 2 loader 覆盖面 | PARTIAL：不止四个 loader；backup 把 `Nothing` 当全扫起点 | 成立 | 侧缓存读改 `readSideCache`（不可信=弃用，且配对的写侧对同一路径返回 Left → vault 硬停/backup 警告，不会静默）；lock 加完整路径解析；trash 遍历/doctor 探测本就不递归链接，删除侧见下 |
+| 3 侧缓存读侧 | PARTIAL | 成立 | `readSideCache` 完整路径 + 句柄 link count |
+| 4 probeName 二问 | PARTIAL：`doesPathExist` 吞 ACL 错误 | 成立（本仓 Exec 注释早已记录该行为） | 直绑 `GetFileAttributesW`，失败时读 `GetLastError`：只有 ERROR_FILE_NOT_FOUND(2)/ERROR_PATH_NOT_FOUND(3) 算缺失，其余一律 `ProbeUnknown` fail-closed。Doctor 的 `staleTmpFiles` 判据改为仅 `NamePlain` 放行，`--repair` 删除前对完整路径再过一次 `resolveUnder`（解析不出=跳过不删） |
+| 5 mask/admitsUserPath/Scan | PARTIAL：`openExclusiveBinary` 的窗口比登记的更宽（`hANDLEToHandle` 返回后到下一条 `onException` 之间也有所有权窗口） | 成立 | 残余描述已按它的措辞更正；`Pm.Scan` 维持已登记残余 |
+| 6 测试钉子 | PARTIAL：`caseSideCacheJunction` 钉的是目录级 pre-check（删掉文件级复检仍绿）；`caseLoaderLevelGate` 只测 `.pm` 自身 junction | 成立 | 新模块 StateGuardTests（PathGuardTests 触及 750 行预算，按 P3b-10 先例拆分）+5 例：manifest 深层 symlink、catalog 读侧 hardlink、plan 双形态、`.pm` 普通文件、侧缓存**文件级**链接（写侧文件级复检 + 读侧 hardlink 弃用）。`caseTrashBaseJunction` 的 ③ 步改为断言 `appendManifest` 拒绝（新实现比旧用例的 setup 假设更严） |
+| 7 文档 | NOT-FIXED：DESIGN 版本行陈旧、REVIEW-LOG 两处过度声明、Config haddock"前后各验一次"只到目录、"任何东西自动进入检查范围"未限定深度、README 过度 | **全部成立** | 逐条更正：DESIGN 当前实现行、REVIEW-LOG 加两处「十一轮更正」、`loadCatalog` 注释收窄声明、`requirePmTrusted`/`writeCacheFile` haddock 写明分工与文件级复检、README P3b-13 行标注二问缺陷 |
+
+回归：181/181（+5），GHC 警告 0；真实库只读四连不变
+（doctor 0 / trash list 0 / status 1 / vault status 1，doctor 275 ms）。
+
+## 残余（更新）
+
+- **TOCTOU**：受信取用口把「校验→打开」收成一次，但 `resolveUnder` 与
+  `openStateRead/Append` 之间仍有窗口（symlink 在两者之间被放入时，靠 link
+  count 那半边兜不住 symlink 形态）。根治仍需 handle-relative 原生 API
+  （NtCreateFile + OBJ_DONT_REPARSE 一类），登记待 P4 前评估。
+- `openExclusiveBinary` 缺外层 `mask`；窗口按十一轮的措辞登记为
+  「`createFile` 返回→第一个 handler」与「`hANDLEToHandle` 返回→下一条
+  `onException`」两段。
+- `requirePmTrusted` 的枚举在深度 1 与使用点之间是两个快照（枚举后新放入的
+  条目由使用点的完整路径解析兜底；hardlink 形态由句柄判定兜底）。
+- `Pm.Config.writeRootInfo` 裸覆盖写（仅测试 fixture）；`Pm.Scan` symlink 探测
+  异常按非 symlink 继续（ACL 形态未证实）；`GitGuard`/`Vault.photosJsonRef` 读
+  的是**库外**用户文件（.gitignore/photos.json），不属 `.pm` 取用口的辖区。
+- **未证实项**：8.3 短名、Unicode 兼容等价、保留设备名、云占位/Dedup 实际
+  reparse 形态、能让 `canonicalizePath` 抛异常的输入、"可读内容但不可读
+  attributes"的 ACL 库（`ProbeUnknown` 对其 fail-closed 属预期保守）。
+- `tamperMark` 字符串哨兵；`catalog.json.tmp` 固定名并发；`opSrcAbs` 无 root
+  归属校验；`writeConfig` 普通覆盖写；备份盘符 fixture、位移槽 99、root-id tmp
+  残留、.gitignore TOCTOU。

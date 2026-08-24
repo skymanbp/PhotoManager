@@ -30,10 +30,13 @@ module Pm.Win
   , pathUnder
   , pathAtOrUnder
   , isNameSurrogate
+  , NameKind (..)
+  , probeName
   , resolveUnder
   , openExclusiveBinary
   , openFreshBinary
   , openStateAppend
+  , openStateRead
   , handleIsSingleLink
   , suppressCriticalErrorDialogs
   , DriveKind (..)
@@ -56,13 +59,18 @@ import System.FilePath (splitDirectories, (</>))
 import System.IO
 import qualified System.Win32.Console as Win32Console
 import qualified System.Win32.File as Win32File
-import System.Win32.Types (LPTSTR, hANDLEToHandle, peekTString, withHandleToHANDLE, withTString)
+import System.Win32.Types (LPTSTR, getLastError, hANDLEToHandle, peekTString, withHandleToHANDLE, withTString)
 
 foreign import WINDOWS_CCONV unsafe "windows.h FindFirstFileW"
   c_FindFirstFileW :: LPTSTR -> Ptr Word8 -> IO (Ptr ())
 
 foreign import WINDOWS_CCONV unsafe "windows.h FindClose"
   c_FindClose :: Ptr () -> IO Bool
+
+-- Win32 包的 getFileAttributes 失败时抛 IOError，错误码被折进异常文本——
+-- 'probeName' 需要**原始错误码**来分辨 Missing/Unknown，因此直接绑原 API。
+foreign import WINDOWS_CCONV unsafe "windows.h GetFileAttributesW"
+  c_GetFileAttributesW :: LPTSTR -> IO Word32
 
 -- | Must run before any output (DESIGN.md §14 编码风险).
 setupConsole :: IO ()
@@ -155,23 +163,31 @@ pathAtOrUnder base p = do
 data NameKind = NameMissing | NamePlain | NameSurrogate | ProbeUnknown
   deriving (Show, Eq)
 
+-- P3b-14（十一轮 #4）：Missing\/Unknown 的分辨不再用 @doesPathExist@ 二问——
+-- 它把 ACL 拒绝、非法名等错误也吞成 False（本仓 'Pm.Exec' 的注释早已记录这一
+-- 点），于是"查不出"仍会塌缩进"不存在"。改为直接读 @GetFileAttributesW@ 失败
+-- 时的 @GetLastError@：只有 ERROR_FILE_NOT_FOUND (2) 与 ERROR_PATH_NOT_FOUND
+-- (3) 是 'NameMissing'，其余错误码一律 'ProbeUnknown'（fail-closed）。
+-- unsafe FFI 调用不让出 capability，紧随其后的 getLastError 读的就是这次调用
+-- 的错误码（Win32 包内部 errorWin 同款模式）。
 probeName :: FilePath -> IO NameKind
 probeName p = do
-  ea <- try (Win32File.getFileAttributes p) :: IO (Either SomeException Win32File.FileAttributeOrFlag)
-  case ea of
-    Left _ -> do
-      -- 属性查不到：可能是"不存在"，也可能是 ACL 拒绝之类的"答不上来"。
-      -- doesPathExist 用另一条路径再问一次；它也说不存在才算缺失。
-      ex <- doesPathExist p
-      pure (if ex then ProbeUnknown else NameMissing)
-    Right attrs
-      | attrs .&. Win32File.fILE_ATTRIBUTE_REPARSE_POINT == 0 -> pure NamePlain
-      | otherwise -> do
+  attrs <- withTString p c_GetFileAttributesW
+  if attrs == invalidFileAttributes
+    then do
+      ec <- getLastError
+      pure (if ec == 2 || ec == 3 then NameMissing else ProbeUnknown)
+    else
+      if attrs .&. Win32File.fILE_ATTRIBUTE_REPARSE_POINT == 0
+        then pure NamePlain
+        else do
           mt <- reparseTag p
           pure $ case mt of
             Nothing -> NameSurrogate -- 是 reparse 但读不出 tag → 保守拒绝
             Just tag ->
               if tag .&. ioReparseTagNameSurrogate /= 0 then NameSurrogate else NamePlain
+ where
+  invalidFileAttributes = 0xFFFFFFFF :: Word32
 
 -- | 便捷谓词：仅当明确判定为 name surrogate 时为 True。'ProbeUnknown' 在这里
 -- 是 False —— 调用方若要 fail-closed 必须直接用 'probeName'（'resolveUnder'
@@ -231,6 +247,27 @@ openStateAppend fp = do
     else do
       hClose h
       ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝写入——人工核查"))
+
+-- | @openStateAppend@ 的只读对偶：打开后立刻查 link count，\>1 即拒绝。
+--
+-- P3b-14（十一轮复审 major，探针实证）：写侧从九轮起就查 link count，**读侧
+-- 一直没查**。实测把 @.pm\/catalog.json@ 预置成库外文件的 hardlink 后，
+-- 'Pm.Config.requirePmTrusted' 放行（hardlink 不是 reparse point）、
+-- @loadCatalog@ **零警告地载入了库外快照**；@.pm\/plans\/\<id\>.json@ 同形态
+-- 让 @loadPlan@ 载入库外计划，apply 会照它执行。读进来的字节决定 pm 之后
+-- 做什么，因此读侧与写侧必须同规格。
+--
+-- 判定在**句柄**上做，随后的读取也必须用同一个句柄——按名字重开等于把校验
+-- 与使用分成两次独立解析（这正是十一轮那一类缺口的成因）。
+openStateRead :: FilePath -> IO Handle
+openStateRead fp = do
+  h <- openBinaryFile fp ReadMode
+  ok <- handleIsSingleLink h
+  if ok
+    then pure h
+    else do
+      hClose h
+      ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝读取——人工核查"))
 
 -- | @resolveUnder base rel@：从 @base@ 起沿 @rel@ **逐分量下降**，任一级是
 -- reparse point 即 Nothing；成功返回落点的绝对路径。

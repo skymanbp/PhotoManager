@@ -350,8 +350,16 @@ caseTrashBaseJunction = withSystemTempDirectory "pm-guard" $ \dir -> do
   -- ② 遍历侧：库外内容不得被列成"隔离文件"
   tv <- trashView root
   tvUnregistered tv @?= []
-  -- ③ 唯一 unlink：合法 manifest 记录 + 被劫持基准 → HELD，库外文件存活
-  appendManifest root (TrashRecord "v.jpg" "v.jpg" "aa" "test" tpid now)
+  -- ③ 唯一 unlink：被劫持基准 → HELD，库外文件存活。
+  -- P3b-14：appendManifest 自身现在就拒绝（完整路径 resolveUnder 在 trash
+  -- 这一级看到 junction）——旧用例把"穿过 junction 写出 manifest"当 setup
+  -- 容忍，现改为断言拒绝；manifest 由测试直接放进库外目录（攻击者本来就能
+  -- 这么放），钉 runTrash 面对既有记录仍 HELD。
+  ra <- try (appendManifest root (TrashRecord "v.jpg" "v.jpg" "aa" "test" tpid now)) :: IO (Either SomeException ())
+  either (const (pure ())) (const (assertFailure "appendManifest 应拒绝被劫持的 .pm/trash")) ra
+  writeFile
+    (outside </> "manifest.ndjson")
+    "{\"victim\":\"v.jpg\",\"trash\":\"v.jpg\",\"sha256\":\"aa\",\"reason\":\"test\",\"plan\":\"20260101-000000-aaaaaa\",\"at\":\"2026-01-01T00:00:00Z\"}\n"
   code <- runTrash cfg (TrashEmpty True) root
   code @?= 1
   doesFileExist (outside </> "v.jpg") >>= (@?= True)
