@@ -47,8 +47,9 @@ pm ui                            # 桌面 GUI（状态可视化 / 分类推送 /
 ```
 
 GUI 四页：**状态**（Raw·成片·相册·暂存四层卡 + vault 同步差异清单 + 备份盘滞后
-+ "下一步"）、**分类推送**（相册里 vault 还没有的照片，缩略图选类目 → 生成推送
-计划）、**计划**（逐项明细）、**上手**。GUI 只生成计划，执行永远在终端。
++ "下一步"）、**分类推送**（相册里 vault 还没有的照片，缩略图选类目，或选
+第四个按钮「暂不同步」→ 保存决定 / 生成推送计划）、**计划**（逐项明细）、
+**上手**。GUI 只生成计划与记录决定，执行永远在终端。
 
 ## 命令
 
@@ -60,6 +61,9 @@ pm clean staging                 # 仅清理「归档层+备份盘」都有同 s
 pm vault status                  # 相册 ↔ vault 展示集六态差异（--json 兼容 sync_photos.py）
 pm vault push --category landscape A.jpg …   # NEW 定类目拷入 vault；DRIFT 出裁决计划；
                                  # 结束打印显式 git 步骤（pm 不执行 git）
+pm vault hold A.jpg …            # 决定「暂不同步」：只写主库 .pm 的一条本地记录，
+                                 # vault 与照片零改动；照片字节一变该决定自动失效
+pm vault unhold A.jpg …          # 撤销，文件回到 NEW
 pm names                         # Raw 事件夹统一 Scheme A 计划（B 类月份从成片还原；歧义不猜）
 pm versions                      # 版本组 / 非设计内精确重复报告（只读）
 
@@ -274,6 +278,13 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   登记残余。打包：NSIS 安装包（CLI 作 sidecar 与 GUI 同目录，`pm_exe()` 补
   "同目录"查找）+ 免安装 zip；实测装到临时目录后 GUI 能靠同目录找到 `pm`、
   杀掉 GUI 后 serve 零残留、静默卸载后目录与注册表均干净。**apply 端点仍未开**
+- P4-7 ✅ 第九态 HELD「暂不同步」（用户裁定：这批 NEW 先不同步，另给一个专门
+  放"决定不同步"的分类，以后想同步再调整）——**不是 vault 的第四个类目**（那等于
+  建目录把照片发出去），而是主库 `.pm/vault-holds.json` 里的本地决定：`new` 键
+  不变、`newActive` 扣掉它、退出码不再报"有事可做"，push 拒收 held 文件，记录里
+  存决定当时的 sha 以便照片一换就失效回到 NEW。CLI `pm vault hold|unhold` 与第二个
+  写端点 `POST /api/vault/hold` 共用校验器；GUI 分类卡加第四个按钮、状态页加 HELD
+  pill 与清单（206 测试；四道新闸各自突变转红）—— 评审待跑
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License

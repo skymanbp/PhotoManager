@@ -26,6 +26,8 @@ module Pm.Vault
   , planCategories
   , runVaultStatus
   , runVaultPush
+  , newActive
+  , hasDiffR
   , checkAssignments
   , vaultPushItems
   , mkVaultPushPlan
@@ -58,6 +60,7 @@ import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
 import Pm.Plan
 import Pm.Types
+import Pm.VaultHold (readHolds, splitHeld)
 import Pm.Win (volumeFsType)
 
 -- ─── 纯核心：legacy 算法逐行复刻 ────────────────────────────────────────────
@@ -153,8 +156,17 @@ hasDiff d =
 -- ─── JSON 渲染（键名、键序、值形状 = legacy；末尾追加 unpushable） ──────────
 
 renderVaultJson ::
-  FilePath -> FilePath -> Int -> Int -> VaultDiff -> [(FilePath, String)] -> [(FilePath, String)] -> BSL.ByteString
-renderVaultJson srcDir vaultDir srcCount vaultCount d unpushable unstable =
+  FilePath ->
+  FilePath ->
+  Int ->
+  Int ->
+  VaultDiff ->
+  [(FilePath, String)] ->
+  [(FilePath, String)] ->
+  [(FilePath, Text)] ->
+  [(FilePath, String)] ->
+  BSL.ByteString
+renderVaultJson srcDir vaultDir srcCount vaultCount d unpushable unstable held heldStale =
   AE.encodingToLazyByteString . pairs $
     AE.pair "source_dir" (AE.string srcDir)
       <> AE.pair "vault_dir" (AE.string vaultDir)
@@ -182,6 +194,11 @@ renderVaultJson srcDir vaultDir srcCount vaultCount d unpushable unstable =
       <> AE.pair "unpushable" (AE.list pairNC unpushable)
       -- pm 第八态（评审 #5）：读取不稳定的名字（已从六态整体排除）
       <> AE.pair "unstable" (AE.list pairNC unstable)
+      -- pm 第九态（P4-7 用户裁定）：决定「暂不同步」的 NEW（仍在 new 键里，
+      -- 六态集合不受影响；held 是它的注解子集，不进 vault、不算"有事可做"）
+      <> AE.pair "held" (AE.list (\(n, h) -> AE.list id [AE.string n, AE.text (T.take 16 h)]) held)
+      -- 决定已失效（照片字节变了 / 已不在 NEW）：回到 NEW 处理，只报告
+      <> AE.pair "held_stale" (AE.list pairNC heldStale)
  where
   pairNC (n, c) = AE.list id [AE.string n, AE.string c]
 
@@ -290,7 +307,24 @@ data VaultReport = VaultReport
   , vrSrcMeta :: Map FilePath Entry
     -- ^ 源名 → Entry（size\/mtime\/sha，push 计划的执行前提；读取不稳的
     -- 文件不在此表 → 不可入计划）
+  , vrHeld :: [(FilePath, Text)]
+    -- ^ 第九态（P4-7）：用户决定「暂不同步」且**当时那张还是这张**（sha 相符）
+    -- 的 NEW。仍留在 'vdNew' 里（六态集合是对外契约），但 'newActive' 会把它们
+    -- 排除、退出码不再报"有事可做"。
+  , vrHeldStale :: [(FilePath, String)]
+    -- ^ 决定已失效（字节变了 → 回到 NEW；或已不在 NEW → 可 unhold 清掉）。
   }
+
+-- | 真正"待处理"的 NEW：扣掉已决定暂不同步的（P4-7）。
+newActive :: VaultReport -> [FilePath]
+newActive r = [n | n <- vdNew (vrDiff r), n `notElem` map fst (vrHeld r)]
+
+-- | 报告级的"有差异"：与 'hasDiff' 同构，但 NEW 用 'newActive'——用户已经
+-- 决定不同步的照片不该让 `pm status` 永远 exit 1。
+hasDiffR :: VaultReport -> Bool
+hasDiffR r =
+  let d = vrDiff r
+   in not (null (newActive r) && null (vdMissing d) && null (vdRenamed d) && null (vdDrift d))
 
 -- | Left (消息, 退出码)。quiet 抑制告警行（--json 输出面要纯净）。
 computeVault :: Bool -> Config -> IO (Either (String, Int) VaultReport)
@@ -398,10 +432,13 @@ computeVault' quiet cfg vaultDir = do
         -- 缓存目录不可信（junction 化）是硬失败：继续下去等于把 pm 的写
         -- 交给库外（P3b-13 十轮 critical）。
         wc <- writeVaultCache root (Catalog "vault-cache" now (entryMap vEntries)) meta
-        case wc of
-          Left e -> pure (Left (e, 2))
-          Right () ->
-            pure
+        eholds <- readHolds root
+        case (wc, eholds) of
+          (Left e, _) -> pure (Left (e, 2))
+          (_, Left e) -> pure (Left (e, 2))
+          (Right (), Right holds) ->
+            let (held, heldStale) = splitHeld holds (vdNew d) (`Map.lookup` srcShas)
+             in pure
             ( Right
                 VaultReport
                   { vrSrcDir = srcDir
@@ -412,6 +449,8 @@ computeVault' quiet cfg vaultDir = do
                   , vrUnpushable = unpushable
                   , vrUnstable = unstable
                   , vrSrcMeta = Map.fromList [(n, e) | (n, _, Just e) <- srcTriples]
+                  , vrHeld = held
+                  , vrHeldStale = heldStale
                   }
             )
 
@@ -427,9 +466,9 @@ runVaultStatus asJson cfg = do
     Left (msg, code) -> putStrLn msg >> pure code
     Right r -> do
       if asJson
-        then BSLC.putStrLn (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r))
+        then BSLC.putStrLn (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r) (vrHeld r) (vrHeldStale r))
         else renderHuman r
-      pure (if hasDiff (vrDiff r) || not (null (vrUnstable r)) then 1 else 0)
+      pure (if hasDiffR r || not (null (vrUnstable r)) then 1 else 0)
 
 renderHuman :: VaultReport -> IO ()
 renderHuman r = do
@@ -446,7 +485,11 @@ renderHuman r = do
     (length (vdDuplicate d))
     (length unpushable)
     (length (vrUnstable r))
-  mapM_ (\n -> putStrLn ("  + NEW " <> n <> "  → pm vault push --category <类目> " <> n)) (vdNew d)
+  unless (null (vrHeld r)) $
+    printf "  （其中 %d 张已决定暂不同步，不计入待办；pm vault unhold <文件…> 可恢复）\n" (length (vrHeld r))
+  mapM_ (\n -> putStrLn ("  + NEW " <> n <> "  → pm vault push --category <类目> " <> n)) (newActive r)
+  mapM_ (\(n, _) -> putStrLn ("  ⏸ HELD " <> n <> "（暂不同步；pm vault unhold " <> n <> " 恢复）")) (vrHeld r)
+  mapM_ (\(n, why) -> putStrLn ("  ⏵ HELD 失效 " <> n <> "：" <> why)) (vrHeldStale r)
   mapM_ (\(n, c) -> putStrLn ("  - MISSING " <> c </> n <> "  → 决定保留还是撤（只报告）")) (vdMissing d)
   mapM_
     ( \(n, m, c, h) ->
@@ -574,8 +617,8 @@ runVaultPush runPlan mCat files cfg = do
               let allItems = vaultPushItems r pairs'
               if null allItems
                 then do
-                  unless (null (vdNew d)) $ do
-                    putStrLn ("  → " <> show (length (vdNew d)) <> " 个 NEW 待分类：pm vault push --category <类目> <文件…>（类目: " <> unwords fixedCategories <> "）")
+                  unless (null (newActive r)) $ do
+                    putStrLn ("  → " <> show (length (newActive r)) <> " 个 NEW 待分类：pm vault push --category <类目> <文件…>（类目: " <> unwords fixedCategories <> "）")
                   putStrLn "（无可执行项，未生成计划）"
                   pure (if hasDiff d then 1 else 0)
                 else do
@@ -596,6 +639,7 @@ checkAssignments :: VaultReport -> [(String, FilePath)] -> [String]
 checkAssignments r pairs' = dupErrs <> [e | p <- pairs', Just e <- [checkSel p]]
  where
   d = vrDiff r
+  heldNames = map fst (vrHeld r)
   -- 同一 name 被指派两次（跨类目或同类目重复）：逐条校验各自合法，但计划会
   -- 带两个 Copy，执行后同一张照片重复入 vault（codex 二十轮 minor）。按 name
   -- 分组 fail-closed；CLI（`pm vault push a.jpg a.jpg`）与 API 共用这一处。
@@ -608,6 +652,7 @@ checkAssignments r pairs' = dupErrs <> [e | p <- pairs', Just e <- [checkSel p]]
     | f `elem` map fst (vrUnstable r) = Just (f <> " 本轮读取不稳定（已退出六态分类，fail-closed），稍后重试")
     | c `notElem` fixedCategories = Just ("类目不存在: " <> c <> "（可选: " <> unwords fixedCategories <> "）")
     | f `notElem` vdNew d = Just (f <> " 不在 NEW 集合里（只有 NEW 可 push；看 pm vault status）")
+    | f `elem` heldNames = Just (f <> " 已决定暂不同步 → 先 pm vault unhold " <> f <> "（或在 GUI 里改成一个类目）")
     | not (pushableExt f) = Just (f <> " 是 UNPUSHABLE（写路径只收 jpg/jpeg）")
     | not (Map.member f (vrSrcMeta r)) = Just (f <> " 读取不稳定，本轮不可入计划（稍后重试）")
     | otherwise = Nothing
