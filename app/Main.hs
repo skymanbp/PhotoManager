@@ -91,7 +91,7 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    infoOption "pm 0.4.1 (P4-2/3)" (long "version" <> help "打印版本")
+    infoOption "pm 0.4.2 (P4-4/5)" (long "version" <> help "打印版本")
   backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
   vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =
@@ -118,6 +118,7 @@ parserInfo =
       ServeOpts
         <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
         <*> switch (long "exit-on-stdin-eof" <> help "stdin 关闭即退出（GUI 拉起时用：父进程一死 serve 随之结束，不留孤儿）")
+        <*> switch (long "writable" <> help "允许 POST 端点生成计划（只写 .pm/plans，不执行、不碰照片）；缺省只读")
   initP =
     fmap CmdInit $
       InitOpts

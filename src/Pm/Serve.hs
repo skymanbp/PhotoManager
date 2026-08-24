@@ -41,6 +41,7 @@ import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (IOException, bracket, try)
 import Crypto.Random (getRandomBytes)
 import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteArray as BA
 import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
@@ -61,11 +62,11 @@ import System.IO (hFlush, hIsEOF, stdin, stdout)
 
 import Pm.Catalog (loadCatalog)
 import Pm.Commands (loadPlanAnyRoot)
-import Pm.Config (Config (..), pmSubPlans, requirePmTrusted, untrustedMsg)
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPlan)
+import Pm.Config (Config (..), pmSubPlans, requirePmTrusted, requireWritable, untrustedMsg)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPlan, savePlan)
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
-import Pm.Vault (VaultDiff (..), VaultReport (..), computeVault, fixedCategories, renderVaultJson)
+import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, planCategories, renderVaultJson, vaultPushItems)
 import Pm.Win (resolveUnder)
 
 data ServeOpts = ServeOpts
@@ -76,17 +77,26 @@ data ServeOpts = ServeOpts
     -- ^ P4-3：由 GUI 拉起时置位。GUI 把一条管道接到 serve 的 stdin 且从不写；
     -- GUI 进程一死（含崩溃、被 taskkill），Windows 关闭管道，这里读到 EOF 即
     -- 退出——否则 serve 会成为孤儿一直监听。
+  , soWritable :: Bool
+    -- ^ P4-5：允许 POST 端点**生成计划**（只写 @.pm/plans@，不执行、不碰照片）。
+    -- 缺省只读；`pm ui` 拉起时置位。apply 端点尚不存在（后置，另评审）。
   }
 
--- | 一次 serve 会话的状态：配置、token、vault 缓存刷新的进程内互斥。
+-- | 一次 serve 会话的状态：配置、token、可写开关、vault 缓存刷新的进程内互斥。
 data ServeEnv = ServeEnv
   { seCfg :: Config
   , seToken :: BS.ByteString
+  , seWritable :: Bool
   , seVaultLock :: MVar ()
   }
 
-newServeEnv :: Config -> BS.ByteString -> IO ServeEnv
-newServeEnv cfg tok = ServeEnv cfg tok <$> newMVar ()
+newServeEnv :: Config -> BS.ByteString -> Bool -> IO ServeEnv
+newServeEnv cfg tok writable = ServeEnv cfg tok writable <$> newMVar ()
+
+-- | POST 请求体上限（十八轮：warp 默认无总 body 上限，写端点须自设）。一次
+-- 分类指派最多几十条 name/category，64 KiB 绰绰有余。
+maxBodyBytes :: Int
+maxBodyBytes = 64 * 1024
 
 -- | 启动时打印给调用方的一行 JSON。
 data Announce = Announce
@@ -114,7 +124,7 @@ runServe cfg o = case soPort o of
     pure 2
   _ -> do
     tok <- newToken
-    env <- newServeEnv cfg tok
+    env <- newServeEnv cfg tok (soWritable o)
     r <- try (bracket (bindLoopback (maybe 0 id (soPort o))) close $ \sock -> do
       port <- socketPort sock
       BSL.putStr (encode (Announce (fromIntegral port) (T.pack (BC.unpack tok))))
@@ -239,6 +249,53 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
                      ]
               ]
           )
+  -- P4-5：唯一的写端点——由页面的分类指派**生成** vault push 计划（只写
+  -- @<vault>/.pm/plans@，不执行、不碰照片；执行仍是另一步，尚无端点）。
+  -- 校验与计划构造和 CLI `pm vault push` 共用（'checkAssignments' /
+  -- 'vaultPushItems' / 'mkVaultPushPlan'），落盘前同样过 'requireWritable'。
+  ("POST", ["api", "vault", "push-plan"])
+    | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝生成计划"
+    | otherwise -> do
+        body <- readBodyCapped req
+        case body of
+          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
+          Just raw -> case Aeson.eitherDecodeStrict' raw of
+            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
+            Right (PushPlanReq as)
+              | null as -> err status400 "assignments 为空"
+              | otherwise -> do
+                  er <- vaultReport
+                  case er of
+                    Left (msg, code) -> err (if code == 2 then status404 else status500) msg
+                    Right r -> do
+                      let pairs' = [(paCategory a, paName a) | a <- as]
+                          errs = checkAssignments r pairs'
+                      if not (null errs)
+                        then jsonR status400 [] (object ["error" .= ("指派不合法" :: String), "details" .= errs])
+                        else do
+                          let items = vaultPushItems r pairs'
+                          eplan <- mkVaultPushPlan r items
+                          case eplan of
+                            Left m -> err status500 m
+                            Right plan -> do
+                              w <- requireWritable (plRootPath plan)
+                              case w of
+                                Left m -> err status403 ("vault root 不可写: " <> m)
+                                Right _ -> do
+                                  esave <- try (savePlan plan) :: IO (Either IOException FilePath)
+                                  case esave of
+                                    Left e -> err status500 ("计划落盘失败: " <> show e)
+                                    Right fp ->
+                                      jsonR
+                                        status200
+                                        []
+                                        ( object
+                                            [ "plan" .= plan
+                                            , "path" .= fp
+                                            , "apply" .= ("pm apply " <> T.unpack (plId plan))
+                                            , "gitSteps" .= gitStepsLines (plRootPath plan) (plId plan) (planCategories plan)
+                                            ]
+                                        )
   ("GET", ["api", "plans"]) -> do
     (ps, errs) <- listPlans (cfgMainPath cfg)
     (vps, verrs) <- maybe (pure ([], [])) listPlans (cfgVaultPath cfg)
@@ -272,6 +329,29 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
   cfg = seCfg env
   -- vault 缓存刷新串行化（十八轮 minor）：两个并发 GET 会争用固定 tmp 名。
   vaultReport = withMVar (seVaultLock env) (const (computeVault True cfg))
+
+-- | 读请求体，超过 'maxBodyBytes' 即放弃（不把剩余读完，直接 413）。
+readBodyCapped :: Request -> IO (Maybe BS.ByteString)
+readBodyCapped req = go [] 0
+ where
+  go acc n = do
+    chunk <- getRequestBodyChunk req
+    if BS.null chunk
+      then pure (Just (BS.concat (reverse acc)))
+      else
+        let n' = n + BS.length chunk
+         in if n' > maxBodyBytes then pure Nothing else go (chunk : acc) n'
+
+-- | @{"assignments":[{"name":"a.jpg","category":"landscape"},…]}@
+newtype PushPlanReq = PushPlanReq [PushAssign]
+
+data PushAssign = PushAssign {paName :: FilePath, paCategory :: String}
+
+instance Aeson.FromJSON PushPlanReq where
+  parseJSON = Aeson.withObject "push-plan" $ \o -> PushPlanReq <$> o Aeson..: "assignments"
+
+instance Aeson.FromJSON PushAssign where
+  parseJSON = Aeson.withObject "assignment" $ \o -> PushAssign <$> o Aeson..: "name" <*> o Aeson..: "category"
 
 validSha :: Text -> Bool
 validSha s = T.length s == 64 && T.all isHexDigit s

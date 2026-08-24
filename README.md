@@ -189,7 +189,18 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   200/200）
 - **codex 十九轮：GO**（P4-2/3 + 十八轮闭合；GUI 边界确认——Rust 侧只 spawn /
   api_info / kill，页面无 XSS sink、无 POST；2 minor：blob URL 不 revoke 已修，
-  跨进程 vault-cache 刷新争用登记残余）→ **等用户开窗验收 GUI**，再裁定写端点
+  跨进程 vault-cache 刷新争用登记残余）
+- **用户开窗验收反馈**：分类页滚动后缩略图消失；要求更清晰优雅的 UX、快速上手、
+  直观可视化，并点名三项状态可视化（vault 同步与差异 / Raw·成片·相册各层 / 备份盘
+  同步）；裁定写端点"先做生成计划，apply 后置"
+- P4-4/5 ✅ UX 重做 + 生成计划端点（`ui/` 四页：状态（分层卡 + vault 八态与差异
+  清单 + 备份盘卡 + 下一步）/ 分类推送（GUI 侧 `createImageBitmap` 缩放缩略图——
+  原图 4–75 MB 全分辨率解码是消失的根因；分段类目按钮 + 进度 + 「生成推送计划」）
+  / 计划（表格 + 逐项明细，自动选中最新）/ 上手；数字键 1–4 切页。serve 加
+  `--writable`（`pm ui` 置位）与唯一写端点 `POST /api/vault/push-plan`（与 CLI
+  共用校验/构造，只写 `.pm/plans`，64 KiB 上限）；三处闸突变各自转红；202/202；
+  渲染经 DPI-aware 窗口截图自验四页含滚动到底）—— **apply 端点仍未开**
+- P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License

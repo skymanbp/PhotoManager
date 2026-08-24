@@ -39,8 +39,12 @@ fn spawn_serve() -> Result<(ApiInfo, Child), String> {
     // closes the pipe and serve exits on EOF — no orphan listener. The pipe
     // handle lives inside `Child` (we never take `child.stdin`), so it stays
     // open exactly as long as we keep the Child.
+    // `--writable`: the GUI is the one client that may ask serve to GENERATE
+    // plans (POST /api/vault/push-plan writes only .pm/plans; nothing is
+    // executed and no photo is touched — apply stays a separate, later step).
     cmd.arg("serve")
         .arg("--exit-on-stdin-eof")
+        .arg("--writable")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
