@@ -113,3 +113,52 @@ I5 不覆盖；gitStepsLines 纯字符串（pm 零 git 执行）;六态算法/�
 - 62d5a4a（P3b-2/3 names/versions）+ 本轮修复 commit 补送 codex 复审。
 - 真实写入（vault push 分类 / names apply / versions 处置）仍等复审 +
   用户 AskUserQuestion 裁定，纪律不变。
+
+---
+
+# 二轮复审（2026-08-24，`codex exec -s read-only` 直跑，对 676426c..d8e6d6d）
+
+- verdict：**NO-GO**——A 部分 #5 FIXED，#1/#2/#3/#4/#6 PARTIAL；B 部分
+  （62d5a4a names/versions）3 major + 1 minor。
+- 处置：PARTIAL 五条与 B1/B2/B3 逐条核实成立，同轮修复（P3b-5，133/133）；
+  B4 经源码 + 不变量 I7 反驳，不改。
+- 桥接插件的首次派发（task-mt6limry-ngckbn）29 秒空跑（线程自述无工具），
+  改用 `codex exec` 直跑取得本结论；桥接层前后台配置相同，属线程侧偶发。
+
+## A 部分逐条
+
+| # | 复审判定 | 残留边界（codex） | P3b-5 处置 |
+|---|---|---|---|
+| 1 | PARTIAL | 重跑再位移复用同一 `~displaced` 路径 → move 失败 → 复位被挡；doctor Q-DONE-LOST 不核 sha 就补 Done；undo 会把 `~d` 当可撤销 | `~d<N>` 尝试序号 → `<pid>~displaced-<N>/`（`quarTrashRel` 解析）；占位者未挪开不试 `~r`；doctor 核 sha 不符 → Bad 不修；`cancelRestores` 剔除所有 `~d`。测试：同计划两轮位移用槽位 1/2、undo 为空、doctor sha 不符 Bad |
+| 2 | PARTIAL | junction/symlink 别名路径走词法父链看不到真实祖先 `.git`；`!.PM/` 反规则未检 | 守卫入口 `canonicalizePath`；反规则 `T.toLower` 后判 `.pm`。测试：`!.PM/` 拒绝。junction 场景未自动化（Windows 建 junction 需 `mklink /J` 进程调用，测试依赖不含 process；逻辑为一行 canonicalize，记录为未注入项） |
+| 3 | PARTIAL | `execPlan defaultExecEnv` 绕过可覆盖的 `eePreflight` 钩子 | 守卫下沉 `Pm.GitGuard`；Exec 在锁内按盘上 role **无条件**调用，钩子删除；Cli 的 rootPreflight 删除。测试：RoleVault root + 无 ignore → `execPlan defaultExecEnv` 拒绝且 journal 未创建 |
+| 4 | PARTIAL | `Nothing == Nothing` 让未建 root 的 vault 缓存通过；路径无条件 case-fold | 双方 root-id 皆 `Just` 且相等才复用；路径取 canonicalizePath 精确值比较。代价：vault root 建立前每次全量重 hash（真实库 79 张，秒级） |
+| 5 | FIXED | — | — |
+| 6 | PARTIAL | 备份发现只返回首命中，克隆盘歧义不可见；nubBy 小写去重的 FS 语义假设 | `discoverBackupRoots` 返回全部命中（`discoverAmong` 可注入候选、有测试），`discoverBackupRoot` 多命中即 Left；bindExecRoot 备份槽取全部命中，候选按 `canonicalizePath` 去重 |
+
+## B 部分（62d5a4a）
+
+- **B1 major｜runNames 不校验 RoleMain —— 成立，已修（统一修）**：新增
+  `Pm.Config.requireRole`，names/import/clean/scan 四处以主库身份出计划或写
+  索引前都校验 role；测试：backup root 伪装主库 → runNames exit 2、runPlan
+  未调用。
+- **B2 major｜FpDir 只看直接子项名字+大小 —— 成立，部分采纳**：改为递归树
+  指纹（类型/相对路径/大小/mtimeNs；目录改名不变）。**未采纳内容 hash**：
+  Rename 不触碰内容且 undo 可逆；Raw 事件夹数十 GB，计划期+执行期两次全量
+  hash 的代价与收益不成比例；§14 单机威胁模型下作为残余风险登记（需同时
+  伪造整棵树的名字、大小与 mtime）。若用户要求内容级 Merkle，可作为 names
+  的可选开关后续增量。测试：子目录文件变化改变指纹、目录改名不变。
+- **B3 minor｜目标预检只查目录 —— 成立，已修**：文件或目录皆算占用 →
+  NEEDS-DECISION。测试：目标为普通文件时不出计划。
+- **B4 major｜designedPair 排除过宽 —— 不成立（反驳）**：`designedPair`
+  只豁免**恰两份**、一在 `成片` 一在 `相册`、同 case-fold 文件名的组（三份
+  以上照报，`versionsReport` :129-134）；相册 ⊆ 成片 ∪ inbox-origin 是不变量
+  I7 的设计拓扑，相册没有「所属事件」，「无关事件的成片副本」在设计里不是
+  一个可定义的概念；来源映射（journal 登记）是 P5 ingest 的工作。保持现状。
+
+## 残余与未自动化项（复审可再挑战）
+
+- 位移隔离槽位封顶 99（超出即保守失败，victim 仍在 trash）。
+- junction 别名 vault 路径的守卫行为未自动化测试。
+- 目录指纹不含内容 hash（见 B2）。
+- 落位后复核异常路径仍未做故障注入（同首轮记录）。

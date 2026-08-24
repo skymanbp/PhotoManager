@@ -7,12 +7,16 @@
 -- unplugged, without ever probing hardware from status.
 module Pm.Backup
   ( discoverBackupRoot
+  , discoverBackupRoots
+  , discoverAmong
   , BackupCacheMeta (..)
   , writeBackupCache
   , readBackupCacheMeta
   ) where
 
+import Control.Monad (forM)
 import Data.Aeson
+import Data.List (intercalate)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime)
@@ -22,39 +26,47 @@ import Pm.Config (Config (..), pmDir, readJsonMaybe, readRootInfo, writeSideCach
 import Pm.Types
 import Pm.Win (listCandidateDrives, suppressCriticalErrorDialogs)
 
+-- | 在给定候选路径里找带该 UUID 的备份 root，返回**全部**命中（P3b-5 复审
+-- #6：两块盘同时挂载且带同一 UUID——整盘克隆——只返回首命中会把身份歧义
+-- 藏起来）。候选列表可注入，便于 fixture 测试。
+discoverAmong :: Text -> [FilePath] -> IO [FilePath]
+discoverAmong bid cands = do
+  hits <- forM cands $ \c -> do
+    minfo <- readRootInfo c
+    pure [c | Just i <- [minfo], riRole i == RoleBackup, riId i == bid]
+  pure (concat hits)
+
 -- | Probe present REMOVABLE\/FIXED volumes for the registered backup root.
--- Right = absolute root path on the mounted drive.
-discoverBackupRoot :: Config -> IO (Either String FilePath)
-discoverBackupRoot cfg = case (cfgBackupId cfg, cfgBackupSubpath cfg) of
+-- Right (探过的卷数, 全部命中路径)；Left = 未登记。
+discoverBackupRoots :: Config -> IO (Either String (Int, [FilePath]))
+discoverBackupRoots cfg = case (cfgBackupId cfg, cfgBackupSubpath cfg) of
   (Just bid, Just sub) -> do
     suppressCriticalErrorDialogs
     drives <- listCandidateDrives
-    found <- probe bid sub (map fst drives)
-    case found of
-      Just p -> pure (Right p)
-      Nothing ->
-        pure
-          ( Left
-              ( "备份盘未挂载（在 "
-                  <> show (length drives)
-                  <> " 个卷上都找不到 root "
-                  <> T.unpack (T.take 8 bid)
-                  <> "… 的 "
-                  <> sub
-                  <> "\\.pm\\root-id.json）→ 插上备份盘后重试"
-              )
-          )
+    hits <- discoverAmong bid [(c : ":\\") </> sub | (c, _) <- drives]
+    pure (Right (length drives, hits))
   _ ->
     pure (Left "备份 root 未登记 → 插上备份盘后运行 pm backup init <盘上镜像路径>")
- where
-  probe _ _ [] = pure Nothing
-  probe bid sub (c : cs) = do
-    let candidate = (c : ":\\") </> sub
-    minfo <- readRootInfo candidate
-    case minfo of
-      Just info
-        | riRole info == RoleBackup && riId info == bid -> pure (Just candidate)
-      _ -> probe bid sub cs
+
+-- | 恰一命中才是可用的备份 root；零命中 = 未挂载，多命中 = 身份冲突，
+-- 都拒绝（不猜哪块盘是对的）。
+discoverBackupRoot :: Config -> IO (Either String FilePath)
+discoverBackupRoot cfg = do
+  er <- discoverBackupRoots cfg
+  pure $ case er of
+    Left m -> Left m
+    Right (_, [p]) -> Right p
+    Right (n, []) ->
+      Left
+        ( "备份盘未挂载（在 " <> show n <> " 个卷上都找不到 root "
+            <> maybe "?" (T.unpack . T.take 8) (cfgBackupId cfg) <> "… 的 "
+            <> maybe "?" id (cfgBackupSubpath cfg) <> "\\.pm\\root-id.json）→ 插上备份盘后重试"
+        )
+    Right (_, ps) ->
+      Left
+        ( "多个卷同时匹配备份 root（" <> intercalate "、" ps
+            <> "），身份冲突（同一标识被整盘克隆），拒绝——拔掉多余的盘或修正 root-id.json"
+        )
 
 -- ─── Main-side cache (status while unplugged) ───────────────────────────────
 

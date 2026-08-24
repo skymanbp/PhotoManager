@@ -24,6 +24,7 @@ module Pm.Exec
   ) where
 
 import Control.Exception (IOException, try)
+import Control.Monad (forM)
 import Crypto.Hash (Digest, SHA256 (..), hashWith)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
@@ -35,7 +36,6 @@ import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
   , doesFileExist
-  , getFileSize
   , listDirectory
   , removeFile
   , setModificationTime
@@ -43,6 +43,7 @@ import System.Directory
 import System.FilePath (isRelative, splitDirectories, takeDirectory, takeExtension, takeFileName, (</>))
 
 import Pm.Config (pmDir, readRootInfo)
+import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash
 import Pm.Journal
 import Pm.Lock (withRootLock)
@@ -78,20 +79,11 @@ data ExecEnv = ExecEnv
     -- ^ 评审 cx-1：拿到锁之后、动盘之前复验 root-id.json 的 UUID。盘符会
     -- 漂移（备份盘 E: → F:），路径不是身份；不符即整批拒绝执行。
     -- Nothing = 跳过（测试用临时 root 无标识）。
-  , eePreflight :: FilePath -> IO (Either String ())
-    -- ^ 锁内、身份复验后、journal\/tmp\/trash 任何写入前的最后闸门
-    -- （P3b-4 评审 #3：vault 计划在 apply 时重检 I11——计划生成与执行
-    -- 之间 .gitignore 可能被改）。Left → 整批拒绝。默认放行。
   }
 
 defaultExecEnv :: ExecEnv
 defaultExecEnv =
-  ExecEnv
-    { eeCheckpoint = \_ -> pure ()
-    , eeDoneSync = Buffered
-    , eeExpectRootId = Nothing
-    , eePreflight = \_ -> pure (Right ())
-    }
+  ExecEnv {eeCheckpoint = \_ -> pure (), eeDoneSync = Buffered, eeExpectRootId = Nothing}
 
 data ItemOutcome
   = ODone {oSha :: Maybe Text, oDstStat :: Maybe StatSnap, oTrashRel :: Maybe FilePath}
@@ -158,9 +150,14 @@ execPlan env plan = do
     case ridOk of
       Left e -> pure (Left e)
       Right () -> do
-        pf <- eePreflight env root
+        -- P3b-5 复审 #3（内核自卫）：vault root 的 I11 重检不经可覆盖的
+        -- ExecEnv 钩子，按盘上 role 无条件执行——锁内、journal/tmp/trash
+        -- 任何写入之前；计划生成与执行之间 .gitignore 被改则整批拒绝。
+        pf <- case mi of
+          Just info | riRole info == RoleVault -> vaultIgnoreGuard root
+          _ -> pure (Right ())
         case pf of
-          Left e -> pure (Left e)
+          Left e -> pure (Left (e <> "（执行期重检，整批拒绝）"))
           Right () -> withJournal root $ \j -> do
             (outs, restoredIxs) <- execItems env root j (plId plan) (plItems plan)
             now <- getCurrentTime
@@ -238,27 +235,46 @@ restoreQuarantine env root j pid (_, qit, trashRel) = do
           (FpFileSha (opVictimSha (piOp qit)))
       oid = opId pid (piIx qit) <> "~r"
   occ <- doesFileExist victimAbs
-  dispNote <-
+  (dispOk, dispNote) <-
     if not occ
-      then pure ""
+      then pure (True, "")
       else do
         oshaE <- try (sha256File victimAbs) :: IO (Either IOException Text)
         case oshaE of
-          Left e -> pure ("；复位目标被占且无法读取(" <> show e <> ")")
+          Left e -> pure (False, "；复位目标被占且无法读取(" <> show e <> ")")
           Right osha -> do
-            let doid = opId pid (piIx qit) <> "~d"
-                dispOp = OpQuarantine victimRel osha ("rollback-displaced:" <> opId pid (piIx qit))
-            dout <- execQuarantine env root j doid (quarTrashRel doid victimRel) dispOp
-            case dout of
-              ODone {} -> pure "；占位文件已隔离(~displaced)"
-              other -> pure ("；占位文件隔离未成功(" <> outcomeLabel other <> ")")
-  out <- execRename env root j oid restoreOp
-  pure $ case out of
-    ODone {} -> ("；旧目标已自动复位" <> dispNote, True)
-    other ->
-      ( "；自动复位未成功(" <> outcomeLabel other <> ")，旧字节仍在 .pm/trash/" <> trashRel <> dispNote
-      , False
-      )
+            -- 位移目录带尝试序号（P3b-5 复审 #1）：同计划重跑可能再次位移，
+            -- 固定路径会与上次残留撞车。
+            mslot <- freeDisplacedSlot (opId pid (piIx qit)) victimRel
+            case mslot of
+              Nothing -> pure (False, "；位移隔离槽位耗尽(99)，不动占位者")
+              Just (doid, n) -> do
+                let dispOp = OpQuarantine victimRel osha ("rollback-displaced:" <> opId pid (piIx qit))
+                dout <- execQuarantine env root j doid (quarTrashRel doid victimRel) dispOp
+                case dout of
+                  ODone {} -> pure (True, "；占位文件已隔离(~displaced-" <> show n <> ")")
+                  other -> pure (False, "；占位文件隔离未成功(" <> outcomeLabel other <> ")")
+  -- 占位者没挪开就不试 rename（必被 I5 拒绝，徒增噪音）
+  if not dispOk
+    then pure ("；自动复位未做（复位目标仍被占），旧字节仍在 .pm/trash/" <> trashRel <> dispNote, False)
+    else do
+      out <- execRename env root j oid restoreOp
+      pure $ case out of
+        ODone {} -> ("；旧目标已自动复位" <> dispNote, True)
+        other ->
+          ( "；自动复位未成功(" <> outcomeLabel other <> ")，旧字节仍在 .pm/trash/" <> trashRel <> dispNote
+          , False
+          )
+ where
+  -- 第一个盘上尚不存在的 ~d<N> 位移槽（N 从 1 起，封顶 99）
+  freeDisplacedSlot base victimRel = go (1 :: Int)
+   where
+    go n
+      | n > 99 = pure Nothing
+      | otherwise = do
+          let doid = base <> "~d" <> T.pack (show n)
+          ex <- doesFileExist (trashDir root </> quarTrashRel doid victimRel)
+          if ex then go (n + 1) else pure (Just (doid, n))
 
 execItem :: ExecEnv -> FilePath -> Journal -> Text -> PlanItem -> IO ItemOutcome
 execItem env root j pid item = case piStatus item of
@@ -460,20 +476,31 @@ execQuarantine env root j oid trashRel op = do
 planIdOf :: Text -> Text
 planIdOf oid = T.takeWhile (/= '#') oid
 
--- | Sorted @name\\tsize@ (dirs as -1) of direct children, hashed. Cheap,
--- filesystem-agnostic identity for directory renames.
+-- | 目录指纹：递归树上每个条目一行 @类型\\t相对路径\\t大小\\tmtimeNs@
+-- （目录大小记 -1、mtime 记 0），排序后 sha256。P3b-5 复审 B2：原先只看
+-- 直接子项的名字+大小，换成同名同大小的另一棵树也能通过。不含文件内容
+-- hash——Rename 不触碰内容、undo 可逆，而 Raw 事件夹动辄数十 GB，计划期
+-- 与执行期两次全量 hash 的代价与收益不成比例（§14 单机威胁模型下作为
+-- 残余风险记录：需同时伪造整棵树的名字、大小与 mtime）。
 dirFingerprint :: FilePath -> IO Text
 dirFingerprint dir = do
-  names <- listDirectory dir
-  entries <- mapM entryLine (sort names)
-  let payload = TE.encodeUtf8 (T.pack (unlines entries))
+  entries <- walk ""
+  let payload = TE.encodeUtf8 (T.pack (unlines (sort entries)))
       digest = hashWith SHA256 payload :: Digest SHA256
   pure (T.pack (show digest))
  where
-  entryLine n = do
-    isD <- doesDirectoryExist (dir </> n)
-    sz <- if isD then pure (-1) else getFileSize (dir </> n)
-    pure (n <> "\t" <> show sz)
+  walk rel = do
+    let here = if null rel then dir else dir </> rel
+    names <- listDirectory here
+    fmap concat . forM names $ \n -> do
+      let relN = if null rel then n else rel </> n
+          absN = dir </> relN
+      isD <- doesDirectoryExist absN
+      if isD
+        then (("d\t" <> relN <> "\t-1\t0") :) <$> walk relN
+        else do
+          s <- statSnap absN
+          pure ["f\t" <> relN <> "\t" <> show (ssSize s) <> "\t" <> show (ssMtimeNs s)]
 
 -- | Fold executed outcomes back into the mutated root's catalog. A directory
 -- rename rewrites the path prefix of every entry beneath it.

@@ -32,15 +32,15 @@ import Data.Char (isDigit, toLower)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
 import Data.Time (getCurrentTime)
-import System.Directory (doesDirectoryExist, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath ((</>))
 import Text.Printf (printf)
 
-import Pm.Config (Config (..), readRootInfo)
+import Pm.Config (Config (..), requireRole)
 import Pm.Exec (dirFingerprint)
 import Pm.Op
 import Pm.Plan
-import Pm.Types (RootInfo (..))
+import Pm.Types (RootInfo (..), RootRole (..))
 
 -- ─── 解析（纯） ─────────────────────────────────────────────────────────────
 
@@ -244,10 +244,12 @@ runNames runPlan cfg = do
       forM_ oddTop $ \d -> putStrLn ("  ⚠ Raw 下非年份目录（不碰）: " <> d)
       forM_ (nrUnrecognized rep) $ \p -> putStrLn ("  ⚠ 无法识别（不猜，不入计划）: " <> p)
       forM_ (nrDecisions rep) $ \(p, why) -> putStrLn ("  ✋ NEEDS-DECISION " <> p <> " —— " <> why)
-      -- 执行期盘面校验：目标已存在 → 该项降为裁决（不覆盖，I5 计划期防线）
+      -- 计划期盘面校验：目标路径已被文件**或**目录占用 → 该项降为裁决
+      -- （不覆盖，I5 计划期防线；P3b-5 复审 B3：只查目录会让文件占位漏进计划）
       checked <- forM (nrRenames rep) $ \(yd, old, new) -> do
-        tex <- doesDirectoryExist (rawTop </> yd </> new)
-        pure (if tex then Left (yd </> old, "目标目录已在盘上存在: " <> new) else Right (yd, old, new))
+        let target = rawTop </> yd </> new
+        tex <- (||) <$> doesFileExist target <*> doesDirectoryExist target
+        pure (if tex then Left (yd </> old, "目标路径已在盘上存在（文件或目录）: " <> new) else Right (yd, old, new))
       forM_ [d | Left d <- checked] $ \(p, why) ->
         putStrLn ("  ✋ NEEDS-DECISION " <> p <> " —— " <> why)
       let finalRenames = [r | Right r <- checked]
@@ -256,10 +258,11 @@ runNames runPlan cfg = do
           putStrLn "✓ 无可机械执行的改名"
           pure (if null (nrDecisions rep) && null (nrUnrecognized rep) && null [() | Left _ <- checked] then 0 else 1)
         else do
-          minfo <- readRootInfo root
-          case minfo of
-            Nothing -> putStrLn ("主库缺 .pm/root-id.json → 先 pm init --main " <> root) >> pure 2
-            Just info -> do
+          -- P3b-5 复审 B1：以主库身份改名的前提是该路径确为 RoleMain root
+          er <- requireRole RoleMain root
+          case er of
+            Left msg -> putStrLn msg >> pure 2
+            Right info -> do
               items <- forM (zip [0 ..] finalRenames) $ \(i, (yd, old, new)) -> do
                 fp <- dirFingerprint (rawTop </> yd </> old)
                 pure (PlanItem i (OpRename ("Raw" </> yd </> old) ("Raw" </> yd </> new) (FpDir fp)) StPending Nothing)

@@ -45,11 +45,12 @@ import qualified Data.Text.Encoding as TE
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
 import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, listDirectory)
-import System.FilePath (splitDirectories, takeDirectory, takeExtension, (</>))
+import System.FilePath (splitDirectories, takeExtension, (</>))
 import Text.Printf (printf)
 
 import Pm.Catalog (loadCatalog)
 import Pm.Config (Config (..), pmDir, readJsonMaybe, readRootInfo, writeRootInfo, writeSideCache, freshRootId)
+import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
 import Pm.Plan
@@ -308,11 +309,12 @@ computeVault quiet cfg = case cfgVaultPath cfg of
         (mcat, _) <- loadCatalog root
         mMeta <- readVaultCacheMeta root
         mVCache <- readVaultCacheCatalog root
-        let cacheIdentityOk = case mMeta of
-              Just m ->
-                map toLower (vmVaultPath m) == map toLower vaultCanon
-                  && vmRootId m == (riId <$> mVRoot)
-              Nothing -> False
+        -- P3b-5 复审 #4：双方 root-id 都必须存在且相等才复用（Nothing==Nothing
+        -- 不算身份）；路径比较用 canonicalizePath 的精确输出（它已按盘上
+        -- 真实大小写解析，不再无条件小写化）。vault root 建立前每次全量重 hash。
+        let cacheIdentityOk = case (mMeta, mVRoot) of
+              (Just m, Just vr) -> vmVaultPath m == vaultCanon && vmRootId m == Just (riId vr)
+              _ -> False
             mainCache = maybe Map.empty catEntries mcat
             vaultCache =
               if cacheIdentityOk then maybe Map.empty catEntries mVCache else Map.empty
@@ -443,66 +445,8 @@ renderHuman r = do
 
 -- ─── pm vault push（§10.2） ─────────────────────────────────────────────────
 
--- | I11 的可重入校验核心（P3b-4 评审 #2/#3 共用：ensureVaultRoot 建 root
--- 前与 pm apply 的执行期 preflight 都走这里）。三种 git 语境全覆盖：
---
---   * vault 自身有 @.git@ **目录**（普通仓根）→ 查本目录 .gitignore；
---   * vault 自身有 @.git@ **文件**（worktree\/submodule 链接）→ 同上；
---   * vault 自身无 .git 但**祖先**有 → 一律拒绝：.pm 的忽略状态由祖先仓
---     的 ignore 链决定，pm 不实现完整 gitignore 语义，fail-closed。
---
--- .gitignore 检查是文本级白名单：必须存在恰好 @.pm\/@ 的行，且不允许任何
--- 含 @.pm@ 的反规则（@!@ 行可重新包含 .pm\/，评审 #2）。pm 不执行 git（I9）。
-vaultIgnoreGuard :: FilePath -> IO (Either String ())
-vaultIgnoreGuard vaultDir = do
-  gitDir <- doesDirectoryExist (vaultDir </> ".git")
-  gitFile <- doesFileExist (vaultDir </> ".git")
-  if gitDir || gitFile
-    then do
-      let igFp = vaultDir </> ".gitignore"
-      ex <- doesFileExist igFp
-      if not ex
-        then pure (Left (i11Msg igFp "无 .gitignore"))
-        else do
-          raw <- BS.readFile igFp
-          let ls = map T.strip (T.lines (TE.decodeUtf8Lenient raw))
-              hasRule = ".pm/" `elem` ls
-              negations = [l | l <- ls, "!" `T.isPrefixOf` l, ".pm" `T.isInfixOf` l]
-          case (hasRule, negations) of
-            (False, _) -> pure (Left (i11Msg igFp "缺 `.pm/` 行"))
-            (True, _ : _) ->
-              pure (Left (i11Msg igFp ("存在可能重新包含 .pm 的反规则: " <> T.unpack (T.intercalate ", " negations))))
-            (True, []) -> pure (Right ())
-    else do
-      manc <- findGitAncestor vaultDir
-      case manc of
-        Just anc ->
-          pure
-            ( Left
-                ( "I11: vault 位于上层 git 仓库内部（" <> anc
-                    <> "）且自身不是仓根——.pm 的忽略状态由祖先 ignore 链决定，pm 不解析完整 gitignore 语义，拒绝（fail-closed）"
-                )
-            )
-        Nothing -> pure (Right ())
- where
-  i11Msg igFp why =
-    "I11: vault 是 git 工作树且 .gitignore 未有效覆盖 `.pm/`（" <> why
-      <> "）—— 先经用户确认修正 " <> igFp <> "（恰含 `.pm/` 行、无 .pm 反规则），再运行"
-
--- | 从 start 的父目录向上找持有 .git（目录或文件）的祖先。
-findGitAncestor :: FilePath -> IO (Maybe FilePath)
-findGitAncestor start = go (takeDirectory start)
- where
-  go dir = do
-    d <- doesDirectoryExist (dir </> ".git")
-    f <- doesFileExist (dir </> ".git")
-    if d || f
-      then pure (Just dir)
-      else
-        let up = takeDirectory dir
-         in if up == dir then pure Nothing else go up
-
--- | I11 守卫 + vault root 建立（幂等）。守卫核心见 'vaultIgnoreGuard'。
+-- | I11 守卫 + vault root 建立（幂等）。守卫核心 'vaultIgnoreGuard' 在
+-- 'Pm.GitGuard'（内核级：Exec 执行期按 role 无条件重检，此处建 root 前先检）。
 ensureVaultRoot :: FilePath -> IO (Either String RootInfo)
 ensureVaultRoot vaultDir = do
   g <- vaultIgnoreGuard vaultDir

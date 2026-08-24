@@ -407,12 +407,16 @@ caseGuardVariants = withSystemTempDirectory "pm-vault" $ \tmp -> do
   writeF (v1 </> ".git") "gitdir: ../repo/.git/worktrees/v1\n"
   g1 <- vaultIgnoreGuard v1
   assertBool ".git 文件应触发 I11" (either ("I11" `isInfixOf`) (const False) g1)
-  -- ② 反规则：`.pm/` 行存在但另有 `!.pm/` → 拒绝
+  -- ② 反规则：`.pm/` 行存在但另有 `!.pm/` → 拒绝；`!.PM/` 大小写变体同样
+  --    拒绝（Windows 默认 core.ignorecase，P3b-5 复审 #2）
   let v2 = tmp </> "v2"
   createDirectoryIfMissing True (v2 </> ".git")
   writeF (v2 </> ".gitignore") ".pm/\n!.pm/\n"
   g2 <- vaultIgnoreGuard v2
   assertBool "反规则应拒绝" (either ("反规则" `isInfixOf`) (const False) g2)
+  writeF (v2 </> ".gitignore") ".pm/\n!.PM/\n"
+  g2b <- vaultIgnoreGuard v2
+  assertBool "大写反规则应拒绝" (either ("反规则" `isInfixOf`) (const False) g2b)
   -- ③ 祖先仓：父链上有 .git、vault 自身不是仓根 → 拒绝
   let anc = tmp </> "repo"
       v3 = anc </> "sub" </> "vault"

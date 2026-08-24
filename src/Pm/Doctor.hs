@@ -210,7 +210,15 @@ classifyPending root (oid, op) = case op of
     trashEx <- doesFileExist (trashDir root </> trashRel)
     victimEx <- doesFileExist (root </> victim)
     case (trashEx, victimEx) of
-      (True, _) -> pure [Finding "Q-DONE-LOST" Warn (T.unpack oid <> ": 已入 trash、Done 丢失 (" <> trashRel <> ")") "--repair 将补记 Done"]
+      (True, _) -> do
+        -- P3b-5 复审 #1：补记 Done 前必须核 sha——trash 位置上可能是别的
+        -- 内容（同路径重试残留），盲补会把错误内容认证成「已隔离」。
+        tsha <- sha256File (trashDir root </> trashRel)
+        pure
+          [ if tsha == sha
+              then Finding "Q-DONE-LOST" Warn (T.unpack oid <> ": 已入 trash、Done 丢失 (" <> trashRel <> ")") "--repair 将补记 Done"
+              else Finding "Q-DONE-LOST" Bad (T.unpack oid <> ": trash 位置内容与 Intent sha 不符 (" <> trashRel <> ")，需人工核查") ""
+          ]
       (False, True) -> do
         vsha <- sha256File (root </> victim)
         let note = if vsha == sha then "victim 原位完好" else "victim 原位但内容已变"

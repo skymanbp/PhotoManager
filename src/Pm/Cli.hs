@@ -28,7 +28,8 @@ import Data.List (intercalate, nubBy)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.FilePath (normalise, splitDirectories)
+import System.Directory (canonicalizePath)
+import System.FilePath (splitDirectories)
 import System.IO (hFlush, stdout)
 import Text.Printf (printf)
 import Text.Read (readMaybe)
@@ -45,7 +46,6 @@ import Pm.Op
 import Pm.Plan
 import Pm.Scan (ScanResult (..), freshnessSweep)
 import Pm.Types
-import Pm.Vault (vaultIgnoreGuard)
 import Pm.Win (volumeFsType)
 
 -- | 写盘命令共有的两段式开关（DESIGN.md §5）。
@@ -93,7 +93,6 @@ executePlanNow' plan = do
         defaultExecEnv
           { eeDoneSync = if plKind plan == "backup" then Barrier else Buffered
           , eeExpectRootId = plRootId plan
-          , eePreflight = rootPreflight
           }
   r <- execPlan env plan
   case r of
@@ -115,18 +114,6 @@ executePlanNow' plan = do
   isBad (OConflict _) = True
   isBad (OFailed _) = True
   isBad _ = False
-
--- | P3b-4 评审 #3：vault root 的计划在执行锁内（journal/tmp/trash 任何
--- 写入前）重检 I11——计划生成与 apply 之间 .gitignore 可能被改；journal
--- 一旦在未忽略的 git 工作树里出现就是污染。非 vault root 直接放行。
-rootPreflight :: FilePath -> IO (Either String ())
-rootPreflight root = do
-  minfo <- readRootInfo root
-  case minfo of
-    Just info | riRole info == RoleVault -> do
-      g <- vaultIgnoreGuard root
-      pure (either (\m -> Left (m <> "（apply 执行期重检，整批拒绝）")) Right g)
-    _ -> pure (Right ())
 
 savePlanAndMaybeRun :: GoOpts -> Plan -> IO Int
 savePlanAndMaybeRun = savePlanAndMaybeRunWith pure
@@ -159,16 +146,20 @@ bindExecRoot cfg plan rid = do
   mVault <- case cfgVaultPath cfg of
     Nothing -> pure Nothing
     Just vp -> fmap ((,) vp) <$> readRootInfo vp
-  eBack <- discoverBackupRoot cfg
-  mBack <- case eBack of
-    Left _ -> pure Nothing
-    Right bp -> fmap ((,) bp) <$> readRootInfo bp
+  -- P3b-5 复审 #6：备份槽取**全部**命中（整盘克隆的两块盘都进候选集）；
+  -- 候选去重按 canonicalizePath 的真实文件系统身份（解析 junction/大小写），
+  -- 不再无条件字符串小写化。
+  eBack <- discoverBackupRoots cfg
+  backHits <- case eBack of
+    Left _ -> pure []
+    Right (_, ps) -> forM ps $ \bp -> fmap ((,) bp) <$> readRootInfo bp
   let hit role m = [p | Just (p, i) <- [m], riId i == rid, riRole i == role]
-      cands =
+      cands0 =
         [(p, "主库" :: String) | p <- hit RoleMain mMain]
           <> [(p, "vault") | p <- hit RoleVault mVault]
-          <> [(p, "备份盘") | p <- hit RoleBackup mBack]
-      uniq = nubBy ((==) `on` (map toLower . normalise . fst)) cands
+          <> [(p, "备份盘") | m <- backHits, p <- hit RoleBackup m]
+  canon <- forM cands0 $ \(p, l) -> (\c -> (c, (p, l))) <$> canonicalizePath p
+  let uniq = map snd (nubBy ((==) `on` fst) canon)
   case uniq of
     [(p, label)] -> do
       when (p /= plRootPath plan) $

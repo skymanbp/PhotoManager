@@ -11,12 +11,13 @@ import Control.Monad (when)
 import Data.IORef (atomicModifyIORef', newIORef)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, renameDirectory, setModificationTime)
 import System.FilePath ((</>))
 import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog
+import Pm.Config (writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec
 import Pm.Hash
@@ -419,12 +420,13 @@ injectionTests =
             jAppend j Barrier (JIntent "p#0" (OpRename "old.txt" "new.txt" (FpFileSha "aa")) now)
           rows <- doctorRows root
           assertBool ("expected R3 in " <> show rows) (("R3", Warn) `elem` rows)
-    , testCase "P3b-4 #1: supersede 复位目标被占 → 占位者隔离(~displaced) + victim 复位" $
+    , testCase "P3b-4 #1 / P3b-5: 复位目标被占 → 占位者隔离(~displaced-N) + victim 复位；重跑用新槽位；undo 不含内部事务" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"
+              victim = root </> "landscape" </> "d.jpg"
           createDirectoryIfMissing True (root </> "landscape")
-          writeFile (root </> "landscape" </> "d.jpg") "OLDBYTES"
-          oldSha <- sha256File (root </> "landscape" </> "d.jpg")
+          writeFile victim "OLDBYTES"
+          oldSha <- sha256File victim
           op <- mkCopyOp (dir </> "s.jpg") "NEWBYTES" ("landscape" </> "d.jpg")
           plan <-
             mkGroupPlanIO
@@ -433,29 +435,81 @@ injectionTests =
               , (op, Just 0)
               ]
           -- 竞态注入：Copy 落位 rename 前，第三方抢占目标路径。回滚必须
-          -- 先隔离占位者（journaled，进 <pid>~displaced/）再复位 victim，
+          -- 先隔离占位者（journaled，进 <pid>~displaced-N/）再复位 victim，
           -- 而不是被 I5 卡死留下 victim 在 trash（codex P3b-4 #1 反例）。
           let env =
                 defaultExecEnv
-                  { eeCheckpoint = \c -> when (c == CpCopyAfterFlush) $
-                      writeFile (root </> "landscape" </> "d.jpg") "INTERLOPER"
+                  { eeCheckpoint = \c -> when (c == CpCopyAfterFlush) $ writeFile victim "INTERLOPER"
                   }
-          r <- execPlan env plan
-          case r of
+              displaced n =
+                trashDir root </> (T.unpack (plId plan) <> "~displaced-" <> show (n :: Int)) </> "landscape" </> "d.jpg"
+          r1 <- execPlan env plan
+          case r1 of
             Right [(_, OFailed m1), (_, OConflict m2)] -> do
               assertBool ("复位成功应入注记: " <> m2) ("旧目标已自动复位" `elemSubstr` m2)
-              assertBool ("占位隔离应入注记: " <> m2) ("~displaced" `elemSubstr` m2)
+              assertBool ("占位隔离应入注记: " <> m2) ("~displaced-1" `elemSubstr` m2)
               assertBool ("组未生效标注: " <> m1) ("组未生效" `elemSubstr` m1)
-            other -> assertFailure ("expected [OFailed, OConflict], got " <> show other)
-          back <- readFile (root </> "landscape" </> "d.jpg")
-          back @?= "OLDBYTES" -- victim 已复位到原位
-          disp <-
-            readFile
-              (trashDir root </> (T.unpack (plId plan) <> "~displaced") </> "landscape" </> "d.jpg")
-          disp @?= "INTERLOPER" -- 占位者进独立隔离区，一个字节没丢
-          -- doctor 对账干净：位移隔离与复位 rename 都有 Intent+Done
+            other -> assertFailure ("round1: expected [OFailed, OConflict], got " <> show other)
+          readFile victim >>= (@?= "OLDBYTES") -- victim 已复位到原位
+          readFile (displaced 1) >>= (@?= "INTERLOPER") -- 占位者进独立隔离区，一个字节没丢
+          -- P3b-5 复审 #1：同计划重跑再次被占 → 用槽位 2，不与上次残留撞车，
+          -- victim 仍复位
+          r2 <- execPlan env plan
+          case r2 of
+            Right [(_, OFailed _), (_, OConflict m2)] ->
+              assertBool ("重跑应用槽位 2: " <> m2) ("~displaced-2" `elemSubstr` m2)
+            other -> assertFailure ("round2: " <> show other)
+          readFile victim >>= (@?= "OLDBYTES")
+          readFile (displaced 2) >>= (@?= "INTERLOPER")
+          -- doctor 对账无 Bad；undo 序列不含 ~d/~r 内部事务（两次 q 均被 ~r 抵消）
           rows <- doctorRows root
           [row | row@(_, sev) <- rows, sev == Bad] @?= []
+          ur <- buildUndoPlan root 1
+          case ur of
+            Left msg -> assertBool msg ("没有可撤销" `elemSubstr` msg)
+            Right p -> assertFailure ("expected no undoable ops, got " <> show (map piOp (plItems p)))
+    , testCase "P3b-5 #3 内核自卫: RoleVault root 缺 .pm/ ignore → execPlan defaultExecEnv 亦拒绝（I11 不可绕过）" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "vault"
+          createDirectoryIfMissing True (root </> ".git")
+          writeFile (root </> ".gitignore") "_site/\n"
+          now <- getCurrentTime
+          writeRootInfo root (RootInfo "vault-rid" RoleVault now Nothing)
+          op <- mkCopyOp (dir </> "s.jpg") "X" ("landscape" </> "x.jpg")
+          plan0 <- mkPlanIO root [op]
+          r <- execPlan defaultExecEnv plan0 {plRootId = Just "vault-rid"}
+          case r of
+            Left msg -> assertBool msg ("I11" `elemSubstr` msg)
+            Right _ -> assertFailure "kernel must refuse a vault root whose .pm/ is not ignored"
+          jEx <- doesFileExist (journalPath root)
+          jEx @?= False -- journal 未创建：拒绝发生在任何写入之前
+    , testCase "P3b-5 B2 dirFingerprint 递归：子目录内文件变化改变指纹；目录自身改名不变" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let d = dir </> "ev"
+          createDirectoryIfMissing True (d </> "sub")
+          writeFile (d </> "a.arw") "AAAA"
+          writeFile (d </> "sub" </> "b.xmp") "BBBB"
+          setModificationTime (d </> "sub" </> "b.xmp") t0
+          fp1 <- dirFingerprint d
+          -- 深层文件同名同大小、内容与 mtime 变化 → 旧指纹（只看直接子项）不变，新指纹必变
+          writeFile (d </> "sub" </> "b.xmp") "CCCC"
+          fp2 <- dirFingerprint d
+          assertBool "递归指纹应随子目录文件变化" (fp1 /= fp2)
+          renameDirectory d (dir </> "ev2")
+          fp3 <- dirFingerprint (dir </> "ev2")
+          fp3 @?= fp2 -- undo 前提：改名不改指纹
+    , testCase "P3b-5 #1 doctor: Q-DONE-LOST 补记前核 sha——trash 内容不符 → Bad 且 --repair 不盲补" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+          createDirectoryIfMissing True (trashDir root </> "p")
+          writeFile (trashDir root </> "p" </> "v.jpg") "WRONG"
+          now <- getCurrentTime
+          withJournal root $ \j -> jAppend j Barrier (JIntent "p#0" (OpQuarantine "v.jpg" "beefbeef" "t") now)
+          rows <- doctorRows root
+          assertBool ("expected Bad Q-DONE-LOST in " <> show rows) (("Q-DONE-LOST", Bad) `elem` rows)
+          _ <- runDoctor root (DoctorOpts False True)
+          es <- journalEntries root
+          filter isDone es @?= []
     , testCase "torn tail: 末行半截 JSON → TORN warning" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"

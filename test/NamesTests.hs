@@ -3,6 +3,7 @@
 -- | P3b-2/3：pm names（Scheme B→A 统一）与 pm versions（版本组报告）。
 module NamesTests (namesTests) where
 
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isInfixOf)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist)
 import System.FilePath (takeDirectory, (</>))
@@ -28,6 +29,7 @@ namesTests =
     , testCase "restoreMonth：唯一/缺失/歧义 + case-fold 地点" caseRestore
     , testCase "namesPlan：年份夹不符与同批撞名全降裁决" caseNamesPlan
     , testCase "runNames E2E：Scheme B 目录改名落盘 + undo 完整回滚" caseNamesE2E
+    , testCase "P3b-5 B1/B3：主库路径是 backup root → 拒绝出计划；目标被文件占位 → 降裁决" caseNamesGuards
     , testCase "normalizeStem：§1.1 后缀清单 + 迭代不动点" caseStem
     , testCase "versionsReport：设计内成片↔相册对排除；同目录版本组；真重复上报" caseVersions
     ]
@@ -108,6 +110,27 @@ caseNamesE2E = withSystemTempDirectory "pm-names" $ \tmp -> do
   (oldEx2, newEx2) @?= (True, False)
   inside2 <- readFile (evOld </> "x.ARW")
   inside2 @?= "RAWBYTES"
+
+caseNamesGuards :: IO ()
+caseNamesGuards = withSystemTempDirectory "pm-names" $ \tmp -> do
+  -- B1：配置的「主库」其实是 backup root → 不出计划、不执行
+  let bad = tmp </> "bak"
+  createDirectoryIfMissing True (bad </> "Raw" </> "2025" </> "RAW-2025-Winter-Alaska")
+  createDirectoryIfMissing True (bad </> "成片" </> "25-01-Alaska")
+  writeRootInfo bad (RootInfo "bk" RoleBackup t0 Nothing)
+  ran <- newIORef False
+  code <- runNames (\_ -> writeIORef ran True >> pure 0) (mkMainCfg bad)
+  code @?= 2
+  readIORef ran >>= (@?= False)
+  -- B3：目标路径被普通文件占用 → NEEDS-DECISION，不出计划（原先只查目录会漏）
+  let root = tmp </> "main"
+  createDirectoryIfMissing True (root </> "Raw" </> "2023" </> "23-12-Turkey")
+  writeF (root </> "Raw" </> "2023" </> "23-12-Turkey-Raw") "a file, not a dir"
+  writeRootInfo root (RootInfo "m" RoleMain t0 Nothing)
+  ran2 <- newIORef False
+  code2 <- runNames (\_ -> writeIORef ran2 True >> pure 0) (mkMainCfg root)
+  code2 @?= 1
+  readIORef ran2 >>= (@?= False)
 
 caseStem :: IO ()
 caseStem = do
