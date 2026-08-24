@@ -133,35 +133,44 @@ savePlanAndMaybeRunWith preExec go plan = do
 -- P2.3（复审三轮新发现）：绑定按**身份**而非计划 kind——doctor 在备份 root
 -- 上生成的 C5 修复计划 kind 是 doctor-c5-quarantine，按 kind 分支会把它错绑
 -- 到主库（fail-closed 会拒绝，但计划就永远执行不了）。规则：先比主库 UUID，
--- 不中再发现备份盘比对；都不中 → 拒绝。
+-- 再比 vault root（P3b：固定路径，无发现流程），最后发现备份盘比对；
+-- 都不中 → 拒绝。
 bindExecRoot :: Config -> Plan -> T.Text -> IO (Either String Plan)
 bindExecRoot cfg plan rid = do
   let mroot = cfgMainPath cfg
   mMain <- readRootInfo mroot
+  mVault <- case cfgVaultPath cfg of
+    Nothing -> pure Nothing
+    Just vp -> fmap ((,) vp) <$> readRootInfo vp
   if (riId <$> mMain) == Just rid
     then pure (Right plan {plRootPath = mroot})
-    else do
-      er <- discoverBackupRoot cfg
-      case er of
-        Right broot -> do
-          minfo <- readRootInfo broot
-          case minfo of
-            Just info
-              | riId info == rid -> do
-                  when (broot /= plRootPath plan) $
-                    putStrLn ("· 备份盘挂载点已变: " <> plRootPath plan <> " → " <> broot <> "（按 UUID 重新绑定）")
-                  pure (Right plan {plRootPath = broot})
-            _ ->
-              pure (Left ("计划 rootId 与主库、已发现备份盘均不符（" <> T.unpack rid <> "），拒绝执行"))
-        Left msg ->
-          pure
-            ( Left
-                ( "计划 rootId 与主库不符（"
-                    <> T.unpack rid
-                    <> "），备份盘也不可用: "
-                    <> msg
-                )
-            )
+    else case mVault of
+      Just (vp, vinfo) | riId vinfo == rid -> do
+        when (vp /= plRootPath plan) $
+          putStrLn ("· vault 路径与计划记录不同: " <> plRootPath plan <> " → " <> vp <> "（按 UUID 重新绑定）")
+        pure (Right plan {plRootPath = vp})
+      _ -> do
+        er <- discoverBackupRoot cfg
+        case er of
+          Right broot -> do
+            minfo <- readRootInfo broot
+            case minfo of
+              Just info
+                | riId info == rid -> do
+                    when (broot /= plRootPath plan) $
+                      putStrLn ("· 备份盘挂载点已变: " <> plRootPath plan <> " → " <> broot <> "（按 UUID 重新绑定）")
+                    pure (Right plan {plRootPath = broot})
+              _ ->
+                pure (Left ("计划 rootId 与主库、vault、已发现备份盘均不符（" <> T.unpack rid <> "），拒绝执行"))
+          Left msg ->
+            pure
+              ( Left
+                  ( "计划 rootId 与主库、vault 均不符（"
+                      <> T.unpack rid
+                      <> "），备份盘也不可用: "
+                      <> msg
+                  )
+              )
 
 -- | 评审 cx-3：clean 计划在**每次执行前**逐项重验三副本（当前 catalog 定位
 -- 见证 + 真实重 hash），不过的降级 NEEDS-DECISION——计划生成与执行之间的

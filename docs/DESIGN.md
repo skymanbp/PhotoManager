@@ -454,6 +454,17 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - 结束打印**显式路径**的 git 步骤：`git add landscape portrait urban`（明确
   禁止 `git add -A`/`git add .`，防把 `.pm/` 等误提交）；pm 不执行 git（I9）。
 - **photos.json 不在 pm 写域**：类别判定/坐标是 AI 视觉判断，属 `/photo-inbox`。
+- **P3b-1 落锤（2026-08-23）**：CLI 形态 `pm vault push [--category C FILES…]`
+  ——NEW 只推显式点名 + 显式类目的文件（无类目零猜测）；DRIFT 生成
+  NEEDS-DECISION 项，裁决复用 `pm resolve --keep src`（§6.5 supersede，
+  victim 进 vault 侧 `.pm/trash/`）；RENAME/MISSING 只报告。I11 守卫为
+  **文本级** `.gitignore` 含 `.pm/` 行检查（pm 不跑 git，I9）+ role 校验，
+  fail-closed；vault root 由首次生成计划时建立（用户已批准 ignore 行，
+  展示集仓 commit 2d81d36）。执行绑定 bindExecRoot 序：主库 → vault
+  （固定路径无发现流程）→ 备份盘；doctor/trash/undo 增 `--vault` 开关。
+  真实库只读验证：RENAME 项命中 `BLOCKED(photos.json:208)`（实测该行
+  正是 `_DSC9013_2.JPG` 的 Pages URL），15 NEW 待分类不出计划，vault
+  目录零写入。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 

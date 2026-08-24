@@ -10,6 +10,8 @@ module Pm.Commands
   , ApplyOpts (..)
   , ResolveOpts (..)
   , BackupCmd (..)
+  , RootSel (..)
+  , rootSel
   , withCfg
   , pickRoot
   , runInit
@@ -51,6 +53,7 @@ import Pm.Scan
 import Pm.Trash
 import Pm.Types
 import Pm.Undo (buildUndoPlan)
+import Pm.Vault (computeVault, gitStepsLines, planCategories)
 import Pm.Win (volumeFsType)
 
 data InitOpts = InitOpts
@@ -92,14 +95,33 @@ withCfg act = do
     Left e -> putStrLn e >> pure 2
     Right cfg -> act cfg
 
--- | 主库 root，或（--backup 时）经发现流程找到的备份 root。
-pickRoot :: Config -> Bool -> IO (Either (String, Int) FilePath)
-pickRoot cfg False = pure (Right (cfgMainPath cfg))
-pickRoot cfg True = do
+-- | doctor\/trash\/undo 的作用 root：主库（默认）、备份盘（UUID 发现流程）
+-- 或 vault（P3b：固定路径 + role 校验，root 由首次 vault push 建立）。
+data RootSel = SelMain | SelBackup | SelVault
+  deriving (Show, Eq)
+
+rootSel :: Bool -> Bool -> Either String RootSel
+rootSel True True = Left "--backup 与 --vault 只能二选一"
+rootSel True False = Right SelBackup
+rootSel False True = Right SelVault
+rootSel False False = Right SelMain
+
+pickRoot :: Config -> RootSel -> IO (Either (String, Int) FilePath)
+pickRoot cfg SelMain = pure (Right (cfgMainPath cfg))
+pickRoot cfg SelBackup = do
   er <- discoverBackupRoot cfg
   pure $ case er of
     Left msg -> Left (msg, 1)
     Right p -> Right p
+pickRoot cfg SelVault = case cfgVaultPath cfg of
+  Nothing -> pure (Left ("配置无 vault 路径 → pm init --main <主库> --vault <展示集路径>", 2))
+  Just vp -> do
+    minfo <- readRootInfo vp
+    pure $ case minfo of
+      Just info
+        | riRole info == RoleVault -> Right vp
+        | otherwise -> Left ("该路径不是 vault root（role=" <> show (riRole info) <> "）", 2)
+      Nothing -> Left ("vault root 尚未建立（首次 pm vault push 时按 I11 创建）", 2)
 
 -- ─── init / scan ────────────────────────────────────────────────────────────
 
@@ -263,33 +285,43 @@ runTrash cfg tc root = do
 
 -- ─── undo / apply / resolve ─────────────────────────────────────────────────
 
-runUndoCmd :: Int -> Config -> IO Int
-runUndoCmd n cfg = do
-  r <- buildUndoPlan (cfgMainPath cfg) n
-  case r of
-    Left e -> putStrLn e >> pure 2
-    Right plan -> do
-      fp <- savePlan plan
-      mapM_ putStrLn (renderPlan plan)
-      putStrLn ("计划已存 " <> fp)
-      putStrLn ("执行: pm apply " <> T.unpack (plId plan))
-      pure 0
+runUndoCmd :: Int -> RootSel -> Config -> IO Int
+runUndoCmd n sel cfg = do
+  eroot <- pickRoot cfg sel
+  case eroot of
+    Left (msg, code) -> putStrLn msg >> pure code
+    Right root -> do
+      r <- buildUndoPlan root n
+      case r of
+        Left e -> putStrLn e >> pure 2
+        Right plan -> do
+          fp <- savePlan plan
+          mapM_ putStrLn (renderPlan plan)
+          putStrLn ("计划已存 " <> fp)
+          putStrLn ("执行: pm apply " <> T.unpack (plId plan))
+          pure 0
 
--- | 计划可能存在主库或备份 root 的 .pm/plans 下；先主库，找不到再试备份盘。
+-- | 计划可能存在主库、vault 或备份 root 的 .pm/plans 下；按此序查找。
 loadPlanAnyRoot :: Config -> T.Text -> IO (Either String Plan)
 loadPlanAnyRoot cfg pid = do
   r <- loadPlan (cfgMainPath cfg) pid
   case r of
     Right p -> pure (Right p)
     Left mainErr -> do
-      eb <- discoverBackupRoot cfg
-      case eb of
-        Left _ -> pure (Left mainErr)
-        Right broot -> do
-          rb <- loadPlan broot pid
-          pure $ case rb of
-            Right p -> Right p
-            Left _ -> Left (mainErr <> "（备份 root 也没有）")
+      rv <- case cfgVaultPath cfg of
+        Nothing -> pure (Left mainErr)
+        Just vp -> loadPlan vp pid
+      case rv of
+        Right p -> pure (Right p)
+        Left _ -> do
+          eb <- discoverBackupRoot cfg
+          case eb of
+            Left _ -> pure (Left mainErr)
+            Right broot -> do
+              rb <- loadPlan broot pid
+              pure $ case rb of
+                Right p -> Right p
+                Left _ -> Left (mainErr <> "（vault/备份 root 也没有）")
 
 runApply :: ApplyOpts -> Config -> IO Int
 runApply o cfg = do
@@ -325,6 +357,12 @@ runApply o cfg = do
                       (Just mc, Just bc) ->
                         refreshBackupCache cfg (plRootPath plan3) bc (backupDiff mc bc)
                       _ -> pure ()
+                  when (plKind plan3 == "vault-push") $ do
+                    when (code == 0) $
+                      mapM_ putStrLn (gitStepsLines (plRootPath plan3) (plId plan3) (planCategories plan3))
+                    -- 刷新 vault 缓存（computeVault 顺带写缓存；结果此处不用）
+                    _ <- computeVault True cfg
+                    pure ()
                   pure code
 
 runResolve :: ResolveOpts -> Config -> IO Int

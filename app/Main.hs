@@ -7,26 +7,33 @@ module Main (main) where
 import Options.Applicative
 import System.Exit (exitSuccess, exitWith, ExitCode (..))
 
-import Pm.Cli (GoOpts (..))
+import Pm.Cli (GoOpts (..), savePlanAndMaybeRun)
 import Pm.Commands
 import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
 import Pm.Status (StatusOpts (..), runStatus)
-import Pm.Vault (runVaultStatus)
+import Pm.Vault (runVaultPush, runVaultStatus)
 import Pm.Win (setupConsole)
 
 data Cmd
   = CmdInit InitOpts
   | CmdScan ScanCmd
   | CmdStatus StatusOpts
-  | CmdDoctor DoctorOpts Bool -- Bool = --backup (体检备份 root)
-  | CmdTrash TrashCmd Bool
-  | CmdUndo Int
+  | CmdDoctor DoctorOpts Bool Bool -- --backup / --vault
+  | CmdTrash TrashCmd Bool Bool
+  | CmdUndo Int Bool Bool
   | CmdApply ApplyOpts
   | CmdResolve ResolveOpts
   | CmdImport GoOpts
   | CmdBackup BackupCmd
   | CmdClean GoOpts -- clean staging
   | CmdVaultStatus Bool -- --json（sync_photos.py 兼容输出）
+  | CmdVaultPush GoOpts (Maybe String) [FilePath] -- --category + FILES
+
+-- | --backup/--vault 二选一校验后进入命令体。
+withSel :: Bool -> Bool -> (RootSel -> IO Int) -> IO Int
+withSel bku vlt act = case rootSel bku vlt of
+  Left m -> putStrLn m >> pure 2
+  Right sel -> act sel
 
 main :: IO ()
 main = do
@@ -39,8 +46,8 @@ run :: Cmd -> IO Int
 run (CmdInit o) = runInit o
 run (CmdScan o) = withCfg (runScanCmd o)
 run (CmdStatus o) = withCfg (\cfg -> runStatus cfg o)
-run (CmdDoctor o onBackup) = withCfg $ \cfg -> do
-  eroot <- pickRoot cfg onBackup
+run (CmdDoctor o bku vlt) = withCfg $ \cfg -> withSel bku vlt $ \sel -> do
+  eroot <- pickRoot cfg sel
   case eroot of
     Left (msg, code) -> putStrLn msg >> pure code
     Right root -> do
@@ -49,12 +56,12 @@ run (CmdDoctor o onBackup) = withCfg $ \cfg -> do
         then putStrLn "✓ doctor: 无发现"
         else mapM_ (putStrLn . renderFinding) findings
       pure code
-run (CmdTrash tc onBackup) = withCfg $ \cfg -> do
-  eroot <- pickRoot cfg onBackup
+run (CmdTrash tc bku vlt) = withCfg $ \cfg -> withSel bku vlt $ \sel -> do
+  eroot <- pickRoot cfg sel
   case eroot of
     Left (msg, code) -> putStrLn msg >> pure code
     Right root -> runTrash cfg tc root
-run (CmdUndo n) = withCfg (runUndoCmd n)
+run (CmdUndo n bku vlt) = withCfg $ \cfg -> withSel bku vlt $ \sel -> runUndoCmd n sel cfg
 run (CmdApply o) = withCfg (runApply o)
 run (CmdResolve o) = withCfg (runResolve o)
 run (CmdImport go) = withCfg (runImport go)
@@ -62,6 +69,7 @@ run (CmdBackup (BackupInit p)) = withCfg (runBackupInit p)
 run (CmdBackup (BackupRun go mworkers)) = withCfg (runBackupRun go mworkers)
 run (CmdClean go) = withCfg (runClean go)
 run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
+run (CmdVaultPush go mcat fs) = withCfg (runVaultPush (savePlanAndMaybeRun go) mcat fs)
 
 parserInfo :: ParserInfo Cmd
 parserInfo =
@@ -70,7 +78,9 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    infoOption "pm 0.3.0 (P3a)" (long "version" <> help "打印版本")
+    infoOption "pm 0.3.1 (P3b)" (long "version" <> help "打印版本")
+  backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
+  vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =
     hsubparser
       ( command "init" (info initP (progDesc "生成配置 + 主库 root 标识"))
@@ -131,6 +141,16 @@ parserInfo =
               (CmdVaultStatus <$> switch (long "json" <> help "sync_photos.py 兼容的 JSON 输出（六键值形状逐字段一致 + unpushable）"))
               (progDesc "相册 ↔ vault 六态差异（只读；退出码 0/1/2 同 sync_photos.py）")
           )
+          <> command
+            "push"
+            ( info
+                ( CmdVaultPush
+                    <$> goOpts
+                    <*> optional (strOption (long "category" <> metavar "CAT" <> help "landscape|portrait|urban——推送 NEW 文件的类目（CLI 无法看图，类目由你定）"))
+                    <*> many (strArgument (metavar "FILES..." <> help "要推送的 NEW 文件名（相册内文件名，须配 --category）"))
+                )
+                (progDesc "NEW→拷入 vault 类目；DRIFT→生成裁决计划（resolve --keep src 走 supersede）；结束打印显式 git 步骤（pm 不执行 git，I9）")
+            )
       )
   doctorP =
     CmdDoctor
@@ -138,7 +158,8 @@ parserInfo =
               <$> switch (long "deep" <> help "全量重 hash 索引条目（慢，介质级验证）")
               <*> switch (long "repair" <> help "应用安全闭环：补记 Done / 清自建 tmp / 生成 C5 隔离计划")
           )
-      <*> switch (long "backup" <> help "体检备份 root（需插盘）")
+      <*> backupSw
+      <*> vaultSw
   trashP =
     CmdTrash
       <$> hsubparser
@@ -150,8 +171,13 @@ parserInfo =
                   (progDesc "最终清除隔离区已登记条目（逐项列出；clean-staging 条目须再过三副本屏障）")
               )
         )
-      <*> switch (long "backup" <> help "操作备份 root 的隔离区（需插盘）")
-  undoP = CmdUndo <$> option auto (long "last" <> metavar "N" <> value 1 <> help "撤销最近 N 个已完成操作（默认 1；仅主库）")
+      <*> backupSw
+      <*> vaultSw
+  undoP =
+    CmdUndo
+      <$> option auto (long "last" <> metavar "N" <> value 1 <> help "撤销最近 N 个已完成操作（默认 1）")
+      <*> backupSw
+      <*> vaultSw
   applyP =
     fmap CmdApply $
       ApplyOpts

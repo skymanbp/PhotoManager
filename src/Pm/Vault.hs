@@ -1,12 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | 相册 ↔ vault 展示集差异（DESIGN.md §10.1）。六态语义与 JSON 值形状逐字段
--- 兼容 sync_photos.py（docs\/specs\/sync-photos-legacy-spec.md 是逐行为基线）；
--- UNPUSHABLE 是 pm 新增第七态：.png 在 status 里显式可见（push 写路径拒收），
--- 不改变六态归类也不影响退出码。
+-- | 相册 ↔ vault 展示集：status 六态差异（DESIGN.md §10.1）与 push 写路径
+-- （§10.2）。status 六态语义与 JSON 值形状逐字段兼容 sync_photos.py
+-- （docs\/specs\/sync-photos-legacy-spec.md 是逐行为基线）；UNPUSHABLE 是 pm
+-- 新增第七态：.png 在 status 里显式可见（push 写路径拒收），不改变六态归类
+-- 也不影响退出码。
 --
--- I11：vault 是 git 工作树——本模块对 vault 目录**零写入**；vault 侧 sha
--- 缓存放主库 `.pm\/vault-cache\/`（比照 Pm.Backup 的备份盘缓存先例）。
+-- I11：vault 是 git 工作树——status 对 vault 目录**零写入**（vault 侧 sha
+-- 缓存放主库 `.pm\/vault-cache\/`）；push 建 vault root 前先验 `.gitignore`
+-- 已覆盖 `.pm\/`（用户批准 2026-08-23），验不过 fail-closed。
+-- I9：pm 绝不执行 git——push 结束打印显式路径的 git 步骤（禁 -A）。
 module Pm.Vault
   ( VaultDiff (..)
   , vaultDiff
@@ -15,31 +18,42 @@ module Pm.Vault
   , renderVaultJson
   , VaultCacheMeta (..)
   , readVaultCacheMeta
+  , VaultReport (..)
+  , computeVault
+  , ensureVaultRoot
+  , gitStepsLines
+  , planCategories
   , runVaultStatus
+  , runVaultPush
   ) where
 
-import Control.Monad (unless)
+import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson
 import qualified Data.Aeson.Encoding as AE
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSLC
 import Data.Char (toLower)
-import Data.List (partition, sort)
+import Data.List (nub, partition, sort)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
-import System.Directory (doesDirectoryExist, listDirectory)
-import System.FilePath (takeExtension, (</>))
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
+import System.FilePath (splitDirectories, takeExtension, (</>))
 import Text.Printf (printf)
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (Config (..), pmDir, readJsonMaybe, writeSideCache)
+import Pm.Config (Config (..), pmDir, readJsonMaybe, readRootInfo, writeRootInfo, writeSideCache, freshRootId)
 import Pm.Hash (StatSnap (..), sha256File, statSnap)
+import Pm.Op
+import Pm.Plan
 import Pm.Types
+import Pm.Win (volumeFsType)
 
 -- ─── 纯核心：legacy 算法逐行复刻 ────────────────────────────────────────────
 
@@ -66,6 +80,10 @@ fixedCategories = ["landscape", "portrait", "urban"]
 -- legacy 字面六拼写会静默丢 .Jpg\/.Png 等，pm 有意修复为 case-fold）。
 photoExtFold :: FilePath -> Bool
 photoExtFold p = map toLower (takeExtension p) `elem` [".jpg", ".jpeg", ".png"]
+
+-- | push 写路径只收 jpg\/jpeg（vault 硬规则 3；.png = UNPUSHABLE）。
+pushableExt :: FilePath -> Bool
+pushableExt p = map toLower (takeExtension p) `elem` [".jpg", ".jpeg"]
 
 -- | 核心 diff。输入：源侧 名→sha；vault 侧按类目次序的 (类目, 名→sha)。
 -- 次序契约与 legacy 逐点对应：new\/missing 候选按名字典序（Map 键序 =
@@ -210,7 +228,7 @@ listFlatPhotos dir = do
 
 -- | 取一个文件的 sha：stat 与缓存条目一致 → 复用；否则真实重读，并用
 -- 双 stat 防撕裂（hash 期间文件在变就重来，三轮不稳则如实告警后采用
--- 末次结果且不入缓存）。返回 (sha, 可入缓存的条目)。
+-- 末次结果且不入缓存\/不入 push 计划）。返回 (sha, 可入缓存的条目)。
 shaViaCache :: Map FilePath Entry -> FilePath -> FilePath -> IO (Text, Maybe Entry)
 shaViaCache cache rel abs' = do
   pre <- statSnap abs'
@@ -245,23 +263,31 @@ shaViaCache cache rel abs' = do
             putStrLn ("  ⚠ 文件在读取期间持续变化（结果按末次读取，不入缓存）: " <> abs')
             pure (sha, Nothing)
 
--- ─── 命令入口：pm vault status [--json] ─────────────────────────────────────
+-- ─── 共享计算核心（status 与 push 同源；每次运行顺带刷新缓存） ──────────────
 
--- | 退出码与 legacy 同构：0 同步 \/ 1 有差异（duplicate、unpushable 不算）\/
--- 2 路径错误。
-runVaultStatus :: Bool -> Config -> IO Int
-runVaultStatus asJson cfg = case cfgVaultPath cfg of
-  Nothing -> do
-    putStrLn "配置无 vault 路径 → pm init --main <主库> --vault <展示集路径>（或手动补 config.toml 的 [vault] path）"
-    pure 2
+data VaultReport = VaultReport
+  { vrSrcDir, vrVaultDir :: FilePath
+  , vrSrcCount, vrVaultCount :: Int
+  , vrDiff :: VaultDiff
+  , vrUnpushable :: [(FilePath, String)]
+  , vrSrcMeta :: Map FilePath Entry
+    -- ^ 源名 → Entry（size\/mtime\/sha，push 计划的执行前提；读取不稳的
+    -- 文件不在此表 → 不可入计划）
+  }
+
+-- | Left (消息, 退出码)。quiet 抑制告警行（--json 输出面要纯净）。
+computeVault :: Bool -> Config -> IO (Either (String, Int) VaultReport)
+computeVault quiet cfg = case cfgVaultPath cfg of
+  Nothing ->
+    pure (Left ("配置无 vault 路径 → pm init --main <主库> --vault <展示集路径>（或手动补 config.toml 的 [vault] path）", 2))
   Just vaultDir -> do
     let root = cfgMainPath cfg
         srcDir = root </> "相册"
     okSrc <- doesDirectoryExist srcDir
     okVault <- doesDirectoryExist vaultDir
     case (okSrc, okVault) of
-      (False, _) -> putStrLn ("ERROR: source missing: " <> srcDir) >> pure 2
-      (_, False) -> putStrLn ("ERROR: vault missing: " <> vaultDir) >> pure 2
+      (False, _) -> pure (Left ("ERROR: source missing: " <> srcDir, 2))
+      (_, False) -> pure (Left ("ERROR: vault missing: " <> vaultDir, 2))
       _ -> do
         (mcat, _) <- loadCatalog root
         mVCache <- readVaultCacheCatalog root
@@ -270,10 +296,9 @@ runVaultStatus asJson cfg = case cfgVaultPath cfg of
             resolve cache rel abs' n = do
               (sha, me) <- shaViaCache cache rel abs'
               pure (n, sha, me)
-        -- 源侧：平铺 相册\/，sha 优先复用主库 catalog（键 = 相册\名）
+            warn s = unless quiet (putStrLn s)
         (srcNames, srcSubdirs) <- listFlatPhotos srcDir
         srcTriples <- mapM (\n -> resolve mainCache ("相册" </> n) (srcDir </> n) n) srcNames
-        -- vault 侧：固定三类目 + 未知目录告警
         (_, vaultTop) <- listFlatPhotos vaultDir
         let knownAux = ["_inbox", "_site", "scripts"]
             unknownDirs =
@@ -283,18 +308,13 @@ runVaultStatus asJson cfg = case cfgVaultPath cfg of
               , dn `notElem` knownAux
               , take 1 dn /= "."
               ]
-        perCat <- mapM
-          ( \cat -> do
-              (names, subdirs) <- listFlatPhotos (vaultDir </> cat)
-              unless asJson $
-                mapM_ (\dn -> putStrLn ("  ⚠ vault 类目下有子目录（不递归）: " <> (cat </> dn))) subdirs
-              ps <- mapM (\n -> resolve vaultCache (cat </> n) (vaultDir </> cat </> n) n) names
-              pure (cat, ps)
-          )
-          fixedCategories
-        unless asJson $ do
-          mapM_ (\dn -> putStrLn ("  ⚠ vault 未知目录（未纳入比对）: " <> dn)) unknownDirs
-          mapM_ (\dn -> putStrLn ("  ⚠ 相册下有子目录（平铺语义，不递归）: " <> dn)) srcSubdirs
+        perCat <- forM fixedCategories $ \cat -> do
+          (names, subdirs) <- listFlatPhotos (vaultDir </> cat)
+          mapM_ (\dn -> warn ("  ⚠ vault 类目下有子目录（不递归）: " <> (cat </> dn))) subdirs
+          ps <- mapM (\n -> resolve vaultCache (cat </> n) (vaultDir </> cat </> n) n) names
+          pure (cat, ps)
+        mapM_ (\dn -> warn ("  ⚠ vault 未知目录（未纳入比对）: " <> dn)) unknownDirs
+        mapM_ (\dn -> warn ("  ⚠ 相册下有子目录（平铺语义，不递归）: " <> dn)) srcSubdirs
         let srcShas = Map.fromList [(n, sha) | (n, sha, _) <- srcTriples]
             vaultShas = [(cat, Map.fromList [(n, sha) | (n, sha, _) <- ps]) | (cat, ps) <- perCat]
             d = vaultDiff srcShas vaultShas
@@ -303,7 +323,6 @@ runVaultStatus asJson cfg = case cfgVaultPath cfg of
             unpushable =
               [(n, "相册") | n <- srcNames, isPng n]
                 <> [(n, cat) | (cat, ps) <- perCat, (n, _, _) <- ps, isPng n]
-        -- 缓存回写（vault 侧条目 + 计数 meta；仅主库 .pm 下，I11 无涉）
         now <- getCurrentTime
         let vEntries = [e | (_, ps) <- perCat, (_, _, Just e) <- ps]
             meta =
@@ -318,15 +337,39 @@ runVaultStatus asJson cfg = case cfgVaultPath cfg of
                 , vmUnpushable = length unpushable
                 }
         writeVaultCache root (Catalog "vault-cache" now (entryMap vEntries)) meta
-        if asJson
-          then BSLC.putStrLn (renderVaultJson srcDir vaultDir (Map.size srcShas) vaultCount d unpushable)
-          else renderHuman srcDir vaultDir (Map.size srcShas) vaultCount d unpushable
-        pure (if hasDiff d then 1 else 0)
+        pure
+          ( Right
+              VaultReport
+                { vrSrcDir = srcDir
+                , vrVaultDir = vaultDir
+                , vrSrcCount = Map.size srcShas
+                , vrVaultCount = vaultCount
+                , vrDiff = d
+                , vrUnpushable = unpushable
+                , vrSrcMeta = Map.fromList [(n, e) | (n, _, Just e) <- srcTriples]
+                }
+          )
 
-renderHuman ::
-  FilePath -> FilePath -> Int -> Int -> VaultDiff -> [(FilePath, String)] -> IO ()
-renderHuman srcDir vaultDir srcCount vaultCount d unpushable = do
-  printf "vault 差异 · 相册 %s (%d) ↔ %s (%d)\n" srcDir srcCount vaultDir vaultCount
+-- ─── pm vault status [--json] ───────────────────────────────────────────────
+
+-- | 退出码与 legacy 同构：0 同步 \/ 1 有差异（duplicate、unpushable 不算）\/
+-- 2 路径错误。
+runVaultStatus :: Bool -> Config -> IO Int
+runVaultStatus asJson cfg = do
+  er <- computeVault asJson cfg
+  case er of
+    Left (msg, code) -> putStrLn msg >> pure code
+    Right r -> do
+      if asJson
+        then BSLC.putStrLn (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r))
+        else renderHuman r
+      pure (if hasDiff (vrDiff r) then 1 else 0)
+
+renderHuman :: VaultReport -> IO ()
+renderHuman r = do
+  let d = vrDiff r
+      unpushable = vrUnpushable r
+  printf "vault 差异 · 相册 %s (%d) ↔ %s (%d)\n" (vrSrcDir r) (vrSrcCount r) (vrVaultDir r) (vrVaultCount r)
   printf
     "  OK %d · NEW %d · MISSING %d · RENAME %d · DRIFT %d · DUPLICATE %d · UNPUSHABLE %d\n"
     (length (vdOk d))
@@ -336,7 +379,7 @@ renderHuman srcDir vaultDir srcCount vaultCount d unpushable = do
     (length (vdDrift d))
     (length (vdDuplicate d))
     (length unpushable)
-  mapM_ (\n -> putStrLn ("  + NEW " <> n <> "  → 分类后拷入 vault（pm vault push，P3b）")) (vdNew d)
+  mapM_ (\n -> putStrLn ("  + NEW " <> n <> "  → pm vault push --category <类目> " <> n)) (vdNew d)
   mapM_ (\(n, c) -> putStrLn ("  - MISSING " <> c </> n <> "  → 决定保留还是撤（只报告）")) (vdMissing d)
   mapM_
     ( \(n, m, c, h) ->
@@ -346,10 +389,171 @@ renderHuman srcDir vaultDir srcCount vaultCount d unpushable = do
   mapM_
     ( \(n, c, sh, vh) ->
         putStrLn
-          ("  ~ DRIFT " <> c </> n <> " (src " <> T.unpack (T.take 16 sh) <> " ≠ vault " <> T.unpack (T.take 16 vh) <> ")")
+          ("  ~ DRIFT " <> c </> n <> " (src " <> T.unpack (T.take 16 sh) <> " ≠ vault " <> T.unpack (T.take 16 vh) <> ") → pm vault push 生成裁决计划")
     )
     (vdDrift d)
   mapM_ (\(n, cats) -> putStrLn ("  ! DUPLICATE " <> n <> " → " <> unwords cats)) (vdDuplicate d)
   mapM_
     (\(n, loc) -> putStrLn ("  ✋ UNPUSHABLE " <> loc </> n <> "（.png：status 可见，push 写路径拒收）"))
     unpushable
+
+-- ─── pm vault push（§10.2） ─────────────────────────────────────────────────
+
+-- | I11 守卫 + vault root 建立（幂等）。pm 不执行 git（I9），gitignore 检查
+-- 是文本级：vault 有 .git 而 .gitignore 无 `.pm/` 行 → fail-closed。
+ensureVaultRoot :: FilePath -> IO (Either String RootInfo)
+ensureVaultRoot vaultDir = do
+  gitEx <- doesDirectoryExist (vaultDir </> ".git")
+  igOk <-
+    if not gitEx
+      then pure True
+      else do
+        let igFp = vaultDir </> ".gitignore"
+        ex <- doesFileExist igFp
+        if not ex
+          then pure False
+          else do
+            raw <- BS.readFile igFp
+            let ls = map T.strip (T.lines (TE.decodeUtf8Lenient raw))
+            pure (".pm/" `elem` ls)
+  if gitEx && not igOk
+    then
+      pure
+        ( Left
+            ( "I11: vault 是 git 工作树且 .gitignore 未覆盖 `.pm/` —— 先经用户确认在 "
+                <> (vaultDir </> ".gitignore")
+                <> " 追加 `.pm/` 行，再运行 push"
+            )
+        )
+    else do
+      existing <- readRootInfo vaultDir
+      case existing of
+        Just info
+          | riRole info == RoleVault -> pure (Right info)
+          | otherwise ->
+              pure (Left ("该路径已是 " <> show (riRole info) <> " root，拒绝作为 vault root"))
+        Nothing -> do
+          rid <- freshRootId
+          now <- getCurrentTime
+          fs <- case vaultDir of
+            (c : _) -> volumeFsType c
+            _ -> pure Nothing
+          let info = RootInfo rid RoleVault now fs
+          writeRootInfo vaultDir info
+          putStrLn ("✓ vault root 标识已创建: " <> T.unpack rid)
+          pure (Right info)
+
+-- | push 收尾要打印的显式 git 步骤（纯函数；I9：pm 自己绝不执行）。
+gitStepsLines :: FilePath -> Text -> [String] -> [String]
+gitStepsLines vaultDir pid cats =
+  [ "→ vault 侧 git 收尾（pm 不执行 git；明确禁止 git add -A / git add .）："
+  , "    cd " <> vaultDir
+  , "    git add " <> unwords (sort (nub cats))
+  , "    git commit -m \"photos: pm vault push " <> T.unpack pid <> "\""
+  , "    git push origin main"
+  ]
+
+-- | 计划涉及的 vault 类目（= 各 Copy dst 的第一层目录；git add 的显式对象）。
+planCategories :: Plan -> [String]
+planCategories plan =
+  filter (/= "") (nub [topOf (opDstRel (piOp it)) | it <- plItems plan, isCopy (piOp it)])
+ where
+  topOf p = case splitDirectories p of (x : _) -> x; [] -> ""
+  isCopy OpCopy {} = True
+  isCopy _ = False -- Quarantine 的 trash 路径与 Rename 不进 git add
+
+-- | photos.json 只读引用检查（§10.2 RENAME 策略）：vault 文件名出现在
+-- photos.json 的哪一行（它以完整 Pages URL 引用）。
+photosJsonRef :: Maybe FilePath -> FilePath -> IO (Maybe Int)
+photosJsonRef Nothing _ = pure Nothing
+photosJsonRef (Just fp) name = do
+  ex <- doesFileExist fp
+  if not ex
+    then pure Nothing
+    else do
+      raw <- BS.readFile fp
+      let ls = zip [1 :: Int ..] (T.lines (TE.decodeUtf8Lenient raw))
+      pure (case [i | (i, l) <- ls, T.pack name `T.isInfixOf` l] of i : _ -> Just i; [] -> Nothing)
+
+-- | `pm vault push [--category C FILES...]`：
+-- NEW×已定类目 → Copy 计划项；DRIFT → NEEDS-DECISION（pm resolve --keep src
+-- 走 §6.5 supersede，旧字节进 vault root 的 .pm\/trash\/）；RENAME\/MISSING
+-- 只报告（RENAME 带 photos.json BLOCKED 检查）。写路径只收 jpg\/jpeg。
+runVaultPush :: (Plan -> IO Int) -> Maybe String -> [FilePath] -> Config -> IO Int
+runVaultPush runPlan mCat files cfg = do
+  er <- computeVault False cfg
+  case er of
+    Left (msg, code) -> putStrLn msg >> pure code
+    Right r -> do
+      let d = vrDiff r
+      -- 选择校验（fail-closed：任何一条不合法就不出计划）
+      let sel = case (mCat, files) of
+            (Just c, fs@(_ : _)) -> Right [(c, f) | f <- fs]
+            (Nothing, []) -> Right []
+            (Just _, []) -> Left ["--category 需要同时给出要推送的文件名（pm vault push --category landscape A.jpg …）"]
+            (Nothing, _ : _) -> Left ["给了文件却没给 --category（CLI 无法看图分类；或用 pm ui，P4）"]
+          checkSel (c, f)
+            | c `notElem` fixedCategories = Just ("类目不存在: " <> c <> "（可选: " <> unwords fixedCategories <> "）")
+            | f `notElem` vdNew d = Just (f <> " 不在 NEW 集合里（只有 NEW 可 push；看 pm vault status）")
+            | not (pushableExt f) = Just (f <> " 是 UNPUSHABLE（写路径只收 jpg/jpeg）")
+            | not (Map.member f (vrSrcMeta r)) = Just (f <> " 读取不稳定，本轮不可入计划（稍后重试）")
+            | otherwise = Nothing
+      case sel of
+        Left errs -> mapM_ putStrLn errs >> pure 2
+        Right pairs' -> do
+          let errs = [e | p <- pairs', Just e <- [checkSel p]]
+          if not (null errs)
+            then mapM_ (putStrLn . ("  ✗ " <>)) errs >> pure 2
+            else do
+              -- 报告面：RENAME（photos.json 引用检查）与 MISSING 只报告
+              forM_ (vdRenamed d) $ \(n, m, c, _) -> do
+                ref <- photosJsonRef (cfgPhotosJson cfg) m
+                case ref of
+                  Just line ->
+                    putStrLn ("  🔁 RENAME 源 '" <> n <> "' ≡ vault '" <> c </> m <> "' → BLOCKED(photos.json:" <> show line <> ")：改名会打断已上线 URL，只报告")
+                  Nothing ->
+                    putStrLn ("  🔁 RENAME 源 '" <> n <> "' ≡ vault '" <> c </> m <> "'（未被 photos.json 引用；改名功能后续增量，暂只报告）")
+              forM_ (vdMissing d) $ \(n, c) ->
+                putStrLn ("  - MISSING " <> c </> n <> "（可能有意撤下，决定权在用户，只报告）")
+              -- 计划面：选中的 NEW + 全部 DRIFT
+              let newItems =
+                    [ ( OpCopy (vrSrcDir r </> f) (c </> f) (enSha e) (enSize e) (enMtimeNs e)
+                      , StPending
+                      )
+                    | (c, f) <- pairs'
+                    , Just e <- [Map.lookup f (vrSrcMeta r)]
+                    ]
+                  driftItems =
+                    [ ( OpCopy (vrSrcDir r </> n) (c </> n) (enSha e) (enSize e) (enMtimeNs e)
+                      , StNeedsDecision "DRIFT：相册是上游真相 → pm resolve <计划> --item N --keep src（旧字节先入 vault .pm/trash）或 --keep dst 保留现状"
+                      )
+                    | (n, c, _, _) <- vdDrift d
+                    , Just e <- [Map.lookup n (vrSrcMeta r)]
+                    ]
+                  allItems = newItems <> driftItems
+              if null allItems
+                then do
+                  unless (null (vdNew d)) $ do
+                    putStrLn ("  → " <> show (length (vdNew d)) <> " 个 NEW 待分类：pm vault push --category <类目> <文件…>（类目: " <> unwords fixedCategories <> "）")
+                  putStrLn "（无可执行项，未生成计划）"
+                  pure (if hasDiff d then 1 else 0)
+                else do
+                  einfo <- ensureVaultRoot (vrVaultDir r)
+                  case einfo of
+                    Left msg -> putStrLn msg >> pure 2
+                    Right info -> do
+                      pid <- newPlanId
+                      now <- getCurrentTime
+                      let plan =
+                            Plan
+                              { plId = pid
+                              , plKind = "vault-push"
+                              , plRootPath = vrVaultDir r
+                              , plRootId = Just (riId info)
+                              , plCreated = now
+                              , plItems = [PlanItem i op st Nothing | (i, (op, st)) <- zip [0 ..] allItems]
+                              }
+                      code <- runPlan plan
+                      when (code == 0) $
+                        mapM_ putStrLn (gitStepsLines (vrVaultDir r) pid (planCategories plan))
+                      pure code

@@ -6,23 +6,29 @@ module VaultTests (vaultTests) where
 
 import Data.Aeson (decode, object, toJSON, (.=))
 import qualified Data.ByteString.Lazy.Char8 as BSLC
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.Directory (createDirectoryIfMissing)
-import System.FilePath (takeDirectory, (</>))
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Pm.Cli (bindExecRoot, executePlanNow)
+import Pm.Commands (resolveKeep)
 import Pm.Config (Config (..))
+import Pm.Op
+import Pm.Plan
+import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.Vault
 
 vaultTests :: TestTree
 vaultTests =
   testGroup
-    "P3a vault status"
+    "P3 vault"
     [ testCase "六态基本分类（ok/new/missing/rename/drift）" caseSixStates
     , testCase "DUPLICATE 与 ok/drift 重叠，不构成划分，也不算差异" caseDuplicateOverlap
     , testCase "RENAME 贪心首配：一个 NEW 只消费一个 MISSING（类目序优先）" caseGreedyFirstFit
@@ -34,6 +40,12 @@ vaultTests =
     , testCase "IO：NEW（含 .Jpg case-fold 收录）→ exit 1" caseIoNewExit1
     , testCase "IO：源目录缺失 → exit 2" caseIoMissingSource
     , testCase "IO：vault 文件字节改动 → 二跑经缓存复验报 DRIFT" caseIoCacheDrift
+    , testCase "P3b I11：git 树无 .pm/ ignore 行 → ensureVaultRoot fail-closed" casePushI11
+    , testCase "P3b push：NEW+--category 端到端落位 → 复检 OK" casePushNewLands
+    , testCase "P3b push：.png / 非 NEW / 缺 --category 全部拒绝 exit 2" casePushRefusals
+    , testCase "P3b push：DRIFT→NEEDS-DECISION→keep src→supersede→旧字节在 vault trash" casePushDriftSupersede
+    , testCase "P3b bindExecRoot：vault 计划按 UUID 绑回配置路径" caseBindVaultRoot
+    , testCase "P3b gitStepsLines/planCategories：显式类目、无 -A、隔离项不入 add" caseGitSteps
     ]
 
 h :: Char -> Text
@@ -248,3 +260,147 @@ caseIoCacheDrift = withSystemTempDirectory "pm-vault" $ \tmp -> do
     Just m -> do
       vmDrift m @?= 1
       vmOk m @?= 0
+
+-- ─── P3b push ───────────────────────────────────────────────────────────────
+
+-- | 立即执行的 runPlan（测试用：跳过交互确认，仍走完整 Exec 内核）。
+execNow :: Plan -> IO Int
+execNow p = savePlan p >> executePlanNow p
+
+casePushI11 :: IO ()
+casePushI11 = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let vdir = tmp </> "vault"
+  createDirectoryIfMissing True (vdir </> ".git") -- 模拟 git 工作树
+  writeF (vdir </> ".gitignore") "_inbox/\n"
+  er <- ensureVaultRoot vdir
+  case er of
+    Left msg -> assertBool "错误应点名 I11" ("I11" `isInfixOf` msg)
+    Right _ -> assertFailure "缺 .pm/ ignore 行时不应建 root"
+  -- 补上 .pm/ 行 → 建立成功且幂等
+  writeF (vdir </> ".gitignore") "_inbox/\n.pm/\n"
+  er2 <- ensureVaultRoot vdir
+  case er2 of
+    Left m -> assertFailure ("应建 root: " <> m)
+    Right info -> do
+      riRole info @?= RoleVault
+      er3 <- ensureVaultRoot vdir
+      fmap riId er3 @?= Right (riId info)
+
+casePushNewLands :: IO ()
+casePushNewLands = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"; vdir = tmp </> "vault"
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  code <- runVaultPush execNow (Just "landscape") ["a.jpg"] (mkVaultCfg root vdir)
+  code @?= 0
+  landed <- readFile (vdir </> "landscape" </> "a.jpg")
+  landed @?= "AAA"
+  -- 复检：push 后 a.jpg 应为 OK，NEW 清空
+  code2 <- runVaultStatus False (mkVaultCfg root vdir)
+  code2 @?= 0
+
+casePushRefusals :: IO ()
+casePushRefusals = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"; vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  writeF (root </> "相册" </> "p.png") "PNG"
+  writeF (root </> "相册" </> "ok.jpg") "OK"
+  writeF (vdir </> "landscape" </> "ok.jpg") "OK"
+  cPng <- runVaultPush execNow (Just "landscape") ["p.png"] cfg
+  cPng @?= 2
+  pngLanded <- doesFileExist (vdir </> "landscape" </> "p.png")
+  pngLanded @?= False
+  cNotNew <- runVaultPush execNow (Just "landscape") ["ok.jpg"] cfg
+  cNotNew @?= 2
+  cNoCat <- runVaultPush execNow Nothing ["p.png"] cfg
+  cNoCat @?= 2
+  cBadCat <- runVaultPush execNow (Just "scenery") ["p.png"] cfg
+  cBadCat @?= 2
+
+casePushDriftSupersede :: IO ()
+casePushDriftSupersede = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"; vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  writeF (root </> "相册" </> "d.jpg") "NEWBYTES"
+  writeF (vdir </> "landscape" </> "d.jpg") "OLDBYTES"
+  ref <- newIORef Nothing
+  let capture p = savePlan p >> writeIORef ref (Just p) >> pure 1
+  _ <- runVaultPush capture Nothing [] cfg
+  mplan <- readIORef ref
+  plan <- maybe (assertFailure "DRIFT 应生成计划" >> undefined) pure mplan
+  case plItems plan of
+    [it] -> do
+      case piStatus it of
+        StNeedsDecision _ -> pure ()
+        st -> assertFailure ("DRIFT 项应为 NEEDS-DECISION，得到 " <> show st)
+      -- keep src → supersede 组（旧目标先隔离再落源）
+      rc <- resolveKeep plan it "src"
+      rc @?= 0
+      eplan <- loadPlan vdir (plId plan)
+      plan' <- either (\e -> assertFailure e >> undefined) pure eplan
+      code <- executePlanNow plan'
+      code @?= 0
+      landed <- readFile (vdir </> "landscape" </> "d.jpg")
+      landed @?= "NEWBYTES"
+      -- 旧字节必须还在 vault 自己的 .pm/trash 里
+      trashed <- findFileUnder (vdir </> ".pm" </> "trash") "d.jpg"
+      case trashed of
+        Nothing -> assertFailure "旧字节不在 vault trash"
+        Just fp -> readFile fp >>= (@?= "OLDBYTES")
+    its -> assertFailure ("计划应恰含 1 个 DRIFT 项，得到 " <> show (length its))
+
+caseBindVaultRoot :: IO ()
+caseBindVaultRoot = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"; vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  createDirectoryIfMissing True root
+  createDirectoryIfMissing True vdir
+  einfo <- ensureVaultRoot vdir
+  info <- either (\e -> assertFailure e >> undefined) pure einfo
+  pid <- newPlanId
+  let plan =
+        Plan
+          { plId = pid
+          , plKind = "vault-push"
+          , plRootPath = tmp </> "stale-mount" -- 故意给过期路径
+          , plRootId = Just (riId info)
+          , plCreated = riCreated info
+          , plItems = []
+          }
+  eb <- bindExecRoot cfg plan (riId info)
+  case eb of
+    Left e -> assertFailure ("应绑定到 vault: " <> e)
+    Right p' -> plRootPath p' @?= vdir
+
+caseGitSteps :: IO ()
+caseGitSteps = do
+  let quar = PlanItem 0 (OpQuarantine ("landscape" </> "x.jpg") "s" "supersede") StPending (Just 1)
+      copy1 = PlanItem 1 (OpCopy "src1" ("landscape" </> "x.jpg") "s" 1 0) StPending (Just 1)
+      copy2 = PlanItem 2 (OpCopy "src2" ("urban" </> "y.jpg") "s" 1 0) StPending Nothing
+      plan = Plan "pid" "vault-push" "V:\\vault" (Just "rid") t0' [quar, copy1, copy2]
+      cats = planCategories plan
+  cats @?= ["landscape", "urban"]
+  let ls = gitStepsLines "V:\\vault" "pid" cats
+      cmdLines = filter (isInfixOf "git ") (drop 1 ls) -- 首行是含「禁止 -A」字样的警示语，不是命令
+  assertBool "git add 行显式列类目" ("    git add landscape urban" `elem` ls)
+  assertBool "命令行无 -A / 无裸 git add ." (not (any (\l -> "-A" `isInfixOf` l || "add ." `isInfixOf` l) cmdLines))
+ where
+  t0' = read "2026-01-01 00:00:00 UTC"
+
+-- | 在目录树下找第一个同名文件（trash 的 <ts>/ 层名未知）。
+findFileUnder :: FilePath -> FilePath -> IO (Maybe FilePath)
+findFileUnder dir name = do
+  entries <- listDirectory dir
+  go entries
+ where
+  go [] = pure Nothing
+  go (e : es) = do
+    let p = dir </> e
+    isFile <- doesFileExist p
+    if isFile
+      then if takeFileName p == name then pure (Just p) else go es
+      else do
+        r <- findFileUnder p name
+        case r of
+          Just hit -> pure (Just hit)
+          Nothing -> go es
