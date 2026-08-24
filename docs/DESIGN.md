@@ -495,6 +495,22 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   ⑥ bindExecRoot 三槽位全查：UUID 命中 + role 与槽位相符、恰一命中才绑定，
   多命中（UUID 被复制/恢复）或 role 不符一律拒绝。
   评审归档：`docs/reviews/2026-08-24-p3b-codex-review.md`。
+- **P3b-5 复审收口（同日，codex 二轮：5 PARTIAL + names/versions 3 major 1 minor）**：
+  ① 位移隔离带尝试序号 `~d<N>` → `<pid>~displaced-<N>/`（重跑不与残留撞车）；
+  占位者没挪开就不试复位；doctor 补 Q-DONE-LOST 的 Done 前核 sha；`~d` 永不
+  进入 undo 序列。② 守卫先 `canonicalizePath`（junction 别名看不到真实祖先）、
+  反规则检测 case-fold。③ 守卫下沉 `Pm.GitGuard`，Exec 按盘上 role **无条件**
+  在锁内重检（`execPlan defaultExecEnv` 也绕不过），ExecEnv 钩子删除。
+  ④ vault 缓存只在双方 root-id 皆存在且相等时复用（`Nothing==Nothing` 不算
+  身份；root 建立前每次全量重 hash）；路径比较取 canonicalizePath 精确值。
+  ⑥ 备份发现返回**全部** UUID 命中（`discoverBackupRoots`/`discoverAmong`），
+  多命中即身份冲突拒绝；bindExecRoot 候选按 canonicalizePath 去重。
+  B1 `requireRole RoleMain` 统一加到 scan/import/clean/names（配置主库路径指向
+  备份/vault root 一律拒绝）；B2 目录指纹改为**递归**（类型/相对路径/大小/
+  mtime，目录改名不变）——不含内容 hash（Raw 事件夹数十 GB，两次全量 hash 与
+  收益不成比例，§14 残余风险登记）；B3 names 目标预检文件或目录皆算占用。
+  B4（designedPair 排除过宽）**不成立**：豁免仅限恰两份的 成片↔相册 同名对，
+  正是 I7 的设计拓扑，相册无「所属事件」概念。归档同上文件第二轮章节。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -669,3 +685,10 @@ verdict NO-GO，6 major 逐条对照源码核实**全部成立** → **P3b-4 全
 重检 I11、缓存身份绑定 + statHitStable racy 判据统一修、unstable 第八态
 fail-closed、bindExecRoot 恰一命中）；新增 6 测试（128/128）。评审归档：
 `docs/reviews/2026-08-24-p3b-codex-review.md`。
+
+同日 codex 二轮复审（`codex exec` 只读直跑，对 676426c..d8e6d6d）：#5 FIXED、
+其余 5 条 PARTIAL（各留一个可复现边界）+ names/versions 首评 3 major 1 minor
+→ **P3b-5 收口**（§10.2 P3b-5 条目）：位移槽位序号 + doctor 核 sha + undo
+剔除内部事务、守卫 canonical 路径 + case-fold 反规则、I11 下沉内核按 role
+无条件重检、缓存身份双 Just、备份发现全命中、requireRole 统一、递归目录
+指纹、names 文件占位预检；B4 经 I7 反驳不成立。新增 5 测试（133/133）。

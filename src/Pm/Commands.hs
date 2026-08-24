@@ -178,12 +178,11 @@ runInit o = do
 runScanCmd :: ScanCmd -> Config -> IO Int
 runScanCmd sc cfg = do
   let root = cfgMainPath cfg
-  minfo <- readRootInfo root
-  case minfo of
-    Nothing -> do
-      putStrLn ("主库缺 .pm/root-id.json → 先运行 pm init --main " <> root)
-      pure 2
-    Just rootInfo -> do
+  -- P3b-5 复审 B1：主库路径必须是 RoleMain root（指向备份/vault 会改错库）
+  er <- requireRole RoleMain root
+  case er of
+    Left msg -> putStrLn msg >> pure 2
+    Right rootInfo -> do
       (old, warns) <- loadCatalog root
       mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
       defWorkers <- getNumProcessors
@@ -517,12 +516,13 @@ runImport go cfg = do
               putStrLn "✓ 暂存区无需归档"
               pure (if null (irUnrecognized rep) && null (irDupTarget rep) then 0 else 1)
             else do
-              minfo <- readRootInfo root
-              case minfo of
-                -- P2.2 fail-closed（复审 cx-1 残留）：root 无身份就不出计划，
-                -- 而不是造一个 rootId=Nothing 的计划再依赖下游拒绝。
-                Nothing -> putStrLn ("主库缺 .pm/root-id.json → 先 pm init --main " <> root) >> pure 2
-                Just info -> do
+              -- P2.2 fail-closed（复审 cx-1 残留）：root 无身份就不出计划，
+              -- 而不是造一个 rootId=Nothing 的计划再依赖下游拒绝。
+              -- P3b-5 复审 B1：并校验 role 确为 RoleMain。
+              er <- requireRole RoleMain root
+              case er of
+                Left msg -> putStrLn msg >> pure 2
+                Right info -> do
                   pid <- newPlanId
                   now <- getCurrentTime
                   savePlanAndMaybeRun
@@ -687,11 +687,11 @@ runClean go cfg = do
                       putStrLn "无可清理项"
                       pure (if null held then 0 else 1)
                     else do
-                      minfo <- readRootInfo root
-                      case minfo of
-                        -- P2.2 fail-closed（复审 cx-1 残留）：同 runImport。
-                        Nothing -> putStrLn ("主库缺 .pm/root-id.json → 先 pm init --main " <> root) >> pure 2
-                        Just info -> do
+                      -- P2.2 fail-closed（复审 cx-1 残留）+ P3b-5 B1 role 校验：同 runImport。
+                      erole <- requireRole RoleMain root
+                      case erole of
+                        Left msg -> putStrLn msg >> pure 2
+                        Right info -> do
                           pid <- newPlanId
                           now <- getCurrentTime
                           -- P2.2（复审 cx-3 旁路封堵）：--apply 即时路径同样在

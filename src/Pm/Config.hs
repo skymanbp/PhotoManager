@@ -11,6 +11,7 @@ module Pm.Config
   , writeConfig
   , renderConfig
   , readRootInfo
+  , requireRole
   , writeRootInfo
   , freshRootId
   , pmDir
@@ -124,6 +125,19 @@ readJsonMaybe fp = do
 
 readRootInfo :: FilePath -> IO (Maybe RootInfo)
 readRootInfo = readJsonMaybe . rootInfoPath
+
+-- | 读 root 身份并校验 role（P3b-5 复审 B1）：配置里的主库路径若指向备份\/
+-- vault root，任何以「主库」身份生成的计划（import\/clean\/names\/scan）都会
+-- 改错库。缺身份与 role 不符都是 Left（附下一步指引），调用点一律 fail-closed。
+requireRole :: RootRole -> FilePath -> IO (Either String RootInfo)
+requireRole role root = do
+  minfo <- readRootInfo root
+  pure $ case minfo of
+    Nothing -> Left (root <> " 缺 .pm/root-id.json → 先 pm init --main <主库>（备份盘用 pm backup init）")
+    Just info
+      | riRole info == role -> Right info
+      | otherwise ->
+          Left (root <> " 是 " <> show (riRole info) <> " root，不是 " <> show role <> "，拒绝以该身份操作（检查配置路径）")
 
 -- | 侧缓存目录的成对覆盖写（catalog.json + meta.json）。备份盘缓存与
 -- vault 缓存共用：都是可重建的展示\/加速缓存，纯覆盖写即可——耐久层在

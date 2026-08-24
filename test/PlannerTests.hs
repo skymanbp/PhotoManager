@@ -20,6 +20,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import Test.Tasty.QuickCheck (chooseInt, elements, forAll, listOf1, suchThat, testProperty, (.&&.), (===))
 
+import Pm.Backup (discoverAmong)
 import Pm.Clean
 import Pm.Cli (bindExecRoot, recheckCleanItems)
 import Pm.Commands (TrashCmd (..), resolveKeep, runTrash)
@@ -258,6 +259,18 @@ backupE2eTests =
           case r of
             Right [(_, ODone {})] -> pure ()
             other -> assertFailure ("expected done, got " <> show other)
+    , testCase "P3b-5 #6 discoverAmong: 两个候选带同一备份 UUID → 全部返回（歧义可见）；role 不符不算" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          now <- getCurrentTime
+          let a = dir </> "diskA" </> "Photography"
+              b = dir </> "diskB" </> "Photography"
+              c = dir </> "diskC" </> "Photography"
+          mapM_ (createDirectoryIfMissing True) [a, b, c]
+          writeRootInfo a (RootInfo "bk-1" RoleBackup now Nothing)
+          writeRootInfo b (RootInfo "bk-1" RoleBackup now Nothing)
+          writeRootInfo c (RootInfo "bk-1" RoleMain now Nothing)
+          hits <- discoverAmong "bk-1" [a, b, c, dir </> "none" </> "Photography"]
+          hits @?= [a, b]
     ]
 
 -- ─── clean staging（三副本前置） ────────────────────────────────────────────

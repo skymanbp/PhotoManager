@@ -69,6 +69,10 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   vaultIgnoreGuard 加固（.git 文件/祖先仓/反规则）、apply 执行锁内重检 I11、
   缓存绑定 root 身份 + racy-clean 判据统一、UNSTABLE 第八态 fail-closed、
   bindExecRoot 恰一命中；128/128 测试；归档 docs/reviews/2026-08-24-*）
+- P3b-5 ✅ codex 二轮复审收口（位移槽位序号 + doctor 核 sha + undo 剔除内部
+  事务、守卫 canonical 路径 + case-fold 反规则、I11 下沉 Pm.GitGuard 由内核按
+  role 无条件重检、缓存身份双 Just、备份发现全命中、requireRole 统一、递归
+  目录指纹、names 文件占位预检；133/133 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

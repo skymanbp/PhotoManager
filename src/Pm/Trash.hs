@@ -21,6 +21,7 @@ import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
+import Data.Char (isDigit)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -70,13 +71,17 @@ manifestPath :: FilePath -> FilePath
 manifestPath root = trashDir root </> "manifest.ndjson"
 
 -- | opId → 隔离落位目录的唯一推导（Exec 与 doctor 共用，P3b-4 评审 #1）：
--- 普通隔离落 @\<planId\>\/\<victim\>@；组回滚的占位者位移隔离（opId 带 @~d@
--- 后缀）落 @\<planId\>~displaced\/\<victim\>@ —— 同一计划里 victim 本体已
--- 占用前者，二者不可同路径。两侧不共用此函数就会像评审 #1 那样各推各的。
+-- 普通隔离落 @\<planId\>\/\<victim\>@；组回滚的占位者位移隔离（opId 带
+-- @~d\<N\>@ 后缀，N = 本次尝试序号）落 @\<planId\>~displaced-\<N\>\/\<victim\>@
+-- —— 同一计划里 victim 本体已占用前者；带序号是因为同计划重跑可能再次
+-- 位移（P3b-5 复审 #1：固定目录会与上次位移残留撞车，moveFileNoReplace
+-- 失败后复位再被挡住）。两侧不共用此函数就会各推各的。
 quarTrashRel :: Text -> FilePath -> FilePath
 quarTrashRel oid victim =
   let pidS = T.unpack (T.takeWhile (/= '#') oid)
-      dir = if "~d" `T.isSuffixOf` oid then pidS <> "~displaced" else pidS
+      dir = case T.splitOn "~d" oid of
+        [_, n] | not (T.null n), T.all isDigit n -> pidS <> "~displaced-" <> T.unpack n
+        _ -> pidS
    in dir </> victim
 
 -- | Write-ahead: flushed to disk before the victim moves (§6.3 step 1).

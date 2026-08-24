@@ -58,6 +58,9 @@ buildUndoPlan root n = do
 -- | 顺序感知的复位配对（P2.2，复审新发现）：每个 @oid~r@ 复位 Done 只取消
 -- **紧邻其前最近一次**同 oid 的 Done——同一计划复位后重跑成功时，第二次
 -- 真实隔离必须保持可撤销。全局「见 ~r 即整体剔除」会把后一次也吞掉。
+-- P3b-5 复审 #1：组回滚的占位者位移隔离（@oid~d\<N\>@）是内核内部事务的
+-- 一部分，永不进入用户可撤销序列——否则 undo 会试图把占位者搬回已由
+-- victim 占据的原位。占位者本身仍在 trash（manifest 可查）。
 cancelRestores
   :: [(Text, Maybe Text, Maybe FilePath)]
   -> [(Text, Maybe Text, Maybe FilePath)]
@@ -66,7 +69,9 @@ cancelRestores = reverse . go []
   go acc [] = acc -- acc 为倒序（最近在前）
   go acc (d@(oid, _, _) : rest) = case T.stripSuffix "~r" oid of
     Just base -> go (dropMostRecent base acc) rest -- ~r 自身不可撤销
-    Nothing -> go (d : acc) rest
+    Nothing
+      | "~d" `T.isInfixOf` oid -> go acc rest -- 位移隔离：内部事务，不可撤销
+      | otherwise -> go (d : acc) rest
   dropMostRecent base acc = case break (\(o, _, _) -> o == base) acc of
     (pre, _ : post) -> pre <> post
     (pre, []) -> pre
