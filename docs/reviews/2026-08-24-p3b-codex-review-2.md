@@ -352,3 +352,59 @@ bind，warp `runSettingsSocket` 只在传入 socket 上 accept，不按 `setting
 暂存区 5 事件待 `clean staging`（需插备份盘）与 vault 差异 16（15 NEW 待 P4 GUI
 分类、1 REN=BLOCKED）。这是 pm 对真实库的**第一次 names 写入**；`pm undo` 可
 整体回滚。
+---
+
+# 第二十轮（2026-08-24，codex `gpt-5.6-sol`，只读静态；范围 aa21b37..5fd42f5 = P4-4 UX 重做 + P4-5 第一个写端点）
+
+**verdict：GO** —— "未发现 critical/major：`--writable` 闸位于请求体、缓存刷新和
+vault 写入之前，端点不执行计划、不碰照片；发现均为 minor 或覆盖硬化。"
+合并前最小修复集：**空**。
+
+- 写端点｜安全边界成立；重复 name 校验、DRIFT-only 与首次建 root 并发存在非阻断缺口。
+- GUI｜POST 与 XSS 边界正确；缩略失败回退及并发重载可能重新带来内存问题。
+
+## 逐条判定
+
+| 项 | 判定 | 要点 |
+|---|---|---|
+| 1 写端点的闸 | ISSUE（非阻断） | 只读闸先于 body / `vaultReport` / `mkVaultPushPlan` / `savePlan`，只读 POST 零写入；GET 刷新主库 vault-cache 是 §11 明示例外。`readBodyCapped` 逐块读到首次超 64 KiB 即停，不排空剩余体——**它读了本地 warp 3.4.9 源码**：默认最多为 keep-alive 回收 8192 字节，剩余更大则直接关连接（`HTTP1.hs:226-250,290-306`、`Settings.hs:203,213-215`），故不会读完巨大剩余体；body 有 30 s timeout，但每次 ≥2048 字节接收会 tickle，慢传仍能占住 worker 直到越过上限（可硬化为按 `requestBodyLength` 预拒）。**aeson 2.2.5.0 源码**：重复键取首值（`Decoding/Conversion.hs:81-94`），默认无嵌套深度计数——64 KiB 是唯一硬界。`Landscape` 被精确拒；`../x.jpg` 因 NEW 只含平铺 basename 而不在集合里；**同一 name 指派两个类目会双双通过——实际校验缺口**。`ensureVaultRoot` 确会先建 root-id 再过 `requireWritable`：按 §10.2 已有用户批准 + 显式按钮，不需第二次确认，但"只写 plans"措辞不准。API 与 CLI 同为 `requireWritable` → `savePlan`，顺序一致 |
+| 2 Vault.hs 抽取 | ISSUE（非阻断） | 对照 `aa21b37:src/Pm/Vault.hs:501-564`，逐项校验、NEW/DRIFT 构造、root-id、计划字段、`gitStepsLines` 调用**逐行等价**，DRIFT 仍以 NEEDS-DECISION 进计划。但 API 空 assignments 一律 400，而 CLI 的空选择仍能出纯 DRIFT 计划；GUI 又在零 NEW 时禁用按钮 → **DRIFT-only 状态走不了 GUI** |
+| 3 GUI 侧 | ISSUE（非阻断） | POST 只由「生成推送计划」触发、body 只有 UI 状态里的指派；响应路径/命令/git 步骤只进 `textContent`，无 HTML 注入面。`createImageBitmap`/`toBlob` 失败会**回退挂原图**（"因此 WebView2 重新全分辨率解码"标注为未读 WebView2 源码的推断，但与仓库记录的根因一致）。正常路径每张只建一个 URL 且下一轮 revoke、bitmap 会 `close()`；但**连按数字键 2 会并发起多轮**，旧轮在新轮 revoke 之后继续建 URL。快捷键排除了 `INPUT`（当前页无输入框，行为正确，未来应扩到 `isContentEditable`）；`showTab` 的 `main.focus()` 的可访问性影响标注为未验证假设 |
+| 4 Rust 侧 | ISSUE（措辞） | GUI 固定传 `--writable`，普通 `pm serve` 的 optparse `switch` 缺省 False，代码边界正确；但任何手动调用者都能显式传该公开参数，"GUI 是唯一客户端"只能理解为"唯一内置/预期客户端"，不是身份层强制。§14 本就不防同用户恶意进程，不构成安全绕过 |
+| 5 测试 | ISSUE（覆盖） | 两条新例确实分别钉住只读闸、JSON/空/类目/NEW 校验、64 KiB、GET 404，以及计划落盘/装回/dst/sha/照片不动，三处所述突变会转红。缺口：`.pm` 不存在只在只读请求后断言；合法例未快照三个类目目录、未断言响应的 path/apply/gitSteps；应补重复 name、NEW+DRIFT/DRIFT-only、首次 root 上并发两个 POST。原 VaultTests 仍通过 `runVaultPush` 命中抽出的三段 |
+| 6 文档 | ISSUE（措辞） | §11 / README / REVIEW-LOG 对端点、64 KiB、CLI 共用、终端 apply、"apply 端点仍未开"的当前表述一致；历史章节里的"写端点仍未开"有 P4-1/P4-2 时间语境，不是矛盾。需修：各处"只写 `.pm/plans`"不精确（首次还建 root-id）、风险表与 CLI help 仍写"P4-1 只读"、README 的 P5 行重复 |
+
+## 新发现与处置（6 minor，无 critical/major）
+
+| 位置 | 内容 | 处置（P4-6） |
+|---|---|---|
+| `src/Pm/Vault.hs` `checkAssignments` | 持 token 的调用者把同一 NEW name 同时指派 landscape/portrait，计划含两个可执行 Copy，apply 后跨类目重复 | **已修**：按 name 分组的 fail-closed 判定（同类目重复两次同样拒），CLI 与 API 共用一处；闸用例 +3 |
+| `src/Pm/Serve.hs` push-plan | vault 只有 DRIFT、没有 NEW 时按钮永远禁用，出不了裁决计划 | **已修**：空 assignments 在有 DRIFT 时放行；`/api/vault/new` 一并返回 DRIFT 清单，页面据此启用按钮并改文案 |
+| `gui/ui/app.js` `shrink` | 缩放失败挂原图 = 重新触发已记录的 WebView 位图内存问题 | **已修**：失败改挂占位符（不再回退原图），`bitmap.close()` 移进 `finally` |
+| `gui/ui/app.js` `loadVault` | 连按数字键 2 并发加载，旧轮在 revoke 之后继续下载原图并建 URL | **已修**：single-flight 代号（每次 await 后校验，作废轮不再建 URL），快捷键忽略 `ev.repeat` 并排除可编辑元素 |
+| `src/Pm/Vault.hs` `ensureVaultRoot` | 首次 root 上两个并发 POST 都见 `RootAbsent`，一次 `createRootInfo`（no-replace）必失败 → 500 | **已修**：compute→校验→ensureRoot→落盘一次持锁（与 GET 刷新缓存同一把 `seVaultLock`）；并发用例未补，登记 |
+| `src/Pm/Serve.hs` JSON | 重复键按首值；64 KiB 深嵌套值可能吃异常栈/CPU | **登记残余**：loopback + token 模型下不阻断；要把 API 当严格契约时再加重复键拒绝与深度上限 |
+
+## P4-6 收口（同分支，203/203，GHC 警告 0）
+
+- 突变验证（单点粒度）：去掉 `dupErrs <>` → 闸用例 `test/ServeTests.hs:407` 转红
+  （期望 400 得 200），DRIFT 与合法用例保持绿；把空指派改回无条件 400 →
+  `test/ServeTests.hs:477` 转红（期望 200 得 400），闸用例保持绿。
+- 新增用例 `caseServePushPlanDrift`：vault 侧放同名异字节文件 → 空指派得 200、
+  计划 1 项 dst `landscape/a.jpg` 且状态 NEEDS-DECISION、两侧字节零改动。
+- 闸用例补：同 name 跨类目 / 同 name 同类目 / `Landscape` 大小写 / `../a.jpg` 与
+  `sub\a.jpg` 路径型 name → 全 400；全部拒绝后 vault 的 `.pm` **仍不存在**。
+- 文档措辞按第 1、4、6 条修正（写域 = vault 的 `.pm`，含首次 root-id；风险表与
+  CLI help 不再写"P4-1 只读"；README 重复的 P5 行删掉）。
+- 顺带修一条与本轮无关的存量 GHC 警告：`Data.ByteString.hGetLine` 自
+  bytestring-0.12 起废弃 → `Data.ByteString.Char8.hGetLine`。**更正**：上一轮
+  报"警告 0"时读的是 `tail -45` 截断的日志，该警告一直在。
+
+## 残余（二十轮末）
+
+- JSON 重复键 / 深嵌套（上表第 6 条）。
+- 首次建 root 的**并发**用例（修已落地，用例未补）；`readBodyCapped` 的慢速上传
+  可按 `requestBodyLength` 预拒。
+- 十九轮登记项照旧：跨进程 vault-cache 刷新争用、真开端口 raw HTTP 冒烟、
+  Rename/Quarantine 的"返回路径必须被使用"用例、TOCTOU 类（§14 威胁模型）。
+- 覆盖硬化建议未做：合法例未快照三个类目目录、未断言响应 path/apply/gitSteps。

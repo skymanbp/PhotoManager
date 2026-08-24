@@ -17,3 +17,5 @@ memory/
 # Rust / Tauri GUI（P4-2）：构建产物与 tauri 生成的 schema
 gui/src-tauri/target/
 gui/src-tauri/gen/
+gui/src-tauri/binaries/
+

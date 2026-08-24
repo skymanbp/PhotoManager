@@ -102,28 +102,43 @@
 
   // ── 分类推送 ──
   let thumbUrls = [];
+  let vaultGen = 0;   // single-flight 代号：新一轮作废旧一轮
+  let vaultDrift = 0; // 没有 NEW 但有 DRIFT 时，也能出纯裁决计划
   const assign = new Map(); // name -> category
   async function shrink(blob) {
-    // 原图动辄 10–75 MB：交给解码器按目标尺寸缩放，再转成小 JPEG，避免 15 张全分辨率位图撑爆 WebView。
+    // 原图动辄 10–75 MB：交给解码器按目标尺寸缩放，再转成小 JPEG，避免 15 张全分辨率位图撞爆 WebView。
+    // 失败返回 null（挂占位符）：回退到原图 = 把已修掉的那条内存路径重新引回来（codex 二十轮 minor）。
+    let bmp = null;
     try {
-      const bmp = await createImageBitmap(blob, { resizeWidth: 640, resizeQuality: "medium" });
+      bmp = await createImageBitmap(blob, { resizeWidth: 640, resizeQuality: "medium" });
       const cv = document.createElement("canvas"); cv.width = bmp.width; cv.height = bmp.height;
-      cv.getContext("2d").drawImage(bmp, 0, 0); bmp.close();
-      return await new Promise((res) => cv.toBlob((b) => res(b || blob), "image/jpeg", 0.85));
-    } catch { return blob; }
+      cv.getContext("2d").drawImage(bmp, 0, 0);
+      return await new Promise((res) => cv.toBlob((b) => res(b), "image/jpeg", 0.85));
+    } catch { return null; } finally { if (bmp) bmp.close(); }
   }
   function updateProgress(total) {
-    $("#assign-progress").textContent = `已选 ${assign.size} / ${total}`;
-    $("#btn-plan").disabled = assign.size === 0;
+    $("#assign-progress").textContent = `已选 ${assign.size} / ${total}` + (vaultDrift ? ` · ${vaultDrift} 项 DRIFT 待裁决` : "");
+    // DRIFT-only 的 vault（没有 NEW）也要能出纯裁决计划，否则按钮永远灰着（二十轮 minor）。
+    $("#btn-plan").disabled = assign.size === 0 && vaultDrift === 0;
   }
   async function loadVault() {
+    // single-flight：连按数字键 2 会并发起多轮，旧轮在新轮 revoke 之后
+    // 还会继续下载原图并建 blob URL（codex 二十轮 minor）。用代号作废旧轮。
+    const gen = ++vaultGen;
     const grid = $("#vault-grid"); grid.innerHTML = "";
     for (const u of thumbUrls) URL.revokeObjectURL(u); thumbUrls = [];
-    assign.clear(); $("#plan-result").className = "banner hidden";
+    assign.clear(); vaultDrift = 0; $("#plan-result").className = "banner hidden";
     let meta;
     try { meta = await getJson("/api/vault/new"); } catch (e) { grid.appendChild(el("div", "muted", "vault 未配置或不可用：" + e.message)); updateProgress(0); return; }
+    if (gen !== vaultGen) return;
+    vaultDrift = (meta.drift || []).length;
     updateProgress(meta.new.length);
-    if (!meta.new.length) { grid.appendChild(el("div", "muted", "没有待推送的 NEW 照片——相册与 vault 已一致。")); return; }
+    if (!meta.new.length) {
+      grid.appendChild(el("div", "muted", vaultDrift
+        ? `没有待推送的 NEW；但有 ${vaultDrift} 项 DRIFT（同名、内容不同）——点「生成推送计划」出一份纯裁决计划，再在终端 pm resolve。`
+        : "没有待推送的 NEW 照片——相册与 vault 已一致。"));
+      return;
+    }
     const cards = [];
     for (const e of meta.new) {
       const card = el("div", "gcard");
@@ -140,10 +155,13 @@
     }
     // 顺序拉图（每张原图可能几十 MB），缩小后再挂上去
     for (const [e, ph] of cards) {
+      if (gen !== vaultGen) return; // 已被新一轮取代：不再下载、不再建 URL
       try {
         if (!e.sha) throw new Error("catalog 无 sha");
         const blob = await (await get("/api/thumb/" + e.sha)).blob();
         const small = await shrink(blob);
+        if (gen !== vaultGen) return;
+        if (!small) { ph.textContent = "缩略失败（不挂原图）"; continue; }
         const url = URL.createObjectURL(small); thumbUrls.push(url);
         const img = document.createElement("img"); img.alt = e.name; img.src = url;
         ph.textContent = ""; ph.appendChild(img);
@@ -213,7 +231,12 @@
   for (const b of document.querySelectorAll("nav button")) b.onclick = () => showTab(b.dataset.tab);
   // 数字键 1–4 切页（键盘党；也是自动化截图验证用的入口）
   const keys = { "1": "status", "2": "vault", "3": "plans", "4": "help" };
-  document.addEventListener("keydown", (ev) => { if (keys[ev.key] && !ev.ctrlKey && !ev.altKey && ev.target.tagName !== "INPUT") showTab(keys[ev.key]); });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.repeat || ev.ctrlKey || ev.altKey || ev.metaKey) return; // 长按连发 → 并发重载
+    const t = ev.target;
+    if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
+    if (keys[ev.key]) showTab(keys[ev.key]);
+  });
   $("#btn-fresh").onclick = () => loadStatus(true).catch(fail);
   $("#btn-reload").onclick = () => loadStatus(false).catch(fail);
   $("#btn-plans-reload").onclick = () => loadPlans().catch(fail);

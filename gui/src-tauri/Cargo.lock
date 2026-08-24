@@ -2235,7 +2235,7 @@ dependencies = [
 
 [[package]]
 name = "pm-ui"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "serde",
  "serde_json",

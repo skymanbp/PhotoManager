@@ -34,7 +34,7 @@ data Cmd
   | CmdVaultPush GoOpts (Maybe String) [FilePath] -- --category + FILES
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
   | CmdVersions -- 版本组/精确重复报告（只读）
-  | CmdServe ServeOpts -- 127.0.0.1 JSON API（P4-1，只读端点）
+  | CmdServe ServeOpts -- 127.0.0.1 JSON API（缺省只读；--writable 才开生成计划端点）
   | CmdUi -- 拉起 Tauri 桌面 GUI（P4-3；GUI 自己跑 serve）
 
 -- | --backup/--vault 二选一校验后进入命令体。
@@ -91,7 +91,7 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    infoOption "pm 0.4.2 (P4-4/5)" (long "version" <> help "打印版本")
+    infoOption "pm 0.4.3 (P4-6)" (long "version" <> help "打印版本")
   backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
   vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =
@@ -110,7 +110,7 @@ parserInfo =
           <> command "undo" (info undoP (progDesc "由主库 journal 生成反向计划（经 pm apply 执行）"))
           <> command "apply" (info applyP (progDesc "执行已存的计划（root 按 UUID 重新绑定；--only 按组闭包）"))
           <> command "resolve" (info resolveP (progDesc "裁决计划某项：跳过/恢复/--keep src|dst|both（组为单元）"))
-          <> command "serve" (info serveP (progDesc "127.0.0.1 JSON API（供 GUI/skill；随机端口 + 会话 token，启动时打印一行 JSON；P4-1 只读）"))
+          <> command "serve" (info serveP (progDesc "127.0.0.1 JSON API（供 GUI/skill；随机端口 + 会话 token，启动时打印一行 JSON；缺省只读，见 --writable）"))
           <> command "ui" (info (pure CmdUi) (progDesc "拉起桌面 GUI（pm-ui.exe：PM_UI_EXE 或 pm.exe 同目录；GUI 自己启动并管理 pm serve）"))
       )
   serveP =
@@ -118,7 +118,7 @@ parserInfo =
       ServeOpts
         <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
         <*> switch (long "exit-on-stdin-eof" <> help "stdin 关闭即退出（GUI 拉起时用：父进程一死 serve 随之结束，不留孤儿）")
-        <*> switch (long "writable" <> help "允许 POST 端点生成计划（只写 .pm/plans，不执行、不碰照片）；缺省只读")
+        <*> switch (long "writable" <> help "允许 POST 端点生成计划（写域限 vault 的 .pm：plans + 首次的 root-id；不执行、不碰照片）；缺省只读")
   initP =
     fmap CmdInit $
       InitOpts

@@ -534,3 +534,23 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   `scratchpad/shot.ps1`（`SetProcessDPIAware` 后 `GetWindowRect` + `CopyFromScreen`，
   否则显示缩放下截到错位区域）+ `tour.ps1`（只在 pm 窗口确为前台时 SendKeys
   切页——第一版没校验前台，一个 "2" 可能打进了当时前台的窗口，已改）。
+- **二十轮：GO（同日，codex 二十轮审 P4-4/5，aa21b37..5fd42f5；"未发现
+  critical/major"，合并前最小修复集**空**，6 minor）**：写端点边界成立——
+  `--writable` 判定在读体、缓存刷新与任何 vault 写入之前，只读 serve 下 POST
+  零写入；`readBodyCapped` 逐块读到首次超过 64 KiB 即停（它读了本地 warp 3.4.9
+  源码：默认最多为 keep-alive 回收 8192 字节，剩余更大则直接关连接，不会读完
+  巨大剩余体）；aeson 2.2.5.0 重复键取首值、默认无嵌套深度计数（读源码取证）；
+  抽出的 `checkAssignments`/`vaultPushItems`/`mkVaultPushPlan` 与 aa21b37 的
+  `runVaultPush` 逐行等价，DRIFT 仍以 NEEDS-DECISION 进计划；页面 POST 只由
+  按钮触发、响应只进 `textContent`，无 XSS sink。6 minor 中 5 条**已修**（同一
+  name 重复指派、DRIFT-only 出不了计划、缩放失败回退原图、连按键并发加载、
+  首次建 root 的并发 500），第 6 条（JSON 重复键 / 深嵌套）**登记残余**。
+  归档见第二卷第二十轮章节。
+- **P4-6（pm 0.4.3，203/203，GHC 警告 0）**：二十轮五条 minor 的收口（见
+  DESIGN §11 P4-6 条）+ 打包发布（NSIS 安装包 + sidecar `pm.exe` + 免安装 zip；
+  `pm_exe()` 查找顺序补"同目录"）+ README 按"个人自用、但公开"的定位重写。
+  突变：去掉重复指派判定 → 闸用例 `ServeTests.hs:407` 转红（400→200）；把空
+  指派改回无条件 400 → DRIFT 用例 `ServeTests.hs:477` 转红（200→400）；两次
+  另一条用例都保持绿——单点粒度成立。**更正**：上一轮我报"警告 0"时读的是
+  `tail -45` 截断过的日志，实际存量一条 `-Wdeprecations`（`BS.hGetLine`），
+  本轮已修并改用完整日志核对。
