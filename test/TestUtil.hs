@@ -7,6 +7,8 @@ module TestUtil
   , mkPlanIO
   , mkGroupPlanIO
   , ensureTestRoot
+  , tpid
+  , tpOid
   , injectAt
   , runCrash
   , execOk
@@ -33,7 +35,7 @@ import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileE
 import System.FilePath (takeDirectory)
 import Test.Tasty.HUnit
 
-import Pm.Config (readRootInfo, writeRootInfo)
+import Pm.Config (RootIdState (..), createRootInfo, readRootState)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity, runDoctor)
 import Pm.Exec
 import Pm.Hash
@@ -55,20 +57,33 @@ mkCopyOp srcAbs content dstRel = do
 -- | 测试 root 身份（P3b-6 复审 A3：内核不再放行匿名 root）。root 目录已存在
 -- → 确保带 role 标识并返回其 UUID（已有标识则沿用，不改写 role）；目录不
 -- 存在（纯计划 fixture，如 \"R:\"）→ Nothing，计划 rootId 留空——这类计划
--- 从不执行。
+-- 从不执行。P3b-8 复审 minor：走 'readRootState' + 'createRootInfo'（生产
+-- 路径，no-replace）——损坏的标识是测试要保留的状态，fixture 不得把它当缺席
+-- 覆盖掉（此前 readRootInfo == Nothing 即 writeRootInfo）。
 ensureTestRoot :: RootRole -> FilePath -> IO (Maybe Text)
 ensureTestRoot role root = do
   ex <- doesDirectoryExist root
   if not ex
     then pure Nothing
     else do
-      m <- readRootInfo root
-      case m of
-        Just i -> pure (Just (riId i))
-        Nothing -> do
+      st <- readRootState root
+      case st of
+        RootPresent i -> pure (Just (riId i))
+        RootCorrupt e -> assertFailure ("fixture: root-id 损坏，不覆盖（" <> e <> "）")
+        RootAbsent -> do
           now <- getCurrentTime
-          writeRootInfo root (RootInfo "test-root" role now Nothing)
-          pure (Just "test-root")
+          r <- createRootInfo root (RootInfo "test-root" role now Nothing)
+          case r of
+            Left e -> assertFailure ("fixture: createRootInfo 失败: " <> e)
+            Right () -> pure (Just "test-root")
+
+-- | 测试用的合法 planId 与其 opId（P3b-8：'opIdParts' 只认生成格式，手编
+-- journal 的 fixture 不能再用 \"p#0\" 之类短 pid）。
+tpid :: Text
+tpid = "20260101-000000-abcdef"
+
+tpOid :: Int -> Text
+tpOid = opId tpid
 
 mkPlanIO :: FilePath -> [Op] -> IO Plan
 mkPlanIO root ops = do

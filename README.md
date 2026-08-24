@@ -81,6 +81,9 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   畸形 oid fail-closed、悬空 junction 占槽判定、root-id 三态 + 原子 no-replace
   建标识、requireWritable 把 I11 覆盖到全部 .pm 写入口、requireMain 补 apply
   缓存/clean 复验/trash 屏障；151/151 测试）
+- P3b-8 ✅ codex 五轮复审收口（opId 的 planId 须为生成格式——路径型 oid 不再
+  越出 root、readDigits 有界、slotOccupied 探测异常按占用、clean/import/trash
+  身份校验先于任何读取判定、测试 fixture 不覆盖损坏 root-id；155/155 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

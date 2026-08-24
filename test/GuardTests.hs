@@ -1,11 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | P3b-6\/P3b-7：codex 三轮\/四轮复审收口用例——A1 严格 opId\/planId 解析与
--- 位移槽位、A2 通配符反规则、A3 匿名 root 与 role 改写、B1 requireMain 各
--- 入口、init\/backup init 守卫、dirFingerprint 不跟随 reparse point、损坏
--- root-id、I11 覆盖全部 .pm 写入口。
+-- | P3b-6\/P3b-7\/P3b-8：codex 三轮\/四轮\/五轮复审收口用例——A1 严格 opId\/
+-- planId 解析（pid 须为生成格式，路径型 oid 不得越出 root）与位移槽位探测、
+-- A2 通配符反规则、A3 匿名 root 与 role 改写、B1 requireMain\/requireRole 各
+-- 入口且先于任何读取判定、init\/backup init 守卫、dirFingerprint 不跟随
+-- reparse point、损坏 root-id（含测试 fixture 不覆盖）、I11 覆盖全部 .pm 写入口。
 module GuardTests (guardTests) where
 
+import Control.Exception (SomeException, try)
 import Control.Monad (forM_, when)
 import Data.List (isInfixOf)
 import qualified Data.Text as T
@@ -17,8 +19,9 @@ import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Pm.Catalog (saveCatalog)
 import Pm.Cli (GoOpts (..), recheckCleanPlan, savePlanAndMaybeRun)
-import Pm.Commands (RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runTrash)
+import Pm.Commands (RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runClean, runImport, runTrash)
 import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootInfo, readRootState, requireRole, requireWritable, writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec
@@ -35,7 +38,7 @@ import TestUtil
 guardTests :: TestTree
 guardTests =
   testGroup
-    "P3b-6/7 守卫与解析（codex 三轮/四轮）"
+    "P3b-6/7/8 守卫与解析（codex 三轮/四轮/五轮）"
     [ testCase "A2 通配符/转义反规则 fail-closed；纯字面无关反规则放行" caseWildcardNegations
     , testCase "A3 匿名 root（无 root-id）→ execPlan 拒绝，.pm 连锁文件都不创建" caseAnonymousRoot
     , testCase "A3 marker role 改成 RoleMain 也绕不过 I11（守卫对所有 role 生效）" caseRoleRewrite
@@ -54,6 +57,10 @@ guardTests =
     , testCase "P3b-7 major 损坏 root-id：Corrupt 三态；init/vault/可写性拒绝；createRootInfo 不覆盖" caseCorruptRootId
     , testCase "P3b-7 B1 主库路径为备份 root：afterApply 不写缓存、clean 复验全降级、trash empty HELD" caseMainIsBackupWitness
     , testCase "P3b-7 I11 全写入口：doctor --repair / savePlanAndMaybeRun / pickRoot --vault / requireRole 拒绝" caseI11AllWriters
+    , testCase "P3b-8 A1 opIdParts 只认生成格式 pid：路径型/短名/超长序号 → Nothing；doctor 不越出 root" caseOpIdTraversal
+    , testCase "P3b-8 A1 slotOccupied：非法名等探测异常按占用；文件当目录用 → 空槽" caseSlotOccupiedProbe
+    , testCase "P3b-8 B1 runClean / runImport：主库身份校验先于索引读取与三副本判定" caseCleanImportGuardFirst
+    , testCase "P3b-8 minor ensureTestRoot：损坏标识不覆盖；缺席则 no-replace 建立且不改 role" caseFixtureKeepsCorrupt
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -152,22 +159,22 @@ caseOpIdParts = do
   opIdParts (restoreOpId pid 3) @?= Just (pid, 3, SfxRestore)
   opIdParts (displacedOpId pid 3 2) @?= Just (pid, 3, SfxDisplaced 2)
   opIdParts "job~d7#0~d1" @?= Nothing -- planId 含 ~：不是 pm 生成的
-  opIdParts "p#0~d0" @?= Nothing -- N ≥ 1
-  opIdParts "p#0~x" @?= Nothing
-  opIdParts "p#" @?= Nothing
-  opIdParts "p#0#1" @?= Nothing
-  quarTrashRel "p#0~d2" "v.jpg" @?= Just ("p~displaced-2" </> "v.jpg")
-  quarTrashRel "p#0~r" "v.jpg" @?= Just ("p" </> "v.jpg")
-  quarTrashRel "p#0" ("a" </> "v.jpg") @?= Just ("p" </> "a" </> "v.jpg")
+  opIdParts (pid <> "#0~d0") @?= Nothing -- N ≥ 1
+  opIdParts (pid <> "#0~x") @?= Nothing
+  opIdParts (pid <> "#") @?= Nothing
+  opIdParts (pid <> "#0#1") @?= Nothing
+  quarTrashRel (pid <> "#0~d2") "v.jpg" @?= Just (T.unpack pid <> "~displaced-2" </> "v.jpg")
+  quarTrashRel (pid <> "#0~r") "v.jpg" @?= Just (T.unpack pid </> "v.jpg")
+  quarTrashRel (pid <> "#0") ("a" </> "v.jpg") @?= Just (T.unpack pid </> "a" </> "v.jpg")
 
 caseOpIdCanonical :: IO ()
 caseOpIdCanonical = do
-  -- 非规范十进制不是 pm 生成的：手编 "p#00~r" 不得抵消真实 "p#0" 的 Done
-  opIdParts "p#00" @?= Nothing
-  opIdParts "p#01" @?= Nothing
-  opIdParts "p#0~d01" @?= Nothing
-  opIdParts "p#10~d10" @?= Just ("p", 10, SfxDisplaced 10)
-  quarTrashRel "p#00" "v.jpg" @?= Nothing
+  -- 非规范十进制不是 pm 生成的：手编 "<pid>#00~r" 不得抵消真实 "<pid>#0" 的 Done
+  opIdParts (tpid <> "#00") @?= Nothing
+  opIdParts (tpid <> "#01") @?= Nothing
+  opIdParts (tpid <> "#0~d01") @?= Nothing
+  opIdParts (tpid <> "#10~d10") @?= Just (tpid, 10, SfxDisplaced 10)
+  quarTrashRel (tpid <> "#00") "v.jpg" @?= Nothing
   quarTrashRel "job~d7#0~d1" "v.jpg" @?= Nothing
 
 caseSlotOccupiedByDir :: IO ()
@@ -338,14 +345,15 @@ casePlanIxValidation = withSystemTempDirectory "pm-guard" $ \dir -> do
 caseDoctorMalformedOid :: IO ()
 caseDoctorMalformedOid = withSystemTempDirectory "pm-guard" $ \dir -> do
   let root = dir </> "root"
-  createDirectoryIfMissing True (trashDir root </> "p")
-  writeFile (trashDir root </> "p" </> "v.jpg") "V"
-  sha <- sha256File (trashDir root </> "p" </> "v.jpg")
+      tdir = trashDir root </> T.unpack tpid
+  createDirectoryIfMissing True tdir
+  writeFile (tdir </> "v.jpg") "V"
+  sha <- sha256File (tdir </> "v.jpg")
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
-  -- 手编 oid "p#00"（非规范）：旧代码回退到 "p/" 目录 → 内容相符 → Q-DONE-LOST
-  -- Warn → --repair 补记 Done——把畸形记录认证成「已隔离」
-  withJournal root $ \j -> jAppend j Barrier (JIntent "p#00" (OpQuarantine "v.jpg" sha "t") now)
+  -- 手编 oid "<pid>#00"（非规范）：旧代码回退到 "<pid>/" 目录 → 内容相符 →
+  -- Q-DONE-LOST Warn → --repair 补记 Done——把畸形记录认证成「已隔离」
+  withJournal root $ \j -> jAppend j Barrier (JIntent (tpid <> "#00") (OpQuarantine "v.jpg" sha "t") now)
   rows <- doctorRows root
   assertBool ("expected OID-MALFORMED Bad in " <> show rows) (("OID-MALFORMED", Bad) `elem` rows)
   assertBool "畸形 oid 不得再推导出 Q-DONE-LOST" (not (any ((== "Q-DONE-LOST") . fst) rows))
@@ -444,3 +452,85 @@ caseI11AllWriters = withSystemTempDirectory "pm-guard" $ \tmp -> do
     other -> assertFailure (show other)
   rr <- requireRole RoleVault v
   assertBool "requireRole 应含 I11 守卫" (either ("I11" `isInfixOf`) (const False) rr)
+
+-- ─── P3b-8（五轮） ──────────────────────────────────────────────────────────
+
+caseOpIdTraversal :: IO ()
+caseOpIdTraversal = withSystemTempDirectory "pm-guard" $ \dir -> do
+  -- pid 必须是生成格式：路径型 / 短名 / 超长序号都不是 pm 生成的
+  opIdParts "../../outside#0" @?= Nothing
+  opIdParts "..\\..\\outside#0" @?= Nothing
+  opIdParts "p#0" @?= Nothing
+  opIdParts (tpid <> "#99999999999999999999") @?= Nothing -- 20 位：越过 Int，不 read
+  opIdParts (tpid <> "#9223372036854775807") @?= Nothing -- 19 位（maxBound）：封顶 18
+  opIdParts (tpid <> "#123456789012345678") @?= Just (tpid, 123456789012345678, SfxPlain)
+  quarTrashRel "../../outside#0" "v.jpg" @?= Nothing
+  -- doctor：手编 journal 的路径型 oid 不得把 trash 路径推到 root 之外——root 外
+  -- 放一份内容相符的文件（trash/../../../outside = 临时根/outside），旧代码会
+  -- 判 Q-DONE-LOST Warn 并被 --repair 补记 Done
+  let root = dir </> "root"
+      outside = dir </> "outside"
+  createDirectoryIfMissing True root
+  createDirectoryIfMissing True outside
+  writeFile (outside </> "v.jpg") "V"
+  sha <- sha256File (outside </> "v.jpg")
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  withJournal root $ \j -> jAppend j Barrier (JIntent "../../../outside#0" (OpQuarantine "v.jpg" sha "t") now)
+  rows <- doctorRows root
+  assertBool ("expected OID-MALFORMED Bad in " <> show rows) (("OID-MALFORMED", Bad) `elem` rows)
+  assertBool "路径型 oid 不得推导出 Q-DONE-LOST" (not (any ((== "Q-DONE-LOST") . fst) rows))
+  _ <- runDoctor root (DoctorOpts False True)
+  es <- journalEntries root
+  filter isDone es @?= []
+
+caseSlotOccupiedProbe :: IO ()
+caseSlotOccupiedProbe = withSystemTempDirectory "pm-guard" $ \dir -> do
+  slotOccupied (dir </> "no-such-entry") >>= (@?= False)
+  writeFile (dir </> "f.txt") "x"
+  slotOccupied (dir </> "f.txt") >>= (@?= True)
+  slotOccupied dir >>= (@?= True)
+  -- 非法名：doesPathExist 吞错答 False（实测），pathIsSymbolicLink 抛
+  -- InvalidArgument（非「不存在」）→ 按占用，宁可跳槽
+  slotOccupied (dir </> "bad<name") >>= (@?= True)
+  -- 文件当目录用：两个探测都是「不存在」→ 空槽
+  slotOccupied (dir </> "f.txt" </> "child") >>= (@?= False)
+
+caseCleanImportGuardFirst :: IO ()
+caseCleanImportGuardFirst = withSystemTempDirectory "pm-guard" $ \tmp -> do
+  -- 主路径是 RoleBackup root，索引存在、暂存区为空（新鲜）。旧次序：runClean 先
+  -- 读索引 → 备份发现失败 → exit 1；runImport 走到「暂存区无需归档」exit 0。
+  -- 新次序：身份校验先行 → 两者都 exit 2，且不落任何计划。
+  let mainP = tmp </> "disk"
+      cfg = mkCfg mainP Nothing
+  createDirectoryIfMissing True mainP
+  now <- getCurrentTime
+  writeRootInfo mainP (RootInfo "bk" RoleBackup now Nothing)
+  saveCatalog mainP (mkCat [])
+  c1 <- runClean (GoOpts False False) cfg
+  c1 @?= 2
+  c2 <- runImport (GoOpts False False) cfg
+  c2 @?= 2
+  doesDirectoryExist (pmDir mainP </> "plans") >>= (@?= False)
+  -- 同一 fixture 换成 RoleMain：证明上面的 exit 2 确由身份校验产生（而非索引/暂存）
+  writeRootInfo mainP (RootInfo "m" RoleMain now Nothing)
+  c3 <- runClean (GoOpts False False) cfg
+  c3 @?= 1 -- 备份 root 未登记 → 无法确认第三副本
+  c4 <- runImport (GoOpts False False) cfg
+  c4 @?= 0 -- 暂存区无需归档
+
+caseFixtureKeepsCorrupt :: IO ()
+caseFixtureKeepsCorrupt = withSystemTempDirectory "pm-guard" $ \tmp -> do
+  let r = tmp </> "r"
+  createDirectoryIfMissing True (pmDir r)
+  writeFile (pmDir r </> "root-id.json") "{\"id\": \"half-writ"
+  res <- try (ensureTestRoot RoleMain r) :: IO (Either SomeException (Maybe T.Text))
+  either (const (pure ())) (\v -> assertFailure ("fixture 不得把损坏标识当缺席: " <> show v)) res
+  readFile (pmDir r </> "root-id.json") >>= (@?= "{\"id\": \"half-writ")
+  -- 缺席 → 建立（no-replace）；再次调用沿用既有标识，不改写 role
+  let c = tmp </> "c"
+  createDirectoryIfMissing True c
+  ensureTestRoot RoleBackup c >>= (@?= Just "test-root")
+  fmap riRole <$> readRootInfo c >>= (@?= Just RoleBackup)
+  ensureTestRoot RoleMain c >>= (@?= Just "test-root")
+  fmap riRole <$> readRootInfo c >>= (@?= Just RoleBackup)

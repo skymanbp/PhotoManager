@@ -283,26 +283,31 @@ runTrash cfg tc root = do
         if null cleanRecs
           then pure ([], [])
           else do
-            -- P3b-7 复审 B1：主库见证须来自 RoleMain root（同 recheckCleanPlan）
+            -- P3b-7 复审 B1：主库见证须来自 RoleMain root（同 recheckCleanPlan）。
+            -- P3b-8 复审 B1：校验先于任何主库侧读取（catalog、备份发现）。此处
+            -- root 是 pickRoot 已按槽位验过身份的作用 root，trashView 只读它的
+            -- manifest；主库见证另走 cfgMainPath，所以守卫在这里而非 trashView 前。
             emain <- requireMain cfg
-            mMain <- fst <$> loadCatalog (cfgMainPath cfg)
-            er <- discoverBackupRoot cfg
-            case (emain, mMain, er) of
-              (Left m, _, _) -> pure ([], [(r, "主库身份不符: " <> m) | (r, _) <- cleanRecs])
-              (_, Just mainCat, Right broot) -> do
-                mBak <- fst <$> loadCatalog broot
-                case mBak of
-                  Nothing -> pure ([], [(r, "备份盘无索引") | (r, _) <- cleanRecs])
-                  Just bakCat -> do
-                    judged <- forM cleanRecs $ \rec@(r, _) -> do
-                      ok <- threeCopiesStillExist (cfgMainPath cfg) mainCat broot bakCat (trSha r)
-                      pure (rec, ok)
-                    pure
-                      ( [rec | (rec, True) <- judged]
-                      , [(r, "三副本复验不过") | ((r, _), False) <- judged]
-                      )
-              (_, Nothing, _) -> pure ([], [(r, "主库无索引") | (r, _) <- cleanRecs])
-              (_, _, Left msg) -> pure ([], [(r, "备份盘不在线: " <> msg) | (r, _) <- cleanRecs])
+            case emain of
+              Left m -> pure ([], [(r, "主库身份不符: " <> m) | (r, _) <- cleanRecs])
+              Right _ -> do
+                mMain <- fst <$> loadCatalog (cfgMainPath cfg)
+                er <- discoverBackupRoot cfg
+                case (mMain, er) of
+                  (Just mainCat, Right broot) -> do
+                    mBak <- fst <$> loadCatalog broot
+                    case mBak of
+                      Nothing -> pure ([], [(r, "备份盘无索引") | (r, _) <- cleanRecs])
+                      Just bakCat -> do
+                        judged <- forM cleanRecs $ \rec@(r, _) -> do
+                          ok <- threeCopiesStillExist (cfgMainPath cfg) mainCat broot bakCat (trSha r)
+                          pure (rec, ok)
+                        pure
+                          ( [rec | (rec, True) <- judged]
+                          , [(r, "三副本复验不过") | ((r, _), False) <- judged]
+                          )
+                  (Nothing, _) -> pure ([], [(r, "主库无索引") | (r, _) <- cleanRecs])
+                  (_, Left msg) -> pure ([], [(r, "备份盘不在线: " <> msg) | (r, _) <- cleanRecs])
       forM_ heldClean $ \(r, why) ->
         putStrLn ("  HELD(不删) " <> trTrashRel r <> " —— " <> why)
       -- P2.2（复审新发现）：同计划复位后重跑会为同一 trashRel 追加第二条
@@ -558,43 +563,44 @@ freeVersionName root taken dstRel = go (2 :: Int)
 runImport :: GoOpts -> Config -> IO Int
 runImport go cfg = do
   let root = cfgMainPath cfg
-  (mcat, warns) <- loadCatalog root
-  mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
-  case mcat of
-    Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
-    Just cat -> do
-      fr <- stagingFresh root cat
-      case fr of
-        Left msg -> putStrLn msg >> pure 2
-        Right () -> do
-          let rep = planImport cat
-              items = importPlanItems root rep
-              copyBytes = sum [enSize e | (e, _) <- irCopy rep]
-          printf
-            "归档: 拷贝 %d 文件 (%.1f GiB) · 已归档冗余 %d · 返修待裁决 %d · 待修改不碰 %d\n"
-            (length (irCopy rep))
-            (fromIntegral copyBytes / (1024 * 1024 * 1024 :: Double))
-            (length (irAlready rep))
-            (length (irRework rep))
-            (length (irPendingEdit rep))
-          forM_ (irRework rep) $ \(e, dst) ->
-            putStrLn ("  ⚠ 返修: " <> enPath e <> " → " <> dst <> "（目标已存在且内容不同）")
-          forM_ (irUnrecognized rep) $ \p ->
-            putStrLn ("  ⚠ 无法识别的暂存布局（不猜，不入计划）: " <> p)
-          forM_ (irDupTarget rep) $ \(s, d) ->
-            putStrLn ("  ✗ 目标重复（连同侧车整组拒绝）: " <> s <> " → " <> d)
-          if null items
-            then do
-              putStrLn "✓ 暂存区无需归档"
-              pure (if null (irUnrecognized rep) && null (irDupTarget rep) then 0 else 1)
-            else do
-              -- P2.2 fail-closed（复审 cx-1 残留）：root 无身份就不出计划，
-              -- 而不是造一个 rootId=Nothing 的计划再依赖下游拒绝。
-              -- P3b-5 复审 B1：并校验 role 确为 RoleMain。
-              er <- requireRole RoleMain root
-              case er of
-                Left msg -> putStrLn msg >> pure 2
-                Right info -> do
+  -- P2.2 fail-closed（复审 cx-1 残留）：root 无身份就不出计划，而不是造一个
+  -- rootId=Nothing 的计划再依赖下游拒绝；P3b-5 复审 B1：并校验 role 确为
+  -- RoleMain。P3b-8 复审 B1：校验先于任何 catalog 读取与判定（与 runClean 同一
+  -- 次序）——配置路径指向别的 root 时，不该先按它的索引算出一份归档报告再拒绝。
+  er <- requireRole RoleMain root
+  case er of
+    Left msg -> putStrLn msg >> pure 2
+    Right info -> do
+      (mcat, warns) <- loadCatalog root
+      mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
+      case mcat of
+        Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
+        Just cat -> do
+          fr <- stagingFresh root cat
+          case fr of
+            Left msg -> putStrLn msg >> pure 2
+            Right () -> do
+              let rep = planImport cat
+                  items = importPlanItems root rep
+                  copyBytes = sum [enSize e | (e, _) <- irCopy rep]
+              printf
+                "归档: 拷贝 %d 文件 (%.1f GiB) · 已归档冗余 %d · 返修待裁决 %d · 待修改不碰 %d\n"
+                (length (irCopy rep))
+                (fromIntegral copyBytes / (1024 * 1024 * 1024 :: Double))
+                (length (irAlready rep))
+                (length (irRework rep))
+                (length (irPendingEdit rep))
+              forM_ (irRework rep) $ \(e, dst) ->
+                putStrLn ("  ⚠ 返修: " <> enPath e <> " → " <> dst <> "（目标已存在且内容不同）")
+              forM_ (irUnrecognized rep) $ \p ->
+                putStrLn ("  ⚠ 无法识别的暂存布局（不猜，不入计划）: " <> p)
+              forM_ (irDupTarget rep) $ \(s, d) ->
+                putStrLn ("  ✗ 目标重复（连同侧车整组拒绝）: " <> s <> " → " <> d)
+              if null items
+                then do
+                  putStrLn "✓ 暂存区无需归档"
+                  pure (if null (irUnrecognized rep) && null (irDupTarget rep) then 0 else 1)
+                else do
                   pid <- newPlanId
                   now <- getCurrentTime
                   savePlanAndMaybeRun
@@ -615,42 +621,46 @@ runImport go cfg = do
 runClean :: GoOpts -> Config -> IO Int
 runClean go cfg = do
   let root = cfgMainPath cfg
-  (mcat, _) <- loadCatalog root
-  case mcat of
-    Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
-    Just cat -> do
-      fr <- stagingFresh root cat
-      case fr of
-        Left msg -> putStrLn msg >> pure 2
-        Right () -> do
-          er <- discoverBackupRoot cfg
-          case er of
-            Left msg -> putStrLn ("无法确认第三副本，不生成任何清理项: " <> msg) >> pure 1
-            Right broot -> do
-              (mbak, _) <- loadCatalog broot
-              case mbak of
-                Nothing -> putStrLn "备份盘尚无索引 → 先 pm backup" >> pure 2
-                Just bakCat -> do
-                  let rep = planClean cat bakCat
-                  (verified, demoted) <- verifyCandidates root broot (clEligible rep)
-                  let held = clHeld rep <> demoted
-                  printf
-                    "清理: 三副本已确认(真实重hash) %d · HELD %d · 待修改不碰 %d\n"
-                    (length verified)
-                    (length held)
-                    (length (clPendingEdit rep))
-                  forM_ held $ \(p, why) -> putStrLn ("  " <> why <> " " <> p)
-                  let items = cleanPlanItems verified
-                  if null items
-                    then do
-                      putStrLn "无可清理项"
-                      pure (if null held then 0 else 1)
-                    else do
-                      -- P2.2 fail-closed（复审 cx-1 残留）+ P3b-5 B1 role 校验：同 runImport。
-                      erole <- requireRole RoleMain root
-                      case erole of
-                        Left msg -> putStrLn msg >> pure 2
-                        Right info -> do
+  -- P2.2 fail-closed（复审 cx-1 残留）+ P3b-5 B1 role 校验：同 runImport。
+  -- P3b-8 复审 B1：校验必须先于 catalog 读取与 verifyCandidates——主路径若是
+  -- RoleBackup root（备份盘误配成主库、与备份发现命中同一路径），三副本判定
+  -- 会把同一文件当成主库/备份两份见证并打印「三副本已确认」；即便最后拒绝
+  -- 写计划，判定与输出已经错了。
+  erole <- requireRole RoleMain root
+  case erole of
+    Left msg -> putStrLn msg >> pure 2
+    Right info -> do
+      (mcat, _) <- loadCatalog root
+      case mcat of
+        Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
+        Just cat -> do
+          fr <- stagingFresh root cat
+          case fr of
+            Left msg -> putStrLn msg >> pure 2
+            Right () -> do
+              er <- discoverBackupRoot cfg
+              case er of
+                Left msg -> putStrLn ("无法确认第三副本，不生成任何清理项: " <> msg) >> pure 1
+                Right broot -> do
+                  (mbak, _) <- loadCatalog broot
+                  case mbak of
+                    Nothing -> putStrLn "备份盘尚无索引 → 先 pm backup" >> pure 2
+                    Just bakCat -> do
+                      let rep = planClean cat bakCat
+                      (verified, demoted) <- verifyCandidates root broot (clEligible rep)
+                      let held = clHeld rep <> demoted
+                      printf
+                        "清理: 三副本已确认(真实重hash) %d · HELD %d · 待修改不碰 %d\n"
+                        (length verified)
+                        (length held)
+                        (length (clPendingEdit rep))
+                      forM_ held $ \(p, why) -> putStrLn ("  " <> why <> " " <> p)
+                      let items = cleanPlanItems verified
+                      if null items
+                        then do
+                          putStrLn "无可清理项"
+                          pure (if null held then 0 else 1)
+                        else do
                           pid <- newPlanId
                           now <- getCurrentTime
                           -- P2.2（复审 cx-3 旁路封堵）：--apply 即时路径同样在
