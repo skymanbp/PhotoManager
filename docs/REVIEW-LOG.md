@@ -408,3 +408,21 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   （已加同样的「十四轮更正」）。它还给了"返回路径必须被使用"用例的可行设计
   （`resolveUnder` 不对 base 调 `probeName`，root 本身可为 junction，在
   `CpCopyAfterFlush` 改指诱饵库）——登记未做。代码零变化，189/189，0.3.15。
+- **P3b-18 十四轮 #3 残余闭合（同日，用户裁定"等待期间做"；非评审轮）**：
+  用例 `caseCopyDstUsesResolvedPath`（StateGuardTests）——`rootLink` junction
+  指向库 A，以 `rootLink` 为 root 执行一条 Copy；在 `CpCopyAfterFlush`（tmp 已
+  写完、落位 move 之前）删除并重建 junction 改指诱饵库 B（同身份、同目录结构，
+  让重拼版实现能"顺利"落到 B，失败原因只可能是用了哪条路径）。断言：ODone、
+  文件在 A、B 零改动。**突变**：`execCopy` 把传给 `execCopy'` 的 dst 改回
+  `root </> opDstRel op`（P3b-17 之前的形状）→ 用例 FAIL（`doesFileExist
+  (libA </> dstRel)` 得 False，文件落到了 B）。平台前提经用例内直接执行实证：
+  A 内 journal/lock 句柄打开期间 junction 可删除重建，已打开句柄继续指向 A。
+  +1 例（190/190），警告 0，pm 0.3.16。在独立 worktree（分支
+  `p3b18-returned-path`）开发，不污染十六轮正在读的工作树；进入十七轮范围。
+- **P3b-17c 十六轮文档收口（同日，codex 十六轮，额度重置后重跑：0 代码缺陷 +
+  1 文档 minor）**：十六轮确认 `46c4d12..ca260cb` 代码零变化、**维持十五轮
+  "两条判据已收敛"的判定**；NO-GO 只因第二卷谓词表的排除说明把 `newEx`
+  （实为 `existsAny`）、`raced`（实为 `doesFileExist`）说成 `doesPathExist`，
+  且把已**扩宽**的 `slotOccupied` 说成仅移动——与 `git diff` 删除行逐行对照
+  成立，已逐项标注类型并说明排除理由。与 P3b-18 同在分支 `p3b18-returned-path`
+  上，一并合并进 main，进入十七轮范围。

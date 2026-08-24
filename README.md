@@ -149,6 +149,15 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   `confinedUser`，Copy 的 dst 也只用 `confinedUserPath` 的返回路径，
   `execCopyTmp` 不再持有 root。新增 2 例（FpDir / FpFileSha 两形态分开钉），
   突变一次两条同时转红；189/189 测试）
+- P3b-17b ✅ codex 十五轮文档收口（两条代码判据——按名字操作 / 谓词宽度——
+  首次**均判已收敛**、无需代码修复；NO-GO 只因两处文档 minor，已修；代码零
+  变化）
+- P3b-18 ✅ 闭合十四轮 #3 登记的覆盖缺口：此前没有用例钉住"限域助手**返回的
+  路径必须被使用**"（把 Copy dst 改回 `root </> opDstRel` 重拼，旧用例照样绿）。
+  按十五轮给的设计：root 本身放在 junction 上（`resolveUnder` 只 canonicalize
+  base，合法用法），在 `CpCopyAfterFlush` 把它改指诱饵库 B——正确实现落在原库
+  A、B 零改动；突变回重拼即落到 B、用例转红。顺带实证了十五轮标注的平台前提：
+  A 内 journal/lock 句柄打开时 junction 可删除重建。190/190 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

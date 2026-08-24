@@ -32,8 +32,12 @@
 
 按**删除的谓词实现点**计数（`git diff a2efb3f..91339b7 -- src/Pm/` 里以
 `-` 开头、含 `doesFileExist` / `existsAny` / `doesDirectoryExist` /
-`doesPathExist` 的行；仅移动位置未换实现的 `newEx` / `raced` / `slotOccupied`
-的 `doesPathExist` 不计）：
+`doesPathExist` 的行）。**排除**三行（十六轮 minor 更正——初版把它们统称为
+"未换实现的 `doesPathExist`"，类型说错了两处、性质说错了一处）：
+`newEx (existsAny)` 与 `raced (doesFileExist)` 只是移动位置、实现未换；
+`slotOccupied` 的 `doesPathExist` 不是仅移动，而是**扩大**为"doesPathExist +
+悬空链接（`pathIsSymbolicLink`）+ 异常一律按占用"——它不属本轮"受信探针
+替换"这一类，故不入表，但方向是扩宽而非收窄：
 
 | 原谓词（删除行） | 文件 | 替换为 | 宽度 |
 |---|---|---|---|
@@ -127,7 +131,8 @@ junction（须由用例的设置阶段实际验证，失败则报告平台前提
 
 ## 残余（更新）
 
-- **"返回路径必须被使用"无用例**：设计已可行（见上），待做。其余同十四轮：
+- **"返回路径必须被使用"无用例**：设计已可行（见上）——**已于 P3b-18 做掉**
+  （见下节）。其余同十四轮：
 - **TOCTOU（check-use 窗口）**；`createRootInfo` post-mkdir 未重解析；
   `openExclusiveBinary` 缺外层 `mask`；`requirePmTrusted` 深度 1 枚举与使用点
   两个快照；`writeRootInfo` 裸覆盖写（仅 fixture）；`Pm.Scan` symlink 探测异常
@@ -138,3 +143,62 @@ junction（须由用例的设置阶段实际验证，失败则报告平台前提
 - **慢介质开销**：无超时，实测待用户插盘。
 - `tamperMark` 字符串哨兵；`opSrcAbs` 无 root 归属校验；`writeConfig` 普通
   覆盖写；备份盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU。
+
+---
+
+# P3b-18：十四轮 #3 残余闭合（非评审轮；用户裁定"等待期间做"）
+
+十六轮因 codex 用量上限中止、额度重置后重跑期间，按十五轮给的设计把"返回
+路径必须被使用"用例做掉。在独立 worktree（分支 `p3b18-returned-path`，基于
+ca260cb）开发，十六轮正在读的工作树零改动。
+
+## 用例：`caseCopyDstUsesResolvedPath`（StateGuardTests）
+
+| 步骤 | 内容 |
+|---|---|
+| 布置 | 库 A、诱饵库 B 各有 `.pm` 与相同身份 `m`；`rootLink` junction → A |
+| 执行 | 以 `rootLink` 为 root 跑一条 Copy（dst `相册/x.jpg`） |
+| 注入 | `CpCopyAfterFlush`（tmp 已写完并设好 mtime、落位 move 之前）：`removeDirectoryLink rootLink` + `mklink /J rootLink B` |
+| 断言 | `ODone`；`A/相册/x.jpg` 存在且内容正确；`B/相册/x.jpg` **不存在** |
+
+B 给同样的身份与目录结构是有意的：让重拼版实现能"顺利"落到 B，失败原因只
+可能是"用了哪条路径"，不混入别的拒绝理由。
+
+## 突变验证
+
+| 突变 | 结果 |
+|---|---|
+| `execCopy` 把传给 `execCopy'` 的 dst 改回 `root </> opDstRel op`（P3b-17 之前的形状） | **FAIL**（`doesFileExist (libA </> dstRel)` 得 False——文件沿改指后的 junction 落到了 B） |
+
+## 平台前提（十五轮标注为假设，本例实证）
+
+A 内 `journal.ndjson` 与 `lock` 的句柄打开期间，删除并重建 junction 成功；
+已打开的句柄继续指向 A 的对象，`JDone` / `JCleanShutdown` 都写进了 A 的
+journal。前提由检查点内直接执行验证——不允许则 mklink 非零退出抛异常，用例
+失败并暴露前提，而不是静默跳过。
+
+回归：190/190（+1），GHC 警告 0，pm 0.3.16。真实库只读四连待合并 main 后重跑。
+
+---
+
+# 第十六轮（复审 P3b-17b，commit ca260cb；gpt-5.6-sol 独立评审；额度重置后重跑）
+
+首跑在第 38 个探查命令后被 codex 用量上限中止（`turn.failed`："You've hit
+your usage limit"），后三次重试 0 exec 立即失败；用户裁定"不用换，额度刚刚
+重置了"后重跑，74 次探查完成。
+
+**verdict：NO-GO——代码与两条收敛性判据仍无阻断**（明确"维持第十五轮判定"，
+并确认 `git diff 46c4d12..HEAD` 代码零变化：`.hs/.c/.yaml/.cabal` 过滤后的
+diff 与 name-only 均为空）；NO-GO 只落在一处文档 minor。
+
+| 项 | codex 判定 | 核实 / 处置 |
+|---|---|---|
+| 十五轮 minor ① 谓词表 | PARTIAL | `readJournal` 已补、计数口径已声明——但紧接的排除说明把 `newEx`（实为 `existsAny`）、`raced`（实为 `doesFileExist`）统称为"未换实现的 `doesPathExist`"，且 `slotOccupied` 并非仅移动而是**扩大**（补了悬空链接与异常分支）。**核实成立**（与我自己 `git diff` 删除行输出逐行对照：`-    newEx <- existsAny …`、`-  raced <- doesFileExist dstAbs`、`-  ex <- doesPathExist (trashDir …)`）。已按它的建议逐项标注类型，并说明 `slotOccupied` 因不属受信探针替换类而排除、方向是扩宽 |
+| 十五轮 minor ② README | FIXED | 措辞与 REVIEW-LOG 十四轮更正一致 |
+| 十五轮章节转述 | 准确 | "无需代码修复"与残余登记措辞均确认；用例设计与源码相符（`resolveUnder` 只 canonicalize base；`CpCopyAfterFlush` 在持有 `dstAbs` 的落位前） |
+
+十六轮读的是 ca260cb 的工作树，因此它看到的"返回路径必须被使用"仍是登记
+残余、测试数仍是 189——P3b-18 当时在独立分支上，尚未合并（见上节）。
+
+最小修复集：仅修正谓词表第 33–36 行的类型说明；无需代码改动。已修（本文件
+上方的排除说明即为修正后文本）。
