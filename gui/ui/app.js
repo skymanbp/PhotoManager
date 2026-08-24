@@ -206,8 +206,10 @@
     const btn = $("#btn-plan"); btn.disabled = true;
     const out = $("#plan-result");
     const lines = [];
-    // 两步之间会 await：先把选择快照下来，提交期间点击也不再改它（submitting）
+    // 两步之间会 await：先把**全部**提交状态快照下来（选择 + DRIFT 数），
+    // 提交期间点击、切页、数字键都不再改它（submitting）。
     const snap = new Map(assign);
+    const driftSnap = vaultDrift;
     submitting = true;
     try {
       // 1) 先落「暂不同步」的增删：服务端拒收 held 文件的 push，撤销必须先生效
@@ -222,7 +224,7 @@
       }
       // 2) 再按类目生成推送计划（没有类目指派、也没有 DRIFT 就跳过）
       const assignments = [...snap.entries()].filter(([, c]) => c !== HOLD).map(([name, category]) => ({ name, category }));
-      if (assignments.length || vaultDrift) {
+      if (assignments.length || driftSnap) {
         const r = await post("/api/vault/push-plan", { assignments });
         const j = await r.json();
         if (!r.ok) { out.className = "banner bad"; out.textContent = (lines.join("\n") + "\n未生成计划：" + (j.error || r.status) + (j.details ? "\n" + j.details.join("\n") : "")).trim(); btn.disabled = false; return; }
@@ -283,10 +285,11 @@
     const m = document.querySelector("main"); m.tabIndex = -1; m.focus({ preventScroll: true }); m.scrollTop = 0;
     try { await loaders[name](); } catch (e) { fail(e); }
   }
-  for (const b of document.querySelectorAll("nav button")) b.onclick = () => showTab(b.dataset.tab);
+  for (const b of document.querySelectorAll("nav button")) b.onclick = () => { if (submitting) return; showTab(b.dataset.tab); };
   // 数字键 1–4 切页（键盘党；也是自动化截图验证用的入口）
   const keys = { "1": "status", "2": "vault", "3": "plans", "4": "help" };
   document.addEventListener("keydown", (ev) => {
+    if (submitting) return; // 提交期间不切页：loadVault 会清空刚推进的 baseline
     if (ev.repeat || ev.ctrlKey || ev.altKey || ev.metaKey) return; // 长按连发 → 并发重载
     const t = ev.target;
     if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;

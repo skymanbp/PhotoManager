@@ -24,6 +24,7 @@ module Pm.VaultHold
 
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import Data.Char (isHexDigit)
 import Data.List (nub, sort, sortOn)
 import Data.Text (Text)
@@ -82,23 +83,35 @@ readHolds root = do
   r <- readPmState root holdsFileName
   case r of
     Left m -> pure (Left m)
-    Right (Just bytes) -> pure $ case Aeson.eitherDecodeStrict' bytes of
-      Left e ->
-        Left
-          ( root <> " 的 .pm/" <> holdsFileName <> " 无法解析（" <> e
-              <> "）——拒绝按「无决定」处理；人工核查修复"
-          )
-      Right hs -> validateHolds hs
+    Right (Just bytes) -> pure (decodeHolds root bytes)
     Right Nothing -> do
       t <- readPmState root holdsTmpName
-      pure $ case t of
-        Left m -> Left m
-        Right Nothing -> Right [] -- 真的没有决定
+      case t of
+        Left m -> pure (Left m)
+        -- 正文与 tmp 都不在：可能真没有决定，也可能撞上正常覆盖写的
+        -- delete→rename 窗口（读者先看到正文缺失，写者随后 rename 完成，
+        -- 读者再看 tmp 也已不在）。再读一次正文消歧（二十二轮 minor）。
+        Right Nothing -> do
+          again <- readPmState root holdsFileName
+          pure $ case again of
+            Left m -> Left m
+            Right Nothing -> Right [] -- 真的没有决定
+            Right (Just bytes) -> decodeHolds root bytes
         Right (Just _) ->
-          Left
+          pure . Left $
             ( root <> " 的 .pm/" <> holdsFileName <> " 缺失，但残留 " <> holdsTmpName
                 <> "（覆盖写中途崩溃）——拒绝按「无决定」处理：核对 .tmp 内容后改名回来，或确认清空后删掉它"
             )
+
+-- | 解析 + 语义校验（'readHolds' 的两个入口共用）。
+decodeHolds :: FilePath -> BS.ByteString -> Either String [VaultHold]
+decodeHolds root bytes = case Aeson.eitherDecodeStrict' bytes of
+  Left e ->
+    Left
+      ( root <> " 的 .pm/" <> holdsFileName <> " 无法解析（" <> e
+          <> "）——拒绝按「无决定」处理；人工核查修复"
+      )
+  Right hs -> validateHolds hs
 
 -- | 写名单（覆盖写：完整路径解析 → 独占 tmp → flush → no-replace rename）。
 -- 先过 'requireWritable'（I11 + 身份），与其它 @.pm@ 写入口同一道闸；调用方

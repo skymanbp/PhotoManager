@@ -27,6 +27,7 @@ module Pm.Vault
   , runVaultStatus
   , runVaultPush
   , newActive
+  , freshSrcSha
   , hasDiffR
   , checkAssignments
   , vaultPushItems
@@ -313,6 +314,22 @@ data VaultReport = VaultReport
     -- ^ 决定已失效（字节变了 → 回到 NEW；或已不在 NEW → 可 unhold 清掉）。
   }
 
+-- | 源侧某个名字**本轮真实**的 sha：空缓存调 'shaViaCache' → 必走重读 +
+-- 双 stat；'Nothing' = 本轮读取不稳定。
+--
+-- 决定的**创建**与**复核**都只准用它：'vrSrcMeta' / `srcShas` 里的 sha 可能
+-- 来自主库 catalog 的 (size,mtime) 命中，等长替换 + 还原 mtime 时那是**陈旧
+-- 值**——二十一轮据此指出复核会失真，二十二轮进一步指出创建同样会：hold 会
+-- 记下旧 sha，下一轮复核立刻把它判成失效，决定根本落不住。
+freshShaAt :: FilePath -> FilePath -> IO (Maybe Text)
+freshShaAt srcDir n = do
+  (sha, me) <- shaViaCache Map.empty ("相册" </> n) (srcDir </> n)
+  pure (sha <$ me)
+
+-- | 'freshShaAt' 的报告层包装（源目录取自报告）。
+freshSrcSha :: VaultReport -> FilePath -> IO (Maybe Text)
+freshSrcSha r = freshShaAt (vrSrcDir r)
+
 -- | 真正"待处理"的 NEW：扣掉已决定暂不同步的（P4-7）。
 newActive :: VaultReport -> [FilePath]
 newActive r = [n | n <- vdNew (vrDiff r), n `notElem` map fst (vrHeld r)]
@@ -425,10 +442,7 @@ computeVault' quiet cfg vaultDir = do
             -- 只对「名单里且仍是 NEW」的文件做，数量 = 用户决定不同步的张数。
             freshHeld <-
               mapM
-                ( \n -> do
-                    (sha, me) <- shaViaCache Map.empty ("相册" </> n) (srcDir </> n)
-                    pure (n, sha <$ me) -- me == Nothing → 本轮读不稳定
-                )
+                (\n -> (,) n <$> freshShaAt srcDir n)
                 [vhName h | h <- holds, vhName h `elem` vdNew d]
             let freshMap = Map.fromList freshHeld
                 (held, heldStale) = splitHeld holds (vdNew d) (\n -> maybe Nothing id (Map.lookup n freshMap))

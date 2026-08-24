@@ -472,7 +472,8 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   零改动）：`{name, sha, at, note}`。语义：
   - `new` 键（对外契约、与 sync_photos.py 集合比对面）**不变**，HELD 是它的
     注解子集；`newActive` = NEW − HELD 才是"待处理"，退出码按它算——用户已经
-    决定不同步的照片不该让 `pm status` 永远 exit 1。
+    决定不同步的照片不该让 `pm vault status` 永远 exit 1（顶层 `pm status` 读
+    缓存 meta 的 `vmHeld`，同样按 NEW − HELD 显示）。
   - 记录里存**决定当时的 sha**：照片字节后来被换过（重修图/重导出）→ 决定
     **失效**（`held_stale`），照片回到 NEW 让用户再看一眼。宁可多问一次，也
     不让一张已经不是当初那张的照片被旧决定永久压住。复核用的 sha **强制重算**
@@ -490,8 +491,15 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
     静默清零。
   - `pm vault push` **拒收**已 HELD 的文件（先 `pm vault unhold`）；CLI 是
     `pm vault hold|unhold <文件…>`，GUI 是分类卡上的第四个按钮。
-  - 决定不走两段式计划：它不碰任何照片字节，撤销就是 unhold。身份闸两道：
-    `computeVault` 的 `requireMain` + `writeHolds` 的 `requireWritable`（I11）。
+  - 决定不走两段式计划：它不碰任何照片字节，撤销就是 unhold。身份闸**四道**，
+    次序与 `pm apply` 一致——**取锁前**先做零写入的 `requireMain` 预检（否则
+    `withRootLock` 会先把 `.pm/lock` 建出来再拒绝，二十二轮 major），然后
+    root lock（I10），锁内 `computeVault` 的 `requireMain` 复检，落盘前
+    `writeHolds` 的 `requireWritable`（I11）。
+  - 决定里的 sha **创建与复核都必须是本轮真实重算的**（`freshSrcSha`）：从
+    `vrSrcMeta` / `srcShas` 取会拿到主库 catalog 的 (size,mtime) 命中值，
+    等长替换 + 还原 mtime 时那是陈旧值——二十一轮指出复核会失真，二十二轮
+    指出创建同样会（hold 记下旧 sha → 下一轮复核立刻判失效，决定落不住）。
 - **P3b-1 落锤（2026-08-23）**：CLI 形态 `pm vault push [--category C FILES…]`
   ——NEW 只推显式点名 + 显式类目的文件（无类目零猜测）；DRIFT 生成
   NEEDS-DECISION 项，裁决复用 `pm resolve --keep src`（§6.5 supersede，
@@ -549,8 +557,10 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `GET /api/thumb/<sha>`（只提供 catalog 里 JPEG 条目的原字节，读取前逐级
   `resolveUnder`——扫描后被换成库外链接的条目不跟随；缩放由 GUI 做）。vault
   两个端点会刷新 `.pm/vault-cache`，进程内互斥串行化（并发争用固定 tmp 名）。
-- **写端点（P4-5，用户裁定"先做生成计划，apply 后置"）**：serve 加 `--writable`
-  开关（缺省只读；`pm ui` 拉起时置位）。唯一写端点 `POST /api/vault/push-plan`，
+- **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
+  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。目前共**两个**写端点——
+  `POST /api/vault/push-plan`（P4-5，本条）与 `POST /api/vault/hold`（P4-7，
+  见下）；**apply 端点仍未开**。第一个是 `POST /api/vault/push-plan`，
   体 `{"assignments":[{"name","category"},…]}`，上限 64 KiB（413）；校验与计划
   构造和 CLI `pm vault push` **共用**（`checkAssignments` / `vaultPushItems` /
   `mkVaultPushPlan`，fail-closed：任一指派不合法整体 400 并列出全部错误）；落盘
@@ -698,8 +708,8 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 | file-io 未经上游在 GHC 9.10.3 测试 | P0 冒烟 + FilePath 降级预案（§4） |
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |
 | GUI 工具链 | 2026-08-24 改判 Rust/Tauri：cargo、tauri-cli、WebView2、MSVC 本机均已在，零安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
-| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable`（只有 GUI 拉起时置位）才开唯一的生成计划端点、写域限 vault 的 `.pm`（§11）。同用户的进程若拿到 token 也能打该端点——本节威胁模型不防同机同用户恶意进程；它至多让磁盘上多一个**计划文件**，执行仍需人在终端 `pm apply` |
-| 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha：字节一变即失效并回到 NEW；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
+| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable`（只有 GUI 拉起时置位）才开两个写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）与记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）（§11）。同用户的进程若拿到 token 也能打这两个端点——本节威胁模型不防同机同用户恶意进程；它至多让磁盘上多一个**计划文件**或改动一条**本地决定**（可 unhold 撤销），照片零改动，执行仍需人在终端 `pm apply` |
+| 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：字节一变即失效并回到 NEW；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |
 | 相册↔成片 1 个例外文件 | doctor 报告单列，结合 inbox-origin 判定（I7），用户裁决 |

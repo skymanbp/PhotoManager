@@ -165,7 +165,7 @@ parserInfo =
           "status"
           ( info
               (CmdVaultStatus <$> switch (long "json" <> help "sync_photos.py 兼容的 JSON 输出（六键值形状逐字段一致 + unpushable）"))
-              (progDesc "相册 ↔ vault 六态差异（只读；退出码 0/1/2 同 sync_photos.py）")
+              (progDesc "相册 ↔ vault 六态差异（只读；退出码 0/1/2 同 sync_photos.py，但已决定「暂不同步」的 NEW 不计入差异）")
           )
           <> command
             "push"
