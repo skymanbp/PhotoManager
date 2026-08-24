@@ -64,12 +64,17 @@
   }
 
   // ── 分类（vault NEW 看图）──
+  // 十九轮 minor：blob URL 不 revoke 会随每次进入分类页累积（WebView 内存）。
+  // 上一轮的 URL 在重建网格前逐个释放。
+  let thumbUrls = [];
   async function loadVault() {
     const v = await getJson("/api/vault/status");
     $("#vault-summary").textContent =
       `相册 ${v.source_count} ↔ vault ${v.vault_count} · OK ${v.ok.length} · NEW ${v.new.length} · MISSING ${v.missing.length} · RENAME ${v.renamed.length} · DRIFT ${v.drift.length}`;
     const grid = $("#vault-grid");
     grid.innerHTML = "";
+    for (const u of thumbUrls) URL.revokeObjectURL(u);
+    thumbUrls = [];
     const meta = await getJson("/api/vault/new");
     for (const e of meta.new) {
       const card = document.createElement("div");
@@ -92,7 +97,9 @@
       // <img src> 带不了 Authorization 头 → fetch 成 blob
       try {
         const blob = await (await get("/api/thumb/" + e.sha)).blob();
-        img.src = URL.createObjectURL(blob);
+        const url = URL.createObjectURL(blob);
+        thumbUrls.push(url);
+        img.src = url;
       } catch (err) { name.textContent += "（无缩略图: " + err.message + "）"; }
     }
   }

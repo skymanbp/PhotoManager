@@ -503,3 +503,14 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   `Network.Wai.Test` 不经 socket/warp 解析/超时/连接复用，建议 P4-3 前补一条
   真开端口的 raw HTTP 冒烟（登记，未做——目前靠人工 netstat 冒烟）。
   归档见第二卷第十八轮章节。
+- **十九轮：GO（同日，codex 十九轮审 P4-2/3 + 十八轮闭合，7464780..da07eae，
+  252 次探查；"未发现 critical/major"，2 minor）**：十八轮五项全部 FIXED；GUI
+  边界确认（Rust 侧只有 spawn/api_info/kill、无 `std::fs`、唯一 Command 参数是
+  `serve --exit-on-stdin-eof`；`PM_EXE` 在 §14 模型下不要求限制；`api_info` 只对
+  本地页面可调、CSP 由 Tauri 注入——它读了本地 tauri/wry 源码取证；页面无 XSS
+  sink、无 POST）。minor ①app.js blob URL 不 revoke → **已修**（每轮 URL 记录、
+  重建网格前逐个 revoke）；minor ②**跨进程** vault-cache 刷新争用固定 `.tmp`
+  （GUI serve 与另一个 `pm vault status` 同时刷新）→ 进程内 MVar 挡不住，需
+  跨进程句柄锁并把 catalog/meta 当同一临界区，**登记为残余**。合并前最小修复集
+  空。归档见第二卷第十九轮章节。**下一步：请用户开窗验收 GUI 三页，再裁定是否
+  开写端点。**

@@ -187,6 +187,9 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   同分支闭合：Host 精确解析、`--port` 范围、vault JSON 末尾 LF 逐字节用例、vault
   缓存刷新进程内互斥、thumb 读取前 `resolveUnder`（库外 symlink → 404，用例钉住）；
   200/200）
+- **codex 十九轮：GO**（P4-2/3 + 十八轮闭合；GUI 边界确认——Rust 侧只 spawn /
+  api_info / kill，页面无 XSS sink、无 POST；2 minor：blob URL 不 revoke 已修，
+  跨进程 vault-cache 刷新争用登记残余）→ **等用户开窗验收 GUI**，再裁定写端点
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License
