@@ -74,8 +74,10 @@ pm undo <planId>                 # 整体回滚已执行的计划
 pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读，见 --writable）
 ```
 
-所有命令默认只读（生成计划、exit 1 表示"有事可做"）；写盘要么 `--apply` 交互
-确认，要么两段式 `pm apply <planId>`。
+所有命令默认只读（生成计划、exit 1 表示"有事可做"）；**动照片字节**要么
+`--apply` 交互确认，要么两段式 `pm apply <planId>`。唯一的例外是
+`pm vault hold|unhold`：它不碰任何照片，只在主库 `.pm` 里记一条"暂不同步"的
+决定，撤销就是 unhold，因此直接写、不出计划。
 
 ## 安全模型（一页版）
 
@@ -87,8 +89,10 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
   只经受信取用口读写（逐级 no-follow 解析 + link-count 校验），挡住 junction /
   symlink / hardlink 换名一类的库外写入。
 - **GUI 永不直接碰照片**：Rust 壳层只做 spawn / 交 token / kill 三件事，一切经
-  `pm serve`；serve 只绑 127.0.0.1 + 随机端口 + Bearer token，**缺省只读**，
-  `--writable`（只有 GUI 拉起时置位）也只允许"生成计划"，写域限 vault 的 `.pm`。
+  `pm serve`；serve 只绑 127.0.0.1 + 随机端口 + Bearer token，**缺省只读**。
+  `--writable`（只有 GUI 拉起时置位）只开两个写端点：生成推送计划（写 vault 的
+  `.pm/plans`）与记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）——
+  两者都不碰照片字节，执行仍在终端。
 - **pm 不执行 git**（I9）：涉及 vault 仓的提交步骤只打印给你自己执行。
 
 ## 从源码构建
