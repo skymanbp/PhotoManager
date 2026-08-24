@@ -20,6 +20,8 @@ pm clean staging                 # 仅清理「归档层+备份盘」都有同 s
 pm vault status                  # 相册 ↔ vault 展示集六态差异（--json 兼容 sync_photos.py）
 pm vault push --category landscape A.jpg …   # NEW 定类目拷入 vault；DRIFT 出裁决计划；
                                  # 结束打印显式 git 步骤（pm 不执行 git）
+pm names                         # Raw 事件夹统一 Scheme A 计划（B 类月份从成片还原；歧义不猜）
+pm versions                      # 版本组 / 非设计内精确重复报告（只读）
 
 pm apply <planId>                # 执行计划（--dry 全量预览 / --only 1,3-5 部分执行）
 pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先隔离）
@@ -59,6 +61,9 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   集合逐项一致 78/15/1/0/0/0；行为基线 docs/specs/；vault 目录零写入）
 - P3b-1 ✅ `pm vault push`（I11 文本级守卫 + DRIFT→resolve supersede 复用 +
   RENAME BLOCKED(photos.json) 实测命中 + doctor/trash/undo --vault；
-  真实写入待 codex 评审 + 用户分类）— names / versions 进行中
+  真实写入待 codex 评审 + 用户分类）
+- P3b-2/3 ✅ `pm names`（真实库 42 夹：31 合规 + 6 项计划 + 3 拒猜 + 2 双月名
+  报告；E2E undo 回滚有测试）+ `pm versions`（真实库定位 7 连号跨夹 ARW 重复
+  与 相册 9275≡成片 9274 那 1 例外）—— 真实改名待用户 apply
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）

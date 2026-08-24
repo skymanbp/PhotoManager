@@ -10,8 +10,10 @@ import System.Exit (exitSuccess, exitWith, ExitCode (..))
 import Pm.Cli (GoOpts (..), savePlanAndMaybeRun)
 import Pm.Commands
 import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
+import Pm.Names (runNames)
 import Pm.Status (StatusOpts (..), runStatus)
 import Pm.Vault (runVaultPush, runVaultStatus)
+import Pm.Versions (runVersions)
 import Pm.Win (setupConsole)
 
 data Cmd
@@ -28,6 +30,8 @@ data Cmd
   | CmdClean GoOpts -- clean staging
   | CmdVaultStatus Bool -- --json（sync_photos.py 兼容输出）
   | CmdVaultPush GoOpts (Maybe String) [FilePath] -- --category + FILES
+  | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
+  | CmdVersions -- 版本组/精确重复报告（只读）
 
 -- | --backup/--vault 二选一校验后进入命令体。
 withSel :: Bool -> Bool -> (RootSel -> IO Int) -> IO Int
@@ -70,6 +74,8 @@ run (CmdBackup (BackupRun go mworkers)) = withCfg (runBackupRun go mworkers)
 run (CmdClean go) = withCfg (runClean go)
 run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
 run (CmdVaultPush go mcat fs) = withCfg (runVaultPush (savePlanAndMaybeRun go) mcat fs)
+run (CmdNames go) = withCfg (runNames (savePlanAndMaybeRun go))
+run CmdVersions = withCfg runVersions
 
 parserInfo :: ParserInfo Cmd
 parserInfo =
@@ -90,6 +96,8 @@ parserInfo =
           <> command "backup" (info backupP (progDesc "主库 → 备份盘单向增量（init 登记备份盘）"))
           <> command "clean" (info cleanP (progDesc "clean staging: 三副本确认后的暂存清理计划"))
           <> command "vault" (info vaultP (progDesc "相册 ↔ vault 展示集（status 兼容 sync_photos.py）"))
+          <> command "names" (info (CmdNames <$> goOpts) (progDesc "Raw 事件夹统一 Scheme A（YY-MM-地点-Raw；目录改名走 §6.2 协议，undo 可回滚）"))
+          <> command "versions" (info (pure CmdVersions) (progDesc "版本组/精确重复报告（只读；版本后缀不强制统一）"))
           <> command "doctor" (info doctorP (progDesc "崩溃恢复对账 + 完整性体检（默认只读）"))
           <> command "trash" (info trashP (progDesc "隔离区：list / empty（唯一最终清除入口）"))
           <> command "undo" (info undoP (progDesc "由主库 journal 生成反向计划（经 pm apply 执行）"))
