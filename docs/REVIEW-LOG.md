@@ -75,3 +75,11 @@ GHC 探针证伪（`isDigit` 只认 ASCII、`read::Int` 越界静默回绕）→
 （§10.2 P3b-8 条目）：opId 的 planId 须为生成格式、readDigits 有界、slotOccupied
 全包 try、runClean/runImport/runTrash 身份校验先于读取判定、fixture 不覆盖损坏
 标识。新增 4 测试（155/155）。
+
+同日 codex 六轮复审（第 1 次即真跑，126 次命令执行，对 fdcd5e3..dfdf981）：
+A1/B1/文档 FIXED；余 1 新 major——Doctor 直接拼接手编 journal 的 Op 路径字段，
+合法 oid + `../../../x` 仍越出 root；统一排查同类还发现 Exec relOk 挡不住
+`\evil`/`c:evil`（filepath 实测 `</>` 整体替换）与 manifest `trashRel` 被 trash
+empty unlink → **P3b-9 收口**（§10.2 P3b-9 条目）：共用 `relPathOk`/`opPathsOk`
+谓词进 validatePlan/execItem/Doctor（OP-PATH fail-closed）/readManifest，`.pm`
+内部目标一律拒（undo 的 `.pm/trash/` rename 源除外）。新增 3 测试（158/158）。

@@ -84,7 +84,7 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    infoOption "pm 0.3.6 (P3b-8)" (long "version" <> help "打印版本")
+    infoOption "pm 0.3.7 (P3b-9)" (long "version" <> help "打印版本")
   backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
   vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =

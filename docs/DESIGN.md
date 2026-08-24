@@ -560,6 +560,17 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   改走 `readRootState` + `createRootInfo`（损坏标识不覆盖）；journal fixture 一律用
   生成格式 pid。测试 +4（155/155）。归档同上文件第五轮章节；§16 评审摘要拆到
   `docs/REVIEW-LOG.md`。
+- **P3b-9 六轮收口（同日，codex 六轮：A1/B1/文档 FIXED；余 1 新 major）**：
+  Doctor 直接拼接手编 journal 的 Op 路径字段（合法 oid + `../../../x` 仍越出
+  root 探测，--repair 可补 Done）；同类统一排查另发现 Exec 旧 relOk 挡不住
+  `\evil`/`c:evil`（filepath 实测 `isRelative` 均 True 且 `</>` **整体替换**）与
+  NTFS ADS，manifest 的 `trashRel` 被 trash empty **unlink**，Op 路径可指向
+  `.pm` 内部。修复 = 共用谓词 `Pm.Op.relPathOk`（非空/非绝对/无 `:`/不以分隔符
+  开头/无 `.`/`..` 分量）+ `opPathsOk`（`.pm` 内部拒，唯一例外 undo/复位 rename
+  的 `.pm/trash/` 源）：validatePlan 加路径校验、execItem 换同谓词、Doctor
+  classifyPending/verifyDone 前置 `OP-PATH` Bad + applyRepairs 双保险、
+  readManifest 非法记录降损坏行。catalog `enPath` 的只读探测记为残余（写屏障
+  在 validatePlan）。测试 +3（158/158）。归档同上文件第六轮章节。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 

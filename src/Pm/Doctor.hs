@@ -188,10 +188,15 @@ pendingTmp _ _ = Nothing
 
 -- | P3b-7 复审 A1：opId 不合 pm 语法（手编 journal）→ 单独一条 Bad，不做任何
 -- 盘面推导（tmp/trash 路径都由 oid 推出，猜错就会把无关文件认证成已完成）。
+-- P3b-8 六轮复审 major：Op 自带的相对路径（victim/dstRel/old/new）同为手编
+-- 输入，拼上 root 前先过 'opPathsOk'——否则合法 oid + @..\/..\/x@ 路径仍能让
+-- doctor 在 root 外探测/核 sha，--repair 还会补 Done 或生成 C5 计划。
 classifyPending :: FilePath -> (Text, Op) -> IO [Finding]
 classifyPending root (oid, op)
   | Nothing <- opIdParts oid =
       pure [Finding "OID-MALFORMED" Bad (T.unpack oid <> ": journal 中的 opId 不是 pm 生成的语法，不推导、不修复（需人工核查）") ""]
+  | not (opPathsOk op) =
+      pure [Finding "OP-PATH" Bad (T.unpack oid <> ": journal 中的 Op 相对路径非法（越界/盘符/ADS/.pm 内部），不推导、不修复（需人工核查）") ""]
   | otherwise = classifyPending' root (oid, op)
 
 classifyPending' :: FilePath -> (Text, Op) -> IO [Finding]
@@ -268,16 +273,24 @@ verifyDone :: FilePath -> Map.Map Text Op -> (Text -> Bool) -> (Text, Maybe Text
 verifyDone root intents restoredAfter (oid, msha, mtrash) =
   case Map.lookup oid intents of
     Nothing -> pure [Finding "C3" Info (T.unpack oid <> ": Done 无对应 Intent（journal 头部轮转或跨批），跳过") ""]
-    Just op -> case (op, msha) of
-      (OpCopy _ dstRel _ _ _, Just sha) -> checkTarget (root </> dstRel) dstRel sha
-      (OpQuarantine _ _ _, Just sha)
-        | Just trashRel <- mtrash ->
-            if restoredAfter oid
-              then
-                pure
-                  [Finding "Q-RESTORED" Info (T.unpack oid <> ": 隔离后已被 journaled 复位（" <> trashRel <> "），无需核查") ""]
-              else checkTarget (trashDir root </> trashRel) trashRel sha
-      _ -> pure [] -- rename Done carries no content claim
+    -- P3b-8 六轮复审 major：Intent 的 Op 路径与 Done 的 trash 路径都是手编
+    -- 输入，拼上 root 前先验（同 classifyPending 的 OP-PATH fail-closed）。
+    Just op
+      | not (opPathsOk op) ->
+          pure [Finding "OP-PATH" Bad (T.unpack oid <> ": journal 中的 Op 相对路径非法（越界/盘符/ADS/.pm 内部），Done 不核查（需人工核查）") ""]
+      | otherwise -> case (op, msha) of
+          (OpCopy _ dstRel _ _ _, Just sha) -> checkTarget (root </> dstRel) dstRel sha
+          (OpQuarantine _ _ _, Just sha)
+            | Just trashRel <- mtrash ->
+                if not (relPathOk trashRel)
+                  then pure [Finding "OP-PATH" Bad (T.unpack oid <> ": Done 记录的 trash 路径非法（" <> trashRel <> "），不核查（需人工核查）") ""]
+                  else
+                    if restoredAfter oid
+                      then
+                        pure
+                          [Finding "Q-RESTORED" Info (T.unpack oid <> ": 隔离后已被 journaled 复位（" <> trashRel <> "），无需核查") ""]
+                      else checkTarget (trashDir root </> trashRel) trashRel sha
+          _ -> pure [] -- rename Done carries no content claim
  where
   checkTarget abs' rel sha = do
     ex <- doesFileExist abs'
@@ -335,11 +348,13 @@ applyRepairs root findings pending stale = do
         [ (oid, op)
         | (oid, op) <- pending
         , isJust (opIdParts oid) -- P3b-7：畸形 oid 永不补记
+        , opPathsOk op -- P3b-8 六轮：非法 Op 路径永不补记（classifyPending 已拦，双保险）
         , any (\f -> fRow f `elem` ["C2", "R2", "Q-DONE-LOST"] && (T.unpack oid <> ":") `isPrefixOfStr` fDetail f && fSeverity f == Warn) findings
         ]
       c5 =
         [ (oid, op)
         | (oid, op) <- pending
+        , opPathsOk op -- P3b-8 六轮：C5 隔离计划的 dstRel 同样不得越界
         , any (\f -> fRow f == "C5" && (T.unpack oid <> ":") `isPrefixOfStr` fDetail f) findings
         ]
   unless (null repairDone) $
