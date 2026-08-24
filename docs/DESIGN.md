@@ -571,6 +571,19 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   classifyPending/verifyDone 前置 `OP-PATH` Bad + applyRepairs 双保险、
   readManifest 非法记录降损坏行。catalog `enPath` 的只读探测记为残余（写屏障
   在 validatePlan）。测试 +3（158/158）。归档同上文件第六轮章节。
+- **P3b-10 七轮收口（同日，codex 七轮：1 FIXED / 8 PARTIAL / 1 NOT-FIXED +
+  4 新发现）**：核心是**词法校验挡不住 Windows 规范化别名与 junction**。探针
+  实测：`root </> ".PM" </> f` 与 `".pm." </> f` 都能读到 `.pm` 内文件（大小写
+  不敏感 + 尾随点被剥），而 `.pm ` / `.. `（尾随空格）打不开（codex 该断言证伪）；
+  trash 内 junction 下 `listDirectory` 穿透且 `removeFile` **真的删掉库外文件**。
+  修复分两层：①词法 `Pm.Op.normComp`（折大小写 + 剥尾随点\/空格）收紧
+  `relPathOk`\/`opPathsOk`；②真正动盘处 canonical 限域 `Pm.Win.pathUnder`
+  （`canonicalizePath` 让操作系统回答路径究竟指向哪，覆盖 junction\/短名\/别名）
+  —— 进 `pm trash empty` 的唯一 unlink、`Pm.Exec` 的 copy\/rename\/quarantine
+  三个落位点（含 `.pm/trash` 例外的 rename 源）；`listTrashFiles` 遇 reparse
+  point 不递归；`loadCatalog` 校验每条 `enPath`（真实库 4855 条零违规，非法即
+  整份拒绝 → `pm scan` 重建）；`reverseOp`\/`pendingTmp` 补验。测试拆出
+  `test/PathGuardTests.hs` 并 +4（162/162）。归档同上文件第七轮章节。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 

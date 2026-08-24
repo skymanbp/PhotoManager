@@ -21,7 +21,8 @@ module Pm.Op
 
 import Control.Monad (guard)
 import Data.Aeson
-import Data.Char (isDigit)
+import Data.Char (isDigit, toLower)
+import Data.List (dropWhileEnd)
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.FilePath (isAbsolute, isPathSeparator, splitDirectories)
@@ -160,23 +161,36 @@ restoreOpId pid ix = opId pid ix <> "~r"
 displacedOpId :: Text -> Int -> Int -> Text
 displacedOpId pid ix n = opId pid ix <> "~d" <> T.pack (show n)
 
--- | 外部可手编输入（plan\/journal\/manifest）里相对路径字段的 fail-closed 校验
--- （P3b-8 六轮复审 major，Exec\/validatePlan\/Doctor\/Trash 共用）：这些字段会被
--- 拼到 @root \<\/\>@ 或 @.pm\/trash \<\/\>@ 上，而 Windows 的 @\<\/\>@ 对带盘符
--- （@c:evil@）或以分隔符开头（@\\evil@）的第二参数是**整体替换**而非拼接
--- （filepath 实测），@..@ 分量向上越界，@:@ 还打开 NTFS 备用数据流
--- （@a.jpg:ads@）。只接受非空、纯相对、不含 @:@、不以分隔符开头、无
--- @.@\/@..@ 分量的路径。
+-- | Win32 路径**分量**规范化（P3b-10 七轮复审 major，GHC 9.10 + Win11 实测）：
+-- 打开文件时尾随的点会被丢弃（@.pm.@ 打开的就是 @.pm@，实测命中），比较不分
+-- 大小写（@.PM@ 即 @.pm@，实测命中）；尾随空格反而**不**被剥（@.pm @ 打不开，
+-- @.. @ 也不等于 @..@——codex 该断言实测证伪）。谓词按更保守的一侧取：两者
+-- 一并剥除后再判定，宁可多拒（Windows 本就无法创建以点\/空格结尾的名字）。
+normComp :: String -> String
+normComp = map toLower . dropWhileEnd (\c -> c == '.' || c == ' ')
+
+-- | 外部可手编输入（plan\/journal\/manifest\/catalog）里相对路径字段的
+-- fail-closed 词法校验（P3b-8 六轮复审 major，Exec\/validatePlan\/Doctor\/
+-- Trash\/Catalog\/Undo 共用）：这些字段会被拼到 @root \<\/\>@ 或
+-- @.pm\/trash \<\/\>@ 上，而 Windows 的 @\<\/\>@ 对带盘符（@c:evil@）或以分隔符
+-- 开头（@\\evil@）的第二参数是**整体替换**而非拼接（filepath 实测），@..@
+-- 分量向上越界，@:@ 还打开 NTFS 备用数据流（@a.jpg:ads@）。只接受非空、纯
+-- 相对、不含 @:@、不以分隔符开头、且**规范化后**每个分量都非空的路径
+-- （P3b-10：规范化后为空即 @.@ \/ @..@ \/ @...@ \/ 纯空格之类的等价名）。
+--
+-- 词法校验挡不住 junction\/symlink 别名——那一层由 'Pm.Win.pathUnder' 在真正
+-- 动盘处（尤其 @pm trash empty@ 的唯一 unlink）做 canonical 限域。
 relPathOk :: FilePath -> Bool
 relPathOk p =
   not (null p)
     && not (isAbsolute p)
     && notElem ':' p
     && not (any isPathSeparator (take 1 p))
-    && all (`notElem` [".", ".."]) (splitDirectories p)
+    && all (not . null . normComp) (splitDirectories p)
 
 -- | Op 的相对路径字段（OpCopy 的 src 是绝对路径，允许指向其他 root，不在
--- 其列——它只被读取，落位目标是 dstRel）。
+-- 其列——它只被读取，落位目标是 dstRel；其来源 catalog 由
+-- 'Pm.Catalog.loadCatalog' 校验）。
 opRelPaths :: Op -> [FilePath]
 opRelPaths OpCopy {opDstRel = d} = [d]
 opRelPaths (OpRename o n _) = [o, n]
@@ -185,14 +199,15 @@ opRelPaths (OpQuarantine v _ _) = [v]
 -- | Op 全部相对路径合法，且不指向 @.pm@ 内部——唯一例外是 undo\/复位 rename
 -- 的源（@.pm\/trash\/…@，隔离文件搬回原位）；其余任何 @.pm@ 前缀（如 rename
 -- @.pm\/root-id.json@、quarantine journal）都是对 pm 自身状态的操纵，拒绝。
+-- P3b-10：@.pm@ 比对走 'normComp'，@.PM@\/@.pm.@ 一并拒绝。
 opPathsOk :: Op -> Bool
 opPathsOk op = case op of
   OpCopy {opDstRel = d} -> ok d
   OpRename o n _ -> (ok o || okTrashSrc o) && ok n
   OpQuarantine v _ _ -> ok v
  where
-  ok p = relPathOk p && take 1 (splitDirectories p) /= [".pm"]
-  okTrashSrc p = relPathOk p && take 2 (splitDirectories p) == [".pm", "trash"]
+  ok p = relPathOk p && map normComp (take 1 (splitDirectories p)) /= [".pm"]
+  okTrashSrc p = relPathOk p && map normComp (take 2 (splitDirectories p)) == [".pm", "trash"]
 
 describeOp :: Op -> String
 describeOp (OpCopy s d _ sz _) = "copy " <> s <> " -> " <> d <> " (" <> show sz <> " B)"

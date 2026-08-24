@@ -327,3 +327,46 @@ I5 不覆盖；gitStepsLines 纯字符串（pm 零 git 执行）;六态算法/�
   FpFileSha 前置条件 + I5 no-replace 约束）；语义上等价于合法 undo，未禁。
 - root-id tmp 残留、.gitignore TOCTOU、`pm backup` 盘符 fixture、位移槽 99、
   reparse 记 `l`（沿前几轮记录）。
+
+---
+
+# 七轮复审（2026-08-24，`codex exec -s read-only` 直跑，对 fdcd5e3..dfdf981 之后的 d8316fe）
+
+- 取结果：中转站余额耗尽（403 insufficient balance）致首轮断粮；用户充值后守候脚本
+  自动重跑，attempt 2 真跑（54 次命令执行）。另有一次**新的空跑变体**：
+  stderr 连刷 `tools::router: failed to parse function arguments`（112 条、30 分钟）
+  且进程不退出——按零 `command_execution` 判据人工 kill，循环自愈。
+- verdict：**NO-GO**（1 FIXED / 8 PARTIAL / 1 NOT-FIXED + 4 新发现）。核心指控：
+  **词法校验挡不住 Windows 规范化别名与 junction**。逐条探针核实后同轮修复
+  （P3b-10，162/162，零 GHC 警告）。
+
+## 逐条
+
+| # | 复审判定 | 探针核实 | P3b-10 处置 |
+|---|---|---|---|
+| 1 A1 词法谓词 | PARTIAL：`.PM`\/`.pm `\/`.. ` 别名可绕过 | **半数证实半数证伪**（Probe5，GHC 9.10 + Win11）：`root </> ".PM" </> f` 读到 `.pm` 里的文件 → **成立**；`root </> ".pm." </> f` 同样命中（尾随点被剥）→ **codex 没提到的更宽形态**；而 `.pm `、`.. `（尾随空格）**打不开** → 该断言**证伪** | `normComp` = 大小写折叠 + 剥尾随点\/空格；`relPathOk` 改判「规范化后分量非空」（一并覆盖 `.`\/`..`\/`...`\/纯空格）；`opPathsOk` 的 `.pm` 比对走 `normComp` |
+| 4/7 junction | PARTIAL\/NOT-FIXED：trash 内 junction 可致库外删除\/搬运（codex 标为"需探针确认"） | **完全证实且是数据丢失级**（Probe5 B）：junction 下 `doesDirectoryExist=True`、`listDirectory` 穿透、`removeFile` **真的删掉了库外文件** | 三道闸：①`listTrashFiles` 遇 reparse point 不递归（链接本体列为条目，doctor 以 UNREGISTERED 报出）；②`pm trash empty` 每条 unlink 前 `Pm.Win.pathUnder` canonical 限域，越界 → HELD 且 exit 1；③`Pm.Exec` 的 copy\/rename\/quarantine 三个落位点同样限域（含 `.pm/trash` 例外的 rename 源——这正是 #7 的攻击面） |
+| 6 catalog `enPath` | PARTIAL：手编快照 → `opSrcAbs` 未校验 | 成立（`Pm.Diff:80`\/`Pm.Import:156` 直接 `root </> enPath`）；**真实库 4855 条目实测零违规**，可安全 fail-closed | `loadCatalog` 校验每条 `enPath`，任一非法即整份拒绝载入并报警（快照是可由 `pm scan` 重建的缓存） |
+| 5 undo | PARTIAL：`reverseOp` 直接拼 `.pm/trash/<trashRel>`，`savePlan` 不验 | 成立 | `reverseOp` 先验 Intent 的 `opPathsOk` 与 Done 的 `relPathOk`，非法即拒绝生成撤销计划 |
+| 3/新 minor `pendingTmp` | PARTIAL：未先验 Op | 成立（仅影响 TMP-STALE 预期集合，`takeFileName` 已挡住穿越） | `pendingTmp` 前置 `opPathsOk` |
+| 2 计划链路 · 8 filepath 事实 | PARTIAL（措辞）\/ FIXED | 链路本身经核实完整；filepath 事实无相反实证 | 无需改动 |
+| 9 测试 · 10 文档 | PARTIAL：缺别名\/junction\/catalog 覆盖；文档把 `.pm` 拒绝写得过于绝对 | 成立 | 新增 4 例（含 junction 三道闸与 catalog\/undo）；文档补记 Win32 规范化与 reparse 的处置及残余 |
+
+## 附带
+
+- `canonicalizePath` 对**不存在的末段**照样返回规范路径（Probe6：新目录名、两层
+  缺失均正常），因此限域门不会误拒 names 那 6 项「改到新名字」的改名。
+- 测试文件触及 750 行预算 → 路径类用例拆出 `test/PathGuardTests.hs`
+  （同 P3b-6 拆 `Pm.BackupCmd` 的先例）。
+- 工程事故（自记）：一次用 PowerShell `Get-Content`+`WriteAllLines` 回写
+  `GuardTests.hs`，控制台按 CP936 解码致 CJK 全毁；`git checkout --` 复原。
+  源文件此后一律用 Edit\/Write 工具或 git 操作，不经 PowerShell 文本往返。
+
+## 残余与未自动化项
+
+- 限域用 `canonicalizePath`，与后续实际操作之间存在 TOCTOU 窗口（§14 单机威胁
+  模型：需要攻击者在窗口内替换 reparse point）；Exec 侧另有锁 + no-replace 兜底。
+- catalog 只读探测（doctor `--deep`\/status\/diff）现由 `loadCatalog` 校验覆盖，
+  但 `opSrcAbs` 本身仍不做 root 归属校验（备份计划的 src 合法地位于另一 root）。
+- `pm backup` 盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU
+  （沿前几轮记录）。

@@ -57,7 +57,8 @@ import Pm.Op
 import Pm.Plan
 import Pm.Trash
 import Pm.Types
-import Pm.Win (moveFileNoReplace)
+-- pathUnder = P3b-10 七轮复审 #7 的第二道闸（canonical 限域，挡 junction 别名）
+import Pm.Win (moveFileNoReplace, pathUnder)
 
 -- | Protocol step markers, one between every pair of externally visible
 -- effects (§13 P3 fault injection).
@@ -340,10 +341,27 @@ execItem env root j pid item = case piStatus item of
         op@OpQuarantine {} ->
           execQuarantine env root j (opId pid (piIx item)) (quarDirFor pid SfxPlain </> opVictimRel op) op
 
+-- | 词法校验（'opPathsOk'）之后的第二道闸：让操作系统解析每个落位\/取用点，
+-- 解析后必须仍在给定基准之内。P3b-10（七轮复审 #7，junction 实测）：库内或
+-- trash 内的 junction 会让**完全合法**的相对路径指向库外——rename 源走
+-- @.pm\/trash@ 例外时尤其危险（能把库外文件搬进库）。解析失败按不通过
+-- （fail-closed）。目标尚不存在不影响判定：canonicalizePath 对缺失末段仍返回
+-- 规范化路径（实测：新目录名、两层缺失均正常返回）。
+confined :: [(FilePath, FilePath)] -> IO Bool
+confined = fmap and . mapM (uncurry pathUnder)
+
+escapeOutcome :: ItemOutcome
+escapeOutcome = OConflict "路径解析后不在 root/.pm\\trash 之内（junction/别名？），拒绝执行"
+
 -- ─── Copy (§6.1) ────────────────────────────────────────────────────────────
 
 execCopy :: ExecEnv -> FilePath -> Journal -> Text -> Int -> Op -> IO ItemOutcome
 execCopy env root j oid ix op = do
+  okc <- confined [(root, root </> opDstRel op)]
+  if okc then execCopy' env root j oid ix op else pure escapeOutcome
+
+execCopy' :: ExecEnv -> FilePath -> Journal -> Text -> Int -> Op -> IO ItemOutcome
+execCopy' env root j oid ix op = do
   preE <- try (statSnap (opSrcAbs op)) :: IO (Either IOException StatSnap)
   case preE of
     Left e -> pure (OFailed ("源 stat 失败: " <> show e))
@@ -420,6 +438,13 @@ execCopy env root j oid ix op = do
 
 execRename :: ExecEnv -> FilePath -> Journal -> Text -> Op -> IO ItemOutcome
 execRename env root j oid op = do
+  -- 源与目标解析后都必须在 root 内。源走 .pm/trash 例外（undo/组回滚复位）时，
+  -- 这一步挡住 trash 内 junction 把库外对象搬进库（七轮复审 #7）。
+  okc <- confined [(root, root </> opOldRel op), (root, root </> opNewRel op)]
+  if okc then execRename' env root j oid op else pure escapeOutcome
+
+execRename' :: ExecEnv -> FilePath -> Journal -> Text -> Op -> IO ItemOutcome
+execRename' env root j oid op = do
   let oldAbs = root </> opOldRel op
       newAbs = root </> opNewRel op
   oldIsFile <- doesFileExist oldAbs
@@ -465,6 +490,12 @@ execRename env root j oid op = do
 -- 不同目录）；manifest 的 planId 从 oid 剥离。
 execQuarantine :: ExecEnv -> FilePath -> Journal -> Text -> FilePath -> Op -> IO ItemOutcome
 execQuarantine env root j oid trashRel op = do
+  -- victim 必须在 root 内、隔离落位必须在 .pm/trash 内（七轮复审 #7 同类）
+  okc <- confined [(root, root </> opVictimRel op), (trashDir root, trashDir root </> trashRel)]
+  if okc then execQuarantine' env root j oid trashRel op else pure escapeOutcome
+
+execQuarantine' :: ExecEnv -> FilePath -> Journal -> Text -> FilePath -> Op -> IO ItemOutcome
+execQuarantine' env root j oid trashRel op = do
   let victimAbs = root </> opVictimRel op
       trashAbs = trashDir root </> trashRel
   ex <- doesFileExist victimAbs
