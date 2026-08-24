@@ -26,6 +26,9 @@ module Pm.Vault
   , planCategories
   , runVaultStatus
   , runVaultPush
+  , checkAssignments
+  , vaultPushItems
+  , mkVaultPushPlan
   ) where
 
 import Control.Monad (forM, forM_, unless, when)
@@ -550,17 +553,10 @@ runVaultPush runPlan mCat files cfg = do
             (Nothing, []) -> Right []
             (Just _, []) -> Left ["--category 需要同时给出要推送的文件名（pm vault push --category landscape A.jpg …）"]
             (Nothing, _ : _) -> Left ["给了文件却没给 --category（CLI 无法看图分类；或用 pm ui，P4）"]
-          checkSel (c, f)
-            | f `elem` map fst (vrUnstable r) = Just (f <> " 本轮读取不稳定（已退出六态分类，fail-closed），稍后重试")
-            | c `notElem` fixedCategories = Just ("类目不存在: " <> c <> "（可选: " <> unwords fixedCategories <> "）")
-            | f `notElem` vdNew d = Just (f <> " 不在 NEW 集合里（只有 NEW 可 push；看 pm vault status）")
-            | not (pushableExt f) = Just (f <> " 是 UNPUSHABLE（写路径只收 jpg/jpeg）")
-            | not (Map.member f (vrSrcMeta r)) = Just (f <> " 读取不稳定，本轮不可入计划（稍后重试）")
-            | otherwise = Nothing
       case sel of
         Left errs -> mapM_ putStrLn errs >> pure 2
         Right pairs' -> do
-          let errs = [e | p <- pairs', Just e <- [checkSel p]]
+          let errs = checkAssignments r pairs'
           if not (null errs)
             then mapM_ (putStrLn . ("  ✗ " <>)) errs >> pure 2
             else do
@@ -575,21 +571,7 @@ runVaultPush runPlan mCat files cfg = do
               forM_ (vdMissing d) $ \(n, c) ->
                 putStrLn ("  - MISSING " <> c </> n <> "（可能有意撤下，决定权在用户，只报告）")
               -- 计划面：选中的 NEW + 全部 DRIFT
-              let newItems =
-                    [ ( OpCopy (vrSrcDir r </> f) (c </> f) (enSha e) (enSize e) (enMtimeNs e)
-                      , StPending
-                      )
-                    | (c, f) <- pairs'
-                    , Just e <- [Map.lookup f (vrSrcMeta r)]
-                    ]
-                  driftItems =
-                    [ ( OpCopy (vrSrcDir r </> n) (c </> n) (enSha e) (enSize e) (enMtimeNs e)
-                      , StNeedsDecision "DRIFT：相册是上游真相 → pm resolve <计划> --item N --keep src（旧字节先入 vault .pm/trash）或 --keep dst 保留现状"
-                      )
-                    | (n, c, _, _) <- vdDrift d
-                    , Just e <- [Map.lookup n (vrSrcMeta r)]
-                    ]
-                  allItems = newItems <> driftItems
+              let allItems = vaultPushItems r pairs'
               if null allItems
                 then do
                   unless (null (vdNew d)) $ do
@@ -597,22 +579,65 @@ runVaultPush runPlan mCat files cfg = do
                   putStrLn "（无可执行项，未生成计划）"
                   pure (if hasDiff d then 1 else 0)
                 else do
-                  einfo <- ensureVaultRoot (vrVaultDir r)
-                  case einfo of
+                  eplan <- mkVaultPushPlan r allItems
+                  case eplan of
                     Left msg -> putStrLn msg >> pure 2
-                    Right info -> do
-                      pid <- newPlanId
-                      now <- getCurrentTime
-                      let plan =
-                            Plan
-                              { plId = pid
-                              , plKind = "vault-push"
-                              , plRootPath = vrVaultDir r
-                              , plRootId = Just (riId info)
-                              , plCreated = now
-                              , plItems = [PlanItem i op st Nothing | (i, (op, st)) <- zip [0 ..] allItems]
-                              }
+                    Right plan -> do
                       code <- runPlan plan
                       when (code == 0) $
-                        mapM_ putStrLn (gitStepsLines (vrVaultDir r) pid (planCategories plan))
+                        mapM_ putStrLn (gitStepsLines (vrVaultDir r) (plId plan) (planCategories plan))
                       pure code
+
+-- ─── vault push 的计划构造（CLI 与 `pm serve` 的 POST /api/vault/push-plan 共用，P4-5） ──
+
+-- | 逐条校验「类目, NEW 文件名」指派（fail-closed：任何一条不合法就不出计划）。
+-- 返回全部错误而不是第一条，GUI 能一次把问题都标出来。
+checkAssignments :: VaultReport -> [(String, FilePath)] -> [String]
+checkAssignments r pairs' = [e | p <- pairs', Just e <- [checkSel p]]
+ where
+  d = vrDiff r
+  checkSel (c, f)
+    | f `elem` map fst (vrUnstable r) = Just (f <> " 本轮读取不稳定（已退出六态分类，fail-closed），稍后重试")
+    | c `notElem` fixedCategories = Just ("类目不存在: " <> c <> "（可选: " <> unwords fixedCategories <> "）")
+    | f `notElem` vdNew d = Just (f <> " 不在 NEW 集合里（只有 NEW 可 push；看 pm vault status）")
+    | not (pushableExt f) = Just (f <> " 是 UNPUSHABLE（写路径只收 jpg/jpeg）")
+    | not (Map.member f (vrSrcMeta r)) = Just (f <> " 读取不稳定，本轮不可入计划（稍后重试）")
+    | otherwise = Nothing
+
+-- | 计划项：选中的 NEW（Pending）+ 全部 DRIFT（NEEDS-DECISION）。调用方须先过
+-- 'checkAssignments'。
+vaultPushItems :: VaultReport -> [(String, FilePath)] -> [(Op, ItemStatus)]
+vaultPushItems r pairs' = newItems <> driftItems
+ where
+  newItems =
+    [ (OpCopy (vrSrcDir r </> f) (c </> f) (enSha e) (enSize e) (enMtimeNs e), StPending)
+    | (c, f) <- pairs'
+    , Just e <- [Map.lookup f (vrSrcMeta r)]
+    ]
+  driftItems =
+    [ ( OpCopy (vrSrcDir r </> n) (c </> n) (enSha e) (enSize e) (enMtimeNs e)
+      , StNeedsDecision "DRIFT：相册是上游真相 → pm resolve <计划> --item N --keep src（旧字节先入 vault .pm/trash）或 --keep dst 保留现状"
+      )
+    | (n, c, _, _) <- vdDrift (vrDiff r)
+    , Just e <- [Map.lookup n (vrSrcMeta r)]
+    ]
+
+-- | 建 vault root 身份（幂等，含 I11 守卫）并组装计划——**不落盘**；落盘由
+-- 调用方经 'savePlan'（CLI 的 savePlanAndMaybeRun / API 的 push-plan 端点）。
+mkVaultPushPlan :: VaultReport -> [(Op, ItemStatus)] -> IO (Either String Plan)
+mkVaultPushPlan r allItems = do
+  einfo <- ensureVaultRoot (vrVaultDir r)
+  case einfo of
+    Left msg -> pure (Left msg)
+    Right info -> do
+      pid <- newPlanId
+      now <- getCurrentTime
+      pure . Right $
+        Plan
+          { plId = pid
+          , plKind = "vault-push"
+          , plRootPath = vrVaultDir r
+          , plRootId = Just (riId info)
+          , plCreated = now
+          , plItems = [PlanItem i op st Nothing | (i, (op, st)) <- zip [0 ..] allItems]
+          }

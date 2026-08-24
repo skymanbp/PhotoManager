@@ -514,3 +514,23 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   跨进程句柄锁并把 catalog/meta 当同一临界区，**登记为残余**。合并前最小修复集
   空。归档见第二卷第十九轮章节。**下一步：请用户开窗验收 GUI 三页，再裁定是否
   开写端点。**
+- **用户开窗验收（同日）**：①bug——分类页往下滚动后缩略图消失；②"需要更加清晰
+  更加优雅的 UX，让用户能够快速上手并进行实用的功能，以及直观的可视化"；③追加：
+  一眼看明白的"状态"可视化——vault 同步状况与差哪些 / Raw·成片·相册各层状态 /
+  备份硬盘同步状态；④裁定写端点：**开，先做"生成计划"端点，apply 端点后置**。
+- **P4-4/5（pm 0.4.2，202/202）**：**P4-5 写端点**——`--writable`（缺省只读，
+  `pm ui` 置位）；`POST /api/vault/push-plan`：`readBodyCapped` 64 KiB（413）→
+  JSON（400）→ 与 CLI 共用的 `checkAssignments`（400 + 全部错误）→
+  `vaultPushItems` / `mkVaultPushPlan`（从 `runVaultPush` 抽出，CLI 行为不变，
+  VaultTests 原集合通过）→ `requireWritable` → `savePlan`；响应含计划/路径/
+  `pm apply` 提示/git 步骤。测试 +2：闸用例（只读 403、坏 JSON/空/非法类目/非
+  NEW 400、70 KiB 413、GET 404、之后 vault `.pm` 不出现）与合法用例（计划落到
+  `<vault>/.pm/plans`，`loadPlan` 装回，dst = `portrait/a.jpg`、sha 一致，照片与
+  vault 类目目录零改动）；突变：去 `--writable` 闸 / 体上限失效 / 跳过指派校验
+  → 闸用例各自转红、合法用例不受影响。**P4-4 UX**——`ui/` 重写（见 DESIGN §11）；
+  缩略图消失的根因：相册原图 1.2–75.9 MB（94 张共 2.5 GB），15 张 NEW 全分辨率
+  解码的位图撑爆 WebView，被丢弃后不再重绘——改为 GUI 侧 `createImageBitmap`
+  按 640 px 解码缩放再挂上；截图自验：分类页 END 滚到底 15 张全在。渲染验证工具
+  `scratchpad/shot.ps1`（`SetProcessDPIAware` 后 `GetWindowRect` + `CopyFromScreen`，
+  否则显示缩放下截到错位区域）+ `tour.ps1`（只在 pm 窗口确为前台时 SendKeys
+  切页——第一版没校验前台，一个 "2" 可能打进了当时前台的窗口，已改）。

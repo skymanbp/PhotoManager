@@ -20,7 +20,7 @@ import Data.Time (getCurrentTime)
 import Network.HTTP.Types
 import Network.Wai
 import Network.Wai.Test
-import System.Directory (createDirectoryIfMissing, removeFile)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
@@ -31,7 +31,7 @@ import Pm.Catalog (saveCatalog)
 import Pm.Config (Config (..), pmDir, writeRootInfo)
 import Pm.Hash (sha256File)
 import Pm.Op (Fingerprint (..), Op (..))
-import Pm.Plan (Plan (..), savePlan)
+import Pm.Plan (Plan (..), PlanItem (..), loadPlan, savePlan)
 import Pm.Serve (ServeEnv, allowedOrigin, hostOk, listPlans, newServeEnv, newToken, portOk, serveApp)
 import Pm.Types (Entry (..), FileKind (..), RootInfo (..), RootRole (..))
 import Pm.Vault (VaultReport (..), computeVault, renderVaultJson)
@@ -51,6 +51,8 @@ serveTests =
     , testCase "P4-2 /api/vault/status 与 CLI --json 的 stdout 逐字节相同（含末尾 LF）" caseServeVaultStatusBytes
     , testCase "P4-2 thumb：扫描后条目被换成指向库外的 symlink → 404，库外文件字节不外泄" caseServeThumbLink
     , testCase "P4-2 --port 范围 0..65535（越界不得静默折回）" caseServePortRange
+    , testCase "P4-5 POST /api/vault/push-plan：只读 serve → 403；坏 JSON/空指派/非法类目/非 NEW → 400；超大体 → 413" caseServePushPlanGuards
+    , testCase "P4-5 POST /api/vault/push-plan：合法指派 → 计划落到 <vault>/.pm/plans，可经 loadPlan 装回，项与指派一致" caseServePushPlanOk
     ]
 
 tok :: BS.ByteString
@@ -59,8 +61,27 @@ tok = "0123456789abcdef0123456789abcdef"
 mkCfg :: FilePath -> Config
 mkCfg root = Config root Nothing Nothing Nothing Nothing Nothing
 
+-- | 缺省只读（与 `pm serve` 不带 --writable 相同）。
 mkEnv :: Config -> IO ServeEnv
-mkEnv cfg = newServeEnv cfg tok
+mkEnv cfg = newServeEnv cfg tok False
+
+mkEnvW :: Config -> IO ServeEnv
+mkEnvW cfg = newServeEnv cfg tok True
+
+-- | 带 Host + Bearer 的 POST（JSON 体）。
+postReq :: BS.ByteString -> BSL.ByteString -> Session SResponse
+postReq path body =
+  srequest $
+    SRequest
+      ( setPath
+          defaultRequest
+            { requestMethod = methodPost
+            , requestHeaderHost = Just "127.0.0.1:4321"
+            , requestHeaders = [(hHost, "127.0.0.1:4321"), (hAuthorization, "Bearer " <> tok), (hContentType, "application/json")]
+            }
+          path
+      )
+      body
 
 mkFileLink :: FilePath -> FilePath -> IO ()
 mkFileLink link target =
@@ -353,6 +374,72 @@ caseServeThumbLink = withSystemTempDirectory "pm-serve" $ \dir -> do
     r <- getReq ("/api/thumb/" <> BC.pack (T.unpack sj)) [] tok
     assertStatus 404 r
     liftIO' (assertBool "库外字节不得出现在响应里" (not ("OUTSIDE-SECRET" `BS.isInfixOf` BSL.toStrict (simpleBody r))))
+
+-- | P4-5 的闸：写开关、JSON、指派校验（与 CLI 共用 'checkAssignments'）、体上限。
+-- 每条对应一处判定；删掉判定用例转红。
+caseServePushPlanGuards :: IO ()
+caseServePushPlanGuards = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, _, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  let good = "{\"assignments\":[{\"name\":\"a.jpg\",\"category\":\"landscape\"}]}"
+  -- 只读 serve：403，且 .pm/plans 不出现
+  envR <- mkEnv cfg
+  flip runSession (serveApp envR) $ do
+    r <- postReq "/api/vault/push-plan" good
+    assertStatus 403 r
+  doesDirectoryExist (vdir </> ".pm") >>= (@?= False)
+  envW <- mkEnvW cfg
+  flip runSession (serveApp envW) $ do
+    r1 <- postReq "/api/vault/push-plan" "{not json"
+    assertStatus 400 r1
+    r2 <- postReq "/api/vault/push-plan" "{\"assignments\":[]}"
+    assertStatus 400 r2
+    r3 <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"a.jpg\",\"category\":\"nope\"}]}"
+    assertStatus 400 r3
+    liftIO' (assertBool "应报类目不存在" ("nope" `BS.isInfixOf` BSL.toStrict (simpleBody r3)))
+    r4 <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"ghost.jpg\",\"category\":\"landscape\"}]}"
+    assertStatus 400 r4
+    -- 超过 64 KiB 的体：413，不解析
+    r5 <- postReq "/api/vault/push-plan" (BSL.fromStrict (BS.replicate (70 * 1024) 32))
+    assertStatus 413 r5
+    -- GET 不是端点
+    r6 <- getReq "/api/vault/push-plan" [] tok
+    assertStatus 404 r6
+  -- 全部被拒 → 没有任何计划落盘
+  (ps, _) <- listPlans vdir
+  ps @?= []
+
+-- | 合法指派：计划写进 vault root 的 .pm/plans，响应带计划 + 路径 + apply 提示；
+-- 用 loadPlan 从盘上装回，项数与目标路径与指派一致；照片零改动。
+caseServePushPlanOk :: IO ()
+caseServePushPlanOk = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, jpgBytes, sj, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  env <- mkEnvW cfg
+  pid <- flip runSession (serveApp env) $ do
+    r <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"a.jpg\",\"category\":\"portrait\"}]}"
+    assertStatus 200 r
+    let v = decodeBody r
+    liftIO' $ do
+      arrLen (field ["plan", "items"] v) @?= Just 1
+      field ["plan", "kind"] v @?= Just (Aeson.String "vault-push")
+      case field ["plan", "id"] v of
+        Just (Aeson.String p) -> pure p
+        other -> assertFailure ("响应缺 plan.id: " <> show other)
+  ep <- loadPlan vdir pid
+  case ep of
+    Left e -> assertFailure ("loadPlan 应装回: " <> e)
+    Right plan -> do
+      plKind plan @?= "vault-push"
+      map (opDstRel . piOp) (plItems plan) @?= ["portrait" </> "a.jpg"]
+      map (opSha . piOp) (plItems plan) @?= [sj]
+  -- 照片零改动、vault 类目目录仍空（只生成计划，不执行）
+  BS.readFile (root </> "相册" </> "a.jpg") >>= (@?= jpgBytes)
+  doesFileExist (vdir </> "portrait" </> "a.jpg") >>= (@?= False)
 
 caseServePortRange :: IO ()
 caseServePortRange = do

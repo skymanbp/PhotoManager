@@ -479,7 +479,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P4-2/3 / pm 0.4.1 / 200 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
+  当前实现对应 **P4-4/5 / pm 0.4.2 / 202 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -522,15 +522,31 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `GET /api/thumb/<sha>`（只提供 catalog 里 JPEG 条目的原字节，读取前逐级
   `resolveUnder`——扫描后被换成库外链接的条目不跟随；缩放由 GUI 做）。vault
   两个端点会刷新 `.pm/vault-cache`，进程内互斥串行化（并发争用固定 tmp 名）。
-  **写端点（apply / vault push 分类）在 GUI 骨架落地后另开，先过 codex 评审再
-  请用户裁定**（同 P3 门禁）。
-- GUI 功能 = status 仪表盘 + 计划浏览/勾选/确认 + **vault push 逐张看图分类**
-  （核心价值场景，CLI 做不了）。P4-2 骨架（`gui/`）：`ui/` 纯静态
-  HTML/JS/CSS（无 npm），三页——仪表盘 / 计划 / 分类（NEW 缩略图网格 + 类目
-  单选，尚无提交按钮）；分类页靠只读端点 `GET /api/vault/new`（NEW 名字配上
-  主库 catalog 的 sha/size）。`<img src>` 带不了 Authorization 头 → fetch 成
-  blob 再显示。Tauri 侧 CSP：`connect-src http://127.0.0.1:*`，脚本/样式只
-  `'self'`；WebView 来源 `http://tauri.localhost` 在 serve 的 Origin 白名单里。
+- **写端点（P4-5，用户裁定"先做生成计划，apply 后置"）**：serve 加 `--writable`
+  开关（缺省只读；`pm ui` 拉起时置位）。唯一写端点 `POST /api/vault/push-plan`，
+  体 `{"assignments":[{"name","category"},…]}`，上限 64 KiB（413）；校验与计划
+  构造和 CLI `pm vault push` **共用**（`checkAssignments` / `vaultPushItems` /
+  `mkVaultPushPlan`，fail-closed：任一指派不合法整体 400 并列出全部错误）；落盘
+  前同样过 `requireWritable`（I11 + 身份），只写 `<vault>/.pm/plans`，**不执行、
+  不碰照片**；响应带计划、文件路径、`pm apply <id>` 提示与 git 步骤。**apply
+  端点尚未开**：执行仍在终端；届时先过 codex 评审再请用户裁定。
+- **GUI（P4-4 UX 重做，用户反馈"清晰优雅、快速上手、直观可视化"+ 三项状态
+  可视化）**：左侧导航四页（数字键 1–4 切换）。①**状态**——照片库四张分层卡
+  （Raw / 成片 / 相册 / 暂存：文件数、体积、容量占比条）+ 索引时间与「核对新鲜
+  度」；**vault 展示集同步**卡（差异数 chip、八态计数 pill、NEW/MISSING/RENAME/
+  DRIFT/UNSTABLE 可展开清单——"差哪些"）；**备份硬盘同步**卡（未登记 / 上次同步
+  时间 + 滞后 add/update/extra / 缓存不可信）；「下一步」列表把 status 退出码的
+  语义翻成可点的动作。②**分类推送**——NEW 缩略图网格（原图 4–75 MB，GUI 侧
+  `createImageBitmap(resizeWidth 640)` 缩放后再挂，修掉"滚动后缩略图消失"——
+  全分辨率位图撑爆 WebView 的根因）+ 三类目分段按钮 + 进度「已选 x/N」+
+  「生成推送计划」→ POST push-plan → 结果面板（计划 id、`pm apply` 命令、git
+  步骤）。③**计划**——表格（类型徽标、id、时间、项/待执行/跳过/待裁决）+ 明细
+  （逐项 拷贝/改名/隔离 + 源→目标 + 状态徽标，原始 JSON 可展开），打开即选中
+  最新计划。④**上手**——三步说明 + 安全模型一句话。技术：`<img src>` 带不了
+  Authorization → fetch→blob；旧 blob URL 每轮 revoke；Tauri CSP
+  `connect-src http://127.0.0.1:*`，脚本/样式只 `'self'`；WebView 来源
+  `http://tauri.localhost` 在 serve 的 Origin 白名单里。渲染由主线用
+  `scratchpad/shot.ps1`（DPI-aware 窗口截图 + 前台校验后的 SendKeys）自验。
 - **进程生命周期（P4-3）**：serve 的生命周期归 GUI 管，`pm ui` **不**启动
   serve——它只找到 `pm-ui.exe`（`PM_UI_EXE` 或 pm.exe 同目录）、把自己的路径经
   `PM_EXE` 交给 GUI、等 GUI 退出。GUI 的 Rust 侧只做三件事：`spawn pm serve

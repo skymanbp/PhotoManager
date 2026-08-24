@@ -6,26 +6,85 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header>
-    <span class="brand">pm</span>
+  <aside class="side">
+    <div class="brand"><span class="logo">pm</span><span class="sub">照片库管理器</span></div>
     <nav>
-      <button data-tab="status" class="active">仪表盘</button>
-      <button data-tab="plans">计划</button>
-      <button data-tab="vault">分类</button>
+      <button data-tab="status" class="active"><span class="ic">◉</span>状态</button>
+      <button data-tab="vault"><span class="ic">◈</span>分类推送</button>
+      <button data-tab="plans"><span class="ic">▤</span>计划</button>
+      <button data-tab="help"><span class="ic">?</span>上手</button>
     </nav>
-    <span id="conn" class="conn">连接中…</span>
-  </header>
+    <div class="side-foot">
+      <div id="conn" class="conn">连接中…</div>
+      <div id="root-path" class="muted small"></div>
+    </div>
+  </aside>
+
   <main>
-    <section id="tab-status" class="tab active"><pre id="status-out">…</pre></section>
+    <!-- ── 状态 ── -->
+    <section id="tab-status" class="tab active">
+      <header class="page-head">
+        <h1>状态</h1>
+        <div class="actions">
+          <button id="btn-fresh" class="btn">核对新鲜度</button>
+          <button id="btn-reload" class="btn ghost">刷新</button>
+        </div>
+      </header>
+      <div id="status-banner" class="banner hidden"></div>
+
+      <h2 class="sec">照片库 <span id="index-meta" class="muted small"></span></h2>
+      <div id="layer-cards" class="cards"></div>
+      <div id="fresh-line" class="line muted"></div>
+
+      <h2 class="sec">vault 展示集同步 <span class="muted small">相册 ↔ 档案仓库（个人主页用）</span></h2>
+      <div id="vault-card" class="card wide">
+        <div class="card-head"><span id="vault-chip" class="chip">…</span><span id="vault-summary" class="muted"></span></div>
+        <div id="vault-pills" class="pills"></div>
+        <div id="vault-lists" class="lists"></div>
+      </div>
+
+      <h2 class="sec">备份硬盘同步</h2>
+      <div id="backup-card" class="card wide">
+        <div class="card-head"><span id="backup-chip" class="chip">…</span><span id="backup-summary" class="muted"></span></div>
+        <div id="backup-detail" class="line"></div>
+      </div>
+
+      <h2 class="sec">下一步</h2>
+      <ul id="next-steps" class="steps"></ul>
+    </section>
+
+    <!-- ── 分类推送 ── -->
+    <section id="tab-vault" class="tab">
+      <header class="page-head">
+        <h1>分类推送 <span class="muted small">相册里还没进 vault 的照片（NEW）</span></h1>
+        <div class="actions">
+          <span id="assign-progress" class="muted">…</span>
+          <button id="btn-plan" class="btn primary" disabled>生成推送计划</button>
+        </div>
+      </header>
+      <div id="plan-result" class="banner hidden"></div>
+      <div id="vault-grid" class="grid"></div>
+    </section>
+
+    <!-- ── 计划 ── -->
     <section id="tab-plans" class="tab">
+      <header class="page-head"><h1>计划</h1><div class="actions"><button id="btn-plans-reload" class="btn ghost">刷新</button></div></header>
+      <p class="muted small">pm 的一切写盘都是两段式：先生成计划，再 <code>pm apply &lt;id&gt;</code> 执行；执行后可 <code>pm undo</code> 回滚。这里只看，不执行。</p>
       <div class="split">
-        <ul id="plan-list"></ul>
-        <pre id="plan-detail">选一个计划</pre>
+        <table id="plan-table" class="table"><thead><tr><th>类型</th><th>计划 id</th><th>生成时间</th><th>项</th><th>待执行</th><th>跳过</th><th>待裁决</th></tr></thead><tbody></tbody></table>
+        <div id="plan-detail" class="detail"><div class="muted">选一个计划查看明细</div></div>
       </div>
     </section>
-    <section id="tab-vault" class="tab">
-      <div id="vault-summary">…</div>
-      <div id="vault-grid" class="grid"></div>
+
+    <!-- ── 上手 ── -->
+    <section id="tab-help" class="tab">
+      <header class="page-head"><h1>三步上手</h1></header>
+      <ol class="howto">
+        <li><b>看状态</b>：左侧「状态」一眼看清三件事——Raw / 成片 / 相册各多少、相册与 vault 差哪些、备份盘上次什么时候同步。</li>
+        <li><b>分类推送</b>：「分类推送」里给每张 NEW 照片选 landscape / portrait / urban，点「生成推送计划」。这一步只写计划文件，不碰照片。</li>
+        <li><b>执行</b>：在终端跑页面给出的 <code>pm apply &lt;id&gt;</code>；执行是校验写入 + 日志，随时 <code>pm undo</code>。之后按提示做 git 提交（pm 从不替你执行 git）。</li>
+      </ol>
+      <p class="muted">安全模型：GUI 是独立进程，从不直接触碰照片文件；一切经 <code>pm serve</code> 的本机 API。pm 没有删除与覆盖原语——唯一的移出机制是带清单的隔离区。</p>
     </section>
   </main>
   <script src="app.js"></script>
