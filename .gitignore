@@ -1,0 +1,15 @@
+# Haskell / Stack
+.stack-work/
+dist-newstyle/
+*.hi
+*.o
+# hpack 从 package.yaml 生成，单一源
+photo-manager.cabal
+
+# cc-memory plugin data (session-local, not project source)
+memory/
+
+# Local scratch
+*.local.*
+
+.ce/
