@@ -59,7 +59,7 @@ import Pm.Trash
 import Pm.Types
 import Pm.Undo (buildUndoPlan)
 import Pm.Vault (computeVault, gitStepsLines, planCategories)
-import Pm.Win (pathUnder, volumeFsType)
+import Pm.Win (resolveUnder, volumeFsType)
 
 data InitOpts = InitOpts
   { ioMain :: FilePath
@@ -254,6 +254,18 @@ runScanCmd sc cfg = do
 
 runTrash :: Config -> TrashCmd -> FilePath -> IO Int
 runTrash cfg tc root = do
+  -- P3b-11（八轮复审 critical）：manifest 与隔离文件都住在 .pm/trash 里，
+  -- 而这条命令是 pm 全程唯一 unlink 用户数据的入口。基准被 junction 劫持时
+  -- 连**读**都不该读——否则 trash list 列的是库外目录的内容，trash empty
+  -- 还会把"隔离区为空"这种安静的假象报给用户。同 P3b-8 的纪律：身份/可信性
+  -- 校验先于任何读取。
+  tr <- requirePmTrusted root
+  case tr of
+    Left m -> putStrLn ("✗ " <> m) >> pure 1
+    Right () -> runTrash' cfg tc root
+
+runTrash' :: Config -> TrashCmd -> FilePath -> IO Int
+runTrash' cfg tc root = do
   tv <- trashView root
   mapM_ (\w -> putStrLn ("✗ manifest 损坏行: " <> w)) (tvWarnings tv)
   case tc of
@@ -317,13 +329,17 @@ runTrash cfg tc root = do
       -- P3b-10（七轮复审 major，junction 实测）：这是 pm 全程唯一 unlink 用户
       -- 数据的位置，词法校验（readManifest 的 relPathOk）挡不住别名——
       -- .pm/trash/link 若是指向库外的 junction，"link\v.jpg" 是完全合法的相对
-      -- 路径，而 removeFile 会顺着链接删掉库外文件（探针已实证）。删除前让
-      -- 操作系统解析每条目标路径，必须仍落在 .pm/trash 之内，否则 HELD。
-      judged <- forM candidates $ \rec@(_, abs') -> do
-        ok <- pathUnder (trashDir root) abs'
-        pure (rec, ok)
-      let purgeable = [rec | (rec, True) <- judged]
-          escaped = [r | ((r, _), False) <- judged]
+      -- 路径，而 removeFile 会顺着链接删掉库外文件（探针已实证）。
+      -- P3b-11（八轮复审 critical，探针实证）：以 trashDir 为基准的 canonical
+      -- 包含判定还不够——.pm/trash **自身**是 junction 时，基准与目标一起解析
+      -- 到库外，包含关系成立、闸门放行，removeFile 删掉了库外文件。改为从
+      -- root 起逐级下降（resolveUnder），.pm 与 trash 这两级同样必须是真名。
+      -- 删的就是验过的那条路径（逐级下降的落点），不是另一次词法拼接。
+      judged <- forM candidates $ \(r, _) -> do
+        m <- resolveUnder root (".pm" </> pmSubTrash </> trTrashRel r)
+        pure (r, m)
+      let purgeable = [(r, p) | (r, Just p) <- judged]
+          escaped = [r | (r, Nothing) <- judged]
       forM_ escaped $ \r ->
         putStrLn ("  HELD(不删) " <> trTrashRel r <> " —— 解析后不在 .pm/trash 之内（链接/别名？先跑 pm doctor 人工核查）")
       let heldN = length heldClean + length escaped

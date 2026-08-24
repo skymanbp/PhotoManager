@@ -32,7 +32,7 @@ import System.FilePath ((</>))
 import System.IO
 import System.IO.Error (isDoesNotExistError)
 
-import Pm.Config (pmDir)
+import Pm.Config (pmDir, pmSubTrash)
 import Pm.Op (OpIdSuffix (..), opIdParts, relPathOk)
 import Pm.Win (flushHandleToDisk)
 
@@ -67,8 +67,10 @@ instance FromJSON TrashRecord where
       <*> o .: "plan"
       <*> o .: "at"
 
+-- 子目录名取自 'Pm.Config' 的单一真源，'Pm.Config.requirePmTrusted' 校验的
+-- 就是这一条路径（校验的与实际写入的必须是同一个名字）。
 trashDir :: FilePath -> FilePath
-trashDir root = pmDir root </> "trash"
+trashDir root = pmDir root </> pmSubTrash
 
 manifestPath :: FilePath -> FilePath
 manifestPath root = trashDir root </> "manifest.ndjson"
@@ -133,11 +135,17 @@ readManifest root = do
 -- 内"。链接本身作为条目列出（doctor 以 UNREGISTERED\/Q1 报出，人工核查），
 -- 但其内容一律不进入清单。同 'Pm.Scan.listTree' \/ 'Pm.Exec.dirFingerprint'
 -- 的既有策略。
+-- P3b-11（八轮复审 major）：子级不跟随还不够——**基准自身**也要查。
+-- @.pm\/trash@ 本身若是指向库外的 junction，遍历会把库外目录整个列成"隔离
+-- 文件"。'requirePmTrusted' 在写入口已把这一形态挡在门外，这里是读侧的
+-- 同一判定：不可信基准一律列空，让 doctor\/trash view 显示"隔离区为空"而不是
+-- 库外内容。
 listTrashFiles :: FilePath -> IO [FilePath]
 listTrashFiles root = do
   let base = trashDir root
+  baseLink <- linkish base
   exists <- doesDirectoryExist base
-  if not exists then pure [] else go base ""
+  if baseLink || not exists then pure [] else go base ""
  where
   go base rel = do
     let dirAbs = if null rel then base else base </> rel

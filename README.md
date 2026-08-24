@@ -92,6 +92,11 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   后再判、`canonicalizePath` 限域进 trash empty 唯一 unlink 与 Exec 三个落位点、
   trash 遍历不跟随 reparse point、catalog `enPath` 校验、undo/pendingTmp 补验；
   路径用例拆出 PathGuardTests；162/162 测试）
+- P3b-11 ✅ codex 八轮复审收口（限域**基准自身**也可能被劫持：`resolveUnder`
+  从基准逐级 no-follow 下降进 trash empty / Exec 三落位点 / doctor tmp 清理、
+  canonical `.pm` 语义排除挡目录别名、`CREATE_NEW` 独占创建挡 hardlink 占位、
+  `requirePmTrusted` 把 `.pm` 家族可信性并入 requireWritable 覆盖全部 `.pm`
+  写入口、catalog 区分半写回退与语义非法拒绝；168/168 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

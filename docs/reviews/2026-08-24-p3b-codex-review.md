@@ -370,3 +370,56 @@ I5 不覆盖；gitStepsLines 纯字符串（pm 零 git 执行）;六态算法/�
   但 `opSrcAbs` 本身仍不做 root 归属校验（备份计划的 src 合法地位于另一 root）。
 - `pm backup` 盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU
   （沿前几轮记录）。
+
+---
+
+# 八轮复审（对 b502c0e = P3b-10）→ NO-GO → P3b-11 收口
+
+verdict：**NO-GO** — 1 critical + 4 major + 1 minor。核心指控一句话：**七轮学会了
+问操作系统"目标解析后在哪"，却仍默认基准可信**——而 `root`、`.pm/trash`、
+`.pm/tmp` 都是 pm 自己拼出来的字符串。
+
+## 探针实证（Probe7\/8，GHC 9.10 + Win11；先证再改）
+
+| 指控 | 探针结果 | 判定 |
+| --- | --- | --- |
+| `.pm/trash` **自身**是 junction → 限域失效 | `pathUnder(trash, trash\v.jpg)` = **True**（两侧都 canonical 到库外）；`removeFile` 后库外文件 **不存在了** | ✅ 成立，**数据丢失级** |
+| `.pm/tmp/<plan>` 是 junction → doctor `--repair` 删库外 | `listDirectory` 穿透；`removeFile` 后库外 hostage.txt **不存在了** | ✅ 成立，**数据丢失级** |
+| `root/alias -> root/.pm` 别名 | `opPathsOk` 放行（alias 词法上不是 `.pm`）；`pathUnder(root, root\alias\root-id.json)` = **True**，canonical 展开为 `.pm\root-id.json` | ✅ 成立 |
+| 预置 hardlink 占确定性 tmp 名 → `WriteMode` 覆盖库外 | 库外文件内容变成 `"PM-WROTE-THIS"`；`pathIsSymbolicLink(hardlink)` = **False** | ✅ 成立（前两层看不见它） |
+| 8.3 短名（如 `PM~1`）同型绕过 | 本卷 `fsutil file queryshortname` 返回不支持 → **无法在本机构造反例** | ⚠️ **未证实**；按机制覆盖（canonical `.pm` 排除），不据此宣称已复现 |
+| Unicode 全角\/兼容等价、`CON`\/`NUL` 设备名 | codex 自己标为"无实证"；未构造出解析到 `.pm` 或库外普通文件的反例 | ⚠️ 未证实，列残余 |
+
+修复候选同步验证：`descendOk`（逐级 no-follow）对上表前三条**全部拒绝**；
+`CREATE_NEW` 独占创建对已存在文件与预置 hardlink **都拒绝**，且库外内容完好；
+`removeFile` 删 hardlink 只减一个目录项，库外原文件字节不变（→ 重跑安全）。
+
+## 处置
+
+| 项 | codex 判定 | 我的核实 | P3b-11 处置 |
+| --- | --- | --- | --- |
+| 2 限域基准（critical\/major×2） | NOT-FIXED | 全部实证成立 | `Pm.Win.resolveUnder`：从基准逐分量下降，**每一段已存在的名字都不得是 reparse point**；`pm trash empty` 的唯一 unlink、`Pm.Exec` 三个落位点、`Doctor.staleTmpFiles` 遍历全部改用它 |
+| 1 词法层 · 8.3\/别名 | PARTIAL | junction 形态成立；短名未证实 | `pathAtOrUnder` 做 canonical `.pm` 语义排除（用户数据路径的第二判据），覆盖"不是 reparse point 但 canonical 后落进 `.pm`"的整类 |
+| tmp symlink\/hardlink（major） | 新发现 | 实证覆盖库外内容 | `Pm.Win.openExclusiveBinary`（`CREATE_NEW`）+ `openFreshBinary`（先 unlink 残留再独占创建）；`copyFileHashed`\/`saveCatalog`\/`createRootInfo` 三处 tmp 全部改用。**与 codex 建议的差异**：它要"已存在即拒绝"，我取"先安全 unlink 再独占创建"——崩溃重跑必须能用同名 tmp（doctor 靠确定性名区分孤儿与在途），而 unlink 对 hardlink\/symlink 只删目录项，库外字节不受影响（实证） |
+| `.pm` 家族整体（journal\/plan\/manifest\/catalog\/root-id\/lock） | codex 指出"只补四个 removeFile 不够" | 成立：这些入口没有共同的路径参数，但有共同的前提 | `Pm.Config.requirePmTrusted` 并入 `requireWritable`，一次判定覆盖全部 `.pm` 写入口；`Pm.Exec` 取锁前 + 锁内各一次；`runTrash` 前置同一闸（基准被劫持时连读都不读——本轮自查发现它此前**没有任何**身份闸） |
+| 3 遍历层 | PARTIAL：基准自身未查 | 成立 | `listTrashFiles`\/`staleTmpFiles` 都先查基准 |
+| 4 catalog 代次语义 | PARTIAL：语义非法仍回退旧代 | 成立 | `loadCatalog` 区分**半写可回退**与**语义非法整条链拒**；校验从 `relPathOk` 收紧到 `userRelOk`（`.pm\journal.ndjson` 是合法相对路径却指向 pm 自身状态） |
+| 5 undo | PARTIAL：未验生成结果 | 成立 | `reverseOp` 对**生成的**反向 Op 再过 `opPathsOk`（一次合法复位历史反转后 `.pm/trash` 成了目标） |
+| 6 测试 | PARTIAL：catalog 用例注释称测 `.1` 回退实则没有 | **成立，是我的测试 bug** | 补真 `.1` 两态用例；新增 base-junction、alias、hardlink、doctor-tmp、undo-reverse 共 6 例（168\/168） |
+| 7 文档 | PARTIAL：残余不完整、措辞过绝对 | 成立 | 本章节 + §10.2 P3b-11 + REVIEW-LOG 八轮段；残余清单见下 |
+
+## 残余（更新，取代前几轮清单中已闭合的条目）
+
+- **TOCTOU**：`resolveUnder` 逐级判定与实际 `removeFile`\/`moveFile` 之间仍有窗口
+  （§14 单机威胁模型：需要攻击者在窗口内替换 reparse point）。codex 建议的
+  handle 语义（`CreateFileW` 取 final path\/File ID 后在同一句柄上做 disposition）
+  能收窄它，需要 handle-relative 的原生 rename\/create——未实施。
+- **8.3 短名 · Unicode 等价 · 保留设备名**：本机无法构造反例（卷未启用短名），
+  按未证实归档；`.pm` 语义排除按机制覆盖短名一类，设备名仍只被词法层挡。
+- `opSrcAbs` 不做 root 归属校验（备份计划的 src 合法地位于另一 root）；codex 建议
+  按 plan kind\/root UUID 绑定允许读取根集合——未实施。
+- `Pm.Config.writeSideCache` 与 `writeConfig` 仍是普通覆盖写（前者是可重建缓存，
+  后者在用户配置目录、不在库内）。
+- `pm backup` 盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU（沿前
+  几轮记录）。
+- `docs/DESIGN.md` 已 740 行，逼近 750 行预算——下一次扩写前需拆分。

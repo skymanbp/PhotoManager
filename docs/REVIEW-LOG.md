@@ -93,3 +93,18 @@ trash 内 junction 则**实测让 removeFile 删掉了库外文件**（数据丢
 `Pm.Win.pathUnder` canonical 限域进 trash empty 与 Exec 三个落位点、
 `listTrashFiles` 不递归 reparse point、`loadCatalog` 校验 `enPath`、
 `reverseOp`/`pendingTmp` 补验。测试拆出 `PathGuardTests`，新增 4 例（162/162）。
+
+同日 codex 八轮复审（attempt 1 即真跑，56 次命令执行，对 b502c0e）：1 critical +
+4 major + 1 minor，核心指控是**限域判定的基准自身可能被劫持**——七轮学会了"问
+操作系统目标在哪"，却仍默认 `root` / `.pm/trash` 这些 pm 自己拼出来的字符串是可
+信基准。探针（Probe7/8）逐条核实，**五条全部成立、两条是数据丢失级**：把
+`.pm/trash` 本身做成指向库外的 junction 后，`pathUnder` 两侧一起解析到库外、判定
+通过，`removeFile` **真的删掉了库外文件**；`.pm/tmp/<plan>` 同形态让 doctor
+`--repair` 删掉库外文件；`root/alias -> root/.pm` 让 root 级包含判定放行，可搬走
+`root-id.json`；预置 hardlink 占用确定性 tmp 名后，`WriteMode` 截断写**覆盖了库外
+文件的内容**（hardlink 不是 reparse point，逐级下降与 canonical 都看不见它）。
+8.3 短名一条因本卷 `fsutil file queryshortname` 不支持而**无法证实**，按未证实归档
+（修复面已覆盖其机制）→ **P3b-11 收口**（§10.2 P3b-11 条目）：`Pm.Win.resolveUnder`
+逐级 no-follow 下降 + `pathAtOrUnder` 的 `.pm` 语义排除 + `openExclusiveBinary`
+（`CREATE_NEW`）独占创建，三层各挡一类；`requirePmTrusted` 把 `.pm` 家族可信性
+放进 `requireWritable`，一次判定覆盖全部 `.pm` 写入口。新增 6 测试（168/168）。

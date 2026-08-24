@@ -15,7 +15,7 @@ import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.FilePath ((</>))
 
-import Pm.Config (readRootInfo)
+import Pm.Config (pmSubTrash, readRootInfo)
 import Pm.Journal
 import Pm.Op
 import Pm.Plan
@@ -83,11 +83,33 @@ cancelRestores = reverse . go []
 -- @.pm\/trash\/\<trashRel\>@ 与库内目标，而 'Pm.Plan.savePlan' 本身不校验
 -- （校验在 loadPlan\/execPlan）。这里先验 Intent 的 Op 路径与 Done 的
 -- trashRel，非法即拒绝生成计划——不把越界路径写进 @.pm\/plans@。
+-- P3b-11（八轮复审 minor）：**生成结果**同样要验。反转是对称操作，而
+-- 'opPathsOk' 的规则不是对称的——@.pm\/trash@ 只允许作 rename 的**源**。
+-- 一次合法的复位历史（@rename .pm\/trash\/p\/v.jpg -> v.jpg@）反转后
+-- @.pm\/trash@ 成了**目标**，是非法 Op；此前 'buildUndoPlan' 照样成功、
+-- 'savePlan' 也不校验，直到 execItem 才拒。挡在生成处，越界路径不进
+-- @.pm\/plans@。
 reverseOp
   :: Map.Map Text Op
   -> (Text, Maybe Text, Maybe FilePath)
   -> Either String Op
-reverseOp intents (oid, msha, mtrash) = case Map.lookup oid intents of
+reverseOp intents d = case reverseOp' intents d of
+  Right op
+    | not (opPathsOk op) ->
+        Left
+          ( "撤销 " <> T.unpack (fst3 d) <> " 生成的反向操作路径非法（"
+              <> describeOp op
+              <> "）——撤销一次复位需要独立的 redo 协议，拒绝"
+          )
+  other -> other
+ where
+  fst3 (a, _, _) = a
+
+reverseOp'
+  :: Map.Map Text Op
+  -> (Text, Maybe Text, Maybe FilePath)
+  -> Either String Op
+reverseOp' intents (oid, msha, mtrash) = case Map.lookup oid intents of
   Nothing -> Left ("Done " <> T.unpack oid <> " 找不到对应 Intent，无法生成反向操作")
   Just op | not (opPathsOk op) -> Left ("Intent " <> T.unpack oid <> " 的路径非法（越界/盘符/ADS/.pm 内部），拒绝生成撤销计划")
   Just (OpCopy _ dstRel opSha' _ _) ->
@@ -104,4 +126,4 @@ reverseOp intents (oid, msha, mtrash) = case Map.lookup oid intents of
           Left ("Quarantine Done " <> T.unpack oid <> " 的 trash 路径非法（" <> trashRel <> "），拒绝生成撤销计划")
       | otherwise ->
           -- 反向 = 从 trash 原位复位（同卷 rename，目标必须不存在）。
-          Right (OpRename (".pm" </> "trash" </> trashRel) victim (FpFileSha sha))
+          Right (OpRename (".pm" </> pmSubTrash </> trashRel) victim (FpFileSha sha))

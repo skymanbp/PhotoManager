@@ -14,6 +14,8 @@ module Pm.Op
   , restoreOpId
   , displacedOpId
   , relPathOk
+  , userRelOk
+  , isTrashSrcRel
   , opRelPaths
   , opPathsOk
   , describeOp
@@ -196,18 +198,28 @@ opRelPaths OpCopy {opDstRel = d} = [d]
 opRelPaths (OpRename o n _) = [o, n]
 opRelPaths (OpQuarantine v _ _) = [v]
 
+-- | **用户数据**相对路径：词法合法（'relPathOk'）且首级不是 @.pm@（比对走
+-- 'normComp'，@.PM@ \/ @.pm.@ 一并拒绝）。Op 的落位目标与 catalog 条目路径
+-- 共用一个谓词——两者都会被拼成绝对路径去读写真实文件，对"什么算用户数据
+-- 路径"必须给出同一个答案。
+userRelOk :: FilePath -> Bool
+userRelOk p = relPathOk p && map normComp (take 1 (splitDirectories p)) /= [".pm"]
+
+-- | 该相对路径是否落在 @.pm\/trash@ 之内（规范化后比对首两级）。这是 pm 唯一
+-- 允许 Op 触及 @.pm@ 内部的形态——undo\/组复位 rename 的**源**，把隔离文件搬回
+-- 原位。单一真源：'opPathsOk' 的例外判定与 'Pm.Exec' 的限域分流都用它，
+-- 免得两处对"什么算 trash 源"给出不同答案。
+isTrashSrcRel :: FilePath -> Bool
+isTrashSrcRel p = relPathOk p && map normComp (take 2 (splitDirectories p)) == [".pm", "trash"]
+
 -- | Op 全部相对路径合法，且不指向 @.pm@ 内部——唯一例外是 undo\/复位 rename
--- 的源（@.pm\/trash\/…@，隔离文件搬回原位）；其余任何 @.pm@ 前缀（如 rename
+-- 的源（'isTrashSrcRel'）；其余任何 @.pm@ 前缀（如 rename
 -- @.pm\/root-id.json@、quarantine journal）都是对 pm 自身状态的操纵，拒绝。
--- P3b-10：@.pm@ 比对走 'normComp'，@.PM@\/@.pm.@ 一并拒绝。
 opPathsOk :: Op -> Bool
 opPathsOk op = case op of
-  OpCopy {opDstRel = d} -> ok d
-  OpRename o n _ -> (ok o || okTrashSrc o) && ok n
-  OpQuarantine v _ _ -> ok v
- where
-  ok p = relPathOk p && map normComp (take 1 (splitDirectories p)) /= [".pm"]
-  okTrashSrc p = relPathOk p && map normComp (take 2 (splitDirectories p)) == [".pm", "trash"]
+  OpCopy {opDstRel = d} -> userRelOk d
+  OpRename o n _ -> (userRelOk o || isTrashSrcRel o) && userRelOk n
+  OpQuarantine v _ _ -> userRelOk v
 
 describeOp :: Op -> String
 describeOp (OpCopy s d _ sz _) = "copy " <> s <> " -> " <> d <> " (" <> show sz <> " B)"
