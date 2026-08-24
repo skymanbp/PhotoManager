@@ -97,6 +97,11 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   canonical `.pm` 语义排除挡目录别名、`CREATE_NEW` 独占创建挡 hardlink 占位、
   `requirePmTrusted` 把 `.pm` 家族可信性并入 requireWritable 覆盖全部 `.pm`
   写入口、catalog 区分半写回退与语义非法拒绝；168/168 测试）
+- P3b-12 ✅ codex 九轮复审收口（**动态**路径层与 hardlink：`.pm/tmp/<planId>`
+  逐次限域挡住"固定层可信、动态层是 junction"的删库外文件；reparse 判定改按
+  name-surrogate tag（云占位/Dedup 不再误拒）；journal/manifest 的 append 与
+  plan/侧缓存的覆盖写加 link-count 与独占创建防护；`RootUntrusted` 让建身份的
+  三条旁路也过闸；`pathAtOrUnder` 改三态消除 fail-open；173/173 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

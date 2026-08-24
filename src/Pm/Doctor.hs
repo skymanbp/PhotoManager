@@ -32,7 +32,7 @@ import Pm.Op
 import Pm.Plan
 import Pm.Trash
 import Pm.Types
-import Pm.Win (isReparsePoint)
+import Pm.Win (isNameSurrogate)
 
 data DoctorOpts = DoctorOpts
   { doDeep :: Bool
@@ -323,7 +323,7 @@ verifyDone root intents restoredAfter (oid, msha, mtrash) =
 staleTmpFiles :: FilePath -> [FilePath] -> IO [FilePath]
 staleTmpFiles root expected = do
   let base = pmDir root </> pmSubTmp
-  baseLink <- isReparsePoint base
+  baseLink <- isNameSurrogate base
   ex <- doesDirectoryExist base
   if baseLink || not ex
     then pure []
@@ -331,7 +331,7 @@ staleTmpFiles root expected = do
       plans <- listDirectory base
       files <- concat <$> forM plans (\p -> do
         let pd = base </> p
-        lnk <- isReparsePoint pd
+        lnk <- isNameSurrogate pd
         isD <- doesDirectoryExist pd
         if lnk
           then pure []
@@ -339,7 +339,7 @@ staleTmpFiles root expected = do
             if isD
               then do
                 inner <- listDirectory pd
-                filterM (fmap not . isReparsePoint) (map (pd </>) inner)
+                filterM (fmap not . isNameSurrogate) (map (pd </>) inner)
               else pure [pd])
       onlyFiles <- filterM doesFileExist files
       pure [f | f <- onlyFiles, f `notElem` expected]

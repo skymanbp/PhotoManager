@@ -70,6 +70,9 @@ runBackupInit path cfg = do
               putStrLn ("该路径已是 " <> show (riRole info) <> " root，拒绝改作备份") >> pure 2
         RootCorrupt e ->
           putStrLn (abs' <> " 的 .pm/root-id.json 存在但无法解析（" <> e <> "），拒绝改写——人工核查") >> pure 2
+        -- P3b-12（九轮复审 major）：同 pm init / vault push，建身份的入口也必须
+        -- 先确认 .pm 家族是真目录，否则标识会落到库外。
+        RootUntrusted m -> putStrLn ("✗ " <> m) >> pure 2
         RootAbsent -> do
           ex <- doesDirectoryExist abs'
           unless ex $ putStrLn ("· 目录不存在，将创建: " <> abs')

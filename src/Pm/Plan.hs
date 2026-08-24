@@ -26,11 +26,15 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import Control.Exception (bracket)
+import Control.Monad (when)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.FilePath ((</>))
+import System.IO (hClose)
 import Text.Printf (printf)
 
 import Pm.Config (pmDir, pmSubPlans)
+import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary)
 import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
 
 data ItemStatus
@@ -136,12 +140,23 @@ plansDir root = pmDir root </> pmSubPlans
 planPath :: FilePath -> Text -> FilePath
 planPath root pid = plansDir root </> (T.unpack pid <> ".json")
 
+-- | P3b-12（九轮复审 major）：此前是覆盖写，计划文件名被预置成库外对象的
+-- hardlink 时会写穿到库外（探针实证同型）。改为「独占创建 tmp → 删旧 →
+-- 'moveFileNoReplace' 落位」：tmp 走 @CREATE_NEW@，删旧对 hardlink 只减一个
+-- 目录项。删旧与落位之间崩溃会丢掉计划文件——可接受：计划可重新生成，耐久层
+-- 是 journal（DESIGN §3）。
 savePlan :: Plan -> IO FilePath
 savePlan p = do
   let root = plRootPath p
       fp = planPath root (plId p)
+      tmp = fp <> ".tmp"
   createDirectoryIfMissing True (plansDir root)
-  BSL.writeFile fp (encode p)
+  bracket (openFreshBinary tmp) hClose $ \h -> do
+    BSL.hPut h (encode p)
+    flushHandleToDisk h
+  old <- doesFileExist fp
+  when old (removeFile fp)
+  moveFileNoReplace tmp fp
   pure fp
 
 -- | 装载前先验 id 格式（也挡住 @..\\x@ 之类拼进 'planPath' 的路径穿越），装载

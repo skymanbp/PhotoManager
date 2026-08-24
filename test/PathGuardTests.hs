@@ -15,6 +15,7 @@ import Control.Exception (SomeException, try)
 import Control.Monad (forM_)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
+import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeDirectoryLink)
 import System.FilePath ((</>))
@@ -25,24 +26,24 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (catalogPath, loadCatalog, saveCatalog)
-import Pm.Commands (TrashCmd (..), runTrash)
-import Pm.Config (Config (..), pmDir, requirePmTrusted, writeRootInfo)
+import Pm.Commands (TrashCmd (..), initPreflight, runTrash)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootState, requirePmTrusted, writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
 import Pm.Exec
 import Pm.Hash (sha256File)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, withJournal)
 import Pm.Op
 import Pm.Plan
-import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, trashDir, trashView)
+import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, manifestPath, trashDir, trashView)
 import Pm.Types (Catalog (..), Entry (..), RootInfo (..), RootRole (..))
 import Pm.Undo (buildUndoPlan)
-import Pm.Win (openExclusiveBinary, pathUnder, resolveUnder)
+import Pm.Win (openExclusiveBinary, pathAtOrUnder, pathUnder, resolveUnder)
 import TestUtil
 
 pathGuardTests :: TestTree
 pathGuardTests =
   testGroup
-    "P3b-9/10/11 路径校验、限域与独占创建（codex 六/七/八轮）"
+    "P3b-9/10/11/12 路径校验、限域、独占创建与 hardlink 防护（codex 六~九轮）"
     [ testCase "P3b-9 relPathOk/opPathsOk：越界/盘符/ADS/.pm 内部 → validatePlan/execPlan/loadPlan 拒绝" caseOpPathValidation
     , testCase "P3b-9 doctor：合法 oid + 越界 Op/trash 路径 → OP-PATH Bad，不越出 root、--repair 不补" caseDoctorOpPathEscape
     , testCase "P3b-9 manifest trashRel 越界 → 记录剔除，trash empty 不 unlink root 外文件" caseManifestPathEscape
@@ -56,6 +57,11 @@ pathGuardTests =
     , testCase "P3b-11 .pm/tmp/<plan> 是 junction → doctor --repair 不删库外文件" caseDoctorTmpJunction
     , testCase "P3b-11 catalog：半写 JSON 回退 .1，语义非法则整条链拒绝（不换一代继续干活）" caseCatalogGenerationSemantics
     , testCase "P3b-11 undo 一次复位历史 → 反向 Op 以 .pm/trash 为目标，生成时即拒" caseUndoReverseResultValidated
+    , testCase "P3b-12 .pm/tmp/<planId> 动态层是 junction → Exec 拒绝落位，库外同名文件存活" caseExecDynamicTmpJunction
+    , testCase "P3b-12 .pm 是 junction → 建身份的三条旁路（init/backup init/vault push）一律拒绝" caseInitBypassUntrusted
+    , testCase "P3b-12 journal/manifest/plan 被 hardlink 占名 → 拒绝写入，库外对象字节不变" caseStateFileHardlink
+    , testCase "P3b-12 pathAtOrUnder 三态：解析不出时不得被当成「不在 .pm 里」放行" casePathAtOrUnderTristate
+    , testCase "P3b-12 undo：root 身份不可用 → 拒绝生成，不留计划文件" caseUndoRequiresIdentity
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -459,5 +465,127 @@ caseUndoReverseResultValidated = withSystemTempDirectory "pm-guard" $ \dir -> do
   either
     (\m -> assertBool m ("生成的反向操作路径非法" `isInfixOf` m))
     (const (assertFailure "反向 Op 以 .pm/trash 为目标，应在生成时拒绝"))
+    r
+  doesDirectoryExist (pmDir root </> "plans") >>= (@?= False)
+
+-- ─── P3b-12（九轮） ─────────────────────────────────────────────────────────
+
+mkHardLink :: FilePath -> FilePath -> IO ()
+mkHardLink link target =
+  () <$ readCreateProcess (shell ("mklink /H \"" <> link <> "\" \"" <> target <> "\"")) ""
+
+-- | 九轮 critical（它给的"更小反例"，已用探针复现）：'requirePmTrusted' 只走
+-- @.pm@ 与 @.pm/tmp@ 这些**固定**层，planId 那一层是运行时构造的。把它预置成
+-- 指向库外的 junction、库外放一个同名的确定性 tmp 文件，
+-- 'Pm.Win.openFreshBinary' 的残留 unlink 就会删掉那个库外文件。
+caseExecDynamicTmpJunction :: IO ()
+caseExecDynamicTmpJunction = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside-plan"
+  createDirectoryIfMissing True (pmDir root </> "tmp")
+  createDirectoryIfMissing True outside
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  op <- mkCopyOp (dir </> "s.jpg") "SOURCE-BYTES" ("相册" </> "x.jpg")
+  pid <- newPlanId
+  let plan = Plan pid "test" root (Just "m") now [PlanItem 0 op StPending Nothing]
+      hostage = outside </> tmpNameFor 0 ("相册" </> "x.jpg")
+  writeFile hostage "OUTSIDE-HOSTAGE"
+  mkJunction (tmpDirFor root pid) outside
+  -- 固定层全部合法，可信闸放行 —— 动态层必须逐次验，这正是九轮的缺口
+  requirePmTrusted root >>= either (assertFailure . ("固定层应当可信: " <>)) pure
+  resolveUnder root (".pm" </> "tmp" </> T.unpack pid </> "0-x.jpg") >>= (@?= Nothing)
+  r <- execPlan defaultExecEnv plan
+  case r of
+    Right [(_, OConflict m)] -> assertBool ("应因限域拒绝: " <> m) ("逐级解析后不在" `isInfixOf` m)
+    other -> assertFailure ("expected confinement OConflict, got " <> show other)
+  doesFileExist hostage >>= (@?= True)
+  readFile hostage >>= (@?= "OUTSIDE-HOSTAGE")
+  doesFileExist (root </> "相册" </> "x.jpg") >>= (@?= False)
+  removeDirectoryLink (tmpDirFor root pid)
+
+-- | 九轮 major：建立身份的入口天然走不了 'requireWritable'（那时还没有身份），
+-- 所以闸下沉到 'readRootState' —— 身份读取的唯一入口。
+caseInitBypassUntrusted :: IO ()
+caseInitBypassUntrusted = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside-pm"
+  createDirectoryIfMissing True root
+  createDirectoryIfMissing True outside
+  mkJunction (pmDir root) outside
+  st <- readRootState root
+  case st of
+    RootUntrusted m -> assertBool m ("不是 root 下的真实目录" `isInfixOf` m)
+    other -> assertFailure ("readRootState 应报不可信，得到 " <> show other)
+  -- 三条建身份旁路共享的下游：createRootInfo 不得把标识建到库外
+  now <- getCurrentTime
+  _ <- createRootInfo root (RootInfo "x" RoleMain now Nothing)
+  doesFileExist (outside </> "root-id.json") >>= (@?= False)
+  -- pm init 的预检同样拒绝
+  initPreflight root
+    >>= either
+      (\m -> assertBool m ("不是 root 下的真实目录" `isInfixOf` m))
+      (const (assertFailure "initPreflight 应拒绝不可信 .pm"))
+  removeDirectoryLink (pmDir root)
+
+-- | 九轮 major（探针实证）：hardlink 既不是 reparse point 也不改 canonical，
+-- 逐级下降与 canonical 判定都看不见它。实测预置 @journal.ndjson@ 为库外对象的
+-- hardlink 后，@AppendMode@ 追加与覆盖写**都写到了库外对象**上。
+caseStateFileHardlink :: IO ()
+caseStateFileHardlink = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+      sharedJ = dir </> "outside-journal.ndjson"
+      sharedM = dir </> "outside-manifest.ndjson"
+      sharedP = dir </> "outside-plan.json"
+  createDirectoryIfMissing True (trashDir root)
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  writeFile sharedJ "OUTSIDE-ORIGINAL\n"
+  writeFile sharedM "OUTSIDE-MANIFEST\n"
+  writeFile sharedP "OUTSIDE-PLAN"
+  mkHardLink (journalPath root) sharedJ
+  mkHardLink (manifestPath root) sharedM
+  -- journal：append 入口拒绝，库外字节不变
+  rj <- try (withJournal root (\j -> jAppend j Barrier (JCleanShutdown now))) :: IO (Either SomeException ())
+  either (const (pure ())) (const (assertFailure "journal 应拒绝 hardlink 占用的名字")) rj
+  readFile sharedJ >>= (@?= "OUTSIDE-ORIGINAL\n")
+  -- manifest：同类
+  rm <- try (appendManifest root (TrashRecord "v.jpg" "v.jpg" "aa" "test" tpid now)) :: IO (Either SomeException ())
+  either (const (pure ())) (const (assertFailure "manifest 应拒绝 hardlink 占用的名字")) rm
+  readFile sharedM >>= (@?= "OUTSIDE-MANIFEST\n")
+  -- plan：覆盖写改成「独占创建 tmp → 删旧 → no-replace 落位」，删旧对 hardlink
+  -- 只减一个目录项，库外对象的字节不变
+  op <- mkCopyOp (dir </> "s.jpg") "X" ("相册" </> "x.jpg")
+  plan <- mkPlanIO root [op]
+  createDirectoryIfMissing True (pmDir root </> "plans")
+  mkHardLink (pmDir root </> "plans" </> (T.unpack (plId plan) <> ".json")) sharedP
+  _ <- savePlan plan
+  readFile sharedP >>= (@?= "OUTSIDE-PLAN")
+
+-- | 九轮 major：'pathAtOrUnder' 此前解析失败返回 False，而调用点取反用作
+-- "不在 .pm 里 → 放行" —— 结构性 fail-open。三态把这个歧义消掉。
+casePathAtOrUnderTristate :: IO ()
+casePathAtOrUnderTristate = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True (pmDir root)
+  writeFile (root </> "photo.jpg") "P"
+  pathAtOrUnder (pmDir root) (pmDir root) >>= (@?= Just True)
+  pathAtOrUnder (pmDir root) (pmDir root </> "journal.ndjson") >>= (@?= Just True)
+  pathAtOrUnder (pmDir root) (root </> "photo.jpg") >>= (@?= Just False)
+
+-- | 九轮 minor：身份不可用时不再生成一份 rootId 为空、execPlan 必然拒绝的
+-- 计划 —— 它已经被 savePlan 写进 .pm/plans 了。
+caseUndoRequiresIdentity :: IO ()
+caseUndoRequiresIdentity = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True (pmDir root)
+  now <- getCurrentTime
+  withJournal root $ \j -> do
+    jAppend j Barrier (JIntent (tpOid 0) (OpRename "a.jpg" "b.jpg" (FpFileSha "aa")) now)
+    jAppend j Barrier (JDone (tpOid 0) Nothing Nothing now)
+  r <- buildUndoPlan root 1
+  either
+    (\m -> assertBool m ("无可用 root 标识" `isInfixOf` m))
+    (const (assertFailure "无身份时应拒绝生成撤销计划"))
     r
   doesDirectoryExist (pmDir root </> "plans") >>= (@?= False)

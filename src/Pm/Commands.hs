@@ -154,6 +154,10 @@ initPreflight mainPath = do
               Left (mainPath <> " 已是 " <> show (riRole prior) <> " root，拒绝作为主库初始化（--force 亦不改写 root 身份）")
         RootCorrupt e ->
           Left (mainPath <> " 的 .pm/root-id.json 存在但无法解析（" <> e <> "），拒绝初始化——人工核查；pm 不改写它")
+        -- P3b-12（九轮复审 major）：显式列出不可信态。这里原本是 catch-all
+        -- `_ -> Right ()`，穷尽性检查看不见它，新增的 RootUntrusted 就被静静
+        -- 放行了——预检的语义必须与 runInit 的判定一致。
+        RootUntrusted m -> Left m
         _ -> Right ()
 
 runInit :: InitOpts -> IO Int
@@ -198,6 +202,9 @@ runInit o = do
                   pure (Right ())
                 RootCorrupt e ->
                   pure (Left (mainPath <> " 的 .pm/root-id.json 在预检后变为不可解析（" <> e <> "），不改写"))
+                -- P3b-12（九轮复审 major）：pm init 建立身份，走不了
+                -- requireWritable —— .pm 若是 junction，标识会写到库外。
+                RootUntrusted m -> pure (Left m)
                 RootAbsent -> do
                   rid <- freshRootId
                   now <- getCurrentTime

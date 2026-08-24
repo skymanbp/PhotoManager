@@ -423,3 +423,54 @@ verdict：**NO-GO** — 1 critical + 4 major + 1 minor。核心指控一句话�
 - `pm backup` 盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU（沿前
   几轮记录）。
 - `docs/DESIGN.md` 已 740 行，逼近 750 行预算——下一次扩写前需拆分。
+
+---
+
+# 九轮复审（对 b9a76e7 = P3b-11）→ NO-GO → P3b-12 收口
+
+verdict：**NO-GO** — 1 critical + 4 major + 2 minor。核心指控一句话：**八轮把闸
+装在了"固定路径层"，而 pm 实际写的路径是动态构造的**；并且"失信"一直只定义了
+reparse 一种，漏掉了 hardlink 这一整类。
+
+## 探针实证（Probe9，GHC 9.10 + Win11）
+
+| 指控 | 探针结果 | 判定 |
+| --- | --- | --- |
+| `.pm/tmp/<planId>` 动态层是 junction（critical） | `.pm/tmp` 非 reparse（可信闸**放行**）、`<planId>` 层是 reparse；`removeFile` 后库外 hostage **不存在了** | ✅ 成立，**数据丢失级** |
+| journal\/plan 名被 hardlink 占用（major） | `AppendMode` 追加后库外文件变成 `"OUTSIDE-ORIGINAL\nPM-APPENDED\n"`；覆盖写后变成 `"PM-PLAN-OVERWRITE"` | ✅ 成立 |
+| `pathIsSymbolicLink` 语义 | 普通目录\/文件 False、junction True、**hardlink False** | ✅ 佐证上一条：hardlink 三不沾 |
+| `pathAtOrUnder` fail-open（major） | 本机构造不出 `canonicalizePath` 抛异常的输入（含 NUL 的名字被截断、`CON`\/`NUL` 正常返回） | ⚠️ 反例未构造出，但**代码结构性 fail-open 成立**，按原则修 |
+| 非 name-surrogate reparse（OneDrive\/Dedup）被误拒（major） | 本机无法构造云占位\/Dedup 对象 | ⚠️ **未证实**；按 Win32 规范改 tag-aware（安全性与可用性同时更正确） |
+
+## 处置
+
+| 项 | codex 判定 | 我的核实 | P3b-12 处置 |
+| --- | --- | --- | --- |
+| 1\/新 critical 动态 tmp 层 | PARTIAL\/critical | 实证成立 | `Pm.Exec.confinedTmp`：`.pm\/tmp\/<planId>\/<name>` 完整路径逐级下降，**创建目录前后各验一次**（把 TOCTOU 收窄到"创建后立刻"） |
+| 4 可信闸覆盖面 | NOT-FIXED | 成立：三条 init 旁路建立身份，天然走不了 `requireWritable` | `RootIdState` 增 `RootUntrusted`，闸下沉进 `readRootState`（身份读取的唯一入口）——init 三旁路 + status\/versions\/备份发现一并覆盖；`createRootInfo` 自身再加一道。GHC 的 `-Wincomplete-patterns` 把三处调用点全指了出来；`initPreflight` 的 catch-all `_ -> Right ()` 是穷尽性检查看不见的第四处，测试抓到 |
+| 新 major hardlink 状态文件 | 新发现 | 实证成立 | `openStateAppend`（link count \> 1 即拒）守 journal\/manifest；`savePlan` 与 `writeSideCache` 的覆盖写改「独占创建 tmp → 删旧 → no-replace 落位」 |
+| 新 major 非 name-surrogate reparse | 新发现（未证实） | 无法构造反例 | `isNameSurrogate` 按 reparse tag 的 0x20000000 位判定（`FindFirstFileW` 的 `dwReserved0`）；读不出 tag → 仍拒（fail-closed） |
+| 2 `pathAtOrUnder` fail-open | PARTIAL | 结构成立、反例未构造出 | 改三态 `IO (Maybe Bool)`，`confinedUser` 只接受 `Just False` |
+| 3 独占创建取舍 | PARTIAL | codex 承认取舍成立，但指出父目录不可信时 `openFreshBinary` 的 unlink 会删库外——**这正是 critical** | 取舍保留（崩溃重跑需要确定性 tmp 名），前置条件写进 haddock：调用方必须先对**完整路径**做 `resolveUnder` |
+| 3 句柄泄漏 | minor | 成立 | `openExclusiveBinary` 加 `onException` 覆盖 HANDLE→Handle 的所有权转移 |
+| 6 undo 无身份计划 | minor | 成立 | `readRootInfo` 为 Nothing 即 Left；生成后再过 `validatePlan` |
+| 5 catalog 代次 | FIXED | — | 无需改动（哨兵脆弱性列残余） |
+| 7 测试 | PARTIAL：给了"更小反例" | 成立 | 该反例直接成为 `caseExecDynamicTmpJunction`；另加 init 旁路、hardlink 状态文件、三态、undo 身份共 5 例（173\/173） |
+| 8 文档 | NOT-FIXED：措辞与代码不符 | 成立 | `resolveUnder` 的 haddock 更正（base 只 canonicalize，不查它是不是链接——root 由用户指定，放在 junction 上是合法用法）；"一次判定覆盖全部 `.pm` 写入口"的说法按实际覆盖面重写；"设备名由词法层挡住"删除（`relPathOk` 确实不拒 `CON`\/`NUL`） |
+
+## 残余（更新）
+
+- **TOCTOU**：逐级判定与实际操作之间的窗口仍在（§14 单机模型）。Copy 的 tmp 路径
+  已加"创建后复检"把窗口收窄，但根治需要 handle-relative 的原生 create\/rename\/
+  delete（`GetFinalPathNameByHandleW` + File ID 比对）——未实施。
+- **未证实项**：8.3 短名（本卷 `fsutil` 不支持）、Unicode 兼容等价、保留设备名
+  （`relPathOk` **不**拒 `CON`\/`NUL`，且实测 `canonicalizePath root\CON` 正常返回；
+  尚无它们解析到 `.pm` 或库外普通文件的实证）、非 name-surrogate reparse 的实际
+  形态（无法构造云占位\/Dedup 对象）。
+- `catalog` 的 `tamperMark` 哨兵是字符串协议，建议改显式状态（九轮认为当前无可
+  构造的伪命中\/漏命中）。
+- 固定名 `catalog.json.tmp` 的并发保存竞态（无锁 scan 与 saveCatalog 之间）。
+- `opSrcAbs` 不做 root 归属校验（备份计划的 src 合法地位于另一 root）。
+- `Pm.Config.writeConfig` 仍是普通覆盖写（在用户配置目录，不在库内）。
+- `pm backup` 盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU。
+- `docs/DESIGN.md` 的逐轮收口列表已移入 `docs/REVIEW-LOG.md`（DESIGN 740 → 619 行）。

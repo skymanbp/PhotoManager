@@ -70,6 +70,7 @@ ensureTestRoot role root = do
       case st of
         RootPresent i -> pure (Just (riId i))
         RootCorrupt e -> assertFailure ("fixture: root-id 损坏，不覆盖（" <> e <> "）")
+        RootUntrusted m -> assertFailure ("fixture: .pm 不可信（" <> m <> "）")
         RootAbsent -> do
           now <- getCurrentTime
           r <- createRootInfo root (RootInfo "test-root" role now Nothing)
