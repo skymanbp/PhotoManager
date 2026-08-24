@@ -165,7 +165,17 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
 - **真实写入 ✅**（用户裁定全量执行）：`pm apply 20260824-030200-0c238a` 6/6 DONE，
   doctor 0，status "索引与磁盘一致"——pm 对真实库的第一次 names 写入。P3 只剩
   等外部条件的项：备份盘三件套（插盘）、15 NEW 分类（P4 GUI）、versions 处置。
-- P4 GUI（C#，经 pm serve JSON API）
+- **P4 改判（用户 2026-08-24）**：GUI 改 **Rust + Tauri v2 + 纯静态 HTML**，内核
+  保持 Haskell（本机 cargo/tauri-cli/WebView2 已在，.NET SDK 不在，零安装）；
+  §11 边界不变：GUI 独立进程、永不直接碰照片、一切经 `pm serve`。
+- P4-1 ✅ `pm serve`（127.0.0.1 + 内核随机端口 + Bearer token 常量时间比对 +
+  Host/Origin 校验；**只读端点** ping / status / vault status / plans / plan /
+  thumb（仅 JPEG 原字节）；`Pm.Status` 拆成 statusReport（ToJSON）+ 渲染，CLI 与
+  API 同源；6 例用 wai-extra 直接打 Application，五处闸各自突变转红；真实库
+  冒烟：401/401/403/403/204、4855 文件、8 计划、4.1 MB 缩略原图、`netstat` 只见
+  127.0.0.1；196/196 测试）—— 写端点（apply / 分类推送）留到 GUI 骨架之后，
+  仍先过 codex 评审再请用户裁定
+- P4-2 Tauri GUI 骨架（`gui/`：仪表盘 + 计划浏览 + 看图分类）→ P4-3 `pm ui`
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License

@@ -21,6 +21,7 @@ module Pm.Commands
   , runUndoCmd
   , runApply
   , afterApply
+  , loadPlanAnyRoot
   , runResolve
   , resolveKeep
   , runImport

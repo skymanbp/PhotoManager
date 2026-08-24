@@ -1,5 +1,5 @@
 name: photo-manager
-version: 0.3.16
+version: 0.4.0
 synopsis: Safety-first photo library manager (pm)
 description: See docs/DESIGN.md
 license: Apache-2.0
@@ -28,6 +28,12 @@ dependencies:
 - time
 - toml-reader
 - Win32
+# P4-1 pm serve（DESIGN §11：127.0.0.1 loopback JSON API）
+- http-types
+- memory
+- network
+- wai
+- warp
 
 library:
   source-dirs: src
@@ -57,3 +63,6 @@ tests:
     - tasty-hunit
     - tasty-quickcheck
     - temporary
+    - http-types
+    - wai
+    - wai-extra

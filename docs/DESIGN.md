@@ -6,7 +6,7 @@
 
 ## 0. 一句话定位
 
-`pm` 是一个 Haskell 编写的照片库管理工具（CLI 核心 + 本地 Web GUI），为
+`pm` 是一个 Haskell 编写的照片库管理工具（CLI 核心 + `pm serve` loopback API + Rust/Tauri 桌面 GUI，§11），为
 `D:\Photography` 三层照片库（Raw → 成片 → 相册）提供**带完整性校验的索引、
 归档、备份同步、命名治理与 vault 分发**。所有写盘操作遵循
 「计划 → 确认 → 校验写入 → 持久化日志」协议；**操作代数里不存在覆盖写与
@@ -162,9 +162,9 @@ src/Pm/Exec.hs              -- ★安全内核：全项目唯一有写盘 IO 的
 src/Pm/Names.hs             -- 事件夹/文件名解析、规范化、rename 计划（目标唯一性校验）
 src/Pm/Versions.hs          -- 版本组聚合报告
 src/Pm/Vault.hs             -- 相册↔vault 差异 + push/ingest 计划（无 git 调用）
-src/Pm/Report.hs            -- 彩色终端 + --json（--json 走 ByteString 直写，绕开编码器）
-src/Pm/Serve.hs             -- wai/warp 127.0.0.1 JSON API（供 GUI 桌面程序与 skill 消费）
-gui/                        -- GUI 桌面程序（C#/Java，P4；独立进程，只经 API 说话，§11）
+src/Pm/Status.hs            -- 仪表盘：statusReport（数据，ToJSON）+ renderStatus（终端）；serve 与 CLI 同源
+src/Pm/Serve.hs             -- wai/warp 127.0.0.1 JSON API（P4-1；供 GUI 桌面程序与 skill 消费，§11）
+gui/                        -- GUI 桌面程序（Rust/Tauri v2，P4-2；独立进程，只经 API 说话，§11）
 test/                       -- tasty: 单元 + QuickCheck + golden + 双模故障注入（§13）
 ```
 
@@ -183,7 +183,8 @@ os-string file-io aeson bytestring text time containers crypton
 optparse-applicative ansi-terminal async stm toml-reader wai warp http-types
 tasty tasty-quickcheck tasty-golden temporary` +
 boot：`Win32`（moveFileEx / flushFileBuffers / SetConsoleOutputCP）、`process`
-（拉起 GUI 进程）。缩略图/看图渲染全部在 GUI 侧（C#/Java 原生图像栈），
+（拉起 GUI 进程）。P4-1 实际加入：`wai warp http-types network memory`
+（测试 `wai-extra`）。缩略图/看图渲染全部在 GUI 侧（Tauri WebView），
 Haskell 侧无图像解码依赖。
 
 > **P0 落锤（2026-08-22）**：直接采用 `FilePath` 全局方案，不引入
@@ -498,22 +499,29 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 
 ---
 
-## 11. GUI（独立桌面程序，C#/Java —— 用户裁定 2026-08-22）
+## 11. GUI（独立桌面程序，Rust / Tauri v2 —— 用户裁定 2026-08-24，改自 8/22 的 C#/Java）
 
 - **架构边界（不变量级）**：GUI 是独立进程，**永不直接触碰照片文件**；一切
   读写经 `pm serve` 的 loopback JSON API——写路径与 CLI 完全同一 Plan/Exec
   内核，I1-I11 对 GUI 自动成立。GUI 崩溃/缺失不影响任何 CLI 功能。
-- API（Haskell 侧，P4 前即随 P1-P3 逐步成型）：`GET /api/status`、
-  `GET /api/plan/<kind>`、`POST /api/apply`（planId + 勾选子集 + 分类赋值）、
-  `GET /api/thumb/<sha>`（返回原 JPG 字节，缩放由 GUI 做）；只听 127.0.0.1，
-  请求带随机 session token（crypton 取熵，`pm ui` 启动时传给 GUI 进程）。
+- **语言选型（2026-08-24 改判）**：GUI 用 **Rust + Tauri v2 + 纯静态 HTML**
+  （不用 npm），内核保持 Haskell。本机实测 cargo/rustc 1.94.1、tauri-cli
+  2.11.4、WebView2 151、VS2022 BuildTools 均已在，.NET SDK 不在——Rust 路线
+  零安装；8/22 的 "C# WPF 优先 / 装 .NET SDK" 作废。JPG 解码/缩放/中文排版
+  由 WebView 原生栈承担；ARW 内嵌预览提取留 v2。
+- **API（P4-1 落地，`src/Pm/Serve.hs`）**：只绑定 127.0.0.1，端口默认由内核
+  随机分配，启动时在 stdout 打印一行 `{"port":N,"token":"…"}`；每个请求须带
+  `Authorization: Bearer <token>`（crypton 16 字节熵 hex，常量时间比对）；
+  `Host` 须为 `127.0.0.1[:port]`（挡 DNS rebinding）；带 `Origin` 的请求只接受
+  `tauri://localhost` / `http(s)://tauri.localhost`（预检 OPTIONS 免 token）。
+  只读端点：`GET /api/ping`、`GET /api/status[?fresh=1]`（与 `pm status` 同源
+  的 `StatusReport`，含退出码）、`GET /api/vault/status`（与 `--json` 同一字节）、
+  `GET /api/plans`、`GET /api/plan/<id>`、`GET /api/thumb/<sha>`（只提供
+  catalog 里 JPEG 条目的原字节，缩放由 GUI 做）。**写端点（apply / vault push
+  分类）在 GUI 骨架落地后另开，先过 codex 评审再请用户裁定**（同 P3 门禁）。
 - GUI 功能 = status 仪表盘 + 计划浏览/勾选/确认 + **vault push 逐张看图分类**
-  （核心价值场景，CLI 做不了）；JPG 解码/缩放走 C#（WPF imaging）或 Java
-  （JavaFX）原生栈，ARW 内嵌预览提取留 v2。
-- 语言选型 P4 落锤：**C# WPF 优先**（Windows 原生栈最稳）；本机实测
-  `dotnet` 存在但无 SDK、`java` 不存在——P4 开工前需装 .NET SDK（或 JDK），
-  届时经你确认再装。
-- `pm ui` = 启动 serve + 拉起 GUI exe（`process`）。
+  （核心价值场景，CLI 做不了）。
+- `pm ui` = 启动 serve + 拉起 GUI exe（`process`），把 announce 行交给 GUI。
 
 ---
 
@@ -592,7 +600,8 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 | vault 改名打断 portfolio 线上 URL | RENAME 默认只报告 + photos.json 只读引用检查标 BLOCKED（§10.2） |
 | file-io 未经上游在 GHC 9.10.3 测试 | P0 冒烟 + FilePath 降级预案（§4） |
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |
-| GUI 工具链缺失（无 .NET SDK / JDK） | P4 开工前经用户确认安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
+| GUI 工具链 | 2026-08-24 改判 Rust/Tauri：cargo、tauri-cli、WebView2、MSVC 本机均已在，零安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
+| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；P4-1 只有只读端点（§11） |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |
 | 相册↔成片 1 个例外文件 | doctor 报告单列，结合 inbox-origin 判定（I7），用户裁决 |
 
@@ -603,6 +612,8 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 1. **计划批准**：v0.2 批准，开工 P0（逐阶段 git commit + 真实库只读验证；
    写盘功能先 fixture + 小事件试点）
 2. **GUI 形态**：允许 C#/Java 编写 → 独立桌面程序 + `pm serve` JSON API（§11）
+   （**2026-08-24 改判**：GUI 改 Rust + Tauri v2 + 纯静态 HTML，内核保持
+   Haskell；边界不变）
 3. **Raw canonical 命名**：Scheme A `YY-MM-地点-Raw`（§8）
 4. **`sync_photos.py`**：退役由 pm 接管（P3 末次互校 → P5 落实，§10.1）
 

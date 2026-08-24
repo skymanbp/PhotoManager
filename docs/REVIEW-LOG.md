@@ -439,3 +439,27 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   磁盘一致"（无需重扫）。pm 对真实库的第一次 names 写入，`pm undo` 可回滚。
   P3 至此只剩等外部条件的项：备份盘（插盘）、15 NEW 分类（P4 GUI）、versions
   处置（用户）。
+
+## P4 GUI（2026-08-24 起）
+
+- **改判（用户 AskUserQuestion）**：GUI 改 Rust + Tauri v2 + 纯静态 HTML，内核
+  保持 Haskell；本机 cargo/rustc 1.94.1、tauri-cli 2.11.4、WebView2 151、
+  VS2022 BuildTools 均已在，.NET SDK 不在——8/22 的 C#/Java 与"装 .NET SDK"
+  作废。DESIGN §0/§4/§11/§14/§15 已改。
+- **P4-1 `pm serve`（pm 0.4.0，196/196）**：`src/Pm/Serve.hs`——显式
+  `SockAddrInet 127.0.0.1` 绑定（端口 0 = 内核随机，`socketPort` 读回）、启动时
+  stdout 一行 `{"port","token"}`；token = crypton 16 字节熵 hex，`constEq` 常量
+  时间比对；`Host` 须 `127.0.0.1[:port]`（DNS rebinding）；`Origin` 只认 Tauri
+  来源，预检 OPTIONS 免 token。只读端点：ping / status[?fresh=1] / vault status
+  （与 `--json` **字节相同**，冒烟核实）/ plans / plan/<id> / thumb/<sha>（只提供
+  catalog 里 JPEG 条目原字节；enPath 来自 loadCatalog 校验）。`Pm.Status` 拆成
+  `statusReport`（ToJSON，含退出码）+ `renderStatus`，`runStatus` 组合二者，
+  文本逐行同 P3b。`listPlans` 经 requirePmTrusted + 完整路径 resolveUnder，
+  文件名先过 isValidPlanId 再走 loadPlan 受信取用口。测试 6 例用 wai-extra
+  `Network.Wai.Test` 直接打 Application；**突变**：去 token 判定 / 去 Host 判定
+  / 去 Origin 白名单 / thumb 不限 JPEG / plan id 不验格式 → 五次各自恰好一例
+  转红（token / Host / Origin / thumb / plans）。真实库冒烟：无 token 401、错
+  token 401、Host 伪造 403、Origin 非法 403、预检 204；status 4855 文件 exit 1
+  （同 CLI）；plans 8；plan 0c238a 6 items；thumb 4 120 421 B 首字节 ffd8ff；
+  `netstat` 只见 `127.0.0.1:<port>`。**没有写端点**——apply / 分类推送留到 GUI
+  骨架之后，先过 codex 评审再请用户裁定。交 codex 十八轮首评。
