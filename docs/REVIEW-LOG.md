@@ -419,3 +419,10 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   A 内 journal/lock 句柄打开期间 junction 可删除重建，已打开句柄继续指向 A。
   +1 例（190/190），警告 0，pm 0.3.16。在独立 worktree（分支
   `p3b18-returned-path`）开发，不污染十六轮正在读的工作树；进入十七轮范围。
+- **P3b-17c 十六轮文档收口（同日，codex 十六轮，额度重置后重跑：0 代码缺陷 +
+  1 文档 minor）**：十六轮确认 `46c4d12..ca260cb` 代码零变化、**维持十五轮
+  "两条判据已收敛"的判定**；NO-GO 只因第二卷谓词表的排除说明把 `newEx`
+  （实为 `existsAny`）、`raced`（实为 `doesFileExist`）说成 `doesPathExist`，
+  且把已**扩宽**的 `slotOccupied` 说成仅移动——与 `git diff` 删除行逐行对照
+  成立，已逐项标注类型并说明排除理由。与 P3b-18 同在分支 `p3b18-returned-path`
+  上，一并合并进 main，进入十七轮范围。

@@ -32,8 +32,12 @@
 
 按**删除的谓词实现点**计数（`git diff a2efb3f..91339b7 -- src/Pm/` 里以
 `-` 开头、含 `doesFileExist` / `existsAny` / `doesDirectoryExist` /
-`doesPathExist` 的行；仅移动位置未换实现的 `newEx` / `raced` / `slotOccupied`
-的 `doesPathExist` 不计）：
+`doesPathExist` 的行）。**排除**三行（十六轮 minor 更正——初版把它们统称为
+"未换实现的 `doesPathExist`"，类型说错了两处、性质说错了一处）：
+`newEx (existsAny)` 与 `raced (doesFileExist)` 只是移动位置、实现未换；
+`slotOccupied` 的 `doesPathExist` 不是仅移动，而是**扩大**为"doesPathExist +
+悬空链接（`pathIsSymbolicLink`）+ 异常一律按占用"——它不属本轮"受信探针
+替换"这一类，故不入表，但方向是扩宽而非收窄：
 
 | 原谓词（删除行） | 文件 | 替换为 | 宽度 |
 |---|---|---|---|
@@ -174,3 +178,27 @@ journal。前提由检查点内直接执行验证——不允许则 mklink 非�
 失败并暴露前提，而不是静默跳过。
 
 回归：190/190（+1），GHC 警告 0，pm 0.3.16。真实库只读四连待合并 main 后重跑。
+
+---
+
+# 第十六轮（复审 P3b-17b，commit ca260cb；gpt-5.6-sol 独立评审；额度重置后重跑）
+
+首跑在第 38 个探查命令后被 codex 用量上限中止（`turn.failed`："You've hit
+your usage limit"），后三次重试 0 exec 立即失败；用户裁定"不用换，额度刚刚
+重置了"后重跑，74 次探查完成。
+
+**verdict：NO-GO——代码与两条收敛性判据仍无阻断**（明确"维持第十五轮判定"，
+并确认 `git diff 46c4d12..HEAD` 代码零变化：`.hs/.c/.yaml/.cabal` 过滤后的
+diff 与 name-only 均为空）；NO-GO 只落在一处文档 minor。
+
+| 项 | codex 判定 | 核实 / 处置 |
+|---|---|---|
+| 十五轮 minor ① 谓词表 | PARTIAL | `readJournal` 已补、计数口径已声明——但紧接的排除说明把 `newEx`（实为 `existsAny`）、`raced`（实为 `doesFileExist`）统称为"未换实现的 `doesPathExist`"，且 `slotOccupied` 并非仅移动而是**扩大**（补了悬空链接与异常分支）。**核实成立**（与我自己 `git diff` 删除行输出逐行对照：`-    newEx <- existsAny …`、`-  raced <- doesFileExist dstAbs`、`-  ex <- doesPathExist (trashDir …)`）。已按它的建议逐项标注类型，并说明 `slotOccupied` 因不属受信探针替换类而排除、方向是扩宽 |
+| 十五轮 minor ② README | FIXED | 措辞与 REVIEW-LOG 十四轮更正一致 |
+| 十五轮章节转述 | 准确 | "无需代码修复"与残余登记措辞均确认；用例设计与源码相符（`resolveUnder` 只 canonicalize base；`CpCopyAfterFlush` 在持有 `dstAbs` 的落位前） |
+
+十六轮读的是 ca260cb 的工作树，因此它看到的"返回路径必须被使用"仍是登记
+残余、测试数仍是 189——P3b-18 当时在独立分支上，尚未合并（见上节）。
+
+最小修复集：仅修正谓词表第 33–36 行的类型说明；无需代码改动。已修（本文件
+上方的排除说明即为修正后文本）。
