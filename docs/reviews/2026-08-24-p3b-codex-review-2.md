@@ -30,15 +30,22 @@
 按类扫描：把 P3b-14~16 三轮 diff（`git diff a2efb3f..HEAD -- src/Pm/`）里所有
 被受信探针 / 受信取用口替换掉的原谓词逐条与替换后比宽度：
 
-| 原谓词（删除行） | 替换为 | 宽度 |
-|---|---|---|
-| catalog / plan / root-id / manifest / 侧缓存的 `doesFileExist fp` + 按名字读 | `readPmState` / `readSideCache`（缺席 = `isDoesNotExistError`） | 同宽 |
-| `tmpEx <- doesFileExist mtmp` | `probePmExists`（文件） | 同宽 |
-| `trashEx <- doesFileExist (trashDir …)` + `sha256File` | `probePmSha`（文件 + 同句柄 hash） | 同宽 |
-| **`oldEx <- existsAny (root </> old)`**（文件**或**目录） | `probePmExists`（**只有文件**） | **收窄** ← 本轮 major |
+按**删除的谓词实现点**计数（`git diff a2efb3f..91339b7 -- src/Pm/` 里以
+`-` 开头、含 `doesFileExist` / `existsAny` / `doesDirectoryExist` /
+`doesPathExist` 的行；仅移动位置未换实现的 `newEx` / `raced` / `slotOccupied`
+的 `doesPathExist` 不计）：
 
-8 处替换只有这一处收窄。修法不是"把 `probePmExists` 改成 any"（那会让 tmp
-探测放行目录占名），而是让**每个调用点显式声明问哪种存在**：
+| 原谓词（删除行） | 文件 | 替换为 | 宽度 |
+|---|---|---|---|
+| `exists <- doesFileExist fp` + 按名字读 | Catalog / **Journal**（十五轮 minor：初版漏列）/ Plan / Trash(manifest) / Config(root-id + 侧缓存) | `readPmState` / `readSideCache`（缺席 = `isDoesNotExistError`） | 同宽（5 处） |
+| `tmpEx <- doesFileExist mtmp` | Doctor | `probePmExists`（文件） | 同宽 |
+| `trashEx <- doesFileExist (trashDir …)` + `sha256File` | Doctor | `probePmSha`（文件 + 同句柄 hash） | 同宽 |
+| **`oldEx <- existsAny (root </> old)`**（文件**或**目录） | Doctor | `probePmExists`（**只有文件**） | **收窄** ← 本轮 major |
+| `isD <- doesDirectoryExist (base </> p)`（清理侧枚举） | Doctor `staleTmpFiles` | `probeName` 只收 `NamePlain` | 删除侧收窄 = **保守方向**（少删不多删） |
+
+读/探测侧 8 处只有 `oldEx` 一处收窄；清理侧那一处是有意的保守收窄。修法不是
+"把 `probePmExists` 改成 any"（那会让 tmp 探测放行目录占名），而是让**每个
+调用点显式声明问哪种存在**：
 
     data PmEntryQ = PmEntryFile | PmEntryAny
     probePmExists :: PmEntryQ -> FilePath -> FilePath -> IO (Either String Bool)
@@ -75,6 +82,57 @@ status 1 / vault status 1；doctor 1917 ms、vault status 7184 ms，本次为改
   读库外用户文件不属 `.pm` 辖区。
 - `probeName` 只把 2/3 当缺失（十三轮"建议补入的错误码：空"）。
 - **status 语义扩展**：缓存失信计入 exit 1，DESIGN §5.1 的 0/1/2 描述宜补一句。
+- **未证实项**：8.3 短名、Unicode 兼容等价、保留设备名、云占位/Dedup 实际
+  reparse 形态、能让 `canonicalizePath` 抛异常的输入、ACL 库、UNC/断网形态。
+- **慢介质开销**：无超时，实测待用户插盘。
+- `tamperMark` 字符串哨兵；`opSrcAbs` 无 root 归属校验；`writeConfig` 普通
+  覆盖写；备份盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU。
+
+---
+
+# 第十五轮（复审 P3b-17，commit 46c4d12；gpt-5.6-sol 独立评审）
+
+**verdict：NO-GO——但两条代码判据均判「已收敛」、无新运行时缺陷、"无需代码
+修复"**；NO-GO 只落在两处文档 minor。这是十二轮设立判据以来第一次代码侧
+零阻断。
+
+- 收敛性（按名字操作）：已收敛——`.pm` 的状态读写、hash、落位均进入受信
+  取用口或消费解析返回路径；剩余按名字命中均属 no-follow / 占位探测或用户
+  数据探测（`restoreQuarantine` 的 `victimAbs` 预探测、`slotOccupied`）。
+- 收敛性（谓词宽度）：已收敛——它**独立**复扫 `a2efb3f..HEAD` 的删除谓词与
+  P3b-17 自身变更，当前调用点均保持或扩大原宽度。
+
+## 逐条判定与处置
+
+| 项 | codex 判定 | 核实 / 处置 |
+|---|---|---|
+| 1 `PmEntryQ` | FIXED | 两态够用；C1 的 File 方向保守正确（目录占 tmp 名 → C1 Info，孤儿清理只收普通文件）；Copy dst 的 `doesFileExist` 不是重构收窄（Copy 只落文件，目录占名由 no-replace move 拒绝，不写 Done）；R 矩阵 (True,True) 的"目标被占"对目录形态仍准确且不进修复线 |
+| 2 Copy dst 路径流 | FIXED | `dstAbs` 在 doesFileExist / sha256File / createDirectoryIfMissing / moveFileNoReplace / race 探测 / statSnap+hash 全部被使用；生产调用图无 Bool 限域旁路（`Pm.Win.pathUnder` 仅旧测试使用）。`resolveUnder` 对缺失末段从 canonicalized base 拼回余段，返回字符串可能与 `root </> rel` 不同但指向同一位置——预期加固 |
+| 3 测试 | PARTIAL | 两条新例各自钉住（它复述了突变后各落 R2 的路径）；"返回路径必须被使用"仍属**已登记覆盖残余，不是阻断项**——当前签名与调用图已能静态证明 dst 全程用返回值 |
+| 4 文档 | PARTIAL → 两处 minor | ① 第二卷谓词表漏列 `readJournal` 的旧 `doesFileExist`（同宽、结论不变）——**核实成立**（`git diff` 删除行 `a/src/Pm/Journal.hs: exists <- doesFileExist fp`，现由 `readPmState root "journal.ndjson"` 替换）；表已改为按删除的谓词实现点逐文件列出。② README 的 P3b-16 条目仍称"调用方只能用返回值"，与 P3b-17 删 Bool 版的陈述直接矛盾——**成立**，已加入与 REVIEW-LOG 相同的「十四轮更正」 |
+
+## "返回路径必须被使用"用例——它给的可行设计（登记，未做）
+
+十四轮我登记的理由是"root 自身是 junction 时 `resolveUnder` 的行为要先探针"。
+十五轮读源码回答了：`resolveUnder` 只 canonicalize base、**不对 base 调用
+`probeName`**，所以 root 本身可以是 junction。最小用例：`rootLink` junction 指
+向 A，A/B 各放不同哨兵；以 `rootLink` 执行 Copy，在 `CpCopyAfterFlush` 把
+junction 改指 B——正确实现只落 A；把 `execCopyTmp` 突变回 `root </> opDstRel`
+会落 B。它标注的假设：Windows 允许在 A 的 journal/lock 句柄打开时重定向该
+junction（须由用例的设置阶段实际验证，失败则报告平台前提）。本轮是文档收口，
+不引入代码改动；进残余。
+
+回归：代码零变化（`git diff 46c4d12..HEAD --stat` 只有 README / REVIEW-LOG /
+第二卷），189/189 不变，pm 0.3.15 不变。
+
+## 残余（更新）
+
+- **"返回路径必须被使用"无用例**：设计已可行（见上），待做。其余同十四轮：
+- **TOCTOU（check-use 窗口）**；`createRootInfo` post-mkdir 未重解析；
+  `openExclusiveBinary` 缺外层 `mask`；`requirePmTrusted` 深度 1 枚举与使用点
+  两个快照；`writeRootInfo` 裸覆盖写（仅 fixture）；`Pm.Scan` symlink 探测异常
+  按非 symlink 继续；`Pm.GitGuard` / `photosJsonRef` 读库外用户文件。
+- `probeName` 只把 2/3 当缺失；**status 语义扩展**待 DESIGN §5.1 补一句。
 - **未证实项**：8.3 短名、Unicode 兼容等价、保留设备名、云占位/Dedup 实际
   reparse 形态、能让 `canonicalizePath` 抛异常的输入、ACL 库、UNC/断网形态。
 - **慢介质开销**：无超时，实测待用户插盘。
