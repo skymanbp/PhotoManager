@@ -11,6 +11,7 @@ import Pm.Cli (GoOpts (..), savePlanAndMaybeRun)
 import Pm.Commands
 import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
 import Pm.Names (runNames)
+import Pm.Serve (ServeOpts (..), runServe)
 import Pm.Status (StatusOpts (..), runStatus)
 import Pm.Vault (runVaultPush, runVaultStatus)
 import Pm.Versions (runVersions)
@@ -32,6 +33,7 @@ data Cmd
   | CmdVaultPush GoOpts (Maybe String) [FilePath] -- --category + FILES
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
   | CmdVersions -- 版本组/精确重复报告（只读）
+  | CmdServe ServeOpts -- 127.0.0.1 JSON API（P4-1，只读端点）
 
 -- | --backup/--vault 二选一校验后进入命令体。
 withSel :: Bool -> Bool -> (RootSel -> IO Int) -> IO Int
@@ -76,6 +78,7 @@ run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
 run (CmdVaultPush go mcat fs) = withCfg (runVaultPush (savePlanAndMaybeRun go) mcat fs)
 run (CmdNames go) = withCfg (runNames (savePlanAndMaybeRun go))
 run CmdVersions = withCfg runVersions
+run (CmdServe o) = withCfg (\cfg -> runServe cfg o)
 
 parserInfo :: ParserInfo Cmd
 parserInfo =
@@ -84,7 +87,7 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    infoOption "pm 0.3.16 (P3b-18)" (long "version" <> help "打印版本")
+    infoOption "pm 0.4.0 (P4-1)" (long "version" <> help "打印版本")
   backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
   vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =
@@ -103,7 +106,12 @@ parserInfo =
           <> command "undo" (info undoP (progDesc "由主库 journal 生成反向计划（经 pm apply 执行）"))
           <> command "apply" (info applyP (progDesc "执行已存的计划（root 按 UUID 重新绑定；--only 按组闭包）"))
           <> command "resolve" (info resolveP (progDesc "裁决计划某项：跳过/恢复/--keep src|dst|both（组为单元）"))
+          <> command "serve" (info serveP (progDesc "127.0.0.1 JSON API（供 GUI/skill；随机端口 + 会话 token，启动时打印一行 JSON；P4-1 只读）"))
       )
+  serveP =
+    fmap CmdServe $
+      ServeOpts
+        <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
   initP =
     fmap CmdInit $
       InitOpts
