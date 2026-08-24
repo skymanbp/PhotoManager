@@ -9,6 +9,7 @@ module Pm.Plan
   , ItemStatus (..)
   , newPlanId
   , isValidPlanId
+  , validatePlan
   , planPath
   , savePlan
   , loadPlan
@@ -126,6 +127,19 @@ isValidPlanId t = case T.splitOn "-" t of
  where
   isHexLower c = isDigit c || (c >= 'a' && c <= 'f')
 
+-- | 计划的结构性校验（装载与执行两处共用；P3b-7 复审 A1 \/ 新 major）：id 为
+-- 生成格式；@piIx@ 非负且全局唯一——负数会拼出无法解析的 opId，重复序号让
+-- 不同操作共享 oid，doctor\/undo 按 oid 折叠时会把它们混成一个。
+validatePlan :: Plan -> Either String ()
+validatePlan p
+  | not (isValidPlanId (plId p)) =
+      Left ("计划 id 不符合生成格式（" <> T.unpack (plId p) <> "，应为 YYYYMMDD-HHMMSS-hex6）")
+  | any (< 0) ixs = Left "计划含负数条目序号（piIx < 0）"
+  | length ixs /= Set.size (Set.fromList ixs) = Left "计划条目序号重复（piIx 不唯一）"
+  | otherwise = Right ()
+ where
+  ixs = map piIx (plItems p)
+
 plansDir :: FilePath -> FilePath
 plansDir root = pmDir root </> "plans"
 
@@ -141,7 +155,7 @@ savePlan p = do
   pure fp
 
 -- | 装载前先验 id 格式（也挡住 @..\\x@ 之类拼进 'planPath' 的路径穿越），装载
--- 后再验文件内 id 与文件名一致。
+-- 后再过 'validatePlan' 并验文件内 id 与文件名一致。
 loadPlan :: FilePath -> Text -> IO (Either String Plan)
 loadPlan root pid
   | not (isValidPlanId pid) =
@@ -154,10 +168,12 @@ loadPlan root pid
         else do
           r <- eitherDecodeFileStrict fp
           pure $ case r of
+            Left e -> Left e
             Right p
               | plId p /= pid ->
                   Left ("计划文件内 id（" <> T.unpack (plId p) <> "）与文件名（" <> T.unpack pid <> "）不符，拒绝装载")
-            other -> other
+              | Left e <- validatePlan p -> Left (e <> "，拒绝装载")
+              | otherwise -> Right p
 
 renderPlan :: Plan -> [String]
 renderPlan p =

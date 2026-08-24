@@ -49,7 +49,7 @@ import System.FilePath (splitDirectories, takeExtension, (</>))
 import Text.Printf (printf)
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (Config (..), pmDir, readJsonMaybe, readRootInfo, requireMain, writeRootInfo, writeSideCache, freshRootId)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, freshRootId, pmDir, readJsonMaybe, readRootInfo, readRootState, requireMain, writeSideCache)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
@@ -461,22 +461,29 @@ ensureVaultRoot vaultDir = do
   case g of
     Left msg -> pure (Left msg)
     Right () -> do
-      existing <- readRootInfo vaultDir
-      case existing of
-        Just info
+      -- P3b-7 复审 major：损坏的标识不当缺席处理（不改写）；首次创建走原子
+      -- no-replace（createRootInfo）。
+      st <- readRootState vaultDir
+      case st of
+        RootPresent info
           | riRole info == RoleVault -> pure (Right info)
           | otherwise ->
               pure (Left ("该路径已是 " <> show (riRole info) <> " root，拒绝作为 vault root"))
-        Nothing -> do
+        RootCorrupt e ->
+          pure (Left (vaultDir <> " 的 .pm/root-id.json 存在但无法解析（" <> e <> "），拒绝改写——人工核查"))
+        RootAbsent -> do
           rid <- freshRootId
           now <- getCurrentTime
           fs <- case vaultDir of
             (c : _) -> volumeFsType c
             _ -> pure Nothing
           let info = RootInfo rid RoleVault now fs
-          writeRootInfo vaultDir info
-          putStrLn ("✓ vault root 标识已创建: " <> T.unpack rid)
-          pure (Right info)
+          er <- createRootInfo vaultDir info
+          case er of
+            Left m -> pure (Left m)
+            Right () -> do
+              putStrLn ("✓ vault root 标识已创建: " <> T.unpack rid)
+              pure (Right info)
 
 -- | push 收尾要打印的显式 git 步骤（纯函数；I9：pm 自己绝不执行）。
 gitStepsLines :: FilePath -> Text -> [String] -> [String]

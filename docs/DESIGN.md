@@ -99,7 +99,7 @@ R4 Haskell）落成以下**硬不变量**，每条都有机制背书，不靠自
 | I8 | 相册↔vault 差异与 `sync_photos.py` **逐字段值形状兼容**（六态 + 位置元组 + 16 字符截断 hash + 退出码 0/1/2 + 同一文件过滤集合含 .png，case-fold） | §10.1 |
 | I9 | pm 绝不执行 git 命令（vault/portfolio 的 add/commit/push 都由用户手动）；对 portfolio `photos.json` 仅只读引用检查 | Vault 模块无 git 调用 |
 | I10 | pm 单实例：mutation 前对 `.pm/lock` 打开句柄并 `hTryLock`（内核级锁，进程死亡自动释放，锁文件残留无害且无需删除） | base `GHC.IO.Handle.Lock`（Windows 走 LockFileEx） |
-| I11 | pm 不在任何 `.gitignore` 未覆盖 `.pm/` 的 git 工作树内建立 root，**任何 role**（主库/备份/vault）一视同仁：`init` / `backup init` / `vault push` 建 root 前检查（经用户确认追加 ignore 行后才建），`pm apply` 取锁前预检 + 锁内按盘上 role 重检；检查是文本级白名单（恰含 `.pm/` 行；`!` 反规则不得含 `.pm` 或通配符 `* ? [ \`，pm 不实现 wildmatch）；`pm doctor` 每次复查 | §5 init + §10.2 P3b-6 + §10.3 |
+| I11 | pm 不在任何 `.gitignore` 未覆盖 `.pm/` 的 git 工作树内建立 root，**任何 role**（主库/备份/vault）一视同仁：`init` / `backup init` / `vault push` 建 root 前检查（经用户确认追加 ignore 行后才建），`pm apply` 取锁前预检 + 锁内按盘上 role 重检；检查是文本级白名单（恰含 `.pm/` 行；`!` 反规则不得含 `.pm` 或通配符 `* ? [ \`，pm 不实现 wildmatch）；所有直接写 `.pm/` 的入口（计划保存、catalog/侧缓存、doctor --repair、trash、undo/resolve）经 `requireWritable` 同一守卫（P3b-7），`pm doctor` 每次复查 | §5 init + §10.2 P3b-6/P3b-7 + §10.3 |
 
 **「快」的量化目标**（介质分列，§12）：`pm status` 默认含 stat-only 新鲜度刷新，
 主库（NVMe、热缓存）< 10 s，`--cached` 纯读快照 < 2 s；备份盘（USB HDD、冷态）
@@ -533,6 +533,21 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   不再无限递归；真实库无 reparse point，既有 names 计划指纹不变。
   `Pm.Commands` 触及 750 行预算 → 备份命令拆到 `Pm.BackupCmd`（Commands 再导出）。
   测试 +11（GuardTests，144/144）。归档同上文件第三轮章节。
+- **P3b-7 四轮收口（同日，codex 四轮：A2/A3/minor/拆分 FIXED；A1/B1/major PARTIAL
+  + 2 新 major）**：
+  A1 `opIdParts` 只认规范十进制（`p#00`、`p#0~d01` 不是 pm 生成的）；`validatePlan`
+  （id 格式 + `piIx` 非负唯一）在 loadPlan 与 execPlan（取锁前 + 锁内）共用；隔离
+  目录改**构造式** `quarDirFor`（Exec 用），解析式 `quarTrashRel` 返回 Maybe——
+  doctor 遇畸形 oid 报 `OID-MALFORMED` Bad、不推导不修，复位配对也走 opIdParts；
+  位移槽「占用」补 lstat 语义（悬空 junction 下 `doesPathExist` 为 False，实测）。
+  major `RootIdState` 区分缺席/损坏/存在：损坏标识 init/backup init/vault push 一律
+  拒绝改写；首次建标识 `createRootInfo` 原子 no-replace（tmp → moveFileNoReplace）。
+  新 major I11 覆盖全部 `.pm` 写入口：`requireWritable`（身份可解析 + 按盘上 role
+  守卫）内嵌进 `requireRole`/`requireMain`；pickRoot 三槽位、savePlanAndMaybeRun、
+  doctor --repair、resolve（先按 UUID 绑回 root 再验可写）、`pm backup` 的备份 root
+  都过同一守卫。B1 `requireMain` 再补 apply 后备份缓存刷新（`afterApply`）、clean
+  执行期复验、trash empty 的 clean-staging 屏障——配置主路径与备份盘同为
+  RoleBackup 时不再自证三副本。测试 +7（151/151）。归档同上文件第四轮章节。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -723,3 +738,11 @@ A1/A2/A3/B1 各留一个可复现绕过 + init 守卫缺失 major + junction 指
 （§10.2 P3b-6 条目）：严格 opId/planId 解析、通配符反规则拒绝、匿名 root
 与 role 改写封堵 + 取锁前预检、requireMain 四入口、init/backup init 守卫、
 指纹不跟随 reparse point；Commands 拆出 Pm.BackupCmd。新增 11 测试（144/144）。
+
+同日 codex 四轮复审（重试循环第 3 次真跑，204 次命令执行，对 e7288ae..a2efb3f）：
+A2/A3/minor/拆分 FIXED；A1/B1/major 各留可复现边界 + 2 新 major（piIx 校验、I11
+未覆盖 doctor --repair/undo/resolve/scan 写入口），逐条核实全部成立（悬空
+junction 下 `doesPathExist=False` 实测）→ **P3b-7 收口**（§10.2 P3b-7 条目）：
+规范十进制 + validatePlan、构造式隔离目录 + doctor 畸形 oid fail-closed、
+RootIdState 三态 + 原子建标识、requireWritable 内嵌 I11 覆盖全部 .pm 写入口、
+requireMain 补 afterApply/clean 复验/trash 屏障。新增 7 测试（151/151）。

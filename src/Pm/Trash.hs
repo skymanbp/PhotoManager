@@ -9,6 +9,7 @@ module Pm.Trash
   ( TrashRecord (..)
   , trashDir
   , manifestPath
+  , quarDirFor
   , quarTrashRel
   , appendManifest
   , readManifest
@@ -77,15 +78,19 @@ manifestPath root = trashDir root </> "manifest.ndjson"
 -- 位移（P3b-5 复审 #1：固定目录会与上次位移残留撞车，moveFileNoReplace
 -- 失败后复位再被挡住）。两侧不共用此函数就会各推各的。
 -- P3b-6 复审 A1：后缀由 'opIdParts' 严格解析（不再 @splitOn "~d"@——planId
--- 含 @~d@ 时会把普通隔离推到位移目录）。非 pm 生成的 oid（手编 journal，
--- doctor 只读分类会遇到）退回普通隔离目录 @\<planId 前缀\>\/@。
-quarTrashRel :: Text -> FilePath -> FilePath
-quarTrashRel oid victim =
-  let dir = case opIdParts oid of
-        Just (pid, _, SfxDisplaced n) -> T.unpack pid <> "~displaced-" <> show n
-        Just (pid, _, _) -> T.unpack pid
-        Nothing -> T.unpack (T.takeWhile (/= '#') oid)
-   in dir </> victim
+-- 含 @~d@ 时会把普通隔离推到位移目录）。
+--
+-- 隔离落位目录由 planId + 后缀**构造**（Exec 用：oid 由内核生成，必合法）：
+-- 普通隔离 @\<pid\>\/@，位移隔离 @\<pid\>~displaced-\<N\>\/@。
+quarDirFor :: Text -> OpIdSuffix -> FilePath
+quarDirFor pid (SfxDisplaced n) = T.unpack pid <> "~displaced-" <> show n
+quarDirFor pid _ = T.unpack pid
+
+-- | 从 oid **解析**后推导（doctor 用）：不合语法 → Nothing。P3b-7 复审 A1：
+-- 不再回退到 @#@ 前缀——手编 journal 的畸形 oid 会被推到真实隔离目录、判成
+-- Q-DONE-LOST 并被 --repair 补记 Done；解析不出就是 Bad，不猜。
+quarTrashRel :: Text -> FilePath -> Maybe FilePath
+quarTrashRel oid victim = (\(pid, _, sfx) -> quarDirFor pid sfx </> victim) <$> opIdParts oid
 
 -- | Write-ahead: flushed to disk before the victim moves (§6.3 step 1).
 appendManifest :: FilePath -> TrashRecord -> IO ()

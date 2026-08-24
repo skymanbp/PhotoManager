@@ -1,8 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | P3b-6：codex 三轮复审收口用例——A1 严格 opId\/planId 解析与位移槽位、
--- A2 通配符反规则、A3 匿名 root 与 role 改写、B1 requireMain 四入口、
--- init\/backup init 守卫、dirFingerprint 不跟随 reparse point。
+-- | P3b-6\/P3b-7：codex 三轮\/四轮复审收口用例——A1 严格 opId\/planId 解析与
+-- 位移槽位、A2 通配符反规则、A3 匿名 root 与 role 改写、B1 requireMain 各
+-- 入口、init\/backup init 守卫、dirFingerprint 不跟随 reparse point、损坏
+-- root-id、I11 覆盖全部 .pm 写入口。
 module GuardTests (guardTests) where
 
 import Control.Monad (forM_, when)
@@ -10,29 +11,31 @@ import Data.List (isInfixOf)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeDirectoryLink)
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Commands (RootSel (..), backupInitPreflight, initPreflight, pickRoot)
-import Pm.Config (Config (..), pmDir, writeRootInfo)
+import Pm.Cli (GoOpts (..), recheckCleanPlan, savePlanAndMaybeRun)
+import Pm.Commands (RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runTrash)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootInfo, readRootState, requireRole, requireWritable, writeRootInfo)
+import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash (sha256File)
-import Pm.Journal (journalPath)
+import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, withJournal)
 import Pm.Op
 import Pm.Plan
-import Pm.Trash (quarTrashRel, trashDir)
+import Pm.Trash (TrashRecord (..), appendManifest, quarTrashRel, trashDir)
 import Pm.Types (RootInfo (..), RootRole (..))
-import Pm.Vault (runVaultStatus)
+import Pm.Vault (ensureVaultRoot, runVaultStatus)
 import TestUtil
 
 guardTests :: TestTree
 guardTests =
   testGroup
-    "P3b-6 守卫与解析（codex 三轮）"
+    "P3b-6/7 守卫与解析（codex 三轮/四轮）"
     [ testCase "A2 通配符/转义反规则 fail-closed；纯字面无关反规则放行" caseWildcardNegations
     , testCase "A3 匿名 root（无 root-id）→ execPlan 拒绝，.pm 连锁文件都不创建" caseAnonymousRoot
     , testCase "A3 marker role 改成 RoleMain 也绕不过 I11（守卫对所有 role 生效）" caseRoleRewrite
@@ -44,6 +47,13 @@ guardTests =
     , testCase "major backupInitPreflight：.git 文件 / 与主库嵌套 → 拒绝" caseBackupInitPreflight
     , testCase "B1 pickRoot SelMain：主库路径是备份 root → 拒绝" casePickRootMain
     , testCase "B1 computeVault：主库路径无标识或非 RoleMain → exit 2" caseVaultRequiresMain
+    , testCase "P3b-7 A1 opIdParts 拒绝非规范十进制（前导零）；quarTrashRel 畸形 → Nothing" caseOpIdCanonical
+    , testCase "P3b-7 A1 validatePlan：负数/重复 piIx → execPlan/loadPlan 拒绝" casePlanIxValidation
+    , testCase "P3b-7 A1 doctor：畸形 oid → OID-MALFORMED Bad，--repair 不补 Done" caseDoctorMalformedOid
+    , testCase "P3b-7 A1 位移槽被悬空 junction 占住 → 跳到下一槽" caseSlotDanglingLink
+    , testCase "P3b-7 major 损坏 root-id：Corrupt 三态；init/vault/可写性拒绝；createRootInfo 不覆盖" caseCorruptRootId
+    , testCase "P3b-7 B1 主库路径为备份 root：afterApply 不写缓存、clean 复验全降级、trash empty HELD" caseMainIsBackupWitness
+    , testCase "P3b-7 I11 全写入口：doctor --repair / savePlanAndMaybeRun / pickRoot --vault / requireRole 拒绝" caseI11AllWriters
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -146,9 +156,19 @@ caseOpIdParts = do
   opIdParts "p#0~x" @?= Nothing
   opIdParts "p#" @?= Nothing
   opIdParts "p#0#1" @?= Nothing
-  quarTrashRel "p#0~d2" "v.jpg" @?= ("p~displaced-2" </> "v.jpg")
-  quarTrashRel "p#0~r" "v.jpg" @?= ("p" </> "v.jpg")
-  quarTrashRel "p#0" ("a" </> "v.jpg") @?= ("p" </> "a" </> "v.jpg")
+  quarTrashRel "p#0~d2" "v.jpg" @?= Just ("p~displaced-2" </> "v.jpg")
+  quarTrashRel "p#0~r" "v.jpg" @?= Just ("p" </> "v.jpg")
+  quarTrashRel "p#0" ("a" </> "v.jpg") @?= Just ("p" </> "a" </> "v.jpg")
+
+caseOpIdCanonical :: IO ()
+caseOpIdCanonical = do
+  -- 非规范十进制不是 pm 生成的：手编 "p#00~r" 不得抵消真实 "p#0" 的 Done
+  opIdParts "p#00" @?= Nothing
+  opIdParts "p#01" @?= Nothing
+  opIdParts "p#0~d01" @?= Nothing
+  opIdParts "p#10~d10" @?= Just ("p", 10, SfxDisplaced 10)
+  quarTrashRel "p#00" "v.jpg" @?= Nothing
+  quarTrashRel "job~d7#0~d1" "v.jpg" @?= Nothing
 
 caseSlotOccupiedByDir :: IO ()
 caseSlotOccupiedByDir = withSystemTempDirectory "pm-guard" $ \dir -> do
@@ -175,6 +195,35 @@ caseSlotOccupiedByDir = withSystemTempDirectory "pm-guard" $ \dir -> do
     other -> assertFailure (show other)
   readFile victim >>= (@?= "OLDBYTES")
   readFile (slot 2) >>= (@?= "INTERLOPER")
+
+caseSlotDanglingLink :: IO ()
+caseSlotDanglingLink = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+      victim = root </> "landscape" </> "d.jpg"
+  createDirectoryIfMissing True (root </> "landscape")
+  writeFile victim "OLDBYTES"
+  oldSha <- sha256File victim
+  op <- mkCopyOp (dir </> "s.jpg") "NEWBYTES" ("landscape" </> "d.jpg")
+  plan <-
+    mkGroupPlanIO
+      root
+      [ (OpQuarantine ("landscape" </> "d.jpg") oldSha "supersede:test", Just 0)
+      , (op, Just 0)
+      ]
+  let slot n =
+        trashDir root </> (T.unpack (plId plan) <> "~displaced-" <> show (n :: Int)) </> "landscape" </> "d.jpg"
+  -- 槽位 1 被**悬空** junction 占住：doesPathExist 跟随链接答 False（实测），
+  -- 只看它会再次选槽 1 → move 必败；须用 lstat 语义补判
+  createDirectoryIfMissing True (takeDirectory (slot 1))
+  _ <- readCreateProcess (shell ("mklink /J \"" <> slot 1 <> "\" \"" <> (dir </> "no-such-target") <> "\"")) ""
+  let env = defaultExecEnv {eeCheckpoint = \c -> when (c == CpCopyAfterFlush) $ writeFile victim "INTERLOPER"}
+  r <- execPlan env plan
+  case r of
+    Right [(_, OFailed _), (_, OConflict m)] -> assertBool ("应改用槽位 2: " <> m) ("~displaced-2" `isInfixOf` m)
+    other -> assertFailure (show other)
+  readFile victim >>= (@?= "OLDBYTES")
+  readFile (slot 2) >>= (@?= "INTERLOPER")
+  removeDirectoryLink (slot 1)
 
 caseJunctionFingerprint :: IO ()
 caseJunctionFingerprint = withSystemTempDirectory "pm-guard" $ \dir -> do
@@ -262,3 +311,136 @@ caseVaultRequiresMain = withSystemTempDirectory "pm-guard" $ \tmp -> do
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   c3 <- runVaultStatus False cfg
   c3 @?= 0
+
+-- ─── P3b-7（四轮） ──────────────────────────────────────────────────────────
+
+casePlanIxValidation :: IO ()
+casePlanIxValidation = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True root
+  op <- mkCopyOp (dir </> "s.jpg") "X" ("相册" </> "x.jpg")
+  plan <- mkPlanIO root [op]
+  let neg = plan {plItems = [PlanItem (-1) op StPending Nothing]}
+      dup = plan {plItems = [PlanItem 0 op StPending Nothing, PlanItem 0 op StPending Nothing]}
+  either (const (pure ())) (const (assertFailure "负序号应拒绝")) (validatePlan neg)
+  either (const (pure ())) (const (assertFailure "重复序号应拒绝")) (validatePlan dup)
+  validatePlan plan @?= Right ()
+  r <- execPlan defaultExecEnv dup
+  case r of
+    Left m -> assertBool m ("重复" `isInfixOf` m)
+    Right _ -> assertFailure "重复序号的计划不得执行"
+  jEx <- doesFileExist (journalPath root)
+  jEx @?= False
+  _ <- savePlan dup
+  l <- loadPlan root (plId dup)
+  either (\m -> assertBool m ("重复" `isInfixOf` m)) (const (assertFailure "重复序号的计划不得装载")) l
+
+caseDoctorMalformedOid :: IO ()
+caseDoctorMalformedOid = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True (trashDir root </> "p")
+  writeFile (trashDir root </> "p" </> "v.jpg") "V"
+  sha <- sha256File (trashDir root </> "p" </> "v.jpg")
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  -- 手编 oid "p#00"（非规范）：旧代码回退到 "p/" 目录 → 内容相符 → Q-DONE-LOST
+  -- Warn → --repair 补记 Done——把畸形记录认证成「已隔离」
+  withJournal root $ \j -> jAppend j Barrier (JIntent "p#00" (OpQuarantine "v.jpg" sha "t") now)
+  rows <- doctorRows root
+  assertBool ("expected OID-MALFORMED Bad in " <> show rows) (("OID-MALFORMED", Bad) `elem` rows)
+  assertBool "畸形 oid 不得再推导出 Q-DONE-LOST" (not (any ((== "Q-DONE-LOST") . fst) rows))
+  _ <- runDoctor root (DoctorOpts False True)
+  es <- journalEntries root
+  filter isDone es @?= []
+
+caseCorruptRootId :: IO ()
+caseCorruptRootId = withSystemTempDirectory "pm-guard" $ \tmp -> do
+  let r = tmp </> "r"
+  createDirectoryIfMissing True (pmDir r)
+  writeFile (pmDir r </> "root-id.json") "{\"id\": \"half-writ"
+  st <- readRootState r
+  case st of
+    RootCorrupt _ -> pure ()
+    other -> assertFailure ("expected RootCorrupt, got " <> show other)
+  readRootInfo r >>= (@?= Nothing)
+  ip <- initPreflight r
+  assertBool "损坏标识不得初始化为主库" (either ("无法解析" `isInfixOf`) (const False) ip)
+  ev <- ensureVaultRoot r
+  assertBool "损坏标识不得改写为 vault" (either ("无法解析" `isInfixOf`) (const False) ev)
+  rw <- requireWritable r
+  assertBool "损坏标识不可写" (either ("无法解析" `isInfixOf`) (const False) rw)
+  now <- getCurrentTime
+  cr <- createRootInfo r (RootInfo "new" RoleMain now Nothing)
+  assertBool "createRootInfo 不得覆盖既有文件" (either (const True) (const False) cr)
+  readFile (pmDir r </> "root-id.json") >>= (@?= "{\"id\": \"half-writ")
+  -- 干净目录：首次创建成功，第二次拒绝，身份保持第一次的
+  let c = tmp </> "c"
+  createDirectoryIfMissing True c
+  c1 <- createRootInfo c (RootInfo "one" RoleMain now Nothing)
+  c1 @?= Right ()
+  c2 <- createRootInfo c (RootInfo "two" RoleMain now Nothing)
+  assertBool "第二次创建应拒绝（no-replace）" (either (const True) (const False) c2)
+  fmap riId <$> readRootInfo c >>= (@?= Just "one")
+
+caseMainIsBackupWitness :: IO ()
+caseMainIsBackupWitness = withSystemTempDirectory "pm-guard" $ \tmp -> do
+  -- 同一路径被配置成「主库」，但盘上标识是 RoleBackup（备份盘误配成主库）
+  let mainP = tmp </> "disk"
+      cfg = mkCfg mainP Nothing
+  createDirectoryIfMissing True (mainP </> "成片")
+  writeFile (mainP </> "成片" </> "c.jpg") "K7"
+  now <- getCurrentTime
+  writeRootInfo mainP (RootInfo "bk" RoleBackup now Nothing)
+  pid <- newPlanId
+  -- afterApply：备份计划收尾不得把 backup-cache 写进这个 root
+  afterApply cfg (Plan pid "backup" mainP (Just "bk") now []) 0
+  cacheEx <- doesDirectoryExist (pmDir mainP </> "backup-cache")
+  cacheEx @?= False
+  -- recheckCleanPlan：主库身份不符 → 全部降级，不复验
+  let qplan =
+        Plan pid "clean-staging" mainP (Just "bk") now
+          [PlanItem 0 (OpQuarantine ("To-Be-Sync'd" </> "x.jpg") "s" "clean-staging:test") StPending Nothing]
+  plan' <- recheckCleanPlan cfg qplan
+  case map piStatus (plItems plan') of
+    [StNeedsDecision _] -> pure ()
+    other -> assertFailure ("expected demotion, got " <> show other)
+  -- trash empty：clean-staging 记录 HELD，文件仍在
+  let rel = "p" </> "x.jpg"
+  createDirectoryIfMissing True (trashDir mainP </> "p")
+  writeFile (trashDir mainP </> rel) "X"
+  appendManifest mainP (TrashRecord "x.jpg" rel "aa" "clean-staging:三副本已确认" "p" now)
+  code <- runTrash cfg (TrashEmpty True) mainP
+  code @?= 1
+  doesFileExist (trashDir mainP </> rel) >>= (@?= True)
+
+caseI11AllWriters :: IO ()
+caseI11AllWriters = withSystemTempDirectory "pm-guard" $ \tmp -> do
+  let v = tmp </> "vault"
+  createDirectoryIfMissing True (v </> ".git")
+  writeFile (v </> ".gitignore") "_site/\n" -- 无 .pm/ 行
+  now <- getCurrentTime
+  writeRootInfo v (RootInfo "vr" RoleVault now Nothing)
+  -- doctor --repair：C2 类悬挂（dst 完好、Done 丢失）本可补记；I11 不过 → 只报不写
+  createDirectoryIfMissing True (v </> "landscape")
+  writeFile (v </> "landscape" </> "a.jpg") "A"
+  sha <- sha256File (v </> "landscape" </> "a.jpg")
+  withJournal v $ \j ->
+    jAppend j Barrier (JIntent "20260101-000000-abcdef#0" (OpCopy (tmp </> "ghost.jpg") ("landscape" </> "a.jpg") sha 1 0) now)
+  (fs, _) <- runDoctor v (DoctorOpts False True)
+  assertBool ("应报 I11 Bad: " <> show [(fRow f, fSeverity f) | f <- fs]) (("I11", Bad) `elem` [(fRow f, fSeverity f) | f <- fs])
+  es <- journalEntries v
+  filter isDone es @?= []
+  -- savePlanAndMaybeRun：计划不落盘
+  pid <- newPlanId
+  let plan = Plan pid "vault-push" v (Just "vr") now []
+  code <- savePlanAndMaybeRun (GoOpts False False) plan
+  code @?= 2
+  doesFileExist (planPath v pid) >>= (@?= False)
+  -- pickRoot --vault 与 requireRole 同样拒绝
+  let cfg = mkCfg (tmp </> "main") (Just v)
+  pr <- pickRoot cfg SelVault
+  case pr of
+    Left (m, 2) -> assertBool m ("I11" `isInfixOf` m)
+    other -> assertFailure (show other)
+  rr <- requireRole RoleVault v
+  assertBool "requireRole 应含 I11 守卫" (either ("I11" `isInfixOf`) (const False) rr)

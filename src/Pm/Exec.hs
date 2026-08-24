@@ -43,6 +43,7 @@ import System.Directory
   , setModificationTime
   )
 import System.FilePath (isRelative, splitDirectories, takeDirectory, takeExtension, takeFileName, (</>))
+import System.IO.Error (isDoesNotExistError)
 
 import Pm.Config (pmDir, readRootInfo)
 import Pm.GitGuard (pmIgnoreGuard)
@@ -121,16 +122,21 @@ execPlan :: ExecEnv -> Plan -> IO (Either String [(PlanItem, ItemOutcome)])
 execPlan env plan = do
   -- P3b-6：取锁本身会创建 .pm/lock——无身份或 I11 不过的 root 连锁文件都
   -- 不该落下（git 工作树污染正是 I11 要防的），先做一次零写入预检；锁内
-  -- 再按同一规则复检（预检与取锁之间被改仍整批拒绝）。
+  -- 再按同一规则复检（预检与取锁之间被改仍整批拒绝）。P3b-7：计划结构
+  -- （id 格式、序号非负唯一）同样先验。
   pre <- readRootInfo (plRootPath plan)
-  preOk <- case pre of
-    Nothing -> pure (Left noIdentityMsg)
-    Just info -> pmIgnoreGuard (riRole info) (plRootPath plan)
+  preOk <- case (validatePlan plan, pre) of
+    (Left e, _) -> pure (Left (planMsg e))
+    (_, Nothing) -> pure (Left noIdentityMsg)
+    (_, Just info) -> pmIgnoreGuard (riRole info) (plRootPath plan)
   either (pure . Left) (const (execPlan' env plan)) preOk
 
 noIdentityMsg :: String
 noIdentityMsg =
   "root 无身份（缺 .pm/root-id.json），拒绝执行（fail-closed，内核级）→ 先 pm init / pm backup init 建立标识"
+
+planMsg :: String -> String
+planMsg e = e <> "，拒绝执行——id 与序号参与 opId/tmp/trash 路径推导"
 
 execPlan' :: ExecEnv -> Plan -> IO (Either String [(PlanItem, ItemOutcome)])
 execPlan' env plan = do
@@ -146,11 +152,7 @@ execPlan' env plan = do
     let ridOk = case mi of
           Nothing -> Left noIdentityMsg
           Just info
-            | not (isValidPlanId (plId plan)) ->
-                Left
-                  ( "计划 id 不符合生成格式（" <> T.unpack (plId plan)
-                      <> "），拒绝执行——id 参与 opId/tmp/trash 路径推导"
-                  )
+            | Left e <- validatePlan plan -> Left (planMsg e)
             | Just e <- eeExpectRootId env
             , riId info /= e ->
                 Left
@@ -271,7 +273,7 @@ restoreQuarantine env root j pid (_, qit, trashRel) = do
               Nothing -> pure (False, "；位移隔离槽位耗尽(99)，不动占位者")
               Just (doid, n) -> do
                 let dispOp = OpQuarantine victimRel osha ("rollback-displaced:" <> opId pid (piIx qit))
-                dout <- execQuarantine env root j doid (quarTrashRel doid victimRel) dispOp
+                dout <- execQuarantine env root j doid (quarDirFor pid (SfxDisplaced n) </> victimRel) dispOp
                 case dout of
                   ODone {} -> pure (True, "；占位文件已隔离(~displaced-" <> show n <> ")")
                   other -> pure (False, "；占位文件隔离未成功(" <> outcomeLabel other <> ")")
@@ -287,17 +289,30 @@ restoreQuarantine env root j pid (_, qit, trashRel) = do
           , False
           )
  where
-  -- 第一个盘上尚不存在的 ~d<N> 位移槽（N 从 1 起，封顶 99）。P3b-6 复审 A1：
-  -- 「存在」= 任何路径条目（文件/目录/reparse point → doesPathExist）；只看
-  -- doesFileExist 会在槽位被同名目录占住时反复选中它、后续 move 必败。
+  -- 第一个盘上尚未被占的 ~d<N> 位移槽（N 从 1 起，封顶 99）。P3b-6 复审 A1：
+  -- 只看 doesFileExist 会在槽位被同名目录占住时反复选中它、后续 move 必败。
   freeDisplacedSlot pid' ix victimRel = go (1 :: Int)
    where
     go n
       | n > 99 = pure Nothing
       | otherwise = do
-          let doid = displacedOpId pid' ix n
-          ex <- doesPathExist (trashDir root </> quarTrashRel doid victimRel)
-          if ex then go (n + 1) else pure (Just (doid, n))
+          occ <- slotOccupied (trashDir root </> quarDirFor pid' (SfxDisplaced n) </> victimRel)
+          if occ then go (n + 1) else pure (Just (displacedOpId pid' ix n, n))
+  -- 「占用」= 任何路径条目，**含悬空的 junction/symlink**：doesPathExist 跟随
+  -- 链接，悬空链接会答 False（P3b-7 复审 A1，directory-1.3.8.5 实测），再用
+  -- lstat 语义的 pathIsSymbolicLink 补判；探测异常（非「不存在」）按占用
+  -- 处理——宁可跳槽，不撞 I5。
+  slotOccupied p = do
+    ex <- doesPathExist p
+    if ex
+      then pure True
+      else do
+        r <- try (pathIsSymbolicLink p) :: IO (Either IOException Bool)
+        pure $ case r of
+          Right isLink -> isLink
+          Left e
+            | isDoesNotExistError e -> False
+            | otherwise -> True
 
 execItem :: ExecEnv -> FilePath -> Journal -> Text -> PlanItem -> IO ItemOutcome
 execItem env root j pid item = case piStatus item of
@@ -311,8 +326,7 @@ execItem env root j pid item = case piStatus item of
         op@OpCopy {} -> execCopy env root j (opId pid (piIx item)) (piIx item) op
         op@OpRename {} -> execRename env root j (opId pid (piIx item)) op
         op@OpQuarantine {} ->
-          let oid = opId pid (piIx item)
-           in execQuarantine env root j oid (quarTrashRel oid (opVictimRel op)) op
+          execQuarantine env root j (opId pid (piIx item)) (quarDirFor pid SfxPlain </> opVictimRel op) op
  where
   relOk op = all good (relPaths op)
   relPaths OpCopy {opDstRel = d} = [d]

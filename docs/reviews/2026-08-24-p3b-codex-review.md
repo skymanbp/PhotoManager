@@ -203,3 +203,41 @@ I5 不覆盖；gitStepsLines 纯字符串（pm 零 git 执行）;六态算法/�
 - `pm backup` 的 requireMain 分支无自动化测试（需盘符发现 fixture）。
 - 位移槽位封顶 99；落位后复核异常路径未做故障注入（沿前两轮记录）。
 - junction 别名 vault 路径的守卫行为（`canonicalizePath` 一行）仍未自动化。
+
+---
+
+# 四轮复审（2026-08-24，`codex exec -s read-only` 直跑，对 e7288ae..a2efb3f）
+
+- 取结果：重试循环前两次空跑（零命令执行），第 3 次真跑：204 次命令执行。
+- verdict：**NO-GO**——A2/A3/minor/拆分 FIXED；A1/B1/major PARTIAL + 2 新 major。
+  逐条对照源码核实**全部成立**（A1 悬空链接一项另以 directory-1.3.8.5 实测：
+  悬空 junction `doesPathExist=False`、`pathIsSymbolicLink=True`），同轮修复
+  （P3b-7，151/151，零 GHC 警告）。
+
+## 逐条
+
+| # | 复审判定 | 残留（codex） | 核实 | P3b-7 处置 |
+|---|---|---|---|---|
+| A1 | PARTIAL | `readDigits` 收前导零（`p#00`→ix 0，`p#0~d01`→`~d1`），手编 `p#00~r` 可抵消真实 Done；`piIx` 未验非负唯一；Doctor 仍 `oid <> "~r"` 拼接、`quarTrashRel` 解析失败回退 `#` 前缀 → 畸形 quarantine 可被判 Q-DONE-LOST 并 `--repair` 补 Done；`doesPathExist` 跟随链接，悬空 junction 占槽答 False | 成立（Op.hs:106 / Plan.hs:56 / Doctor.hs:106 / Trash.hs:84 / Exec.hs:299 原文如此；悬空链接实测） | `readDigits` 要求 `show n == t`；`validatePlan`（id + piIx）在 loadPlan/execPlan 共用；隔离目录改构造式 `quarDirFor`（Exec），`quarTrashRel` 返回 Maybe，Doctor 畸形 oid → `OID-MALFORMED` Bad 且 repairDone 过滤、复位配对走 opIdParts；`slotOccupied` = doesPathExist ∨ pathIsSymbolicLink（探测异常按占用）。测试：前导零矩阵、负/重复 piIx 执行与装载拒绝、畸形 oid doctor 不补 Done、悬空 junction 占槽跳槽 2 |
+| A2 | FIXED | — | — | — |
+| A3 | FIXED | — | — | — |
+| B1 | PARTIAL | apply 备份计划后无条件用 cfgMainPath 刷新 backup-cache；clean 执行期复验与 trash empty 用未经 requireMain 的主库见证——主路径与备份盘同为 RoleBackup 时同一文件充当两份见证 | 成立（Commands.hs runApply/runTrash、Cli.hs recheckCleanPlan、Clean.hs:124-131 原文如此） | `afterApply`（可测）先 requireMain 否则跳过缓存写；`recheckCleanPlan` 与 runTrash clean 分支先 requireMain，失败全部降级/HELD。测试：主路径为 RoleBackup → 不写 backup-cache、全项 NEEDS-DECISION、trash empty HELD 且文件仍在 |
+| major | PARTIAL | `readRootInfo` 把损坏 JSON 当缺席；init/backup init/vault push 随后**覆盖写**新 UUID/role——半写坏的 RoleBackup marker 可被 `init --force` 改成 RoleMain | 成立（Config.hs:119-127、writeRootInfo 覆盖写） | `RootIdState = Absent/Corrupt/Present`，`readRootState` 三态；三处建标识入口 Corrupt 一律拒绝；`createRootInfo` 原子 no-replace（tmp → moveFileNoReplace，失败删自建 tmp）；`writeRootInfo` 仅供测试覆盖。测试：损坏标识 → initPreflight/ensureVaultRoot/requireWritable 拒绝、createRootInfo 不覆盖、二次创建拒绝 |
+| minor | FIXED | — | — | — |
+| 拆分 | FIXED | — | — | — |
+| 新 major 1 | — | 合法 planId + 负数/重复 piIx → 畸形/碰撞 oid，Undo 折叠 | 成立 | 并入 A1 的 `validatePlan` |
+| 新 major 2 | — | I11 只在 Exec 与建 root 时检查；`doctor --repair`、undo、resolve、scan/side-cache 经 role-only pickRoot 直接写 `.pm` | 成立（Main.hs CmdDoctor → pickRoot 无守卫；savePlan 无守卫） | `requireWritable`（身份可解析 + 按盘上 role 的 pmIgnoreGuard）内嵌进 `requireRole`/`requireMain`；pickRoot 三槽位、`savePlanAndMaybeRunWith`、`runDoctor` 的 repair 分支（不可写 → `I11` Bad 只报不修）、`runResolve`（先 bindExecRoot 再 requireWritable）、`runBackupRun'` 的备份 root 全部过守卫。测试：vault 缺 ignore → doctor --repair 不补 Done、计划不落盘、pickRoot --vault 与 requireRole 拒绝 |
+
+## 附带
+
+- 前四轮共同证实：codex 对 pm 的 fail-closed 语义理解准确，四轮 8 条（含 2 新
+  发现）无一误报。
+- `apply` 的备份缓存分支因需盘符发现 fixture，用抽出的 `afterApply` 直接测试。
+
+## 残余与未自动化项
+
+- `pm backup` 的 requireMain/requireRole 分支无自动化测试（需盘符发现 fixture）。
+- 位移槽位封顶 99；落位后复核异常路径未做故障注入（沿前几轮记录）。
+- junction 别名 vault 路径的守卫行为（`canonicalizePath` 一行）仍未自动化。
+- 带 reparse 属性的非链接对象（OneDrive 占位、dedup）在指纹里记为 `l`，其内容
+  变化不改变指纹（保守；真实库无此类对象）。
