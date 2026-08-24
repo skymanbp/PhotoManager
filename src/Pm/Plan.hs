@@ -115,13 +115,17 @@ newPlanId = do
 
 -- | 计划的结构性校验（装载与执行两处共用；P3b-7 复审 A1 \/ 新 major）：id 为
 -- 生成格式；@piIx@ 非负且全局唯一——负数会拼出无法解析的 opId，重复序号让
--- 不同操作共享 oid，doctor\/undo 按 oid 折叠时会把它们混成一个。
+-- 不同操作共享 oid，doctor\/undo 按 oid 折叠时会把它们混成一个；P3b-8 六轮
+-- 复审 major：每个 Op 的相对路径字段过 'opPathsOk'（越界\/盘符\/ADS\/@.pm@
+-- 内部一律拒绝——手编计划的路径会被拼到 root 上）。
 validatePlan :: Plan -> Either String ()
 validatePlan p
   | not (isValidPlanId (plId p)) =
       Left ("计划 id 不符合生成格式（" <> T.unpack (plId p) <> "，应为 YYYYMMDD-HHMMSS-hex6）")
   | any (< 0) ixs = Left "计划含负数条目序号（piIx < 0）"
   | length ixs /= Set.size (Set.fromList ixs) = Left "计划条目序号重复（piIx 不唯一）"
+  | (bad : _) <- [piIx it | it <- plItems p, not (opPathsOk (piOp it))] =
+      Left ("计划条目 " <> show bad <> " 含非法相对路径（绝对/盘符/':'/'.'/'..'/分隔符开头/.pm 内部）")
   | otherwise = Right ()
  where
   ixs = map piIx (plItems p)

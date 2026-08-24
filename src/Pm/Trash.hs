@@ -31,7 +31,7 @@ import System.FilePath ((</>))
 import System.IO
 
 import Pm.Config (pmDir)
-import Pm.Op (OpIdSuffix (..), opIdParts)
+import Pm.Op (OpIdSuffix (..), opIdParts, relPathOk)
 import Pm.Win (flushHandleToDisk)
 
 data TrashRecord = TrashRecord
@@ -109,9 +109,15 @@ readManifest root = do
     then pure ([], [])
     else do
       raw <- BS.readFile fp
+      -- P3b-8 六轮复审 major（同类统一修）：manifest 与 journal/plan 一样是可
+      -- 手编输入，trTrashRel 会被拼到 .pm/trash 上且 **pm trash empty 按它
+      -- unlink**——路径非法的记录按损坏行剔除（fail-closed），绝不参与删除。
       let ls = filter (not . BS.null) (BSC.lines raw)
           step (i :: Int) l = case eitherDecodeStrict l of
-            Right r -> Right r
+            Right r
+              | not (relPathOk (trTrashRel r)) || not (relPathOk (trVictimRel r)) ->
+                  Left ("manifest line " <> show i <> ": 相对路径非法（越界/盘符/ADS），记录已忽略（fail-closed）")
+              | otherwise -> Right r
             Left e -> Left ("manifest line " <> show i <> ": " <> e)
           results = zipWith step [1 ..] ls
       pure ([r | Right r <- results], [w | Left w <- results])

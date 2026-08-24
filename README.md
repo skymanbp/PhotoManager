@@ -4,7 +4,7 @@ Haskell 编写的照片库管理器：为 `D:\Photography` 三层照片库（Raw
 提供带完整性校验的索引、归档、备份同步、命名治理与 vault 分发。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
-对抗评审记录：[docs/reviews/](docs/reviews/)。
+对抗评审记录：[docs/reviews/](docs/reviews/)（按时间摘要：[docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)）。
 
 ## 使用
 
@@ -84,6 +84,10 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
 - P3b-8 ✅ codex 五轮复审收口（opId 的 planId 须为生成格式——路径型 oid 不再
   越出 root、readDigits 有界、slotOccupied 探测异常按占用、clean/import/trash
   身份校验先于任何读取判定、测试 fixture 不覆盖损坏 root-id；155/155 测试）
+- P3b-9 ✅ codex 六轮复审收口（relPathOk/opPathsOk 统一校验一切可手编路径字段：
+  计划 Op、journal Op 与 Done trashRel、manifest 记录；内核 relOk 换同谓词——
+  `\evil`/`c:evil` 在 Windows `</>` 下是整体替换；`.pm` 内部目标拒绝，undo 的
+  `.pm/trash/` rename 源除外；158/158 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

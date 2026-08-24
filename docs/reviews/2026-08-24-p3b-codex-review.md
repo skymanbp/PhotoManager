@@ -285,3 +285,45 @@ I5 不覆盖；gitStepsLines 纯字符串（pm 零 git 执行）;六态算法/�
 - `pm backup` 的 requireMain/requireRole 分支无自动化测试（需盘符发现 fixture）。
 - 位移槽位封顶 99；落位后复核异常路径未做故障注入；junction 别名 vault 守卫、
   reparse 非链接对象记 `l`（沿前几轮记录）。
+
+---
+
+# 六轮复审（2026-08-24，`codex exec -s read-only` 直跑，对 fdcd5e3..dfdf981）
+
+- 取结果：重试循环第 1 次即真跑：126 次命令执行（约 22 分钟；结果文件在会话
+  重启前已完整落盘，链的收尾复制步骤未跑，直接取 `review6-result-1.md`）。
+- verdict：**NO-GO**——A1（oid 语法）/B1/文档 FIXED；余 1 个 major：**Doctor 直接
+  拼接手编 journal 的 Op 路径字段**（合法 oid + `victim=../../../outside/x` 仍可
+  越出 root 探测，`--repair` 可补 Done / 生成 C5 计划）。核实成立，且同类比
+  codex 指出的更宽（见下）。同轮修复（P3b-9，158/158，零 GHC 警告）。
+
+## 逐条
+
+| # | 复审判定 | 核实 | P3b-9 处置 |
+|---|---|---|---|
+| A1（oid 语法/slotOccupied） | FIXED | — | — |
+| B1（守卫次序） | FIXED（含 runTrash 分支内守卫的理由被接受：作用 root 已由 pickRoot 验身份，trashView 只读它的盘面与 manifest） | — | — |
+| 新 major（Doctor 拼接 Op 路径） | **成立**（Doctor.hs:200/215/233/272 原文把 `dstRel`/`victim`/`old`/`new`/Done 的 `trashRel` 直接 `root </>`）。**同类统一排查发现更宽**：①Exec 自己的 relOk 只查 `isRelative` + `..`——filepath 实测 `isRelative "\\evil"`/`"c:evil"` 都是 True 且 `root </> 它们`是**整体替换**（外加 NTFS ADS `a.jpg:ads`），手编计划可直接让内核落位到 root 外；②manifest 的 `trTrashRel` 被 `pm trash empty` **unlink**（Commands.hs:325）——手编一行 `"../../../victim.jpg"` 就删 root 外文件；③Op 路径可指向 `.pm` 内部（rename root-id.json 等） | 共用谓词 `Pm.Op.relPathOk`（非空、非绝对、无 `:`、不以分隔符开头、无 `.`/`..` 分量）+ `opPathsOk`（`.pm` 内部一律拒，唯一例外 undo/复位 rename 的 `.pm/trash/` 源）：`validatePlan` 加路径校验（loadPlan/execPlan 取锁前+锁内三处生效）、`execItem` 换用同谓词、Doctor `classifyPending`/`verifyDone` 前置 `OP-PATH` Bad 且 `applyRepairs` 双保险过滤、`readManifest` 把非法记录降为损坏行（trash empty 绝不删）。测试 +3（158/158） |
+| 测试 | PARTIAL（缺合法 oid + 越界 Op 路径、manifest 注入） | 成立 | `caseOpPathValidation`（拒绝面 + validatePlan/execPlan/loadPlan）、`caseDoctorOpPathEscape`（OP-PATH ×2、不进矩阵、--repair 不补）、`caseManifestPathEscape`（记录剔除、trash empty 不 unlink root 外文件） |
+| 文档（§16 拆分/§10.2） | FIXED | — | P3b-9 条目补记 Doctor Op-path 残留的处置 |
+
+## 附带
+
+- filepath 语义探针（`Probe4.hs`，GHC 9.10）：`isRelative "\\evil" = True`、
+  `isRelative "c:evil" = True`、`"D:\\root" </> "\\evil" = "\\evil"`、
+  `"D:\\root" </> "c:evil" = "c:evil"`（整体替换）；`splitDirectories "a.jpg:ads"
+  = ["a.jpg:ads"]`（`..` 检查对 ADS 无感）——旧 relOk 的两个绕过均实证。
+- codex 对「runTrash 守卫在 clean 分支内」的理由判定为成立（trashView 枚举的
+  是已验身份的作用 root）。
+- `Exec.planIdOf` 维持 `takeWhile (/= '#')`（输入是内核生成 oid）。
+
+## 残余与未自动化项
+
+- catalog 的 `enPath` 同为可手编 `.pm` 文件字段：doctor `--deep`/status/diff 用它
+  做**只读**探测（越界只泄露存在性/哈希比对结果，不产生写或删）；写屏障在
+  validatePlan——由 catalog 生成的备份/归档计划落到 Op 路径后仍被拒。留待
+  七轮意见是否也要在 loadCatalog 前置校验。
+- 手编计划仍可 rename `.pm/trash/<x>` → 库内路径（与 undo 复位同形，受
+  FpFileSha 前置条件 + I5 no-replace 约束）；语义上等价于合法 undo，未禁。
+- root-id tmp 残留、.gitignore TOCTOU、`pm backup` 盘符 fixture、位移槽 99、
+  reparse 记 `l`（沿前几轮记录）。

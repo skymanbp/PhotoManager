@@ -43,7 +43,9 @@ import System.Directory
   , removeFile
   , setModificationTime
   )
-import System.FilePath (isRelative, splitDirectories, takeDirectory, takeExtension, takeFileName, (</>))
+-- isRelative 不再引入：P3b-8 六轮复审——execItem 的路径自查改用 Pm.Op.opPathsOk
+-- （isRelative 对 "\\evil"/"c:evil" 都答 True，而 </> 对二者是整体替换）。
+import System.FilePath (splitDirectories, takeDirectory, takeExtension, takeFileName, (</>))
 import System.IO.Error (isDoesNotExistError)
 
 import Pm.Config (pmDir, readRootInfo)
@@ -326,20 +328,17 @@ execItem env root j pid item = case piStatus item of
   StSkippedByUser -> pure ONotExecuted
   StNeedsDecision _ -> pure ONotExecuted
   StPending -> do
-    -- Ops address the root strictly by relative paths (no escape upward).
-    if not (relOk (piOp item))
-      then pure (OFailed "非法路径（绝对路径或 .. 越界），拒绝执行")
+    -- Ops address the root strictly by validated relative paths。P3b-8 六轮
+    -- 复审：与 validatePlan 共用 'opPathsOk'——旧的 isRelative+".." 自查挡不住
+    -- "\\evil"/"c:evil"（filepath 实测二者 isRelative=True 且 root </> p 是
+    -- **整体替换**）、NTFS ADS（"a.jpg:ads"）与指向 .pm 内部的路径。
+    if not (opPathsOk (piOp item))
+      then pure (OFailed "非法相对路径（越界/盘符/ADS/.pm 内部），拒绝执行")
       else case piOp item of
         op@OpCopy {} -> execCopy env root j (opId pid (piIx item)) (piIx item) op
         op@OpRename {} -> execRename env root j (opId pid (piIx item)) op
         op@OpQuarantine {} ->
           execQuarantine env root j (opId pid (piIx item)) (quarDirFor pid SfxPlain </> opVictimRel op) op
- where
-  relOk op = all good (relPaths op)
-  relPaths OpCopy {opDstRel = d} = [d]
-  relPaths (OpRename o n _) = [o, n]
-  relPaths (OpQuarantine v _ _) = [v]
-  good p = isRelative p && ".." `notElem` splitDirectories p
 
 -- ─── Copy (§6.1) ────────────────────────────────────────────────────────────
 

@@ -13,6 +13,9 @@ module Pm.Op
   , opIdParts
   , restoreOpId
   , displacedOpId
+  , relPathOk
+  , opRelPaths
+  , opPathsOk
   , describeOp
   ) where
 
@@ -21,6 +24,7 @@ import Data.Aeson
 import Data.Char (isDigit)
 import Data.Text (Text)
 import qualified Data.Text as T
+import System.FilePath (isAbsolute, isPathSeparator, splitDirectories)
 
 data Fingerprint
   = FpFileSha Text
@@ -155,6 +159,40 @@ restoreOpId pid ix = opId pid ix <> "~r"
 -- | 第 N 次位移隔离的 opId。
 displacedOpId :: Text -> Int -> Int -> Text
 displacedOpId pid ix n = opId pid ix <> "~d" <> T.pack (show n)
+
+-- | 外部可手编输入（plan\/journal\/manifest）里相对路径字段的 fail-closed 校验
+-- （P3b-8 六轮复审 major，Exec\/validatePlan\/Doctor\/Trash 共用）：这些字段会被
+-- 拼到 @root \<\/\>@ 或 @.pm\/trash \<\/\>@ 上，而 Windows 的 @\<\/\>@ 对带盘符
+-- （@c:evil@）或以分隔符开头（@\\evil@）的第二参数是**整体替换**而非拼接
+-- （filepath 实测），@..@ 分量向上越界，@:@ 还打开 NTFS 备用数据流
+-- （@a.jpg:ads@）。只接受非空、纯相对、不含 @:@、不以分隔符开头、无
+-- @.@\/@..@ 分量的路径。
+relPathOk :: FilePath -> Bool
+relPathOk p =
+  not (null p)
+    && not (isAbsolute p)
+    && notElem ':' p
+    && not (any isPathSeparator (take 1 p))
+    && all (`notElem` [".", ".."]) (splitDirectories p)
+
+-- | Op 的相对路径字段（OpCopy 的 src 是绝对路径，允许指向其他 root，不在
+-- 其列——它只被读取，落位目标是 dstRel）。
+opRelPaths :: Op -> [FilePath]
+opRelPaths OpCopy {opDstRel = d} = [d]
+opRelPaths (OpRename o n _) = [o, n]
+opRelPaths (OpQuarantine v _ _) = [v]
+
+-- | Op 全部相对路径合法，且不指向 @.pm@ 内部——唯一例外是 undo\/复位 rename
+-- 的源（@.pm\/trash\/…@，隔离文件搬回原位）；其余任何 @.pm@ 前缀（如 rename
+-- @.pm\/root-id.json@、quarantine journal）都是对 pm 自身状态的操纵，拒绝。
+opPathsOk :: Op -> Bool
+opPathsOk op = case op of
+  OpCopy {opDstRel = d} -> ok d
+  OpRename o n _ -> (ok o || okTrashSrc o) && ok n
+  OpQuarantine v _ _ -> ok v
+ where
+  ok p = relPathOk p && take 1 (splitDirectories p) /= [".pm"]
+  okTrashSrc p = relPathOk p && take 2 (splitDirectories p) == [".pm", "trash"]
 
 describeOp :: Op -> String
 describeOp (OpCopy s d _ sz _) = "copy " <> s <> " -> " <> d <> " (" <> show sz <> " B)"
