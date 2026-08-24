@@ -3,7 +3,7 @@
 -- | @pm serve@ —— 127.0.0.1 loopback JSON API（DESIGN §11，P4-1）。
 --
 -- 架构边界（不变量级）：GUI 是独立进程、**永不直接触碰照片文件**，一切经
--- 这里说话。P4-1 只有**只读**端点；写端点（apply / vault push 分类）在 GUI
+-- 这里说话。P4-1/2 只有**只读**端点；写端点（apply / vault push 分类）在 GUI
 -- 骨架落地、过 codex 评审与用户裁定之后再开（DESIGN §11）。
 --
 -- 安全模型（单机、同用户；§14 威胁模型）：
@@ -11,24 +11,33 @@
 --     JSON（@{"port":N,"token":"…"}@）交给 @pm ui@ / 调用方；
 --   * 每个请求必须带 @Authorization: Bearer <token>@（token = crypton 16 字节
 --     熵的 hex），比对用常量时间 'constEq'；
---   * @Host@ 必须是 @127.0.0.1[:port]@——挡 DNS rebinding（浏览器里的恶意页面
---     用自家域名解析到 127.0.0.1 来打本机服务）；
+--   * @Host@ 必须**恰好**是 @127.0.0.1@ 或 @127.0.0.1:<端口>@——挡 DNS rebinding
+--     （浏览器里的恶意页面用自家域名解析到 127.0.0.1 来打本机服务）；
 --   * 带 @Origin@ 的请求只接受 Tauri WebView 的来源（tauri://localhost 与
 --     http(s)://tauri.localhost），其余 403；预检 OPTIONS 不需要 token
 --     （浏览器预检不会带 Authorization）。
 --   * 缩略图端点按 sha 查主库 catalog，只提供 JPEG 条目的原字节（缩放由
---     GUI 做，§11）；路径来自 loadCatalog 校验过的 enPath（用户数据读取）。
+--     GUI 做，§11）；路径来自 loadCatalog 校验过的 enPath，读取前再经
+--     'resolveUnder'（十八轮：扫描后被换成库外链接的条目不跟随）。
+--   * vault 端点会刷新 @.pm/vault-cache@（不是文件系统意义的纯读）；warp 并发
+--     执行请求，缓存替换共用固定 tmp 名——进程内互斥 'seVaultLock' 串行化
+--     （十八轮 minor）。
 module Pm.Serve
   ( ServeOpts (..)
+  , ServeEnv
+  , newServeEnv
   , Announce (..)
   , serveApp
   , runServe
   , newToken
   , allowedOrigin
   , hostOk
+  , portOk
   , listPlans
   ) where
 
+import Control.Concurrent.Async (race)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (IOException, bracket, try)
 import Crypto.Random (getRandomBytes)
 import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
@@ -48,7 +57,7 @@ import Network.Wai
 import Network.Wai.Handler.Warp (defaultSettings, runSettingsSocket)
 import System.Directory (doesDirectoryExist, listDirectory)
 import System.FilePath (dropExtension, takeExtension, (</>))
-import System.IO (hFlush, stdout)
+import System.IO (hFlush, hIsEOF, stdin, stdout)
 
 import Pm.Catalog (loadCatalog)
 import Pm.Commands (loadPlanAnyRoot)
@@ -56,13 +65,28 @@ import Pm.Config (Config (..), pmSubPlans, requirePmTrusted, untrustedMsg)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPlan)
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
-import Pm.Vault (VaultReport (..), computeVault, renderVaultJson)
+import Pm.Vault (VaultDiff (..), VaultReport (..), computeVault, fixedCategories, renderVaultJson)
 import Pm.Win (resolveUnder)
 
 data ServeOpts = ServeOpts
   { soPort :: Maybe Int
-    -- ^ Nothing = 由内核随机分配（默认）
+    -- ^ Nothing = 由内核随机分配（默认）；Just 须在 0..65535（十八轮 minor：
+    -- 越界会在 fromIntegral 到 PortNumber 时静默折回）
+  , soExitOnStdinEof :: Bool
+    -- ^ P4-3：由 GUI 拉起时置位。GUI 把一条管道接到 serve 的 stdin 且从不写；
+    -- GUI 进程一死（含崩溃、被 taskkill），Windows 关闭管道，这里读到 EOF 即
+    -- 退出——否则 serve 会成为孤儿一直监听。
   }
+
+-- | 一次 serve 会话的状态：配置、token、vault 缓存刷新的进程内互斥。
+data ServeEnv = ServeEnv
+  { seCfg :: Config
+  , seToken :: BS.ByteString
+  , seVaultLock :: MVar ()
+  }
+
+newServeEnv :: Config -> BS.ByteString -> IO ServeEnv
+newServeEnv cfg tok = ServeEnv cfg tok <$> newMVar ()
 
 -- | 启动时打印给调用方的一行 JSON。
 data Announce = Announce
@@ -79,19 +103,42 @@ newToken = do
   raw <- getRandomBytes 16 :: IO BS.ByteString
   pure (convertToBase Base16 raw)
 
+portOk :: Int -> Bool
+portOk p = p >= 0 && p <= 65535
+
 -- | 只听 127.0.0.1；端口 0 = 随机，绑定后再从 socket 读回真实端口。
 runServe :: Config -> ServeOpts -> IO Int
-runServe cfg o = do
-  tok <- newToken
-  r <- try (bracket (bindLoopback (maybe 0 id (soPort o))) close $ \sock -> do
-    port <- socketPort sock
-    BSL.putStr (encode (Announce (fromIntegral port) (T.pack (BC.unpack tok))))
-    putStrLn ""
-    hFlush stdout
-    runSettingsSocket defaultSettings sock (serveApp cfg tok)) :: IO (Either IOException ())
-  case r of
-    Left e -> putStrLn ("pm serve: " <> show e) >> pure 1
-    Right () -> pure 0
+runServe cfg o = case soPort o of
+  Just p | not (portOk p) -> do
+    putStrLn ("pm serve: --port 须在 0..65535（给的是 " <> show p <> "）")
+    pure 2
+  _ -> do
+    tok <- newToken
+    env <- newServeEnv cfg tok
+    r <- try (bracket (bindLoopback (maybe 0 id (soPort o))) close $ \sock -> do
+      port <- socketPort sock
+      BSL.putStr (encode (Announce (fromIntegral port) (T.pack (BC.unpack tok))))
+      putStrLn ""
+      hFlush stdout
+      let server = runSettingsSocket defaultSettings sock (serveApp env)
+      if soExitOnStdinEof o
+        then do
+          -- 父进程看门：stdin 读到 EOF（管道另一端消失）就结束；race 让先完成
+          -- 的一方取消另一方——server 正常不会返回，所以实际就是 EOF 结束 server。
+          _ <- race server waitStdinEof
+          pure ()
+        else server) :: IO (Either IOException ())
+    case r of
+      Left e -> putStrLn ("pm serve: " <> show e) >> pure 1
+      Right () -> pure 0
+
+-- | 阻塞直到 stdin 关闭（EOF）；读到内容就丢弃继续等。
+waitStdinEof :: IO ()
+waitStdinEof = do
+  eof <- try (hIsEOF stdin) :: IO (Either IOException Bool)
+  case eof of
+    Right False -> BS.hGetLine stdin >> waitStdinEof
+    _ -> pure ()
 
 bindLoopback :: Int -> IO Socket
 bindLoopback port = do
@@ -108,12 +155,19 @@ allowedOrigins = ["tauri://localhost", "http://tauri.localhost", "https://tauri.
 allowedOrigin :: BS.ByteString -> Bool
 allowedOrigin = (`elem` allowedOrigins)
 
--- | @Host@ 头须为 @127.0.0.1@ 或 @127.0.0.1:<port>@。
+-- | @Host@ 头须为 @127.0.0.1@ 或 @127.0.0.1:<1-5 位十进制端口>@——精确解析，
+-- 不做前缀判定（十八轮：前缀判定会放过 @127.0.0.1:1@evil@ 之类的尾巴；就
+-- DNS rebinding 而言那不可利用，但闸的语义应当是"恰好是这个 Host"）。
 hostOk :: BS.ByteString -> Bool
-hostOk h = h == "127.0.0.1" || "127.0.0.1:" `BS.isPrefixOf` h
+hostOk h = case BS.stripPrefix "127.0.0.1" h of
+  Just "" -> True
+  Just rest
+    | Just port <- BS.stripPrefix ":" rest ->
+        not (BS.null port) && BS.length port <= 5 && BC.all (\c -> c >= '0' && c <= '9') port
+  _ -> False
 
-serveApp :: Config -> BS.ByteString -> Application
-serveApp cfg tok req respond = do
+serveApp :: ServeEnv -> Application
+serveApp env req respond = do
   let hdrs = requestHeaders req
       origin = lookup hOrigin hdrs
       corsHdrs = case origin of
@@ -133,8 +187,8 @@ serveApp cfg tok req respond = do
     _
       | requestMethod req == methodOptions ->
           respond (responseLBS status204 corsHdrs "")
-      | not (authorized tok hdrs) -> err status401 "缺少或错误的 Bearer token"
-      | otherwise -> route cfg req jsonR err corsHdrs respond
+      | not (authorized (seToken env) hdrs) -> err status401 "缺少或错误的 Bearer token"
+      | otherwise -> route env req jsonR err corsHdrs respond
 
 authorized :: BS.ByteString -> RequestHeaders -> Bool
 authorized tok hdrs = case lookup hAuthorization hdrs of
@@ -145,8 +199,8 @@ authorized tok hdrs = case lookup hAuthorization hdrs of
 
 type Reply = Status -> ResponseHeaders -> Value -> IO ResponseReceived
 
-route :: Config -> Request -> Reply -> (Status -> String -> IO ResponseReceived) -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-route cfg req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req) of
+route :: ServeEnv -> Request -> Reply -> (Status -> String -> IO ResponseReceived) -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req) of
   ("GET", ["api", "ping"]) ->
     jsonR status200 [] (object ["ok" .= True, "main" .= cfgMainPath cfg, "vault" .= cfgVaultPath cfg])
   ("GET", ["api", "status"]) -> do
@@ -154,15 +208,36 @@ route cfg req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
     r <- statusReport cfg (StatusOpts (not fresh))
     jsonR status200 [] (toJSON r)
   ("GET", ["api", "vault", "status"]) -> do
-    er <- computeVault True cfg
+    er <- vaultReport
     case er of
       Left (msg, code) -> err (if code == 2 then status404 else status500) msg
       Right r ->
+        -- 与 `pm vault status --json` 的 stdout **逐字节相同**：同一 renderVaultJson
+        -- 加 CLI putStrLn 的末尾换行（十八轮 minor：此前少那一个 LF）。
         respond
           ( responseLBS
               status200
               (("Content-Type", "application/json; charset=utf-8") : corsHdrs)
-              (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r))
+              (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r) <> "\n")
+          )
+  -- P4-2：分类页要按 sha 拉缩略图，而 vault/status 的 "new" 只有文件名；
+  -- 这里把 NEW 名字配上主库 catalog 的 Entry（sha/size），仍是只读。
+  ("GET", ["api", "vault", "new"]) -> do
+    er <- vaultReport
+    case er of
+      Left (msg, code) -> err (if code == 2 then status404 else status500) msg
+      Right r ->
+        jsonR
+          status200
+          []
+          ( object
+              [ "categories" .= fixedCategories
+              , "new"
+                  .= [ object ["name" .= n, "sha" .= fmap enSha me, "size" .= fmap enSize me]
+                     | n <- vdNew (vrDiff r)
+                     , let me = Map.lookup n (vrSrcMeta r)
+                     ]
+              ]
           )
   ("GET", ["api", "plans"]) -> do
     (ps, errs) <- listPlans (cfgMainPath cfg)
@@ -180,12 +255,23 @@ route cfg req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
         case mcat >>= findJpeg sha of
           Nothing -> err status404 "无此 JPEG 条目"
           Just rel -> do
-            eb <- try (BS.readFile (cfgMainPath cfg </> rel)) :: IO (Either IOException BS.ByteString)
-            case eb of
-              Left e -> err status500 ("读取失败: " <> show e)
-              Right bytes ->
-                respond (responseLBS status200 (("Content-Type", "image/jpeg") : ("Cache-Control", "private, max-age=3600") : corsHdrs) (BSL.fromStrict bytes))
+            -- 十八轮：enPath 只过了词法闸（userRelOk）；扫描之后条目或其父目录
+            -- 被换成指向库外的 symlink/junction 时，按名字 readFile 会跟随。
+            -- 逐级 no-follow 解析，只读返回路径。
+            m <- resolveUnder (cfgMainPath cfg) rel
+            case m of
+              Nothing -> err status404 "条目路径不是库内真实路径（链接？），不提供"
+              Just abs' -> do
+                eb <- try (BS.readFile abs') :: IO (Either IOException BS.ByteString)
+                case eb of
+                  Left e -> err status500 ("读取失败: " <> show e)
+                  Right bytes ->
+                    respond (responseLBS status200 (("Content-Type", "image/jpeg") : ("Cache-Control", "private, max-age=3600") : corsHdrs) (BSL.fromStrict bytes))
   _ -> err status404 "无此端点"
+ where
+  cfg = seCfg env
+  -- vault 缓存刷新串行化（十八轮 minor）：两个并发 GET 会争用固定 tmp 名。
+  vaultReport = withMVar (seVaultLock env) (const (computeVault True cfg))
 
 validSha :: Text -> Bool
 validSha s = T.length s == 64 && T.all isHexDigit s

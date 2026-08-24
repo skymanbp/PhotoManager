@@ -175,7 +175,18 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   冒烟：401/401/403/403/204、4855 文件、8 计划、4.1 MB 缩略原图、`netstat` 只见
   127.0.0.1；196/196 测试）—— 写端点（apply / 分类推送）留到 GUI 骨架之后，
   仍先过 codex 评审再请用户裁定
-- P4-2 Tauri GUI 骨架（`gui/`：仪表盘 + 计划浏览 + 看图分类）→ P4-3 `pm ui`
+- P4-2/3 ✅ Tauri GUI 骨架 + `pm ui`（`gui/`：Rust 侧只 spawn `pm serve
+  --exit-on-stdin-eof`、把 port/token 经 `api_info` 交给页面、退出即 kill；
+  `ui/` 纯静态三页——仪表盘 / 计划 / 分类（NEW 缩略图网格 + 类目单选，无提交）；
+  新只读端点 `/api/vault/new`；`pm ui` 只找 `pm-ui.exe` 并经 `PM_EXE` 交出自身
+  路径，不自己起 serve。冒烟：GUI 拉起 → 127.0.0.1 新监听；只杀 GUI（不带 /T）
+  → serve 500 ms 内靠 stdin EOF 退出、零残留；`hostOk` 改精确解析（十八轮）。
+  MSVC 目标构建（`cargo build --target x86_64-pc-windows-msvc`）；197/197）——
+  **写端点仍未开**，分类"提交"按钮与 apply 留到下一步并先过评审 + 用户裁定
+- **codex 十八轮：GO**（P4-1 首评，无 critical/major；4 minor + 1 残余硬化全部
+  同分支闭合：Host 精确解析、`--port` 范围、vault JSON 末尾 LF 逐字节用例、vault
+  缓存刷新进程内互斥、thumb 读取前 `resolveUnder`（库外 symlink → 404，用例钉住）；
+  200/200）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License

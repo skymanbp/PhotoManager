@@ -20,9 +20,10 @@ import Data.Time (getCurrentTime)
 import Network.HTTP.Types
 import Network.Wai
 import Network.Wai.Test
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, removeFile)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
+import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -31,8 +32,9 @@ import Pm.Config (Config (..), pmDir, writeRootInfo)
 import Pm.Hash (sha256File)
 import Pm.Op (Fingerprint (..), Op (..))
 import Pm.Plan (Plan (..), savePlan)
-import Pm.Serve (allowedOrigin, hostOk, listPlans, newToken, serveApp)
+import Pm.Serve (ServeEnv, allowedOrigin, hostOk, listPlans, newServeEnv, newToken, portOk, serveApp)
 import Pm.Types (Entry (..), FileKind (..), RootInfo (..), RootRole (..))
+import Pm.Vault (VaultReport (..), computeVault, renderVaultJson)
 import TestUtil
 
 serveTests :: TestTree
@@ -40,11 +42,15 @@ serveTests =
   testGroup
     "P4-1 pm serve loopback JSON API"
     [ testCase "P4-1 token：缺失/错误 → 401；正确 → 200；token 为 32 位 hex" caseServeToken
-    , testCase "P4-1 Host：非 127.0.0.1 → 403（DNS rebinding）；缺失 → 403" caseServeHost
+    , testCase "P4-1 Host：非 127.0.0.1 → 403（DNS rebinding）；缺失 → 403；端口尾部精确解析" caseServeHost
     , testCase "P4-1 Origin：非 Tauri 来源 → 403；Tauri 来源 → 回 CORS 头；预检 OPTIONS 免 token" caseServeOrigin
     , testCase "P4-1 /api/status：fixture 索引 → files/layers/exit 与 runStatus 同源；无索引 → index null + exit 2" caseServeStatus
     , testCase "P4-1 /api/thumb/<sha>：JPEG 条目原字节；非 JPEG 条目 404；坏 sha 400" caseServeThumb
     , testCase "P4-1 /api/plans + /api/plan/<id>：列出/装载；坏 id 400；不存在 404" caseServePlans
+    , testCase "P4-2 /api/vault/new：NEW 名字配上主库 catalog 的 sha/size；无 vault 配置 → 404" caseServeVaultNew
+    , testCase "P4-2 /api/vault/status 与 CLI --json 的 stdout 逐字节相同（含末尾 LF）" caseServeVaultStatusBytes
+    , testCase "P4-2 thumb：扫描后条目被换成指向库外的 symlink → 404，库外文件字节不外泄" caseServeThumbLink
+    , testCase "P4-2 --port 范围 0..65535（越界不得静默折回）" caseServePortRange
     ]
 
 tok :: BS.ByteString
@@ -52,6 +58,13 @@ tok = "0123456789abcdef0123456789abcdef"
 
 mkCfg :: FilePath -> Config
 mkCfg root = Config root Nothing Nothing Nothing Nothing Nothing
+
+mkEnv :: Config -> IO ServeEnv
+mkEnv cfg = newServeEnv cfg tok
+
+mkFileLink :: FilePath -> FilePath -> IO ()
+mkFileLink link target =
+  () <$ readCreateProcess (shell ("mklink \"" <> link <> "\" \"" <> target <> "\"")) ""
 
 -- | 带 Host + Bearer 的 GET。
 getReq :: BS.ByteString -> [Header] -> BS.ByteString -> Session SResponse
@@ -74,6 +87,13 @@ field _ _ = Nothing
 arrLen :: Maybe Aeson.Value -> Maybe Int
 arrLen (Just (Aeson.Array a)) = Just (length a)
 arrLen _ = Nothing
+
+-- | JSON 数组的第一个元素（非数组/空数组 → Nothing）。
+firstOf :: Maybe Aeson.Value -> Maybe Aeson.Value
+firstOf (Just (Aeson.Array a)) = case foldr (:) [] a of
+  (x : _) -> Just x
+  [] -> Nothing
+firstOf _ = Nothing
 
 decodeBody :: SResponse -> Aeson.Value
 decodeBody r = either (error . ("响应不是 JSON: " <>)) id (Aeson.eitherDecode (simpleBody r))
@@ -102,6 +122,12 @@ fixture root = do
     )
   pure (mkCfg root, jpgBytes, sj, sa)
 
+-- | vault fixture：三个类目都空 → 相册里的一切都是 NEW。
+withVault :: FilePath -> Config -> IO Config
+withVault vdir cfg0 = do
+  mapM_ (\c -> createDirectoryIfMissing True (vdir </> c)) ["landscape", "portrait", "urban"]
+  pure cfg0 {cfgVaultPath = Just vdir}
+
 caseServeToken :: IO ()
 caseServeToken = withSystemTempDirectory "pm-serve" $ \dir -> do
   let root = dir </> "root"
@@ -109,8 +135,8 @@ caseServeToken = withSystemTempDirectory "pm-serve" $ \dir -> do
   t <- newToken
   BS.length t @?= 32
   assertBool ("token 应为 hex: " <> BC.unpack t) (BC.all isHexDigit t)
-  let app = serveApp cfg tok
-  flip runSession app $ do
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
     r0 <- request (setPath defaultRequest {requestMethod = methodGet, requestHeaderHost = Just "127.0.0.1", requestHeaders = [(hHost, "127.0.0.1")]} "/api/ping")
     assertStatus 401 r0
     r1 <- getReq "/api/ping" [] "0123456789abcdef0123456789abcdeX"
@@ -130,11 +156,20 @@ caseServeHost = withSystemTempDirectory "pm-serve" $ \dir -> do
   assertBool "127.0.0.1:5" (hostOk "127.0.0.1:5")
   assertBool "127.0.0.1.evil" (not (hostOk "127.0.0.1.evil"))
   assertBool "localhost" (not (hostOk "localhost"))
-  flip runSession (serveApp cfg tok) $ do
+  -- 十八轮：端口尾部精确解析，不是前缀
+  assertBool "127.0.0.1:1@evil" (not (hostOk "127.0.0.1:1@evil"))
+  assertBool "127.0.0.1:abc" (not (hostOk "127.0.0.1:abc"))
+  assertBool "127.0.0.1:" (not (hostOk "127.0.0.1:"))
+  assertBool "127.0.0.1:123456" (not (hostOk "127.0.0.1:123456"))
+  assertBool "127.0.0.1:65535" (hostOk "127.0.0.1:65535")
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
     r <- request (setPath defaultRequest {requestMethod = methodGet, requestHeaderHost = Just "evil.example:80", requestHeaders = [(hHost, "evil.example:80"), (hAuthorization, "Bearer " <> tok)]} "/api/ping")
     assertStatus 403 r
     r2 <- request (setPath defaultRequest {requestMethod = methodGet, requestHeaderHost = Nothing, requestHeaders = [(hAuthorization, "Bearer " <> tok)]} "/api/ping")
     assertStatus 403 r2
+    r3 <- request (setPath defaultRequest {requestMethod = methodGet, requestHeaderHost = Just "127.0.0.1:1@evil", requestHeaders = [(hHost, "127.0.0.1:1@evil"), (hAuthorization, "Bearer " <> tok)]} "/api/ping")
+    assertStatus 403 r3
 
 caseServeOrigin :: IO ()
 caseServeOrigin = withSystemTempDirectory "pm-serve" $ \dir -> do
@@ -142,7 +177,8 @@ caseServeOrigin = withSystemTempDirectory "pm-serve" $ \dir -> do
   (cfg, _, _, _) <- fixture root
   assertBool "tauri://localhost" (allowedOrigin "tauri://localhost")
   assertBool "http://evil" (not (allowedOrigin "http://evil"))
-  flip runSession (serveApp cfg tok) $ do
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
     r <- getReq "/api/ping" [(hOrigin, "http://evil.example")] tok
     assertStatus 403 r
     r2 <- getReq "/api/ping" [(hOrigin, "tauri://localhost")] tok
@@ -178,7 +214,8 @@ caseServeStatus :: IO ()
 caseServeStatus = withSystemTempDirectory "pm-serve" $ \dir -> do
   let root = dir </> "root"
   (cfg, _, _, _) <- fixture root
-  flip runSession (serveApp cfg tok) $ do
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
     r <- getReq "/api/status" [] tok
     assertStatus 200 r
     let v = decodeBody r
@@ -198,7 +235,8 @@ caseServeStatus = withSystemTempDirectory "pm-serve" $ \dir -> do
   createDirectoryIfMissing True (pmDir root2)
   now <- getCurrentTime
   writeRootInfo root2 (RootInfo "m2" RoleMain now Nothing)
-  flip runSession (serveApp (mkCfg root2) tok) $ do
+  env2 <- mkEnv (mkCfg root2)
+  flip runSession (serveApp env2) $ do
     r <- getReq "/api/status" [] tok
     assertStatus 200 r
     liftIO' $ do
@@ -209,7 +247,8 @@ caseServeThumb :: IO ()
 caseServeThumb = withSystemTempDirectory "pm-serve" $ \dir -> do
   let root = dir </> "root"
   (cfg, jpgBytes, sj, sa) <- fixture root
-  flip runSession (serveApp cfg tok) $ do
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
     r <- getReq ("/api/thumb/" <> BC.pack (T.unpack sj)) [] tok
     assertStatus 200 r
     assertHeader "Content-Type" "image/jpeg" r
@@ -235,7 +274,8 @@ caseServePlans = withSystemTempDirectory "pm-serve" $ \dir -> do
   (ps, errs) <- listPlans root
   map plId ps @?= [plId plan]
   errs @?= []
-  flip runSession (serveApp cfg tok) $ do
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
     r <- getReq "/api/plans" [] tok
     assertStatus 200 r
     liftIO' $ do
@@ -249,6 +289,77 @@ caseServePlans = withSystemTempDirectory "pm-serve" $ \dir -> do
     assertStatus 400 r3
     r4 <- getReq "/api/plan/20260101-000000-abcdef" [] tok
     assertStatus 404 r4
+
+-- | P4-2：分类页按 sha 拉缩略图，vault/status 的 "new" 只有名字。fixture 的
+-- vault 三个类目都空 → 相册/a.jpg 是 NEW，sha 须等于 catalog 里的 sha。
+caseServeVaultNew :: IO ()
+caseServeVaultNew = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, jpgBytes, sj, _) <- fixture root
+  -- 无 vault 配置 → 404（computeVault 的退出码 2 映射）
+  env0 <- mkEnv cfg0
+  flip runSession (serveApp env0) $ do
+    r0 <- getReq "/api/vault/new" [] tok
+    assertStatus 404 r0
+  cfg <- withVault vdir cfg0
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
+    r <- getReq "/api/vault/new" [] tok
+    assertStatus 200 r
+    liftIO' $ do
+      let v = decodeBody r
+      arrLen (field ["new"] v) @?= Just 1
+      arrLen (field ["categories"] v) @?= Just 3
+      let first = firstOf (field ["new"] v)
+      (first >>= field ["name"]) @?= Just (Aeson.String "a.jpg")
+      (first >>= field ["sha"]) @?= Just (Aeson.String sj)
+      (first >>= field ["size"]) @?= Just (Aeson.Number (fromIntegral (BS.length jpgBytes)))
+
+-- | 十八轮 minor：此前 API 少 CLI `putStrLn` 的末尾 LF，"逐字节相同"不成立。
+-- 期望值由同一 renderVaultJson 独立算出再加 "\n"。
+caseServeVaultStatusBytes :: IO ()
+caseServeVaultStatusBytes = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, _, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  er <- computeVault True cfg
+  expected <- case er of
+    Left (m, _) -> assertFailure ("computeVault 失败: " <> m)
+    Right r -> pure (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r) <> "\n")
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
+    r <- getReq "/api/vault/status" [] tok
+    assertStatus 200 r
+    liftIO' (simpleBody r @?= expected)
+    liftIO' (BSL.last (simpleBody r) @?= 10)
+
+-- | 十八轮残余硬化：enPath 只过了词法闸；扫描后把条目换成指向库外文件的
+-- symlink，按名字 readFile 会跟随并把库外字节交给客户端。读取前逐级
+-- 'resolveUnder' → 404，库外字节不外泄。删掉那次解析，本例转红。
+caseServeThumbLink :: IO ()
+caseServeThumbLink = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside"
+  (cfg, _, sj, _) <- fixture root
+  createDirectoryIfMissing True outside
+  BS.writeFile (outside </> "secret.jpg") "OUTSIDE-SECRET"
+  -- 扫描之后（catalog 已含 相册/a.jpg 的 sha）把该条目换成库外 symlink
+  removeFile (root </> "相册" </> "a.jpg")
+  mkFileLink (root </> "相册" </> "a.jpg") (outside </> "secret.jpg")
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
+    r <- getReq ("/api/thumb/" <> BC.pack (T.unpack sj)) [] tok
+    assertStatus 404 r
+    liftIO' (assertBool "库外字节不得出现在响应里" (not ("OUTSIDE-SECRET" `BS.isInfixOf` BSL.toStrict (simpleBody r))))
+
+caseServePortRange :: IO ()
+caseServePortRange = do
+  assertBool "0" (portOk 0)
+  assertBool "65535" (portOk 65535)
+  assertBool "65536" (not (portOk 65536))
+  assertBool "-1" (not (portOk (-1)))
 
 -- 'Network.Wai.Test.Session' 是 ReaderT/StateT 叠 IO；HUnit 断言直接 liftIO。
 liftIO' :: IO a -> Session a

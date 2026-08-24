@@ -1,0 +1,19 @@
+:root { color-scheme: light dark; font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif; }
+body { margin: 0; display: flex; flex-direction: column; height: 100vh; }
+header { display: flex; align-items: center; gap: 1rem; padding: .5rem 1rem; border-bottom: 1px solid #8884; }
+.brand { font-weight: 700; font-size: 1.2rem; }
+nav button { margin-right: .25rem; padding: .3rem .8rem; }
+nav button.active { font-weight: 700; text-decoration: underline; }
+.conn { margin-left: auto; font-size: .85rem; opacity: .7; }
+main { flex: 1; overflow: auto; padding: 1rem; }
+.tab { display: none; } .tab.active { display: block; }
+pre { white-space: pre-wrap; font-family: Consolas, "Cascadia Mono", monospace; font-size: .9rem; }
+.split { display: grid; grid-template-columns: 22rem 1fr; gap: 1rem; }
+#plan-list { list-style: none; padding: 0; margin: 0; }
+#plan-list li { padding: .4rem .6rem; border: 1px solid #8884; margin-bottom: .3rem; cursor: pointer; }
+#plan-list li.sel { border-color: #4a90d9; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: .8rem; }
+.card { border: 1px solid #8884; padding: .5rem; }
+.card img { width: 100%; height: 160px; object-fit: contain; background: #0002; }
+.card .name { font-size: .8rem; word-break: break-all; margin: .3rem 0; }
+.card label { margin-right: .6rem; font-size: .85rem; }
