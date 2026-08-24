@@ -45,6 +45,7 @@ serveTests =
     , testCase "P4-1 /api/status：fixture 索引 → files/layers/exit 与 runStatus 同源；无索引 → index null + exit 2" caseServeStatus
     , testCase "P4-1 /api/thumb/<sha>：JPEG 条目原字节；非 JPEG 条目 404；坏 sha 400" caseServeThumb
     , testCase "P4-1 /api/plans + /api/plan/<id>：列出/装载；坏 id 400；不存在 404" caseServePlans
+    , testCase "P4-2 /api/vault/new：NEW 名字配上主库 catalog 的 sha/size；无 vault 配置 → 404" caseServeVaultNew
     ]
 
 tok :: BS.ByteString
@@ -130,6 +131,12 @@ caseServeHost = withSystemTempDirectory "pm-serve" $ \dir -> do
   assertBool "127.0.0.1:5" (hostOk "127.0.0.1:5")
   assertBool "127.0.0.1.evil" (not (hostOk "127.0.0.1.evil"))
   assertBool "localhost" (not (hostOk "localhost"))
+  -- 十八轮：端口尾部精确解析，不是前缀
+  assertBool "127.0.0.1:1@evil" (not (hostOk "127.0.0.1:1@evil"))
+  assertBool "127.0.0.1:abc" (not (hostOk "127.0.0.1:abc"))
+  assertBool "127.0.0.1:" (not (hostOk "127.0.0.1:"))
+  assertBool "127.0.0.1:123456" (not (hostOk "127.0.0.1:123456"))
+  assertBool "127.0.0.1:65535" (hostOk "127.0.0.1:65535")
   flip runSession (serveApp cfg tok) $ do
     r <- request (setPath defaultRequest {requestMethod = methodGet, requestHeaderHost = Just "evil.example:80", requestHeaders = [(hHost, "evil.example:80"), (hAuthorization, "Bearer " <> tok)]} "/api/ping")
     assertStatus 403 r
@@ -249,6 +256,38 @@ caseServePlans = withSystemTempDirectory "pm-serve" $ \dir -> do
     assertStatus 400 r3
     r4 <- getReq "/api/plan/20260101-000000-abcdef" [] tok
     assertStatus 404 r4
+
+-- | P4-2：分类页按 sha 拉缩略图，vault/status 的 "new" 只有名字。fixture 的
+-- vault 三个类目都空 → 相册/a.jpg 是 NEW，sha 须等于 catalog 里的 sha。
+caseServeVaultNew :: IO ()
+caseServeVaultNew = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, jpgBytes, sj, _) <- fixture root
+  mapM_ (\c -> createDirectoryIfMissing True (vdir </> c)) ["landscape", "portrait", "urban"]
+  -- 无 vault 配置 → 404（computeVault 的退出码 2 映射）
+  flip runSession (serveApp cfg0 tok) $ do
+    r0 <- getReq "/api/vault/new" [] tok
+    assertStatus 404 r0
+  let cfg = cfg0 {cfgVaultPath = Just vdir}
+  flip runSession (serveApp cfg tok) $ do
+    r <- getReq "/api/vault/new" [] tok
+    assertStatus 200 r
+    liftIO' $ do
+      let v = decodeBody r
+      arrLen (field ["new"] v) @?= Just 1
+      arrLen (field ["categories"] v) @?= Just 3
+      let first = firstOf (field ["new"] v)
+      (first >>= field ["name"]) @?= Just (Aeson.String "a.jpg")
+      (first >>= field ["sha"]) @?= Just (Aeson.String sj)
+      (first >>= field ["size"]) @?= Just (Aeson.Number (fromIntegral (BS.length jpgBytes)))
+
+-- | JSON 数组的第一个元素（非数组/空数组 → Nothing）。
+firstOf :: Maybe Aeson.Value -> Maybe Aeson.Value
+firstOf (Just (Aeson.Array a)) = case foldr (:) [] a of
+  (x : _) -> Just x
+  [] -> Nothing
+firstOf _ = Nothing
 
 -- 'Network.Wai.Test.Session' 是 ReaderT/StateT 叠 IO；HUnit 断言直接 liftIO。
 liftIO' :: IO a -> Session a

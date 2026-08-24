@@ -1,0 +1,21 @@
+[package]
+name = "pm-ui"
+version = "0.4.1"
+description = "pm desktop shell (Tauri v2) — talks to `pm serve` only"
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.77.2"
+
+# 桌面端只需 rlib；模板的 staticlib/cdylib 是给移动端的，在 windows-gnu 上
+# cdylib 的导出表会溢出（"export ordinal too large"）。
+[lib]
+name = "pm_ui_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2" }

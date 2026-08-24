@@ -479,7 +479,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P3b-18 / pm 0.3.16 / 190 测试**（P3b-13~18 详情见 REVIEW-LOG）。
+  当前实现对应 **P4-2/3 / pm 0.4.1 / 197 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -520,8 +520,21 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   catalog 里 JPEG 条目的原字节，缩放由 GUI 做）。**写端点（apply / vault push
   分类）在 GUI 骨架落地后另开，先过 codex 评审再请用户裁定**（同 P3 门禁）。
 - GUI 功能 = status 仪表盘 + 计划浏览/勾选/确认 + **vault push 逐张看图分类**
-  （核心价值场景，CLI 做不了）。
-- `pm ui` = 启动 serve + 拉起 GUI exe（`process`），把 announce 行交给 GUI。
+  （核心价值场景，CLI 做不了）。P4-2 骨架（`gui/`）：`ui/` 纯静态
+  HTML/JS/CSS（无 npm），三页——仪表盘 / 计划 / 分类（NEW 缩略图网格 + 类目
+  单选，尚无提交按钮）；分类页靠只读端点 `GET /api/vault/new`（NEW 名字配上
+  主库 catalog 的 sha/size）。`<img src>` 带不了 Authorization 头 → fetch 成
+  blob 再显示。Tauri 侧 CSP：`connect-src http://127.0.0.1:*`，脚本/样式只
+  `'self'`；WebView 来源 `http://tauri.localhost` 在 serve 的 Origin 白名单里。
+- **进程生命周期（P4-3）**：serve 的生命周期归 GUI 管，`pm ui` **不**启动
+  serve——它只找到 `pm-ui.exe`（`PM_UI_EXE` 或 pm.exe 同目录）、把自己的路径经
+  `PM_EXE` 交给 GUI、等 GUI 退出。GUI 的 Rust 侧只做三件事：`spawn pm serve
+  --exit-on-stdin-eof`（接一条从不写的 stdin 管道）、把 announce 的 port/token
+  经 Tauri command `api_info` 交给页面、退出时 kill 子进程。GUI 异常死亡（崩溃、
+  被 taskkill 不带 /T）时 Windows 关闭管道，serve 读到 EOF 自行退出——冒烟实测
+  500 ms 内监听消失、零残留。Rust 工具链用 `x86_64-pc-windows-msvc`（Tauri 在
+  Windows 只支持 MSVC；本机默认 gnu 工具链链接 cdylib 会 "export ordinal too
+  large"，桌面端 crate-type 只留 rlib）。
 
 ---
 

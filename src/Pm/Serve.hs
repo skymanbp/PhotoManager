@@ -29,6 +29,7 @@ module Pm.Serve
   , listPlans
   ) where
 
+import Control.Concurrent.Async (race)
 import Control.Exception (IOException, bracket, try)
 import Crypto.Random (getRandomBytes)
 import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
@@ -48,7 +49,7 @@ import Network.Wai
 import Network.Wai.Handler.Warp (defaultSettings, runSettingsSocket)
 import System.Directory (doesDirectoryExist, listDirectory)
 import System.FilePath (dropExtension, takeExtension, (</>))
-import System.IO (hFlush, stdout)
+import System.IO (hFlush, hIsEOF, stdin, stdout)
 
 import Pm.Catalog (loadCatalog)
 import Pm.Commands (loadPlanAnyRoot)
@@ -56,12 +57,16 @@ import Pm.Config (Config (..), pmSubPlans, requirePmTrusted, untrustedMsg)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPlan)
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
-import Pm.Vault (VaultReport (..), computeVault, renderVaultJson)
+import Pm.Vault (VaultDiff (..), VaultReport (..), computeVault, fixedCategories, renderVaultJson)
 import Pm.Win (resolveUnder)
 
 data ServeOpts = ServeOpts
   { soPort :: Maybe Int
     -- ^ Nothing = 由内核随机分配（默认）
+  , soExitOnStdinEof :: Bool
+    -- ^ P4-3：由 GUI 拉起时置位。GUI 把一条管道接到 serve 的 stdin 且从不写；
+    -- GUI 进程一死（含崩溃、被 taskkill），Windows 关闭管道，这里读到 EOF 即
+    -- 退出——否则 serve 会成为孤儿一直监听（P4-2 冒烟实测出现过）。
   }
 
 -- | 启动时打印给调用方的一行 JSON。
@@ -88,10 +93,27 @@ runServe cfg o = do
     BSL.putStr (encode (Announce (fromIntegral port) (T.pack (BC.unpack tok))))
     putStrLn ""
     hFlush stdout
-    runSettingsSocket defaultSettings sock (serveApp cfg tok)) :: IO (Either IOException ())
+    let server = runSettingsSocket defaultSettings sock (serveApp cfg tok)
+    if soExitOnStdinEof o
+      then do
+        -- 父进程看门：stdin 读到 EOF（管道另一端消失）就结束；race 让先完成的
+        -- 一方取消另一方——server 正常不会返回，所以实际就是 EOF 结束 server。
+        _ <- race server waitStdinEof
+        pure ()
+      else server) :: IO (Either IOException ())
   case r of
     Left e -> putStrLn ("pm serve: " <> show e) >> pure 1
     Right () -> pure 0
+
+-- | 阻塞直到 stdin 关闭（EOF）；读到内容就丢弃继续等。
+waitStdinEof :: IO ()
+waitStdinEof = do
+  eof <- try hIsEOFStdin :: IO (Either IOException Bool)
+  case eof of
+    Right False -> BS.hGetLine stdin >> waitStdinEof
+    _ -> pure ()
+ where
+  hIsEOFStdin = hIsEOF stdin
 
 bindLoopback :: Int -> IO Socket
 bindLoopback port = do
@@ -108,9 +130,16 @@ allowedOrigins = ["tauri://localhost", "http://tauri.localhost", "https://tauri.
 allowedOrigin :: BS.ByteString -> Bool
 allowedOrigin = (`elem` allowedOrigins)
 
--- | @Host@ 头须为 @127.0.0.1@ 或 @127.0.0.1:<port>@。
+-- | @Host@ 头须为 @127.0.0.1@ 或 @127.0.0.1:<1-5 位十进制端口>@——精确解析，
+-- 不做前缀判定（十八轮：前缀判定会放过 @127.0.0.1:1@evil@ 之类的尾巴；就
+-- DNS rebinding 而言那不可利用，但闸的语义应当是"恰好是这个 Host"）。
 hostOk :: BS.ByteString -> Bool
-hostOk h = h == "127.0.0.1" || "127.0.0.1:" `BS.isPrefixOf` h
+hostOk h = case BS.stripPrefix "127.0.0.1" h of
+  Just "" -> True
+  Just rest
+    | Just port <- BS.stripPrefix ":" rest ->
+        not (BS.null port) && BS.length port <= 5 && BC.all (\c -> c >= '0' && c <= '9') port
+  _ -> False
 
 serveApp :: Config -> BS.ByteString -> Application
 serveApp cfg tok req respond = do
@@ -163,6 +192,25 @@ route cfg req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
               status200
               (("Content-Type", "application/json; charset=utf-8") : corsHdrs)
               (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r))
+          )
+  -- P4-2：分类页要按 sha 拉缩略图，而 vault/status 的 "new" 只有文件名；
+  -- 这里把 NEW 名字配上主库 catalog 的 Entry（sha/size），仍是只读。
+  ("GET", ["api", "vault", "new"]) -> do
+    er <- computeVault True cfg
+    case er of
+      Left (msg, code) -> err (if code == 2 then status404 else status500) msg
+      Right r ->
+        jsonR
+          status200
+          []
+          ( object
+              [ "categories" .= fixedCategories
+              , "new"
+                  .= [ object ["name" .= n, "sha" .= fmap enSha me, "size" .= fmap enSize me]
+                     | n <- vdNew (vrDiff r)
+                     , let me = Map.lookup n (vrSrcMeta r)
+                     ]
+              ]
           )
   ("GET", ["api", "plans"]) -> do
     (ps, errs) <- listPlans (cfgMainPath cfg)

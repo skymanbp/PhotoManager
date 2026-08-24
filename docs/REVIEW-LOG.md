@@ -463,3 +463,23 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   （同 CLI）；plans 8；plan 0c238a 6 items；thumb 4 120 421 B 首字节 ffd8ff；
   `netstat` 只见 `127.0.0.1:<port>`。**没有写端点**——apply / 分类推送留到 GUI
   骨架之后，先过 codex 评审再请用户裁定。交 codex 十八轮首评。
+- **P4-2/3 Tauri GUI 骨架 + `pm ui`（pm 0.4.1，197/197）**：`gui/src-tauri`
+  （Rust，`cargo tauri init --ci` 模板裁剪：桌面端 crate-type 只留 rlib，
+  bundle 关闭，只留四个图标）+ `gui/ui`（纯静态 HTML/JS/CSS，无 npm）。Rust
+  侧 `lib.rs` 只做三件事：spawn `pm serve --exit-on-stdin-eof`（stdin 接从不写
+  的管道、stdout 读 announce 行）、`api_info` command 把 port/token 交给页面、
+  `RunEvent::Exit` 时 kill 子进程；`PM_EXE` 环境变量指定 pm.exe（`pm ui` 设置
+  为自身路径）。页面三页：仪表盘（/api/status）、计划（/api/plans + /api/plan）、
+  分类（/api/vault/status + 新端点 **/api/vault/new** 把 NEW 名字配上主库
+  catalog 的 sha/size，缩略图经 fetch→blob，因 `<img src>` 带不了 Authorization）。
+  serve 新开关 `--exit-on-stdin-eof`（`race` server 与 stdin EOF）：直接实测
+  `( sleep 3 ) | pm serve --exit-on-stdin-eof` 3170 ms 退出、不带开关时 stdin
+  关闭不影响；GUI 冒烟：pm-ui 拉起后新增 127.0.0.1 监听，**只杀 pm-ui（不带
+  /T）→ 500 ms 内监听消失、pm.exe 零残留**（P4-2 初次冒烟曾出现孤儿 serve，
+  根因是我用 `ps -W` 找不到 pm-ui.exe 没杀到第一个实例——但这暴露了"GUI 异常
+  死亡则 serve 成孤儿"的真实风险，开关就是为此加的）。`hostOk` 按十八轮中途
+  指出改为精确解析（`127.0.0.1` 或 `127.0.0.1:<1-5 位数字>`），+5 断言，突变回
+  前缀判定即转红。工具链：本机默认 `x86_64-pc-windows-gnu`，Tauri 需 MSVC——
+  用已装的 `x86_64-pc-windows-msvc` 目标构建（gnu 下 cdylib "export ordinal
+  too large"）。`pm ui` 找不到 pm-ui.exe 时列出查过的路径、exit 2。**写端点仍
+  未开**：分类页无提交按钮。在 worktree `p4-2-gui` 开发，待十八轮结论后合并。

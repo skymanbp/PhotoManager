@@ -13,6 +13,7 @@ import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
 import Pm.Names (runNames)
 import Pm.Serve (ServeOpts (..), runServe)
 import Pm.Status (StatusOpts (..), runStatus)
+import Pm.Ui (runUi)
 import Pm.Vault (runVaultPush, runVaultStatus)
 import Pm.Versions (runVersions)
 import Pm.Win (setupConsole)
@@ -34,6 +35,7 @@ data Cmd
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
   | CmdVersions -- 版本组/精确重复报告（只读）
   | CmdServe ServeOpts -- 127.0.0.1 JSON API（P4-1，只读端点）
+  | CmdUi -- 拉起 Tauri 桌面 GUI（P4-3；GUI 自己跑 serve）
 
 -- | --backup/--vault 二选一校验后进入命令体。
 withSel :: Bool -> Bool -> (RootSel -> IO Int) -> IO Int
@@ -79,6 +81,8 @@ run (CmdVaultPush go mcat fs) = withCfg (runVaultPush (savePlanAndMaybeRun go) m
 run (CmdNames go) = withCfg (runNames (savePlanAndMaybeRun go))
 run CmdVersions = withCfg runVersions
 run (CmdServe o) = withCfg (\cfg -> runServe cfg o)
+-- 先过 withCfg：配置缺失时在这里报清楚，而不是让 GUI 里的 serve 静默失败
+run CmdUi = withCfg (const runUi)
 
 parserInfo :: ParserInfo Cmd
 parserInfo =
@@ -87,7 +91,7 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    infoOption "pm 0.4.0 (P4-1)" (long "version" <> help "打印版本")
+    infoOption "pm 0.4.1 (P4-2/3)" (long "version" <> help "打印版本")
   backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
   vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =
@@ -107,11 +111,13 @@ parserInfo =
           <> command "apply" (info applyP (progDesc "执行已存的计划（root 按 UUID 重新绑定；--only 按组闭包）"))
           <> command "resolve" (info resolveP (progDesc "裁决计划某项：跳过/恢复/--keep src|dst|both（组为单元）"))
           <> command "serve" (info serveP (progDesc "127.0.0.1 JSON API（供 GUI/skill；随机端口 + 会话 token，启动时打印一行 JSON；P4-1 只读）"))
+          <> command "ui" (info (pure CmdUi) (progDesc "拉起桌面 GUI（pm-ui.exe：PM_UI_EXE 或 pm.exe 同目录；GUI 自己启动并管理 pm serve）"))
       )
   serveP =
     fmap CmdServe $
       ServeOpts
         <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
+        <*> switch (long "exit-on-stdin-eof" <> help "stdin 关闭即退出（GUI 拉起时用：父进程一死 serve 随之结束，不留孤儿）")
   initP =
     fmap CmdInit $
       InitOpts

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>pm</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <span class="brand">pm</span>
+    <nav>
+      <button data-tab="status" class="active">仪表盘</button>
+      <button data-tab="plans">计划</button>
+      <button data-tab="vault">分类</button>
+    </nav>
+    <span id="conn" class="conn">连接中…</span>
+  </header>
+  <main>
+    <section id="tab-status" class="tab active"><pre id="status-out">…</pre></section>
+    <section id="tab-plans" class="tab">
+      <div class="split">
+        <ul id="plan-list"></ul>
+        <pre id="plan-detail">选一个计划</pre>
+      </div>
+    </section>
+    <section id="tab-vault" class="tab">
+      <div id="vault-summary">…</div>
+      <div id="vault-grid" class="grid"></div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
