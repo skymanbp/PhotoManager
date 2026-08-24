@@ -116,9 +116,13 @@ opIdParts oid = do
     _ -> Nothing
   pure (pid, ix, s)
  where
+  -- 规范十进制：无前导零、无符号（P3b-7 复审 A1："p#00"、"p#0~d01" 不是 pm
+  -- 生成的，接受它们会让手编 "p#00~r" 抵消真实的 "p#0" Done）。
   readDigits t
     | T.null t || not (T.all isDigit t) = Nothing
-    | otherwise = Just (read (T.unpack t))
+    | otherwise =
+        let n = read (T.unpack t) :: Int
+         in if T.pack (show n) == t then Just n else Nothing
 
 -- | 复位 rename 的 opId（§6.5）。
 restoreOpId :: Text -> Int -> Text

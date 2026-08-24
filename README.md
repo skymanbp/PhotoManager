@@ -77,6 +77,10 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   （git 2.52 实测）、内核拒绝匿名 root + I11 守卫对所有 role 生效 + 取锁前预检、
   requireMain 补齐 vault/backup/pickRoot/init 四入口、init/backup init 走同一
   守卫、目录指纹不跟随 junction；备份命令拆出 Pm.BackupCmd；144/144 测试）
+- P3b-7 ✅ codex 四轮复审收口（规范十进制 opId + validatePlan 序号校验、doctor
+  畸形 oid fail-closed、悬空 junction 占槽判定、root-id 三态 + 原子 no-replace
+  建标识、requireWritable 把 I11 覆盖到全部 .pm 写入口、requireMain 补 apply
+  缓存/clean 复验/trash 屏障；151/151 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

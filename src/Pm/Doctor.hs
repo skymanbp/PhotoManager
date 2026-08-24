@@ -14,9 +14,9 @@ module Pm.Doctor
   , renderFinding
   ) where
 
-import Control.Monad (filterM, forM, forM_, unless, when)
+import Control.Monad (filterM, forM, forM_, unless)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (mapMaybe)
+import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
@@ -24,7 +24,7 @@ import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, remov
 import System.FilePath ((</>))
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (pmDir, readRootInfo)
+import Pm.Config (pmDir, readRootInfo, requireWritable)
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
 import Pm.Hash (sha256File)
 import Pm.Journal
@@ -103,8 +103,13 @@ runDoctor root opts = do
         Map.fromListWith
           max
           [(jeOpId e, p) | (p, e@JDone {}) <- zip [0 :: Int ..] entries]
-      restoredAfterLastDone oid = case (Map.lookup oid lastDonePos, Map.lookup (oid <> "~r") lastDonePos) of
-        (Just q, Just r) -> r > q
+      -- P3b-7 复审 A1：复位配对经 opIdParts 解析（不再 oid <> "~r" 弱拼接）；
+      -- 只有规范的用户可见 oid 才有复位配对。
+      restoredAfterLastDone oid = case opIdParts oid of
+        Just (pid, ix, SfxPlain) ->
+          case (Map.lookup oid lastDonePos, Map.lookup (restoreOpId pid ix) lastDonePos) of
+            (Just q, Just r) -> r > q
+            _ -> False
         _ -> False
 
   pendingFindings <- concat <$> mapM (classifyPending root) pending
@@ -145,12 +150,23 @@ runDoctor root opts = do
             <> deepFindings
         )
 
-  let allFindings =
+  let findings0 =
         journalFindings <> pendingFindings <> c4Findings <> q1 <> manifestWarns <> staleFindings <> ageFinding
 
-  when (doRepair opts) (applyRepairs root allFindings pending stale)
+  -- P3b-7 复审新 major：--repair 会写 journal / 删自建 tmp / 生成计划，属
+  -- .pm 写入口——root 必须有可解析身份且过 I11（requireWritable），否则
+  -- 只报告不修。
+  repairFindings <-
+    if doRepair opts
+      then do
+        w <- requireWritable root
+        case w of
+          Left m -> pure [Finding "I11" Bad ("--repair 拒绝执行（root 不可写）: " <> m) ""]
+          Right _ -> [] <$ applyRepairs root findings0 pending stale
+      else pure []
 
-  let worst = maximum (Info : map fSeverity allFindings)
+  let allFindings = findings0 <> repairFindings
+      worst = maximum (Info : map fSeverity allFindings)
       code = if worst >= Warn then 1 else 0
   pure (allFindings, code)
 
@@ -170,8 +186,16 @@ pendingTmp root (oid, OpCopy _ dstRel _ _ _) = case opIdParts oid of
   _ -> Nothing
 pendingTmp _ _ = Nothing
 
+-- | P3b-7 复审 A1：opId 不合 pm 语法（手编 journal）→ 单独一条 Bad，不做任何
+-- 盘面推导（tmp/trash 路径都由 oid 推出，猜错就会把无关文件认证成已完成）。
 classifyPending :: FilePath -> (Text, Op) -> IO [Finding]
-classifyPending root (oid, op) = case op of
+classifyPending root (oid, op)
+  | Nothing <- opIdParts oid =
+      pure [Finding "OID-MALFORMED" Bad (T.unpack oid <> ": journal 中的 opId 不是 pm 生成的语法，不推导、不修复（需人工核查）") ""]
+  | otherwise = classifyPending' root (oid, op)
+
+classifyPending' :: FilePath -> (Text, Op) -> IO [Finding]
+classifyPending' root (oid, op) = case op of
   OpCopy _ dstRel sha _ _ -> do
     let dstAbs = root </> dstRel
     dstEx <- doesFileExist dstAbs
@@ -200,10 +224,12 @@ classifyPending root (oid, op) = case op of
       (True, True) -> pure [Finding "R3" Warn (T.unpack oid <> ": rename 未执行且目标被占 (" <> new <> ")" ) "解决占用后重新生成计划"]
       (False, False) -> pure [Finding "R?" Bad (T.unpack oid <> ": 新旧路径都不存在，超出矩阵，需人工核查") ""]
   OpQuarantine victim sha _ -> do
-    -- P3b-4 评审 #1：trash 路径推导与 Exec 共用 quarTrashRel（~d 位移隔离
-    -- 落 <planId>~displaced/，各推各的会在这里指错目录）。
-    let trashRel = quarTrashRel oid victim
-    trashEx <- doesFileExist (trashDir root </> trashRel)
+    -- P3b-4 评审 #1：trash 路径推导与 Exec 共用（quarDirFor / quarTrashRel，
+    -- ~d 位移隔离落 <planId>~displaced-N/，各推各的会在这里指错目录）。
+    -- oid 已在 classifyPending 验过语法，此处 Nothing 不可达；仍按 Bad 处理。
+    let mTrashRel = quarTrashRel oid victim
+    trashRel <- maybe (pure "") pure mTrashRel
+    trashEx <- if isJust mTrashRel then doesFileExist (trashDir root </> trashRel) else pure False
     victimEx <- doesFileExist (root </> victim)
     case (trashEx, victimEx) of
       (True, _) -> do
@@ -308,6 +334,7 @@ applyRepairs root findings pending stale = do
   let repairDone =
         [ (oid, op)
         | (oid, op) <- pending
+        , isJust (opIdParts oid) -- P3b-7：畸形 oid 永不补记
         , any (\f -> fRow f `elem` ["C2", "R2", "Q-DONE-LOST"] && (T.unpack oid <> ":") `isPrefixOfStr` fDetail f && fSeverity f == Warn) findings
         ]
       c5 =
@@ -319,9 +346,10 @@ applyRepairs root findings pending stale = do
     withJournal root $ \j ->
       forM_ repairDone $ \(oid, op) -> do
         now <- getCurrentTime
+        -- trash 路径由 oid 解析推导（repairDone 已过滤畸形 oid，此处必为 Just）
         let (sha, trash) = case op of
               OpCopy _ _ s _ _ -> (Just s, Nothing)
-              OpQuarantine v s _ -> (Just s, Just (quarTrashRel oid v))
+              OpQuarantine v s _ -> (Just s, quarTrashRel oid v)
               _ -> (Nothing, Nothing)
         jAppend j Barrier (JDone oid sha trash now)
         putStrLn ("  修复: 补记 Done " <> T.unpack oid)

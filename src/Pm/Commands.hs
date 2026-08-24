@@ -20,6 +20,7 @@ module Pm.Commands
   , runTrash
   , runUndoCmd
   , runApply
+  , afterApply
   , runResolve
   , resolveKeep
   , runImport
@@ -112,23 +113,26 @@ rootSel False False = Right SelMain
 pickRoot :: Config -> RootSel -> IO (Either (String, Int) FilePath)
 pickRoot cfg SelMain = do
   -- P3b-6 复审 B1：doctor --repair / trash empty / undo 默认作用于主库，
-  -- 配置路径指向备份/vault root 时不得放行（与 scan/import 同一 requireMain）。
+  -- 配置路径指向备份/vault root 时不得放行（与 scan/import 同一 requireMain；
+  -- P3b-7 起 requireRole 内含 I11 守卫，三个槽位一视同仁）。
   em <- requireMain cfg
   pure (either (\m -> Left (m, 2)) (const (Right (cfgMainPath cfg))) em)
 pickRoot cfg SelBackup = do
   er <- discoverBackupRoot cfg
-  pure $ case er of
-    Left msg -> Left (msg, 1)
-    Right p -> Right p
+  case er of
+    Left msg -> pure (Left (msg, 1))
+    Right p -> do
+      rr <- requireRole RoleBackup p
+      pure (either (\m -> Left (m, 2)) (const (Right p)) rr)
 pickRoot cfg SelVault = case cfgVaultPath cfg of
   Nothing -> pure (Left ("配置无 vault 路径 → pm init --main <主库> --vault <展示集路径>", 2))
   Just vp -> do
-    minfo <- readRootInfo vp
-    pure $ case minfo of
-      Just info
-        | riRole info == RoleVault -> Right vp
-        | otherwise -> Left ("该路径不是 vault root（role=" <> show (riRole info) <> "）", 2)
-      Nothing -> Left ("vault root 尚未建立（首次 pm vault push 时按 I11 创建）", 2)
+    st <- readRootState vp
+    case st of
+      RootAbsent -> pure (Left ("vault root 尚未建立（首次 pm vault push 时按 I11 创建）", 2))
+      _ -> do
+        rr <- requireRole RoleVault vp
+        pure (either (\m -> Left (m, 2)) (const (Right vp)) rr)
 
 -- ─── init / scan ────────────────────────────────────────────────────────────
 
@@ -142,11 +146,14 @@ initPreflight mainPath = do
   case g of
     Left m -> pure (Left m)
     Right () -> do
-      existing <- readRootInfo mainPath
-      pure $ case existing of
-        Just prior
+      -- P3b-7 复审 major：损坏的标识不是「缺席」——拒绝，不改写
+      st <- readRootState mainPath
+      pure $ case st of
+        RootPresent prior
           | riRole prior /= RoleMain ->
               Left (mainPath <> " 已是 " <> show (riRole prior) <> " root，拒绝作为主库初始化（--force 亦不改写 root 身份）")
+        RootCorrupt e ->
+          Left (mainPath <> " 的 .pm/root-id.json 存在但无法解析（" <> e <> "），拒绝初始化——人工核查；pm 不改写它")
         _ -> Right ()
 
 runInit :: InitOpts -> IO Int
@@ -184,24 +191,32 @@ runInit o = do
                     , cfgBackupSubpath = maybe Nothing cfgBackupSubpath mold
                     }
               putStrLn ("✓ 配置已写入 " <> fp)
-              existing <- readRootInfo mainPath
-              case existing of
-                Just prior ->
+              st <- readRootState mainPath
+              emarker <- case st of
+                RootPresent prior -> do
                   putStrLn ("✓ 主库 root 标识已存在（沿用）: " <> T.unpack (riId prior))
-                Nothing -> do
+                  pure (Right ())
+                RootCorrupt e ->
+                  pure (Left (mainPath <> " 的 .pm/root-id.json 在预检后变为不可解析（" <> e <> "），不改写"))
+                RootAbsent -> do
                   rid <- freshRootId
                   now <- getCurrentTime
                   fs <- case mainPath of
                     (c : _) -> volumeFsType c
                     _ -> pure Nothing
-                  writeRootInfo mainPath (RootInfo rid RoleMain now fs)
-                  putStrLn ("✓ 主库 root 标识已创建: " <> T.unpack rid)
-              -- vault root 标识在 P3 建（vault 是 git 工作树，I11 要求先走
-              -- .gitignore 确认流程），此处只登记路径。
-              forM_ (ioVault o) $ \vp ->
-                putStrLn ("· vault 路径已登记（root 标识 P3 经确认后创建）: " <> vp)
-              putStrLn "下一步: pm scan"
-              pure 0
+                  -- 原子 no-replace（P3b-7）：预检与此刻之间有人放了文件 → 拒绝
+                  er <- createRootInfo mainPath (RootInfo rid RoleMain now fs)
+                  forM_ er $ \() -> putStrLn ("✓ 主库 root 标识已创建: " <> T.unpack rid)
+                  pure er
+              case emarker of
+                Left m -> putStrLn m >> pure 2
+                Right () -> do
+                  -- vault root 标识在 P3 建（vault 是 git 工作树，I11 要求先走
+                  -- .gitignore 确认流程），此处只登记路径。
+                  forM_ (ioVault o) $ \vp ->
+                    putStrLn ("· vault 路径已登记（root 标识 P3 经确认后创建）: " <> vp)
+                  putStrLn "下一步: pm scan"
+                  pure 0
 
 runScanCmd :: ScanCmd -> Config -> IO Int
 runScanCmd sc cfg = do
@@ -268,10 +283,13 @@ runTrash cfg tc root = do
         if null cleanRecs
           then pure ([], [])
           else do
+            -- P3b-7 复审 B1：主库见证须来自 RoleMain root（同 recheckCleanPlan）
+            emain <- requireMain cfg
             mMain <- fst <$> loadCatalog (cfgMainPath cfg)
             er <- discoverBackupRoot cfg
-            case (mMain, er) of
-              (Just mainCat, Right broot) -> do
+            case (emain, mMain, er) of
+              (Left m, _, _) -> pure ([], [(r, "主库身份不符: " <> m) | (r, _) <- cleanRecs])
+              (_, Just mainCat, Right broot) -> do
                 mBak <- fst <$> loadCatalog broot
                 case mBak of
                   Nothing -> pure ([], [(r, "备份盘无索引") | (r, _) <- cleanRecs])
@@ -283,8 +301,8 @@ runTrash cfg tc root = do
                       ( [rec | (rec, True) <- judged]
                       , [(r, "三副本复验不过") | ((r, _), False) <- judged]
                       )
-              (Nothing, _) -> pure ([], [(r, "主库无索引") | (r, _) <- cleanRecs])
-              (_, Left msg) -> pure ([], [(r, "备份盘不在线: " <> msg) | (r, _) <- cleanRecs])
+              (_, Nothing, _) -> pure ([], [(r, "主库无索引") | (r, _) <- cleanRecs])
+              (_, _, Left msg) -> pure ([], [(r, "备份盘不在线: " <> msg) | (r, _) <- cleanRecs])
       forM_ heldClean $ \(r, why) ->
         putStrLn ("  HELD(不删) " <> trTrashRel r <> " —— " <> why)
       -- P2.2（复审新发现）：同计划复位后重跑会为同一 trashRel 追加第二条
@@ -377,27 +395,53 @@ runApply o cfg = do
                       then recheckCleanPlan cfg plan2
                       else pure plan2
                   code <- executePlanNow plan3
-                  when (plKind plan3 == "backup") $ do
-                    (mMain, _) <- loadCatalog (cfgMainPath cfg)
-                    (mBak, _) <- loadCatalog (plRootPath plan3)
-                    case (mMain, mBak) of
-                      (Just mc, Just bc) ->
-                        refreshBackupCache cfg (plRootPath plan3) bc (backupDiff mc bc)
-                      _ -> pure ()
-                  when (plKind plan3 == "vault-push") $ do
-                    when (code == 0) $
-                      mapM_ putStrLn (gitStepsLines (plRootPath plan3) (plId plan3) (planCategories plan3))
-                    -- 刷新 vault 缓存（computeVault 顺带写缓存；结果此处不用）
-                    _ <- computeVault True cfg
-                    pure ()
+                  afterApply cfg plan3 code
                   pure code
+
+-- | apply 之后的缓存/提示收尾（可测）。P3b-7 复审 B1：备份缓存写进
+-- @\<cfgMainPath\>\/.pm\/backup-cache@，主路径必须是 RoleMain root——
+-- 否则跳过刷新并告警（计划本身已由 bindExecRoot 按 UUID 绑到备份 root）。
+afterApply :: Config -> Plan -> Int -> IO ()
+afterApply cfg plan code = do
+  when (plKind plan == "backup") $ do
+    emain <- requireMain cfg
+    case emain of
+      Left m -> putStrLn ("⚠ 备份缓存未刷新（主库身份不符）: " <> m)
+      Right _ -> do
+        (mMain, _) <- loadCatalog (cfgMainPath cfg)
+        (mBak, _) <- loadCatalog (plRootPath plan)
+        case (mMain, mBak) of
+          (Just mc, Just bc) ->
+            refreshBackupCache cfg (plRootPath plan) bc (backupDiff mc bc)
+          _ -> pure ()
+  when (plKind plan == "vault-push") $ do
+    when (code == 0) $
+      mapM_ putStrLn (gitStepsLines (plRootPath plan) (plId plan) (planCategories plan))
+    -- 刷新 vault 缓存（computeVault 顺带写缓存，内含 requireMain；结果此处不用）
+    _ <- computeVault True cfg
+    pure ()
 
 runResolve :: ResolveOpts -> Config -> IO Int
 runResolve o cfg = do
   ep <- loadPlanAnyRoot cfg (roId o)
   case ep of
     Left e -> putStrLn e >> pure 2
-    Right plan -> do
+    Right plan0 -> do
+      -- P3b-7 复审新 major：resolve 会把计划**写回** <root>/.pm/plans/。root
+      -- 路径取自计划文件（可手编），先按 UUID 绑回真实 root（同 apply），再验
+      -- 可写（身份可解析 + I11）。
+      ebound <- case plRootId plan0 of
+        Nothing -> pure (Left "计划缺 root 标识（P2.1 之前的旧格式）→ 重新生成计划")
+        Just rid -> bindExecRoot cfg plan0 rid
+      ew <- case ebound of
+        Left e -> pure (Left e)
+        Right p -> either Left (const (Right p)) <$> requireWritable (plRootPath p)
+      case ew of
+        Left e -> putStrLn e >> pure 2
+        Right plan -> resolveOn o plan
+
+resolveOn :: ResolveOpts -> Plan -> IO Int
+resolveOn o plan = do
       let hit = [it | it <- plItems plan, piIx it == roItem o]
       case (hit, roKeep o) of
         ([], _) -> putStrLn ("计划中无条目 " <> show (roItem o)) >> pure 2

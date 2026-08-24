@@ -37,7 +37,7 @@ import Text.Read (readMaybe)
 import Pm.Backup
 import Pm.Catalog (loadCatalog, saveCatalog)
 import Pm.Clean (threeCopiesStillExist)
-import Pm.Config (Config (..), readRootInfo)
+import Pm.Config (Config (..), readRootInfo, requireMain, requireWritable)
 import Pm.Diff (BackupDiff (..))
 import Pm.Exec (ExecEnv (..), ItemOutcome (..), defaultExecEnv, execPlan, outcomeLabel, updateCatalog)
 import Pm.Import (stagingTop)
@@ -122,14 +122,20 @@ savePlanAndMaybeRun = savePlanAndMaybeRunWith pure
 -- --apply` 的即时路径也要走执行期三副本重验，复审 cx-3 旁路封堵）。
 savePlanAndMaybeRunWith :: (Plan -> IO Plan) -> GoOpts -> Plan -> IO Int
 savePlanAndMaybeRunWith preExec go plan = do
-  fp <- savePlan plan
-  renderPlanBrief plan
-  putStrLn ("计划已存 " <> fp)
-  putStrLn ("执行: pm apply " <> T.unpack (plId plan))
-  ok <- confirm go
-  if ok
-    then preExec plan >>= executePlanNow
-    else pure 1
+  -- P3b-7 复审新 major：savePlan 写 <root>/.pm/plans/，是 .pm 写入口——root
+  -- 须有可解析身份且过 I11，否则不落盘。
+  w <- requireWritable (plRootPath plan)
+  case w of
+    Left m -> putStrLn ("计划未保存（root 不可写）: " <> m) >> pure 2
+    Right _ -> do
+      fp <- savePlan plan
+      renderPlanBrief plan
+      putStrLn ("计划已存 " <> fp)
+      putStrLn ("执行: pm apply " <> T.unpack (plId plan))
+      ok <- confirm go
+      if ok
+        then preExec plan >>= executePlanNow
+        else pure 1
 
 -- | 评审 cx-1：执行 root 由 UUID 重新发现并绑定，绝不信计划里存的盘符路径
 -- （备份盘可能换盘符重挂，旧盘符可能已属于别的卷）。
@@ -182,16 +188,20 @@ bindExecRoot cfg plan rid = do
 recheckCleanPlan :: Config -> Plan -> IO Plan
 recheckCleanPlan cfg plan = do
   let mroot = cfgMainPath cfg
+  -- P3b-7 复审 B1：主库见证必须来自 RoleMain root——配置主路径若与备份 root
+  -- 是同一块 RoleBackup 盘，同一文件会被当成「归档副本 + 备份副本」两份见证。
+  emain <- requireMain cfg
   (mMain, _) <- loadCatalog mroot
   er <- discoverBackupRoot cfg
-  case (mMain, er) of
-    (Just mainCat, Right broot) -> do
+  case (emain, mMain, er) of
+    (Left m, _, _) -> demoteAllClean plan ("主库身份不符: " <> m)
+    (_, Just mainCat, Right broot) -> do
       (mBak, _) <- loadCatalog broot
       case mBak of
         Nothing -> demoteAllClean plan "备份盘无索引 → 先 pm backup"
         Just bakCat -> recheckCleanItems mroot mainCat broot bakCat plan
-    (Nothing, _) -> demoteAllClean plan "主库无索引"
-    (_, Left msg) -> demoteAllClean plan ("备份盘不在线: " <> msg)
+    (_, Nothing, _) -> demoteAllClean plan "主库无索引"
+    (_, _, Left msg) -> demoteAllClean plan ("备份盘不在线: " <> msg)
 
 -- | 可测核心：给定已解析的两侧 root+catalog，逐项重验并降级。
 recheckCleanItems :: FilePath -> Catalog -> FilePath -> Catalog -> Plan -> IO Plan

@@ -59,15 +59,18 @@ runBackupInit path cfg = do
   case epre of
     Left msg -> putStrLn msg >> pure 2
     Right abs' -> do
-      existing <- readRootInfo abs'
-      case existing of
-        Just info
+      -- P3b-7 复审 major：损坏的标识不当缺席（不改写）；首次创建原子 no-replace。
+      st <- readRootState abs'
+      case st of
+        RootPresent info
           | riRole info == RoleBackup -> do
               putStrLn ("✓ 该路径已是备份 root（沿用标识 " <> T.unpack (riId info) <> "）")
               register abs' (riId info)
           | otherwise ->
               putStrLn ("该路径已是 " <> show (riRole info) <> " root，拒绝改作备份") >> pure 2
-        Nothing -> do
+        RootCorrupt e ->
+          putStrLn (abs' <> " 的 .pm/root-id.json 存在但无法解析（" <> e <> "），拒绝改写——人工核查") >> pure 2
+        RootAbsent -> do
           ex <- doesDirectoryExist abs'
           unless ex $ putStrLn ("· 目录不存在，将创建: " <> abs')
           rid <- freshRootId
@@ -82,9 +85,12 @@ runBackupInit path cfg = do
           if map toLower (normalise abs2) /= map toLower (normalise abs')
             then putStrLn ("路径在检查后发生变化（" <> abs' <> " → " <> abs2 <> "），拒绝") >> pure 2
             else do
-              writeRootInfo abs' (RootInfo rid RoleBackup now fs)
-              putStrLn ("✓ 备份 root 标识已创建: " <> T.unpack rid <> maybe "" (\t -> "（" <> T.unpack t <> "）") fs)
-              register abs' rid
+              er <- createRootInfo abs' (RootInfo rid RoleBackup now fs)
+              case er of
+                Left m -> putStrLn m >> pure 2
+                Right () -> do
+                  putStrLn ("✓ 备份 root 标识已创建: " <> T.unpack rid <> maybe "" (\t -> "（" <> T.unpack t <> "）") fs)
+                  register abs' rid
  where
   register abs' rid = do
     let sub = snd (splitDrive abs')
@@ -105,17 +111,19 @@ runBackupRun' go mworkers cfg = do
   case eroot of
     Left msg -> putStrLn msg >> pure 1
     Right broot -> do
-      minfo <- readRootInfo broot
+      -- P3b-7 复审新 major：备份 root 也是 .pm 写入口（catalog/计划/trash），
+      -- requireRole 内含 I11 守卫（备份盘被 git init 过也会被拒）。
+      erole <- requireRole RoleBackup broot
       (mMain, _) <- loadCatalog (cfgMainPath cfg)
-      case (minfo, mMain) of
-        (Nothing, _) -> putStrLn "备份 root 标识读取失败（发现后被移除？）" >> pure 2
+      case (erole, mMain) of
+        (Left m, _) -> putStrLn ("备份 root 不可用: " <> m) >> pure 2
         (_, Nothing) -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
         -- P2.3（复审三轮新发现）：发现后重读到的身份必须仍等于**配置登记的**
         -- UUID——不采纳盘上任意 id（发现与使用之间路径/卷可能被换）。
-        (Just info, _)
+        (Right info, _)
           | cfgBackupId cfg /= Just (riId info) ->
               putStrLn "备份 root 身份在发现后发生变化（与配置登记不符），拒绝" >> pure 2
-        (Just info, Just mainCat) -> do
+        (Right info, Just mainCat) -> do
           putStrLn ("备份盘: " <> broot <> maybe "" (\t -> "（" <> T.unpack t <> "）") (riFsType info))
           (oldBak, bwarns) <- loadCatalog broot
           mapM_ (\w -> putStrLn ("⚠ 备份快照损坏已跳过: " <> w)) bwarns
