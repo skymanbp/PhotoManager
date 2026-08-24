@@ -133,7 +133,8 @@ pathUnder base p = do
 -- P3b-12（九轮复审 major）：此前返回 @Bool@，解析失败按 False。它被用在
 -- **排除**判定上（@not \<$\> pathAtOrUnder@），于是"答不上来"变成了"不在
 -- @.pm@ 里，放行"——结构性 fail-open。三态把这个歧义消掉：调用点必须显式
--- 决定 @Nothing@ 怎么算，而 'Pm.Exec.confinedUser' 只接受明确的 @Just False@。
+-- 决定 @Nothing@ 怎么算，而 'Pm.Exec.confinedUserPath' 只接受明确的
+-- @Just False@（P3b-17：Bool 版 @confinedUser@ 已删除，用户侧只剩这一个口）。
 pathAtOrUnder :: FilePath -> FilePath -> IO (Maybe Bool)
 pathAtOrUnder base p = do
   eb <- try (canonicalizePath base) :: IO (Either SomeException FilePath)

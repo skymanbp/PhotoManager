@@ -27,6 +27,7 @@ import Test.Tasty.HUnit
 import Pm.Catalog (loadCatalog, saveCatalog)
 import Pm.Config (Config (..), pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
+import Pm.Exec (dirFingerprint)
 import Pm.Hash (sha256File)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, withJournal)
 import Pm.Lock (withRootLock)
@@ -40,7 +41,7 @@ import TestUtil
 stateGuardTests :: TestTree
 stateGuardTests =
   testGroup
-    "P3b-14 .pm 状态文件的受信取用口（codex 十一轮）"
+    "P3b-14 .pm 状态文件的受信取用口（codex 十一~十四轮）"
     [ testCase "P3b-14 manifest.ndjson 是指向库外的文件 symlink → append/读取都拒绝，库外文件零改动" caseManifestDeepSymlink
     , testCase "P3b-14 catalog.json 被 hardlink 占名 → loadCatalog 拒读（读侧 link count）" caseCatalogHardlinkRead
     , testCase "P3b-14 plans/<id>.json 是深层 hardlink/symlink → loadPlan/savePlan 拒绝" casePlanDeepLink
@@ -52,6 +53,8 @@ stateGuardTests =
     , testCase "P3b-16 复位源 .pm/trash/<pid> 是 junction → doctor 报 PM-LINK，--repair 不补虚假 Done" caseDoctorRestoreSrcJunction
     , testCase "P3b-16 .pm/tmp/<planId> 是 junction → C1 的 tmp 探测报 PM-LINK，不穿透库外" caseDoctorPendingTmpProbe
     , testCase "P3b-16 侧缓存失信 → pm status 报 ⚠ 且退出码 1（不再静默 exit 0）" caseStatusUntrustedCacheExit
+    , testCase "P3b-17 FpDir 复位源是真实目录 → 必须落 R3（收窄成 doesFileExist 会错报 R2 并补假 Done）" caseRestoreSrcFpDir
+    , testCase "P3b-17 FpFileSha + 目录占住载荷名 → 同样必须落 R3（触发不需要 FpDir）" caseRestoreSrcFpFile
     ]
 
 -- 本模块只需要 hardlink（/H）与文件 symlink（无开关）两种形态；目录 junction
@@ -362,6 +365,71 @@ caseStatusUntrustedCacheExit = withSystemTempDirectory "pm-sguard" $ \dir -> do
   mkHardLink (cache </> "meta.json") (outside </> "evil-meta.json")
   code1 <- runStatus (mkSCfg root) (StatusOpts True)
   code1 @?= 1
+
+-- ─── P3b-17（十四轮） ───────────────────────────────────────────────────────
+
+-- | 十四轮 **major**：P3b-16 把复位源的 `existsAny`（文件**或**目录）换成受信
+-- 探针时，只写了 `doesFileExist`——**谓词在安全重构里被悄悄收窄**。`OpRename`
+-- 两侧都可以是目录（'Pm.Names' 生成的 Raw 事件夹改名就是 FpDir），于是 trash
+-- 里**真实存在的目录**复位源被判成"不存在"，与存在且指纹相符的 new 组合成
+-- R2 Warn，`--repair` 补写**虚假 Done**。正确格是 R3（不在 repairDone 白名单）。
+--
+-- 拆成**两个**用例而不是一个函数里两段：十三轮的粒度教训——同一函数里前一条
+-- 断言先炸，后一条永远跑不到，等于没钉。拆开后突变一次必须看到**两条**都转红。
+--   ① FpDir：目录 old + 目录 new —— codex 报的那条形态；
+--   ② FpFileSha：目录 old + 文件 new —— 触发**不需要** FpDir，现有 undo 构造器
+--      （'Pm.Undo' 只生成 FpFileSha 复位）配上一个占了载荷名的目录就够。
+-- 把 'Pm.Doctor.probePmExists' 的 @PmEntryAny@ 改回 @PmEntryFile@，两条都转红。
+
+-- | ① old 与 new 都是真实目录，Intent 记的是 new 的 FpDir 指纹。
+caseRestoreSrcFpDir :: IO ()
+caseRestoreSrcFpDir = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  now <- getCurrentTime
+  let root = dir </> "root"
+      qdir = trashDir root </> T.unpack tpid
+  createDirectoryIfMissing True (qdir </> "olddir")
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  writeFile (qdir </> "olddir" </> "a.jpg") "A"
+  createDirectoryIfMissing True (root </> "newdir")
+  writeFile (root </> "newdir" </> "a.jpg") "A"
+  fpd <- dirFingerprint (root </> "newdir")
+  withJournal root $ \j ->
+    jAppend
+      j
+      Barrier
+      (JIntent (tpOid 0) (OpRename (".pm" </> "trash" </> T.unpack tpid </> "olddir") "newdir" (FpDir fpd)) now)
+  assertRestoreSrcSeenAsPresent root
+
+-- | ② 同一屏障、不需要 FpDir：trash 里一个**目录**占住了载荷名，victim 仍在原位
+-- 且 sha 与 Intent 相符（收窄后正是 verifyFp 会通过、被补假 Done 的那一格）。
+caseRestoreSrcFpFile :: IO ()
+caseRestoreSrcFpFile = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  now <- getCurrentTime
+  let root = dir </> "root"
+      qdir = trashDir root </> T.unpack tpid
+  createDirectoryIfMissing True (qdir </> "v.jpg")
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  writeFile (root </> "v.jpg") "RESTORED-BYTES"
+  vsha <- sha256File (root </> "v.jpg")
+  withJournal root $ \j ->
+    jAppend
+      j
+      Barrier
+      (JIntent (tpOid 0) (OpRename (".pm" </> "trash" </> T.unpack tpid </> "v.jpg") "v.jpg" (FpFileSha vsha)) now)
+  assertRestoreSrcSeenAsPresent root
+
+-- | 共用断言：复位源盘上确实在 → R3 Warn（未执行且目标被占），**不得**是
+-- R2 Warn，且 @--repair@ 之后 journal 里没有 Done。
+assertRestoreSrcSeenAsPresent :: FilePath -> IO ()
+assertRestoreSrcSeenAsPresent root = do
+  rows <- doctorRows root
+  assertBool ("目录复位源存在 → 应报 R3 Warn，实得 " <> show rows) (("R3", Warn) `elem` rows)
+  assertBool
+    ("不得报 R2 Warn（那会让 --repair 补虚假 Done）: " <> show rows)
+    (("R2", Warn) `notElem` rows)
+  _ <- runDoctor root (DoctorOpts False True)
+  es <- journalEntries root
+  assertBool ("--repair 不得补记 Done: " <> show (length es)) (not (any isDone es))
 
 mkSCfg :: FilePath -> Config
 mkSCfg root = Config root Nothing Nothing Nothing Nothing Nothing

@@ -578,7 +578,8 @@ caseStateFileHardlink = withSystemTempDirectory "pm-guard" $ \dir -> do
 --
 -- P3b-13（十轮复审 #7）：十轮指出本例**没有一个产生 Nothing 的输入**，
 -- 于是"异常路径若错误地返回 Just False，用例仍绿"。补上 Nothing 分支，
--- 并直接断言 'confinedUser' 对它的处置（放行判据是 @Just False@，不是
+-- 并直接断言限域口对它的处置（P3b-17 起用户侧只剩 'Pm.Exec.confinedUserPath'
+-- 一个口，Bool 版 @confinedUser@ 已删除；放行判据是 @Just False@，不是
 -- "不是 Just True"）。
 casePathAtOrUnderTristate :: IO ()
 casePathAtOrUnderTristate = withSystemTempDirectory "pm-guard" $ \dir -> do
