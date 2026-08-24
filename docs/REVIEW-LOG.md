@@ -426,3 +426,16 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   且把已**扩宽**的 `slotOccupied` 说成仅移动——与 `git diff` 删除行逐行对照
   成立，已逐项标注类型并说明排除理由。与 P3b-18 同在分支 `p3b18-returned-path`
   上，一并合并进 main，进入十七轮范围。
+- **十七轮：GO（同日，codex 十七轮，对 ca260cb..324501e，64 次探查）**——
+  "生产逻辑未变、十六轮 minor 已闭合、P3b-18 钉住既定回退突变、两条判据继续
+  收敛；新发现无；最小修复集空"。P3b 门禁自一轮以来首个 GO。它对新用例的
+  细评：不覆盖三处单点突变（落位前 dst 预检 / 目标缺席不执行的 sha 分支 /
+  move 失败分支的 race 探测）；Rename/Quarantine 对称用例属已登记残余、非阻断
+  （Quarantine 优先）。真实库只读四连不变（doctor 0 / trash 0 / status 1 /
+  vault 1）。归档见第二卷第十七轮章节。**门禁满足，转 AskUserQuestion 请裁定
+  `pm apply 20260824-030200-0c238a`。**
+- **真实写入（同日，用户裁定"全量执行"）**：`pm apply 20260824-030200-0c238a`
+  6/6 DONE（1071 ms）；盘上目录名核实；`pm doctor` 0；`pm status` "✓ 索引与
+  磁盘一致"（无需重扫）。pm 对真实库的第一次 names 写入，`pm undo` 可回滚。
+  P3 至此只剩等外部条件的项：备份盘（插盘）、15 NEW 分类（P4 GUI）、versions
+  处置（用户）。
