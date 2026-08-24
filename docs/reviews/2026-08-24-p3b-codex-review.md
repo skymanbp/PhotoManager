@@ -732,3 +732,8 @@ Exec 内核重构后 184 例原集合逐条通过（含全部故障注入矩阵�
   对每个候选卷 `readRootInfo`。无超时，实测待用户插盘。
 - `tamperMark` 字符串哨兵；`opSrcAbs` 无 root 归属校验；`writeConfig` 普通
   覆盖写；备份盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU。
+
+---
+
+> **第十四轮起见第二卷 [`2026-08-24-p3b-codex-review-2.md`](2026-08-24-p3b-codex-review-2.md)**
+> （本文件触及 750 行预算，按 P3b-8 拆 §16 的先例续写）。残余清单以第二卷最新一轮为准。

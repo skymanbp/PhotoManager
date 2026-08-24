@@ -227,12 +227,28 @@ probePmSha root rel = do
           | isDoesNotExistError e -> PmStateMissing
           | otherwise -> PmStateBad (rel <> " 无法可信读取（" <> show e <> "）")
 
-probePmExists :: FilePath -> FilePath -> IO (Either String Bool)
-probePmExists root rel = do
+-- | @.pm@ 内定点路径的**存在性**受信探测。问的是哪一种存在必须由调用点显式
+-- 说明——P3b-17（十四轮 major）的成因正是它此前不必说：十三轮把复位源的
+-- 'existsAny'（文件**或**目录）换成受信探针时只写了 @doesFileExist@，谓词在
+-- 安全重构里**被悄悄收窄**。'Pm.Op.OpRename' 合法支持 'FpDir'（'Pm.Names' 的
+-- 目录改名计划就是这一种，执行端也确实 stat/hash/move 目录），于是 trash 里
+-- **真实存在的目录**复位源被判成"不存在"，与存在且指纹相符的 @new@ 组合成
+-- R2 Warn，@--repair@ 随即补写**虚假 Done**（正确格是 R3，不进任何修复线）。
+data PmEntryQ
+  = -- | 只认普通文件（pm 自建的 tmp 落位点）
+    PmEntryFile
+  | -- | 任何目录项，文件或目录（'existsAny' 的受信对偶）
+    PmEntryAny
+
+probePmExists :: PmEntryQ -> FilePath -> FilePath -> IO (Either String Bool)
+probePmExists q root rel = do
   m <- resolveUnder root (".pm" </> rel)
   case m of
     Nothing -> pure (Left (rel <> " 不是 root 下的真实路径（junction/symlink？）"))
-    Just fp -> Right <$> doesFileExist fp
+    Just fp ->
+      Right <$> case q of
+        PmEntryFile -> doesFileExist fp
+        PmEntryAny -> existsAny fp
 
 classifyPending' :: FilePath -> (Text, Op) -> IO [Finding]
 classifyPending' root (oid, op) = case op of
@@ -248,9 +264,12 @@ classifyPending' root (oid, op) = case op of
       else do
         -- P3b-15：.pm/tmp 的存在性探测也走受信解析（此前 doesFileExist 会
         -- 跟随链接，影响 C1 的分类文本；不涉及写，但同规则无例外）。
+        -- tmp 问的是 @PmEntryFile@：落位点是 pm 自建的**普通文件**，
+        -- 'staleTmpFiles' 的清理也只收 NamePlain 文件。目录占名时报"无痕迹"
+        -- 而不是"中断于写 tmp"，是保守方向（--repair 不会去动那个目录）。
         etmp <- case pendingTmp root (oid, op) of
           Nothing -> pure (Right False)
-          Just tmpAbs -> probePmExists root (makeRelative (pmDir root) tmpAbs)
+          Just tmpAbs -> probePmExists PmEntryFile root (makeRelative (pmDir root) tmpAbs)
         case etmp of
           Left m -> pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]
           Right True -> pure [Finding "C1" Warn (T.unpack oid <> ": 中断于写 tmp 阶段 (" <> dstRel <> ")") "--repair 将清除 tmp；重跑原计划即可续传"]
@@ -266,9 +285,12 @@ classifyPending' root (oid, op) = case op of
     -- 剥掉首个 @.pm@ 分量得到 @.pm@ 相对路径。不用 makeRelative：
     -- 'isTrashSrcRel' 是**折大小写**判定的，@.PM\/trash\/…@ 合法，而
     -- makeRelative 的词法比较区分大小写，那种形态会剥不掉、把绝对路径拼进去。
+    -- P3b-17（十四轮 major）：问的必须是 @PmEntryAny@——`existsAny` 一直含
+    -- 目录，而 rename 的两侧都可以是目录（FpDir）。收窄成"文件存在"会把真实
+    -- 存在的目录复位源判成缺席，把 R3 错报成 R2 Warn 并被 --repair 补假 Done。
     eOldEx <-
       if isTrashSrcRel old
-        then probePmExists root (joinPath (drop 1 (splitDirectories old)))
+        then probePmExists PmEntryAny root (joinPath (drop 1 (splitDirectories old)))
         else Right <$> existsAny (root </> old)
     case eOldEx of
       Left m -> pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]

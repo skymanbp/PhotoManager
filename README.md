@@ -137,6 +137,17 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   字面成立，而不是每轮再补一个漏掉的分支。另修：我上一轮"对**每条**新屏障做
   突变验证"的说法过强（Catalog 只钉住整体撤回），现已为每一代快照单独构造
   文件级链接用例；新增 3 例，全部逐条突变验证；187/187 测试）
+- P3b-17 ✅ codex 十四轮复审收口（十二轮设立的「拼 `.pm` 路径后按名字操作」
+  判据下**清单首次为空**，但十三轮的修复自己引入了一条 major：把复位源的
+  `existsAny`（文件**或**目录）换成受信探针时只写了 `doesFileExist`——
+  **谓词在安全重构里被悄悄收窄**。trash 里真实存在的**目录**复位源被判成
+  "不存在"，本该落 R3（不在修复白名单）的格退化成 R2 Warn，`--repair` 补写
+  **虚假 Done**。codex 给的触发路径是 FpDir；实测不需要——现有 undo 构造器
+  只产 FpFileSha，配上一个占了载荷名的目录就够。修复：探针改为调用点**显式**
+  说明问哪种存在（`PmEntryAny` / `PmEntryFile`）；同轮删掉 Bool 版
+  `confinedUser`，Copy 的 dst 也只用 `confinedUserPath` 的返回路径，
+  `execCopyTmp` 不再持有 root。新增 2 例（FpDir / FpFileSha 两形态分开钉），
+  突变一次两条同时转红；189/189 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

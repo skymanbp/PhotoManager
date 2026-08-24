@@ -384,10 +384,14 @@ execItem env root j pid item = case piStatus item of
 admitsUserPath :: Maybe Bool -> Bool
 admitsUserPath = (== Just False)
 
--- | 单条用户路径的限域，返回**解析后的路径**（P3b-16，十三轮）。
--- 'confinedUser' 是它的多路径 Bool 包装，仅用于"只需判定、不需路径"的前置
--- 检查（如 Copy 的 dst 预检）。凡随后要 open\/unlink\/rename 的调用点一律用
--- 本函数的返回值。
+-- | 单条用户路径的限域，返回**解析后的路径**（P3b-16，十三轮）。用户数据侧
+-- 只有这一个限域口，Copy\/Rename\/Quarantine 三条写路径都用它的返回值 open\/
+-- hash\/rename。
+--
+-- P3b-17（十四轮 #2）：十三轮留了一个 Bool 版 @confinedUser@ 给 Copy 的 dst
+-- 预检，它与本函数逐行等价却是**重复实现**，而且调用方拿不到路径只能再拼一次
+-- @root \</\> opDstRel@——正是十一~十三轮那个形状的最后一处残留。删掉它之后
+-- "校验完只用返回路径"才是签名上**无从绕过**的（此前那句绝对表述不实）。
 confinedUserPath :: FilePath -> FilePath -> IO (Maybe FilePath)
 confinedUserPath root rel = do
   m <- resolveUnder root rel
@@ -396,15 +400,6 @@ confinedUserPath root rel = do
     Just p -> do
       ok <- admitsUserPath <$> pathAtOrUnder (pmDir root) p
       pure (if ok then Just p else Nothing)
-
-confinedUser :: FilePath -> [FilePath] -> IO Bool
-confinedUser root rels = and <$> mapM one rels
- where
-  one rel = do
-    m <- resolveUnder root rel
-    case m of
-      Nothing -> pure False
-      Just p -> admitsUserPath <$> pathAtOrUnder (pmDir root) p
 
 -- | @.pm@ 内部落位点（隔离目标）：从 root 起全程下降，@.pm@ 与 @trash@ 这两级
 -- 同样必须是真名——这正是八轮 critical 的攻击面。
@@ -432,13 +427,17 @@ escapeOutcome = OConflict "路径逐级解析后不在 root/.pm\\trash 之内（
 
 -- ─── Copy (§6.1) ────────────────────────────────────────────────────────────
 
+-- P3b-17（十四轮 #2）：dst 用 'confinedUserPath' 的**返回路径**一路传下去
+-- （execCopy' → execCopyTmp），不再有第二次 @root \</\> opDstRel@ 重拼。
 execCopy :: ExecEnv -> FilePath -> Journal -> Text -> Int -> Op -> IO ItemOutcome
 execCopy env root j oid ix op = do
-  okc <- confinedUser root [opDstRel op]
-  if okc then execCopy' env root j oid ix op else pure escapeOutcome
+  mDst <- confinedUserPath root (opDstRel op)
+  case mDst of
+    Nothing -> pure escapeOutcome
+    Just dstAbs -> execCopy' env root j oid ix op dstAbs
 
-execCopy' :: ExecEnv -> FilePath -> Journal -> Text -> Int -> Op -> IO ItemOutcome
-execCopy' env root j oid ix op = do
+execCopy' :: ExecEnv -> FilePath -> Journal -> Text -> Int -> Op -> FilePath -> IO ItemOutcome
+execCopy' env root j oid ix op dstAbs = do
   preE <- try (statSnap (opSrcAbs op)) :: IO (Either IOException StatSnap)
   case preE of
     Left e -> pure (OFailed ("源 stat 失败: " <> show e))
@@ -446,7 +445,6 @@ execCopy' env root j oid ix op = do
       | ssSize pre /= opSrcSize op || ssMtimeNs pre /= opSrcMtimeNs op ->
           pure (OConflict "源文件在计划生成后被修改（重新生成计划）")
       | otherwise -> do
-          let dstAbs = root </> opDstRel op
           dstExists <- doesFileExist dstAbs
           if dstExists
             then do
@@ -478,11 +476,12 @@ execCopy' env root j oid ix op = do
                   mTmp2 <- confinedTmp root pid' tname
                   case mTmp2 of
                     Nothing -> pure escapeOutcome
-                    Just tmpAbs -> execCopyTmp env root j oid op tmpAbs
+                    Just tmpAbs -> execCopyTmp env j oid op tmpAbs dstAbs
 
-execCopyTmp :: ExecEnv -> FilePath -> Journal -> Text -> Op -> FilePath -> IO ItemOutcome
-execCopyTmp env root j oid op tmp = do
-  let dstAbs = root </> opDstRel op
+-- P3b-17（十四轮 #2）：@dstAbs@ 由 'execCopy' 的 'confinedUserPath' 解析后
+-- 传进来，本函数不再持有 @root@——没有 root 就拼不出第二条 dst 路径。
+execCopyTmp :: ExecEnv -> Journal -> Text -> Op -> FilePath -> FilePath -> IO ItemOutcome
+execCopyTmp env j oid op tmp dstAbs = do
   wsha <- copyFileHashed (opSrcAbs op) tmp
   eeCheckpoint env CpCopyAfterTmp
   rsha <- sha256File tmp

@@ -366,3 +366,37 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   撤 status 失信退出码各自单独转红；另新增"每一代快照单独 symlink"的用例，
   单撤 `.1` 一条解析即转红（闭合十三轮 minor）。
   归档见 `docs/reviews/2026-08-24-p3b-codex-review.md` 第十三轮章节。
+  （**十四轮更正**：上面"返回路径后调用方**无从**绕过"当时不实——Copy 的 dst
+  预检仍是 Bool 版 `confinedUser`，之后两次重拼 `root </> opDstRel`。P3b-17
+  删掉 Bool 版、dst 也走返回路径后，这句才在签名上成立。另：P3b-16 的
+  `probePmExists` 把复位源的存在性从"文件或目录"收窄成"文件"，是它自己引入
+  的 major，见下。）
+- **P3b-17 十四轮收口（同日，codex 十四轮：1 major；⑤ 类清单**首次为空**，
+  收敛性判「已收敛」但 verdict 仍 NO-GO）**：major 出在 P3b-16 自己的修复里——
+  把复位源的 `existsAny`（文件**或**目录）换成受信探针 `probePmExists` 时只
+  写了 `doesFileExist`，**谓词在安全重构里被悄悄收窄**。`OpRename` 两侧合法
+  可为目录（`Pm.Names` 的 Raw 事件夹改名是 FpDir，执行端确实 stat/hash/move
+  目录），于是 trash 里**真实存在的目录**复位源被判成"不存在"：修前该格是
+  R3 Warn（不在 `repairDone` 白名单），修后与存在且指纹相符的 new 组成
+  R2 Warn（在白名单）→ `--repair` 补写**虚假 Done**；另一格从 R1 Info 掉成
+  R? Bad。codex 给的触发路径是 FpDir；核实两处复位构造点（`Pm.Undo`、
+  `Pm.Exec.restoreQuarantine`）都只产 FpFileSha——但**不需要** FpDir：trash
+  里一个占了载荷名的目录 + victim 原位 sha 相符即可触发。
+  **类级扫描**："安全重构时谓词被悄悄收窄"——把 P3b-14~16 三轮 diff 里所有被
+  受信探针/取用口替换掉的原谓词逐条比宽度，共 8 处，只有这一处从"文件或目录"
+  收成"文件"，其余替换前后同宽。修复：`probePmExists` 加 `PmEntryQ`
+  两态，调用点**显式**说明问哪种存在（复位源 `PmEntryAny`，tmp 落位点
+  `PmEntryFile`——那是 pm 自建的普通文件，`staleTmpFiles` 也只收 NamePlain）。
+  同轮采纳十四轮 #2 的建议删掉 Bool 版 `confinedUser`：它与 `confinedUserPath`
+  逐行等价却是重复实现，Copy 的 dst 现在从 `confinedUserPath` 的返回路径一路
+  传到 `execCopyTmp`，后者不再持有 `root`（没有 root 就拼不出第二条 dst）。
+  测试 +2（189/189）：FpDir 与 FpFileSha 两形态**拆成两个用例**（同一函数里前
+  一条先炸后一条永远跑不到，等于没钉——十三轮的粒度教训），把探针改回
+  `PmEntryFile` 两条同时转红、实得恰为 `[("R2",Warn)]`。
+  **登记而未做**：十四轮 #3 指出没有用例钉住"返回路径必须被使用"（把
+  `tmpAbs` 改回 `tdir </> tname`、或 dst 改回重拼，现有用例照样绿）；它给的
+  设计是让 root 本身成可切换的 junction、在 Intent 后检查点切到诱饵库——
+  `resolveUnder` 以 root 为基准逐级下降，root 自身是 junction 时的行为要先
+  探针，本轮不做、进残余。
+  归档见 `docs/reviews/2026-08-24-p3b-codex-review-2.md`（第二卷，第十四轮起；
+  第一卷触及 750 行预算）。
