@@ -23,10 +23,12 @@ module Pm.Cli
 
 import Control.Monad (forM, forM_, unless, when)
 import Data.Char (toLower)
+import Data.Function (on)
+import Data.List (intercalate, nubBy)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.FilePath (splitDirectories)
+import System.FilePath (normalise, splitDirectories)
 import System.IO (hFlush, stdout)
 import Text.Printf (printf)
 import Text.Read (readMaybe)
@@ -43,6 +45,7 @@ import Pm.Op
 import Pm.Plan
 import Pm.Scan (ScanResult (..), freshnessSweep)
 import Pm.Types
+import Pm.Vault (vaultIgnoreGuard)
 import Pm.Win (volumeFsType)
 
 -- | 写盘命令共有的两段式开关（DESIGN.md §5）。
@@ -90,6 +93,7 @@ executePlanNow' plan = do
         defaultExecEnv
           { eeDoneSync = if plKind plan == "backup" then Barrier else Buffered
           , eeExpectRootId = plRootId plan
+          , eePreflight = rootPreflight
           }
   r <- execPlan env plan
   case r of
@@ -112,6 +116,18 @@ executePlanNow' plan = do
   isBad (OFailed _) = True
   isBad _ = False
 
+-- | P3b-4 评审 #3：vault root 的计划在执行锁内（journal/tmp/trash 任何
+-- 写入前）重检 I11——计划生成与 apply 之间 .gitignore 可能被改；journal
+-- 一旦在未忽略的 git 工作树里出现就是污染。非 vault root 直接放行。
+rootPreflight :: FilePath -> IO (Either String ())
+rootPreflight root = do
+  minfo <- readRootInfo root
+  case minfo of
+    Just info | riRole info == RoleVault -> do
+      g <- vaultIgnoreGuard root
+      pure (either (\m -> Left (m <> "（apply 执行期重检，整批拒绝）")) Right g)
+    _ -> pure (Right ())
+
 savePlanAndMaybeRun :: GoOpts -> Plan -> IO Int
 savePlanAndMaybeRun = savePlanAndMaybeRunWith pure
 
@@ -132,45 +148,41 @@ savePlanAndMaybeRunWith preExec go plan = do
 -- （备份盘可能换盘符重挂，旧盘符可能已属于别的卷）。
 -- P2.3（复审三轮新发现）：绑定按**身份**而非计划 kind——doctor 在备份 root
 -- 上生成的 C5 修复计划 kind 是 doctor-c5-quarantine，按 kind 分支会把它错绑
--- 到主库（fail-closed 会拒绝，但计划就永远执行不了）。规则：先比主库 UUID，
--- 再比 vault root（P3b：固定路径，无发现流程），最后发现备份盘比对；
--- 都不中 → 拒绝。
+-- 到主库（fail-closed 会拒绝，但计划就永远执行不了）。
+-- P3b-4 评审 #6：三个槽位（主库\/vault\/备份）**全部**探查，候选 = UUID
+-- 命中且 role 与槽位相符；必须**恰好一个**命中——多命中（同一标识被整盘
+-- 复制\/恢复到第二个 root）是身份危机，拒绝执行而不是按优先级猜。
 bindExecRoot :: Config -> Plan -> T.Text -> IO (Either String Plan)
 bindExecRoot cfg plan rid = do
   let mroot = cfgMainPath cfg
-  mMain <- readRootInfo mroot
+  mMain <- fmap ((,) mroot) <$> readRootInfo mroot
   mVault <- case cfgVaultPath cfg of
     Nothing -> pure Nothing
     Just vp -> fmap ((,) vp) <$> readRootInfo vp
-  if (riId <$> mMain) == Just rid
-    then pure (Right plan {plRootPath = mroot})
-    else case mVault of
-      Just (vp, vinfo) | riId vinfo == rid -> do
-        when (vp /= plRootPath plan) $
-          putStrLn ("· vault 路径与计划记录不同: " <> plRootPath plan <> " → " <> vp <> "（按 UUID 重新绑定）")
-        pure (Right plan {plRootPath = vp})
-      _ -> do
-        er <- discoverBackupRoot cfg
-        case er of
-          Right broot -> do
-            minfo <- readRootInfo broot
-            case minfo of
-              Just info
-                | riId info == rid -> do
-                    when (broot /= plRootPath plan) $
-                      putStrLn ("· 备份盘挂载点已变: " <> plRootPath plan <> " → " <> broot <> "（按 UUID 重新绑定）")
-                    pure (Right plan {plRootPath = broot})
-              _ ->
-                pure (Left ("计划 rootId 与主库、vault、已发现备份盘均不符（" <> T.unpack rid <> "），拒绝执行"))
-          Left msg ->
-            pure
-              ( Left
-                  ( "计划 rootId 与主库、vault 均不符（"
-                      <> T.unpack rid
-                      <> "），备份盘也不可用: "
-                      <> msg
-                  )
-              )
+  eBack <- discoverBackupRoot cfg
+  mBack <- case eBack of
+    Left _ -> pure Nothing
+    Right bp -> fmap ((,) bp) <$> readRootInfo bp
+  let hit role m = [p | Just (p, i) <- [m], riId i == rid, riRole i == role]
+      cands =
+        [(p, "主库" :: String) | p <- hit RoleMain mMain]
+          <> [(p, "vault") | p <- hit RoleVault mVault]
+          <> [(p, "备份盘") | p <- hit RoleBackup mBack]
+      uniq = nubBy ((==) `on` (map toLower . normalise . fst)) cands
+  case uniq of
+    [(p, label)] -> do
+      when (p /= plRootPath plan) $
+        putStrLn ("· " <> label <> " root 按 UUID 重新绑定: " <> plRootPath plan <> " → " <> p)
+      pure (Right plan {plRootPath = p})
+    [] ->
+      pure . Left $
+        "计划 rootId 与主库、vault、备份盘均不符（" <> T.unpack rid <> "），拒绝执行"
+          <> either (\m -> "；备份盘发现: " <> m) (const "") eBack
+    many ->
+      pure . Left $
+        "UUID " <> T.unpack rid <> " 同时命中多个 root（"
+          <> intercalate "、" [l <> " " <> p | (p, l) <- many]
+          <> "），root 身份冲突（同一标识被复制/恢复到多个位置），拒绝执行——先修正 root-id.json 再重试"
 
 -- | 评审 cx-3：clean 计划在**每次执行前**逐项重验三副本（当前 catalog 定位
 -- 见证 + 真实重 hash），不过的降级 NEEDS-DECISION——计划生成与执行之间的

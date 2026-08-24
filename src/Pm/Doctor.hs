@@ -204,7 +204,9 @@ classifyPending root (oid, op) = case op of
       (True, True) -> pure [Finding "R3" Warn (T.unpack oid <> ": rename 未执行且目标被占 (" <> new <> ")" ) "解决占用后重新生成计划"]
       (False, False) -> pure [Finding "R?" Bad (T.unpack oid <> ": 新旧路径都不存在，超出矩阵，需人工核查") ""]
   OpQuarantine victim sha _ -> do
-    let trashRel = T.unpack (planIdOfOp oid) </> victim
+    -- P3b-4 评审 #1：trash 路径推导与 Exec 共用 quarTrashRel（~d 位移隔离
+    -- 落 <planId>~displaced/，各推各的会在这里指错目录）。
+    let trashRel = quarTrashRel oid victim
     trashEx <- doesFileExist (trashDir root </> trashRel)
     victimEx <- doesFileExist (root </> victim)
     case (trashEx, victimEx) of
@@ -214,8 +216,6 @@ classifyPending root (oid, op) = case op of
         let note = if vsha == sha then "victim 原位完好" else "victim 原位但内容已变"
         pure [Finding "Q2" Info (T.unpack oid <> ": 隔离未执行，" <> note <> "，重跑原计划即可") ""]
       (False, False) -> pure [Finding "Q?" Bad (T.unpack oid <> ": victim 与 trash 均不存在，需人工核查") ""]
- where
-  planIdOfOp o = T.takeWhile (/= '#') o
 
 existsAny :: FilePath -> IO Bool
 existsAny p = do
@@ -317,7 +317,7 @@ applyRepairs root findings pending stale = do
         now <- getCurrentTime
         let (sha, trash) = case op of
               OpCopy _ _ s _ _ -> (Just s, Nothing)
-              OpQuarantine v s _ -> (Just s, Just (T.unpack (T.takeWhile (/= '#') oid) </> v))
+              OpQuarantine v s _ -> (Just s, Just (quarTrashRel oid v))
               _ -> (Nothing, Nothing)
         jAppend j Barrier (JDone oid sha trash now)
         putStrLn ("  修复: 补记 Done " <> T.unpack oid)

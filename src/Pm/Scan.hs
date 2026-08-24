@@ -119,10 +119,13 @@ scanRoot opts oldCat rootId root = do
       statErrs = [(rel, show e) | (rel, Left e) <- statted]
       oldEntries = maybe Map.empty catEntries oldCat
       (reused, toHash) = foldl' split ([], []) stats
+      -- P3b-4 评审 #4（统一修）：复用判据走 statHitStable——(size,mtime)
+      -- 相等之外还排除 racy 条目（hash 时刻与 mtime 同刻度窗口内），与
+      -- Pm.Vault.shaViaCache 共用同一谓词。
       split (rs, hs) se@(StatEntry rel snap) =
         case Map.lookup rel oldEntries of
           Just e
-            | enSize e == ssSize snap && enMtimeNs e == ssMtimeNs snap ->
+            | statHitStable (enSize e) (enMtimeNs e) (enLastVerified e) snap ->
                 (e : rs, hs)
           _ -> (rs, se : hs)
       totalHashBytes = sum [ssSize (seSnap se) | se <- toHash]

@@ -91,6 +91,11 @@ DUPLICATE 与 ok/drift 重叠；JSON 键名/键序/值形状（含 `new` 裸串�
 8. **UNPUSHABLE 是 pm 新增第七态**：legacy 对 `.png` 完全同 jpg（全库 grep
    `UNPUSHABLE` 零命中）。当前真实库 `.png` 为零 → 该轴验收**空洞通过**，
    必须用合成 `.png` fixture 专项测试。
+9. **UNSTABLE 是 pm 新增第八态（P3b-4 评审 #5，2026-08-24）**：读取期间持续
+   变化（三轮双 stat 不稳）的名字整体退出六态分类（两侧都排除，防另一侧伪报
+   NEW/MISSING），JSON 尾键 `unstable`（`[name, loc]` 形状）单列，**退出码算
+   差异（非零）**——legacy 无撕裂防护，读到什么算什么；pm 状态未知即
+   fail-closed。稳定库两跑集合不受影响（unstable 恒空）。
 
 ## 7. P5 指针改写清单（档案侧引用 sync_photos.py 的全部位置）
 

@@ -11,7 +11,7 @@ import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, setModificationTime)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
@@ -19,11 +19,13 @@ import Test.Tasty.HUnit
 
 import Pm.Cli (bindExecRoot, executePlanNow)
 import Pm.Commands (resolveKeep)
-import Pm.Config (Config (..))
+import Pm.Config (Config (..), writeRootInfo)
+import Pm.Hash (StatSnap (..), nsToUtc, statHitStable)
 import Pm.Op
 import Pm.Plan
 import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.Vault
+import TestUtil (t0)
 
 vaultTests :: TestTree
 vaultTests =
@@ -46,6 +48,11 @@ vaultTests =
     , testCase "P3b push：DRIFT→NEEDS-DECISION→keep src→supersede→旧字节在 vault trash" casePushDriftSupersede
     , testCase "P3b bindExecRoot：vault 计划按 UUID 绑回配置路径" caseBindVaultRoot
     , testCase "P3b gitStepsLines/planCategories：显式类目、无 -A、隔离项不入 add" caseGitSteps
+    , testCase "P3b-4 #2 守卫：.git 文件/祖先仓/反规则 全 fail-closed" caseGuardVariants
+    , testCase "P3b-4 #3 apply 执行期重检 I11：ignore 行被移除 → 整批拒绝零写入" caseApplyI11Recheck
+    , testCase "P3b-4 #6 bindExecRoot：UUID 多重命中/role 不符 拒绝绑定" caseBindAmbiguity
+    , testCase "P3b-4 #4 缓存身份绑定：vault 换路径后 (size,mtime) 巧合不复用 sha" caseCacheIdentitySwap
+    , testCase "P3b-4 #4 racy 判据 statHitStable：同刻度窗口不信任缓存" caseRacyGuard
     ]
 
 h :: Char -> Text
@@ -152,6 +159,7 @@ sampleJson =
     3
     sampleDiff
     [("p.png", "相册"), ("q.png", "landscape")]
+    [("w.jpg", "urban")]
 
 caseJsonShape :: IO ()
 caseJsonShape = do
@@ -170,6 +178,7 @@ caseJsonShape = do
           , "duplicate"
               .= [toJSON [toJSON ("a.jpg" :: String), toJSON (["landscape", "portrait"] :: [String])]]
           , "unpushable" .= [["p.png", "相册"] :: [String], ["q.png", "landscape"]]
+          , "unstable" .= [["w.jpg", "urban"] :: [String]]
           ]
   decode sampleJson @?= Just expected
 
@@ -188,6 +197,7 @@ caseJsonKeyOrder = do
         , "\"drift\""
         , "\"duplicate\""
         , "\"unpushable\""
+        , "\"unstable\""
         ]
       posOf needle = length (fst (breakOn needle s))
       breakOn needle hay = go [] hay
@@ -386,6 +396,114 @@ caseGitSteps = do
   assertBool "命令行无 -A / 无裸 git add ." (not (any (\l -> "-A" `isInfixOf` l || "add ." `isInfixOf` l) cmdLines))
  where
   t0' = read "2026-01-01 00:00:00 UTC"
+
+-- ─── P3b-4（codex 评审修复） ────────────────────────────────────────────────
+
+caseGuardVariants :: IO ()
+caseGuardVariants = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  -- ① .git 是普通文件（worktree/submodule 链接）→ 同样算 git 语境
+  let v1 = tmp </> "v1"
+  createDirectoryIfMissing True v1
+  writeF (v1 </> ".git") "gitdir: ../repo/.git/worktrees/v1\n"
+  g1 <- vaultIgnoreGuard v1
+  assertBool ".git 文件应触发 I11" (either ("I11" `isInfixOf`) (const False) g1)
+  -- ② 反规则：`.pm/` 行存在但另有 `!.pm/` → 拒绝
+  let v2 = tmp </> "v2"
+  createDirectoryIfMissing True (v2 </> ".git")
+  writeF (v2 </> ".gitignore") ".pm/\n!.pm/\n"
+  g2 <- vaultIgnoreGuard v2
+  assertBool "反规则应拒绝" (either ("反规则" `isInfixOf`) (const False) g2)
+  -- ③ 祖先仓：父链上有 .git、vault 自身不是仓根 → 拒绝
+  let anc = tmp </> "repo"
+      v3 = anc </> "sub" </> "vault"
+  createDirectoryIfMissing True (anc </> ".git")
+  createDirectoryIfMissing True v3
+  g3 <- vaultIgnoreGuard v3
+  assertBool "祖先仓应拒绝" (either ("上层 git" `isInfixOf`) (const False) g3)
+  -- ④ 合规：.git 目录 + 恰有 `.pm/` 行、无反规则 → 放行
+  let v4 = tmp </> "v4"
+  createDirectoryIfMissing True (v4 </> ".git")
+  writeF (v4 </> ".gitignore") "_site/\n.pm/\n"
+  g4 <- vaultIgnoreGuard v4
+  g4 @?= Right ()
+
+caseApplyI11Recheck :: IO ()
+caseApplyI11Recheck = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  writeF (root </> "相册" </> "n.jpg") "NN"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  createDirectoryIfMissing True (vdir </> ".git")
+  writeF (vdir </> ".gitignore") ".pm/\n"
+  ref <- newIORef Nothing
+  let capture p = savePlan p >> writeIORef ref (Just p) >> pure 1
+  cPlan <- runVaultPush capture (Just "landscape") ["n.jpg"] cfg
+  cPlan @?= 1
+  mplan <- readIORef ref
+  plan <- maybe (assertFailure "应生成计划" >> undefined) pure mplan
+  -- 计划生成后 ignore 行被移除 → apply 执行期 preflight 必须整批拒绝，
+  -- vault 工作树内不得出现 journal（评审 #3 的污染路径）
+  writeF (vdir </> ".gitignore") "_site/\n"
+  code <- executePlanNow plan
+  code @?= 2
+  jEx <- doesFileExist (vdir </> ".pm" </> "journal.ndjson")
+  jEx @?= False
+  landed <- doesFileExist (vdir </> "landscape" </> "n.jpg")
+  landed @?= False
+
+caseBindAmbiguity :: IO ()
+caseBindAmbiguity = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  createDirectoryIfMissing True root
+  createDirectoryIfMissing True vdir
+  -- 同一 UUID 出现在主库与 vault（整盘复制/恢复事故模型）→ 拒绝，不猜
+  writeRootInfo root (RootInfo "dup-id" RoleMain t0 Nothing)
+  writeRootInfo vdir (RootInfo "dup-id" RoleVault t0 Nothing)
+  let plan = Plan "amb-test" "vault-push" vdir (Just "dup-id") t0 []
+  eb <- bindExecRoot cfg plan "dup-id"
+  case eb of
+    Left e -> assertBool ("应报多重命中: " <> e) ("多个" `isInfixOf` e)
+    Right _ -> assertFailure "UUID 碰撞必须拒绝绑定"
+  -- role 与槽位不符：vault 路径上是 backup root → 零候选，同样拒绝
+  writeRootInfo root (RootInfo "other" RoleMain t0 Nothing)
+  writeRootInfo vdir (RootInfo "bk-id" RoleBackup t0 Nothing)
+  eb2 <- bindExecRoot cfg plan "bk-id"
+  case eb2 of
+    Left _ -> pure ()
+    Right _ -> assertFailure "role 不符不得绑定"
+
+caseCacheIdentitySwap :: IO ()
+caseCacheIdentitySwap = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      va = tmp </> "va"
+      vb = tmp </> "vb"
+  writeF (root </> "相册" </> "a.jpg") "BBBB"
+  writeF (va </> "landscape" </> "a.jpg") "AAAA" -- 与源不同 → A 下是 DRIFT
+  writeF (vb </> "landscape" </> "a.jpg") "BBBB" -- 与源相同 → B 下应 OK
+  -- 回溯 mtime：让两个 vault 的 (size,mtime) 巧合一致，且缓存条目非 racy
+  mapM_
+    (\p -> setModificationTime p t0)
+    [va </> "landscape" </> "a.jpg", vb </> "landscape" </> "a.jpg"]
+  c1 <- runVaultStatus False (mkVaultCfg root va)
+  c1 @?= 1 -- DRIFT（顺带写下绑定 va 身份的缓存）
+  -- 切到 vb：若无身份绑定，(size,mtime) 命中会复用 va 的 sha 把 vb 误报 DRIFT
+  c2 <- runVaultStatus False (mkVaultCfg root vb)
+  c2 @?= 0
+
+caseRacyGuard :: IO ()
+caseRacyGuard = do
+  let snap = StatSnap 4 1000000000
+  -- hash 时刻仅晚于 mtime 0.5 s（< 2 s 粒度余量）→ racy，不信任
+  statHitStable 4 1000000000 (Just (nsToUtc 1500000000)) snap @?= False
+  -- hash 时刻晚于 mtime 8 s → 可信
+  statHitStable 4 1000000000 (Just (nsToUtc 9000000000)) snap @?= True
+  -- 无验证时间戳 → fail-closed
+  statHitStable 4 1000000000 Nothing snap @?= False
+  -- size 不符 → 直接不命中
+  statHitStable 5 1000000000 (Just (nsToUtc 9000000000)) snap @?= False
 
 -- | 在目录树下找第一个同名文件（trash 的 <ts>/ 层名未知）。
 findFileUnder :: FilePath -> FilePath -> IO (Maybe FilePath)

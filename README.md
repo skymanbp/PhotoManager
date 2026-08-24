@@ -65,5 +65,9 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
 - P3b-2/3 ✅ `pm names`（真实库 42 夹：31 合规 + 6 项计划 + 3 拒猜 + 2 双月名
   报告；E2E undo 回滚有测试）+ `pm versions`（真实库定位 7 连号跨夹 ARW 重复
   与 相册 9275≡成片 9274 那 1 例外）—— 真实改名待用户 apply
+- P3b-4 ✅ codex 评审 6 major 全修复（组回滚占位隔离 ~displaced、
+  vaultIgnoreGuard 加固（.git 文件/祖先仓/反规则）、apply 执行锁内重检 I11、
+  缓存绑定 root 身份 + racy-clean 判据统一、UNSTABLE 第八态 fail-closed、
+  bindExecRoot 恰一命中；128/128 测试；归档 docs/reviews/2026-08-24-*）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）

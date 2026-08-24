@@ -78,11 +78,20 @@ data ExecEnv = ExecEnv
     -- ^ 评审 cx-1：拿到锁之后、动盘之前复验 root-id.json 的 UUID。盘符会
     -- 漂移（备份盘 E: → F:），路径不是身份；不符即整批拒绝执行。
     -- Nothing = 跳过（测试用临时 root 无标识）。
+  , eePreflight :: FilePath -> IO (Either String ())
+    -- ^ 锁内、身份复验后、journal\/tmp\/trash 任何写入前的最后闸门
+    -- （P3b-4 评审 #3：vault 计划在 apply 时重检 I11——计划生成与执行
+    -- 之间 .gitignore 可能被改）。Left → 整批拒绝。默认放行。
   }
 
 defaultExecEnv :: ExecEnv
 defaultExecEnv =
-  ExecEnv {eeCheckpoint = \_ -> pure (), eeDoneSync = Buffered, eeExpectRootId = Nothing}
+  ExecEnv
+    { eeCheckpoint = \_ -> pure ()
+    , eeDoneSync = Buffered
+    , eeExpectRootId = Nothing
+    , eePreflight = \_ -> pure (Right ())
+    }
 
 data ItemOutcome
   = ODone {oSha :: Maybe Text, oDstStat :: Maybe StatSnap, oTrashRel :: Maybe FilePath}
@@ -148,15 +157,19 @@ execPlan env plan = do
           | otherwise = Right ()
     case ridOk of
       Left e -> pure (Left e)
-      Right () -> withJournal root $ \j -> do
-        (outs, restoredIxs) <- execItems env root j (plId plan) (plItems plan)
-        now <- getCurrentTime
-        jAppend j Barrier (JCleanShutdown now)
-        let final =
-              [ if piIx it `elem` restoredIxs then (it, restoredMark) else (it, out)
-              | (it, out) <- zip (plItems plan) outs
-              ]
-        pure (Right final)
+      Right () -> do
+        pf <- eePreflight env root
+        case pf of
+          Left e -> pure (Left e)
+          Right () -> withJournal root $ \j -> do
+            (outs, restoredIxs) <- execItems env root j (plId plan) (plItems plan)
+            now <- getCurrentTime
+            jAppend j Barrier (JCleanShutdown now)
+            let final =
+                  [ if piIx it `elem` restoredIxs then (it, restoredMark) else (it, out)
+                  | (it, out) <- zip (plItems plan) outs
+                  ]
+            pure (Right final)
   pure $ case r of
     Nothing -> Left "另一个 pm 实例正持有该 root 的锁（I10），稍后重试"
     Just x -> x
@@ -209,19 +222,41 @@ execItems env root j pid = go [] [] []
 -- from @.pm\/trash\/@ back to its original place（§6.5 ②失败 → 复位）. Goes
 -- through 'execRename' so Intent\/Done land in the journal and doctor's
 -- restore-aware C4 check can pair them. Returns (note, restoredOk).
+--
+-- P3b-4 评审 #1：复位目标可能被占——supersede 的 Copy 落位后复核失败的
+-- 残留文件、或落位窗口内第三方创建的文件；I5 会拒绝 rename 落回。此时先
+-- 把占位者 journaled 隔离到 @\<pid\>~displaced\/@（不删除，I2），再复位
+-- victim。占位者是目录或读取失败 → 不动它，保守失败（旧字节仍在 trash）。
 restoreQuarantine :: ExecEnv -> FilePath -> Journal -> Text -> (Int, PlanItem, FilePath) -> IO (String, Bool)
 restoreQuarantine env root j pid (_, qit, trashRel) = do
-  let restoreOp =
+  let victimRel = opVictimRel (piOp qit)
+      victimAbs = root </> victimRel
+      restoreOp =
         OpRename
           (".pm" </> "trash" </> trashRel)
-          (opVictimRel (piOp qit))
+          victimRel
           (FpFileSha (opVictimSha (piOp qit)))
       oid = opId pid (piIx qit) <> "~r"
+  occ <- doesFileExist victimAbs
+  dispNote <-
+    if not occ
+      then pure ""
+      else do
+        oshaE <- try (sha256File victimAbs) :: IO (Either IOException Text)
+        case oshaE of
+          Left e -> pure ("；复位目标被占且无法读取(" <> show e <> ")")
+          Right osha -> do
+            let doid = opId pid (piIx qit) <> "~d"
+                dispOp = OpQuarantine victimRel osha ("rollback-displaced:" <> opId pid (piIx qit))
+            dout <- execQuarantine env root j doid (quarTrashRel doid victimRel) dispOp
+            case dout of
+              ODone {} -> pure "；占位文件已隔离(~displaced)"
+              other -> pure ("；占位文件隔离未成功(" <> outcomeLabel other <> ")")
   out <- execRename env root j oid restoreOp
   pure $ case out of
-    ODone {} -> ("；旧目标已自动复位", True)
+    ODone {} -> ("；旧目标已自动复位" <> dispNote, True)
     other ->
-      ( "；自动复位未成功(" <> outcomeLabel other <> ")，旧字节仍在 .pm/trash/" <> trashRel
+      ( "；自动复位未成功(" <> outcomeLabel other <> ")，旧字节仍在 .pm/trash/" <> trashRel <> dispNote
       , False
       )
 
@@ -236,7 +271,9 @@ execItem env root j pid item = case piStatus item of
       else case piOp item of
         op@OpCopy {} -> execCopy env root j (opId pid (piIx item)) (piIx item) op
         op@OpRename {} -> execRename env root j (opId pid (piIx item)) op
-        op@OpQuarantine {} -> execQuarantine env root j (opId pid (piIx item)) pid op
+        op@OpQuarantine {} ->
+          let oid = opId pid (piIx item)
+           in execQuarantine env root j oid (quarTrashRel oid (opVictimRel op)) op
  where
   relOk op = all good (relPaths op)
   relPaths OpCopy {opDstRel = d} = [d]
@@ -299,18 +336,26 @@ execCopy env root j oid ix op = do
                           jAppend j Barrier (JFailed oid ("落位失败: " <> T.pack (show e)) tf)
                           pure (OFailed ("落位 rename 失败: " <> show e))
                     Right () -> do
-                      post <- statSnap dstAbs
-                      psha <- sha256File dstAbs
-                      if psha /= opSha op
-                        then do
+                      -- P3b-4 评审 #1：落位后复核的 stat/hash 异常必须留在
+                      -- 本项内变成 OFailed——逃逸出去会绕过组回滚（复位不跑）。
+                      verE <-
+                        try ((,) <$> statSnap dstAbs <*> sha256File dstAbs)
+                          :: IO (Either IOException (StatSnap, Text))
+                      case verE of
+                        Left e -> do
                           tf <- getCurrentTime
-                          jAppend j Barrier (JFailed oid "post-move verify failed" tf)
-                          pure (OFailed "落位后复核失败（矩阵 C5，交 pm doctor）")
-                        else do
-                          eeCheckpoint env CpCopyAfterMove
-                          td <- getCurrentTime
-                          jAppend j (eeDoneSync env) (JDone oid (Just (opSha op)) Nothing td)
-                          pure (ODone (Just (opSha op)) (Just post) Nothing)
+                          jAppend j Barrier (JFailed oid ("落位后复核异常: " <> T.pack (show e)) tf)
+                          pure (OFailed ("落位后复核异常（交 pm doctor）: " <> show e))
+                        Right (post, psha)
+                          | psha /= opSha op -> do
+                              tf <- getCurrentTime
+                              jAppend j Barrier (JFailed oid "post-move verify failed" tf)
+                              pure (OFailed "落位后复核失败（矩阵 C5，交 pm doctor）")
+                          | otherwise -> do
+                              eeCheckpoint env CpCopyAfterMove
+                              td <- getCurrentTime
+                              jAppend j (eeDoneSync env) (JDone oid (Just (opSha op)) Nothing td)
+                              pure (ODone (Just (opSha op)) (Just post) Nothing)
 
 -- ─── Rename (§6.2) ──────────────────────────────────────────────────────────
 
@@ -357,10 +402,11 @@ execRename env root j oid op = do
 
 -- ─── Quarantine (§6.3, write-ahead manifest) ────────────────────────────────
 
-execQuarantine :: ExecEnv -> FilePath -> Journal -> Text -> Text -> Op -> IO ItemOutcome
-execQuarantine env root j oid pid op = do
+-- | @trashRel@ 由调用方经 'quarTrashRel' 推导（普通隔离与 ~d 位移隔离落
+-- 不同目录）；manifest 的 planId 从 oid 剥离。
+execQuarantine :: ExecEnv -> FilePath -> Journal -> Text -> FilePath -> Op -> IO ItemOutcome
+execQuarantine env root j oid trashRel op = do
   let victimAbs = root </> opVictimRel op
-      trashRel = T.unpack pid </> opVictimRel op
       trashAbs = trashDir root </> trashRel
   ex <- doesFileExist victimAbs
   if not ex
@@ -389,7 +435,7 @@ execQuarantine env root j oid pid op = do
               , trTrashRel = trashRel
               , trSha = opVictimSha op
               , trReason = opReason op
-              , trPlanId = pid
+              , trPlanId = planIdOf oid
               , trAt = now0
               }
           eeCheckpoint env CpQuarAfterManifest

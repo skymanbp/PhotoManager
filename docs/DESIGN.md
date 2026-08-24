@@ -475,6 +475,26 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   真实库只读验证：RENAME 项命中 `BLOCKED(photos.json:208)`（实测该行
   正是 `_DSC9013_2.JPG` 的 Pages URL），15 NEW 待分类不出计划，vault
   目录零写入。
+- **P3b-4 评审收紧（2026-08-24，codex 6 major 全修复）**：
+  ① supersede 组回滚复位目标被占（落位复核失败残留/竞态第三方文件）时，
+  先把占位者 journaled 隔离到 `<pid>~displaced/`（`~d` opId 约定，
+  `quarTrashRel` 下沉 Pm.Trash 供 Exec/doctor 共用推导）再复位 victim；
+  落位后复核的 stat/hash 异常收进 OFailed 不再逃逸。
+  ② I11 守卫升级为 `vaultIgnoreGuard`：`.git` 文件（worktree）、祖先仓
+  （vault 非仓根一律拒）、`!` 反规则（可重新包含 .pm）全 fail-closed。
+  ③ 执行期重检：ExecEnv 新增 `eePreflight` 钩子（锁内、journal/tmp/trash
+  任何写入前），RoleVault root 的 apply 重跑 I11——计划生成与执行之间
+  ignore 被改则整批拒绝。
+  ④ 缓存身份绑定 + racy 判据：vault-cache meta 记录规范路径 + root UUID，
+  不符即弃用；(size,mtime) 命中统一走 `statHitStable`（上次 hash 时刻须
+  晚于 mtime 2 s 粒度余量，git racily-clean 同型；Scan 复用与 shaViaCache
+  统一修）。
+  ⑤ 读取不稳定名整体退出六态分类，新增 `unstable` 第八态（JSON 键殿后、
+  退出码算差异、push 拒收）；顺带修掉 shaViaCache 告警直打 stdout 污染
+  `--json` 的缺陷。
+  ⑥ bindExecRoot 三槽位全查：UUID 命中 + role 与槽位相符、恰一命中才绑定，
+  多命中（UUID 被复制/恢复）或 role 不符一律拒绝。
+  评审归档：`docs/reviews/2026-08-24-p3b-codex-review.md`。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -642,3 +662,10 @@ canonicalizePath（mj-4）。
 stem 组键改规范化目标路径、bindExecRoot 身份优先（kind 无关）、backup
 采纳前复验配置 UUID、init 写前重 canonicalize；对抗性 TOCTOU 类按 §14
 威胁模型「缓解+记录+交用户裁定」处置。逐项处置表见评审归档三轮章节。
+
+2026-08-24 P3a/P3b-1 实现独立评审（codex gpt-5.6-sol，对 018fb1c..676426c）：
+verdict NO-GO，6 major 逐条对照源码核实**全部成立** → **P3b-4 全部修复**
+（§10.2 P3b-4 条目：组回滚占位隔离、vaultIgnoreGuard、eePreflight 执行期
+重检 I11、缓存身份绑定 + statHitStable racy 判据统一修、unstable 第八态
+fail-closed、bindExecRoot 恰一命中）；新增 6 测试（128/128）。评审归档：
+`docs/reviews/2026-08-24-p3b-codex-review.md`。

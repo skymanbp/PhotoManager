@@ -9,6 +9,7 @@ module KernelTests (kernelTests) where
 import Control.Exception (IOException, throwIO, try)
 import Control.Monad (when)
 import Data.IORef (atomicModifyIORef', newIORef)
+import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
@@ -418,6 +419,43 @@ injectionTests =
             jAppend j Barrier (JIntent "p#0" (OpRename "old.txt" "new.txt" (FpFileSha "aa")) now)
           rows <- doctorRows root
           assertBool ("expected R3 in " <> show rows) (("R3", Warn) `elem` rows)
+    , testCase "P3b-4 #1: supersede 复位目标被占 → 占位者隔离(~displaced) + victim 复位" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+          createDirectoryIfMissing True (root </> "landscape")
+          writeFile (root </> "landscape" </> "d.jpg") "OLDBYTES"
+          oldSha <- sha256File (root </> "landscape" </> "d.jpg")
+          op <- mkCopyOp (dir </> "s.jpg") "NEWBYTES" ("landscape" </> "d.jpg")
+          plan <-
+            mkGroupPlanIO
+              root
+              [ (OpQuarantine ("landscape" </> "d.jpg") oldSha "supersede:test", Just 0)
+              , (op, Just 0)
+              ]
+          -- 竞态注入：Copy 落位 rename 前，第三方抢占目标路径。回滚必须
+          -- 先隔离占位者（journaled，进 <pid>~displaced/）再复位 victim，
+          -- 而不是被 I5 卡死留下 victim 在 trash（codex P3b-4 #1 反例）。
+          let env =
+                defaultExecEnv
+                  { eeCheckpoint = \c -> when (c == CpCopyAfterFlush) $
+                      writeFile (root </> "landscape" </> "d.jpg") "INTERLOPER"
+                  }
+          r <- execPlan env plan
+          case r of
+            Right [(_, OFailed m1), (_, OConflict m2)] -> do
+              assertBool ("复位成功应入注记: " <> m2) ("旧目标已自动复位" `elemSubstr` m2)
+              assertBool ("占位隔离应入注记: " <> m2) ("~displaced" `elemSubstr` m2)
+              assertBool ("组未生效标注: " <> m1) ("组未生效" `elemSubstr` m1)
+            other -> assertFailure ("expected [OFailed, OConflict], got " <> show other)
+          back <- readFile (root </> "landscape" </> "d.jpg")
+          back @?= "OLDBYTES" -- victim 已复位到原位
+          disp <-
+            readFile
+              (trashDir root </> (T.unpack (plId plan) <> "~displaced") </> "landscape" </> "d.jpg")
+          disp @?= "INTERLOPER" -- 占位者进独立隔离区，一个字节没丢
+          -- doctor 对账干净：位移隔离与复位 rename 都有 Intent+Done
+          rows <- doctorRows root
+          [row | row@(_, sev) <- rows, sev == Bad] @?= []
     , testCase "torn tail: 末行半截 JSON → TORN warning" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"

@@ -103,17 +103,19 @@ runStatus cfg opts = do
             Just v -> do
               let vstamp = formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz (vmAt v))
                   vlag = vmNew v + vmMissing v + vmRenamed v + vmDrift v
-              if vlag == 0
+              -- unstable 不是差异但状态未知（P3b-4 #5）：同样要 ⚠ 提示重跑
+              if vlag == 0 && vmUnstable v == 0
                 then printf "  vault      上次比对 %s · 无差异（dup %d · unpushable %d）\n" vstamp (vmDuplicate v) (vmUnpushable v)
                 else
                   printf
-                    "  ⚠ vault    上次比对 %s · 差异 %d（NEW %d / MISS %d / REN %d / DRIFT %d）→ pm vault status\n"
+                    "  ⚠ vault    上次比对 %s · 差异 %d（NEW %d / MISS %d / REN %d / DRIFT %d / 不稳定 %d）→ pm vault status\n"
                     vstamp
                     vlag
                     (vmNew v)
                     (vmMissing v)
                     (vmRenamed v)
                     (vmDrift v)
+                    (vmUnstable v)
       -- Freshness sweep（共享实现：Pm.Scan.freshnessSweep）
       pending <-
         if stCached opts

@@ -9,6 +9,7 @@ module Pm.Trash
   ( TrashRecord (..)
   , trashDir
   , manifestPath
+  , quarTrashRel
   , appendManifest
   , readManifest
   , listTrashFiles
@@ -22,6 +23,7 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Time (UTCTime)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath ((</>))
@@ -66,6 +68,16 @@ trashDir root = pmDir root </> "trash"
 
 manifestPath :: FilePath -> FilePath
 manifestPath root = trashDir root </> "manifest.ndjson"
+
+-- | opId → 隔离落位目录的唯一推导（Exec 与 doctor 共用，P3b-4 评审 #1）：
+-- 普通隔离落 @\<planId\>\/\<victim\>@；组回滚的占位者位移隔离（opId 带 @~d@
+-- 后缀）落 @\<planId\>~displaced\/\<victim\>@ —— 同一计划里 victim 本体已
+-- 占用前者，二者不可同路径。两侧不共用此函数就会像评审 #1 那样各推各的。
+quarTrashRel :: Text -> FilePath -> FilePath
+quarTrashRel oid victim =
+  let pidS = T.unpack (T.takeWhile (/= '#') oid)
+      dir = if "~d" `T.isSuffixOf` oid then pidS <> "~displaced" else pidS
+   in dir </> victim
 
 -- | Write-ahead: flushed to disk before the victim moves (§6.3 step 1).
 appendManifest :: FilePath -> TrashRecord -> IO ()

@@ -9,6 +9,8 @@ module Pm.Hash
   , StatSnap (..)
   , statSnap
   , nsToUtc
+  , utcToNs
+  , statHitStable
   ) where
 
 import Crypto.Hash (Context, Digest, SHA256, hashFinalize, hashInit, hashUpdate)
@@ -58,6 +60,28 @@ copyFileHashed src dst =
 -- over a fixed 10^9 denominator).
 nsToUtc :: Integer -> UTCTime
 nsToUtc ns = posixSecondsToUTCTime (fromRational (ns % 1_000_000_000))
+
+utcToNs :: UTCTime -> Integer
+utcToNs t = truncate (utcTimeToPOSIXSeconds t * 1_000_000_000)
+
+-- | (size, mtime) 缓存命中的统一判据（P3b-4 评审 #4；scan 复用与 vault
+-- shaViaCache 共用，消除各写各的分叉）。相等之外还要求条目不「racy」：
+-- 上次真实 hash 的时刻必须晚于文件 mtime 至少一个最粗时间戳粒度的余量
+-- （FAT/exFAT 2 s；NTFS 100 ns 一并覆盖）。同一 mtime 刻度内先 hash 后
+-- 改写的文件 (size,mtime) 不变而内容已变，无此余量会永久信任陈旧 sha
+-- （git racily-clean 同型问题）。lastVerified 缺失 → 不信任（fail-closed，
+-- 重 hash 一次即回填）。
+statHitStable :: Integer -> Integer -> Maybe UTCTime -> StatSnap -> Bool
+statHitStable size mtimeNs mVerified snap =
+  size == ssSize snap
+    && mtimeNs == ssMtimeNs snap
+    && case mVerified of
+      Nothing -> False
+      Just v -> utcToNs v - mtimeNs > racySlackNs
+
+-- | 最粗常见文件系统（FAT 系）的时间戳粒度。
+racySlackNs :: Integer
+racySlackNs = 2_000_000_000
 
 data StatSnap = StatSnap
   { ssSize :: Integer
