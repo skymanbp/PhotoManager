@@ -202,3 +202,56 @@ diff 与 name-only 均为空）；NO-GO 只落在一处文档 minor。
 
 最小修复集：仅修正谓词表第 33–36 行的类型说明；无需代码改动。已修（本文件
 上方的排除说明即为修正后文本）。
+
+---
+
+# 第十七轮（复审 P3b-17c + P3b-18，commit 324501e；gpt-5.6-sol 独立评审）
+
+**verdict：GO**——"生产逻辑未变，第十六轮 minor 已准确闭合，P3b-18 钉住既定
+Copy 路径回退突变，且两条代码判据继续收敛。新发现：无。合并前最小修复集：空。"
+这是 P3b 门禁自第一轮以来的第一个 GO（64 次探查）。
+
+- 收敛性（按名字操作）：已收敛——`src/`、`cbits/` 无 diff，Copy/Rename/
+  Quarantine 继续消费限域助手返回路径，维持十五/十六轮判定。
+- 收敛性（谓词宽度）：已收敛——复位源 `PmEntryAny`、tmp `PmEntryFile`，维持原判定。
+- 生产代码零变化：是（`app/Main.hs` 与 `package.yaml` 仅版本字面量 0.3.15 →
+  0.3.16；唯一测试逻辑变更在 `test/StateGuardTests.hs`）。
+- 十六轮 minor：FIXED。
+
+## 对 P3b-18 用例本身的细评（它是被审对象）
+
+| 点 | 判定 | 要点 |
+|---|---|---|
+| ① 返回路径是否真的被使用 | 成立（针对既定落位路径突变，非逐分支穷举） | 把 `execCopy` 下传实参改成 `root </> opDstRel op` → 改指后父目录创建、move、复核都沿 B → A/B 断言判红；只改检查点**之后**的实际使用点（父目录创建 / move / 落位复核）也会红。**不会红的单点突变**：只改落位前的 dst 预检（改指尚未发生）、目标缺席时不执行的 sha 分支、只在 move 失败分支执行的 race 探测——本例不覆盖这三处 |
+| ② 诱饵库 B 同身份 | 充分，无假绿 | 突变版确会 `ODone`，但"A 有且内容正确 + B 无"三项断言足以区分落位；`libB/dstRel` 不存在不是整棵 B 的零改动快照，但既定重拼突变必然把目标文件落到 B |
+| ③ 改指后按 root 名字的访问 | 无 | `execCopyTmp` 不持 root；`CpCopyAfterFlush` 后只用 `takeDirectory dstAbs` / `tmp` / `dstAbs`；journal 与 lock 均经已打开句柄。平台行为仍属运行时假设，用例直接删除并重建 junction、无跳过分支 |
+| ④ Rename / Quarantine 对称用例 | 已登记残余，非阻断 | 两条已用返回路径且调用图可静态证明；可补对称突变测试，Quarantine 优先级略高 |
+
+## 残余（同十五轮清单，"返回路径必须被使用"已闭合；新增一条）
+
+- **Rename / Quarantine 的"返回路径必须被使用"对称用例**（十七轮 ④，Quarantine
+  优先）；以及 P3b-18 用例不覆盖的三处单点突变（落位前 dst 预检、目标缺席不执行
+  的 sha 分支、move 失败分支的 race 探测）。
+- 其余：TOCTOU、`createRootInfo` post-mkdir、`openExclusiveBinary` 外层 `mask`、
+  `requirePmTrusted` 快照、`writeRootInfo` fixture 覆盖写、`Pm.Scan` symlink 异常、
+  `probeName` 错误码、status 语义扩展、未证实名字/ACL/UNC 形态、慢介质、
+  `tamperMark` / `opSrcAbs` / `writeConfig` / 槽位 99 / root-id tmp / .gitignore TOCTOU。
+
+回归（merge 后 main，pm 0.3.16）：190/190，警告 0；真实库只读四连 doctor 0
+（678 ms）/ trash list 0 / status 1 / vault status 1——与 P3b-15 起每轮相同的
+集合（status 1 = 暂存区事件 + 索引差异；vault 1 = 15 NEW 待 P4 GUI 分类）。
+public 同步：链内首推遇 GitHub 504，手动重推成功（origin/main = public = 5c2cd4b）。
+
+**门禁满足 → 按用户 2026-08-24 裁定，AskUserQuestion 请裁定
+`pm apply 20260824-030200-0c238a`（6 项 Raw 事件夹改名，undo 可逆）。**
+
+## 真实写入（用户裁定"全量执行"，2026-08-24）
+
+`pm apply 20260824-030200-0c238a`：6/6 → DONE，1071 ms。盘上核实
+`Raw/2023/23-12-Turkey-Raw`、`Raw/2025/{25-06-USA,25-08-PR,25-08-Tennessee,
+25-11-Alaska,25-12-Colorado}-Raw` 均已就位；`Raw/2025` 余下 3 个 `RAW-2025-*`
+是该计划生成时的 3 项拒绝，不是遗漏。事后 `pm doctor` exit 0；`pm status`
+报"✓ 索引与磁盘一致"（`updateCatalog` 已重写目录前缀，无需重扫），exit 1 仅因
+暂存区 5 事件待 `clean staging`（需插备份盘）与 vault 差异 16（15 NEW 待 P4 GUI
+分类、1 REN=BLOCKED）。这是 pm 对真实库的**第一次 names 写入**；`pm undo` 可
+整体回滚。

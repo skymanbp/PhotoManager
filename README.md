@@ -61,10 +61,11 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   集合逐项一致 78/15/1/0/0/0；行为基线 docs/specs/；vault 目录零写入）
 - P3b-1 ✅ `pm vault push`（I11 文本级守卫 + DRIFT→resolve supersede 复用 +
   RENAME BLOCKED(photos.json) 实测命中 + doctor/trash/undo --vault；
-  真实写入待 codex 评审 + 用户分类）
+  真实写入待用户在 P4 GUI 里给 15 NEW 分类后再裁定）
 - P3b-2/3 ✅ `pm names`（真实库 42 夹：31 合规 + 6 项计划 + 3 拒猜 + 2 双月名
   报告；E2E undo 回滚有测试）+ `pm versions`（真实库定位 7 连号跨夹 ARW 重复
-  与 相册 9275≡成片 9274 那 1 例外）—— 真实改名待用户 apply
+  与 相册 9275≡成片 9274 那 1 例外）—— 6 项真实改名已于 codex 十七轮 GO 后
+  经用户裁定执行（见下方「真实写入」）；versions 处置仍待用户
 - P3b-4 ✅ codex 评审 6 major 全修复（组回滚占位隔离 ~displaced、
   vaultIgnoreGuard 加固（.git 文件/祖先仓/反规则）、apply 执行锁内重检 I11、
   缓存绑定 root 身份 + racy-clean 判据统一、UNSTABLE 第八态 fail-closed、
@@ -158,6 +159,12 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   base，合法用法），在 `CpCopyAfterFlush` 把它改指诱饵库 B——正确实现落在原库
   A、B 零改动；突变回重拼即落到 B、用例转红。顺带实证了十五轮标注的平台前提：
   A 内 journal/lock 句柄打开时 junction 可删除重建。190/190 测试）
+- **codex 十七轮：GO** ✅（对 P3b-17c + P3b-18；生产逻辑零变化、两条收敛性判据
+  维持、新发现无、最小修复集空——P3b 门禁自一轮以来首个 GO）。真实写入
+  `pm apply 20260824-030200-0c238a`（6 项 Raw 事件夹改名，undo 可逆）转用户裁定。
+- **真实写入 ✅**（用户裁定全量执行）：`pm apply 20260824-030200-0c238a` 6/6 DONE，
+  doctor 0，status "索引与磁盘一致"——pm 对真实库的第一次 names 写入。P3 只剩
+  等外部条件的项：备份盘三件套（插盘）、15 NEW 分类（P4 GUI）、versions 处置。
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
