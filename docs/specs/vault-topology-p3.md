@@ -12,7 +12,10 @@
 | `<vault-root>\摄影作品\` | 有 | **嵌套独立仓** → `skymanbp/photography-private`（GitHub Pages） |
 | `D:\Photography\` | 无 | 主库不在 git 下（`.pm/` 已在此运行，无 git 摩擦） |
 
-- vault 根仓的 `.gitignore:7` 把 `摄影作品/` 整个排除——
+（`<vault-root>` = 档案 vault 根目录占位；`摄影作品` 实际位于其下若干层子路径，
+公开仓不写本机真实路径。）
+
+- vault 根仓的 `.gitignore:7` 把 `摄影作品/` 所在子路径整个排除——
   两仓互不嵌套管理。**pm 的 vault root = 摄影作品目录本身**，绝不以
   `<vault-root>\` 为根做任何 git 相关提示。
 - 勘察时两仓 `--porcelain` 均为空（全净）→ pm 产生的任何脏项都会是唯一脏项，

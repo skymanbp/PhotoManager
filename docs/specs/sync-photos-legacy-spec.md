@@ -4,13 +4,14 @@
 > 的全文精读。行号引用以该版本为准。本文件是 `pm vault status` 逐字段兼容
 > （DESIGN §10.1 / I8）的验收基线：**「保留」清单必须逐项复刻，「修复」清单是
 > pm 相对 legacy 的有意偏离，验收比对时需逐项豁免登记。**
+> （`<vault-root>` = 档案 vault 根目录的占位，公开仓不写本机真实路径。）
 
 ## 1. 常量与扫描范围
 
 | 常量 | 值 | 行 |
 |---|---|---|
 | `SOURCE` | `D:\Photography\相册`（硬编码） | :51 |
-| `VAULT` | `<vault-root>\摄影作品` | :52 |
+| `VAULT` | `<vault-root>\摄影作品`（硬编码） | :52 |
 | `CATEGORIES` | `("landscape", "portrait", "urban")` 固定元组 | :53 |
 | `PHOTO_EXTS` | `{.jpg,.JPG,.jpeg,.JPEG,.png,.PNG}` 字面六拼写 | :54 |
 

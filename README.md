@@ -71,3 +71,10 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   bindExecRoot 恰一命中；128/128 测试；归档 docs/reviews/2026-08-24-*）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE). Copyright 2026 skymanbp.
+
+公开仓是脱敏快照（本机路径以 `<vault-root>` / `<stack-root>` 占位）；
+设计文档中的库规模、事件夹名等来自作者真实照片库的实测记录。
