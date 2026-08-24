@@ -22,14 +22,13 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import Data.Text (Text)
 import Data.Time (UTCTime)
-import Control.Exception (bracket)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.IO
 
-import Pm.Config (pmDir, requirePmTrusted)
+import Pm.Config (pmDir, readPmState, requirePmTrusted, withPmStateAppend)
 import Pm.Op (Op)
-import Pm.Win (flushHandleToDisk, openStateAppend)
+import Pm.Win (flushHandleToDisk)
 
 data Sync = Barrier | Buffered
 
@@ -72,10 +71,14 @@ journalPath root = pmDir root </> "journal.ndjson"
 -- @AppendMode@ 追加**真的写到了库外对象**上（hardlink 不是 reparse point，
 -- 逐级下降与 canonical 都看不见它）。'openStateAppend' 打开后立刻查 link
 -- count，\>1 即关闭并拒绝——AppendMode 不截断，所以此时尚未写入任何字节。
+-- P3b-14（十一轮）：改走 'withPmStateAppend' —— 它在 'openStateAppend' 之前
+-- 先对**完整路径**做 resolveUnder。journal 在 @.pm@ 深度 1，可信闸本就覆盖它，
+-- 但 manifest 的同类形态（深度 2）实测能把追加写引到库外，两个追加点因此统一
+-- 走同一个口，不留"这个为什么不一样"的缺口。
 withJournal :: FilePath -> (Journal -> IO a) -> IO a
 withJournal root act = do
   createDirectoryIfMissing True (pmDir root)
-  bracket (openStateAppend (journalPath root)) hClose (act . Journal)
+  withPmStateAppend root "journal.ndjson" (act . Journal)
 
 jAppend :: Journal -> Sync -> JEntry -> IO ()
 jAppend (Journal h) sync e = do
@@ -99,12 +102,14 @@ readJournal root = do
 
 readJournal' :: FilePath -> IO ([JEntry], [String])
 readJournal' root = do
-  let fp = journalPath root
-  exists <- doesFileExist fp
-  if not exists
-    then pure ([], [])
-    else do
-      raw <- BS.readFile fp
+  -- P3b-14（十一轮）：读侧与写侧同规格——受信取用口做完整路径 resolveUnder +
+  -- 句柄 link count。不可信一律 Left，绝不降级成"空 journal"（那会让 doctor
+  -- 把在途事务判成无事发生）。
+  rd <- readPmState root "journal.ndjson"
+  case rd of
+    Left m -> pure ([], [m])
+    Right Nothing -> pure ([], [])
+    Right (Just raw) -> do
       let ls = filter (not . BS.null) (BSC.lines raw)
           parsed = map (\l -> (l, eitherDecodeStrict l :: Either String JEntry)) ls
           go _ [] = ([], [])

@@ -282,11 +282,36 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   条目**逐一判定，pm 现有的、我漏掉的、将来新增的目录全部自动进入检查范围，
   "漏枚举"在结构上不再可能。同轮另两处：①闸下沉到 loader
   （`loadCatalog`/`readJournal`/`readManifest`/`loadPlan`）——命令层加闸盖不住
-  `pm status`/`pm versions`/apply 的计划查找，而每一次 root-based 的 `.pm` 读取
-  都经过 loader；②`writeSideCache` 从「给我一个目录」改成「给我 root + `.pm` 下
+  `pm status`/`pm versions`/apply 的计划查找（**十一轮更正**：当时写的"每一次
+  root-based 的 `.pm` 读取都经过 loader"不实——侧缓存读、trash 盘面遍历、doctor
+  的 tmp 探测都不经过这四个 loader，P3b-14 的受信取用口才把状态文件读取真正
+  收口）；②`writeSideCache` 从「给我一个目录」改成「给我 root + `.pm` 下
   的子目录名」，完整路径在建目录前后各验一次。另修：reparse 探测改
   Missing/Plain/Surrogate/Unknown 四态且 Unknown fail-closed（此前"不存在"与
-  "ACL 拒绝"都塌缩成 False）；`reparseTag` 与 `openExclusiveBinary` 加
-  `mask`/`finally`；`admitsUserPath` 判据导出以便测试钉住真实代码。新增 3 测试
-  （176/176），其中一条按十轮给的方法用 `CpCopyAfterIntent` 检查点在两次限域
-  **之间**注入 junction，专门钉住建目录后的复检。
+  "ACL 拒绝"都塌缩成 False）；`reparseTag` 加 `mask`/`finally`（**十一轮更正**：
+  当时把 `openExclusiveBinary` 也写成"已加 mask"，实际它只有逐段 `onException`，
+  外层 mask 仍是已登记残余）；`admitsUserPath` 判据导出以便测试钉住真实代码。
+  新增 3 测试（176/176），其中一条按十轮给的方法用 `CpCopyAfterIntent` 检查点
+  在两次限域**之间**注入 junction，专门钉住建目录后的复检。
+- **P3b-14 十一轮收口（同日，codex 十一轮：1 critical + 2 major + 1 minor +
+  测试/文档各若干；仍判「未收敛」）**：三条实证缺口只有一个根因——pm 访问
+  `.pm` 的模式是「拼路径字符串 → 校验字符串 → 再**按名字**打开」：①校验只到
+  深度 1，`trash/manifest.ndjson`（深度 2）做成指向库外的**文件 symlink** 后，
+  真实 `appendManifest` 把隔离记录**追加进了库外文件**（critical，Probe11）；
+  ②字符串校验在原理上看不见 hardlink 而读侧没有 link count——hardlink 占名的
+  catalog.json 被 `loadCatalog` **零警告载入**、`plans/<id>.json` 两种链接形态
+  都让 `loadPlan` 载入**库外计划**（major×2，Probe11b）；③校验与打开是两次独立
+  解析。修法把取用收成**唯一受信口**（`Pm.Config.readPmState` /
+  `withPmStateAppend` / `readSideCache`）：完整相对路径逐级 `resolveUnder` →
+  只打开一次 → 在**句柄**上查 link count → 从同一句柄读写。catalog 三代、
+  journal、manifest、plan、root-id、两侧缓存读、lock 全部改道；`savePlan` 落位
+  前对完整路径验一次。另修：`probeName` 的 Missing/Unknown 分辨改读
+  `GetFileAttributesW` 失败时的 `GetLastError`（只有 2/3 算缺失，其余
+  fail-closed——`doesPathExist` 二问会把 ACL 错误吞成"不存在"）；
+  `requirePmTrusted` 四态分判 `.pm` 自身（普通文件不再被当"尚不存在"放行）；
+  doctor 的 `staleTmpFiles` 判据从 `isNameSurrogate`（Unknown 算 False）改为仅
+  `NamePlain` 放行，`--repair` 删除前对完整路径再过一次 `resolveUnder`。
+  测试拆出 StateGuardTests（+5，181/181）：manifest 深层 symlink、catalog 读侧
+  hardlink、plan 双形态、`.pm` 普通文件、侧缓存**文件级**链接（十一轮指出旧的
+  目录级用例钉不住 `writeCacheFile` 的文件级复检）。归档见
+  `docs/reviews/2026-08-24-p3b-codex-review.md` 第十一轮章节。

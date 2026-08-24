@@ -22,7 +22,7 @@ import qualified Data.Text as T
 import Data.Time (UTCTime)
 import System.FilePath ((</>))
 
-import Pm.Config (Config (..), pmDir, pmSubBackupCache, readJsonMaybe, readRootInfo, writeSideCache)
+import Pm.Config (Config (..), pmDir, pmSubBackupCache, readRootInfo, readSideCache, writeSideCache)
 import Pm.Types
 import Pm.Win (listCandidateDrives, suppressCriticalErrorDialogs)
 
@@ -114,5 +114,8 @@ cacheDir mainRoot = pmDir mainRoot </> pmSubBackupCache
 writeBackupCache :: FilePath -> Catalog -> BackupCacheMeta -> IO (Either String ())
 writeBackupCache mainRoot = writeSideCache mainRoot pmSubBackupCache
 
+-- P3b-14（十一轮复审 major）：读侧与写侧同规格。此前是自由拼路径 + 按名字
+-- decode——写侧从十轮起验完整路径，读侧却没有，@meta.json@ 被 hardlink/symlink
+-- 占名时 pm 会把库外内容当成自己的备份基线。
 readBackupCacheMeta :: FilePath -> IO (Maybe BackupCacheMeta)
-readBackupCacheMeta mainRoot = readJsonMaybe (cacheDir mainRoot </> "meta.json")
+readBackupCacheMeta mainRoot = readSideCache mainRoot pmSubBackupCache "meta.json"

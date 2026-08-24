@@ -33,8 +33,8 @@ import System.FilePath ((</>))
 import System.IO (hClose)
 import Text.Printf (printf)
 
-import Pm.Config (pmDir, pmSubPlans, requirePmTrusted)
-import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary)
+import Pm.Config (pmDir, pmSubPlans, readPmState, requirePmTrusted, untrustedMsg)
+import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary, resolveUnder)
 import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
 
 data ItemStatus
@@ -145,19 +145,29 @@ planPath root pid = plansDir root </> (T.unpack pid <> ".json")
 -- 'moveFileNoReplace' 落位」：tmp 走 @CREATE_NEW@，删旧对 hardlink 只减一个
 -- 目录项。删旧与落位之间崩溃会丢掉计划文件——可接受：计划可重新生成，耐久层
 -- 是 journal（DESIGN §3）。
+-- P3b-14（十一轮）：建目录之后对**完整路径**再验一次（同
+-- 'Pm.Config.writeCacheFile'）。可信闸只覆盖 @.pm\/plans@ 这一层，计划文件
+-- 自身是深度 2；它若是指向库外的 symlink，删旧那一步会删掉库外文件。
+-- 拒绝以 IOException 抛出（同 'Pm.Config.withPmStateAppend'）：14 处调用点都在
+-- 「生成计划 → 落盘 → 报告」的直线上，写不成必须整条命令中止，而不是让调用方
+-- 各自决定怎么忽略。
 savePlan :: Plan -> IO FilePath
 savePlan p = do
   let root = plRootPath p
-      fp = planPath root (plId p)
-      tmp = fp <> ".tmp"
+      pid = plId p
   createDirectoryIfMissing True (plansDir root)
-  bracket (openFreshBinary tmp) hClose $ \h -> do
-    BSL.hPut h (encode p)
-    flushHandleToDisk h
-  old <- doesFileExist fp
-  when old (removeFile fp)
-  moveFileNoReplace tmp fp
-  pure fp
+  m <- resolveUnder root (".pm" </> pmSubPlans </> (T.unpack pid <> ".json"))
+  case m of
+    Nothing -> ioError (userError (untrustedMsg (planPath root pid)))
+    Just fp -> do
+      let tmp = fp <> ".tmp"
+      bracket (openFreshBinary tmp) hClose $ \h -> do
+        BSL.hPut h (encode p)
+        flushHandleToDisk h
+      old <- doesFileExist fp
+      when old (removeFile fp)
+      moveFileNoReplace tmp fp
+      pure fp
 
 -- | 装载前先验 id 格式（也挡住 @..\\x@ 之类拼进 'planPath' 的路径穿越），装载
 -- 后再过 'validatePlan' 并验文件内 id 与文件名一致。
@@ -175,13 +185,17 @@ loadPlan root pid
 
 loadPlan' :: FilePath -> Text -> IO (Either String Plan)
 loadPlan' root pid = do
-      let fp = planPath root pid
-      exists <- doesFileExist fp
-      if not exists
-        then pure (Left ("计划不存在: " <> fp))
-        else do
-          r <- eitherDecodeFileStrict fp
-          pure $ case r of
+      -- P3b-14（十一轮复审 major，探针实证）：计划文件在深度 2，可信闸只验到
+      -- @.pm/plans@。实测把 @plans/<id>.json@ 做成库外计划的 hardlink **或**
+      -- symlink 后，loadPlan 两种形态都把**库外计划**载入了——apply 会照它执行。
+      -- 受信取用口一次治两种：完整路径 resolveUnder 认 symlink，句柄 link
+      -- count 认 hardlink。
+      rd <- readPmState root (pmSubPlans </> (T.unpack pid <> ".json"))
+      case rd of
+        Left m -> pure (Left m)
+        Right Nothing -> pure (Left ("计划不存在: " <> planPath root pid))
+        Right (Just bytes) ->
+          pure $ case eitherDecodeStrict' bytes of
             Left e -> Left e
             Right p
               | plId p /= pid ->

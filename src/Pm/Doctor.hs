@@ -21,7 +21,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, removeFile)
-import System.FilePath ((</>))
+import System.FilePath (makeRelative, (</>))
 
 import Pm.Catalog (loadCatalog)
 import Pm.Config (pmDir, pmSubTmp, readRootInfo, requireWritable)
@@ -32,7 +32,7 @@ import Pm.Op
 import Pm.Plan
 import Pm.Trash
 import Pm.Types
-import Pm.Win (isNameSurrogate)
+import Pm.Win (NameKind (..), probeName, resolveUnder)
 
 data DoctorOpts = DoctorOpts
   { doDeep :: Bool
@@ -320,26 +320,29 @@ verifyDone root intents restoredAfter (oid, msha, mtrash) =
 -- 随后的 @removeFile@ **真的删掉库外文件**（探针把库外 hostage.txt 删掉了）。
 -- 链接本体既不递归也不列出：不列 = 不删（fail-closed），它会以 doctor 的
 -- 其它行\/人工核查暴露；'Pm.Config.requirePmTrusted' 在写入口拒绝这种 root。
+-- P3b-14（十一轮 #4）：判据从 'isNameSurrogate'（Unknown 算 False，会把"查不出
+-- 是什么"的名字当普通文件送去 --repair 删除）改为 'probeName' 只放行
+-- **明确的** NamePlain——不进列表 = 不删，与"链接本体不列出"同一 fail-closed。
 staleTmpFiles :: FilePath -> [FilePath] -> IO [FilePath]
 staleTmpFiles root expected = do
   let base = pmDir root </> pmSubTmp
-  baseLink <- isNameSurrogate base
+  basePlain <- (== NamePlain) <$> probeName base
   ex <- doesDirectoryExist base
-  if baseLink || not ex
+  if not basePlain || not ex
     then pure []
     else do
       plans <- listDirectory base
       files <- concat <$> forM plans (\p -> do
         let pd = base </> p
-        lnk <- isNameSurrogate pd
+        pk <- probeName pd
         isD <- doesDirectoryExist pd
-        if lnk
+        if pk /= NamePlain
           then pure []
           else
             if isD
               then do
                 inner <- listDirectory pd
-                filterM (fmap not . isNameSurrogate) (map (pd </>) inner)
+                filterM (fmap (== NamePlain) . probeName) (map (pd </>) inner)
               else pure [pd])
       onlyFiles <- filterM doesFileExist files
       pure [f | f <- onlyFiles, f `notElem` expected]
@@ -388,8 +391,15 @@ applyRepairs root findings pending stale = do
         jAppend j Barrier (JDone oid sha trash now)
         putStrLn ("  修复: 补记 Done " <> T.unpack oid)
   forM_ stale $ \f -> do
-    removeFile f -- pm 自建的 .pm/tmp 文件，从未 rename 落位，非用户数据
-    putStrLn ("  修复: 清除孤儿 tmp " <> f)
+    -- P3b-14（十一轮 #4）：删除前对完整相对路径再过一次 'resolveUnder'——
+    -- staleTmpFiles 枚举与这里的 unlink 之间有窗口，且枚举本身只按层探测。
+    -- 解析不出就跳过（不删 = fail-closed），以 doctor 文本暴露给人工。
+    m <- resolveUnder root (makeRelative root f)
+    case m of
+      Nothing -> putStrLn ("  跳过: " <> f <> " 不再是可信路径（junction/symlink？），不删除——人工核查")
+      Just fp -> do
+        removeFile fp -- pm 自建的 .pm/tmp 文件，从未 rename 落位，非用户数据
+        putStrLn ("  修复: 清除孤儿 tmp " <> f)
   forM_ c5 $ \(oid, op) -> case op of
     OpCopy _ dstRel _ _ _ -> do
       actual <- sha256File (root </> dstRel)

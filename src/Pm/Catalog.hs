@@ -11,14 +11,14 @@ module Pm.Catalog
 
 import Control.Exception (bracket)
 import Control.Monad (foldM, when)
-import Data.Aeson (eitherDecodeFileStrict, encode)
+import Data.Aeson (eitherDecodeStrict', encode)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.IO (hClose)
 
-import Pm.Config (pmDir, requirePmTrusted)
+import Pm.Config (pmDir, readPmState, requirePmTrusted)
 import Pm.Op (userRelOk)
 import Pm.Types
 import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary)
@@ -46,29 +46,33 @@ loadCatalog :: FilePath -> IO (Maybe Catalog, [String])
 loadCatalog root = do
   -- P3b-13（十轮复审 major）：闸下沉到 loader。此前只在命令层加闸，于是
   -- pm status / pm versions / apply 的计划查找都在闸之前就读了 .pm。
-  -- 每一次 root-based 的 .pm 读取都经过这里，一处判定覆盖全部读入口。
+  -- （十一轮更正：当时这里写"覆盖全部读入口"不实——侧缓存/trash 遍历/doctor
+  -- 探测不经过 loader；P3b-14 的 'Pm.Config.readPmState' 才把状态文件读取
+  -- 真正收成一个口，本函数的逐代读取也已改道走它。）
   tr <- requirePmTrusted root
   case tr of
     Left m -> pure (Nothing, [m])
     Right () -> loadCatalog' root
 
 loadCatalog' :: FilePath -> IO (Maybe Catalog, [String])
-loadCatalog' root = do
-  let base = catalogPath root
-      candidates = [base, base <> ".1", base <> ".2"]
-  foldM step (Nothing, []) candidates
+loadCatalog' root = foldM step (Nothing, []) ["catalog.json", "catalog.json.1", "catalog.json.2"]
  where
   step acc@(Just _, _) _ = pure acc
   -- 语义非法已经终止过一次 → 后续代次不再尝试（哨兵：warns 末尾是拒绝理由）
-  step acc@(Nothing, warns) fp
+  step acc@(Nothing, warns) rel
     | any (tamperMark `isSuffixOfStr`) warns = pure acc
     | otherwise = do
-        exists <- doesFileExist fp
-        if not exists
-          then pure (Nothing, warns)
-          else do
-            r <- eitherDecodeFileStrict fp
-            case r of
+        let fp = pmDir root </> rel
+        -- P3b-14（十一轮复审 major，探针实证）：此前是 doesFileExist + 按名字
+        -- decode。hardlink 不是 reparse point，可信闸看不见它——实测把
+        -- catalog.json 预置成库外文件的 hardlink 后，这里**零警告地载入了库外
+        -- 快照**，而快照决定 backup/import 会去读写哪些文件。改走受信取用口：
+        -- 完整路径 resolveUnder + 句柄 link count + 同一句柄读完。
+        rd <- readPmState root rel
+        case rd of
+          Left m -> pure (Nothing, warns <> [m <> tamperMark])
+          Right Nothing -> pure (Nothing, warns)
+          Right (Just bytes) -> case eitherDecodeStrict' bytes of
               -- P3b-10（七轮复审 major）：快照是可手编的 .pm 文件，而 enPath 会被拼成
               -- 绝对源路径喂给 backup/import 的 OpCopy（Pm.Diff/Pm.Import）并被 doctor
               -- --deep / clean 见证直接读取。P3b-11：校验从 relPathOk 收紧到

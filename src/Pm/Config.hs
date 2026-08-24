@@ -5,6 +5,11 @@
 -- Config lives under the roaming profile (derived at runtime, never
 -- hard-coded); root markers live in @\<root\>\/.pm\/root-id.json@ so roots are
 -- recognized by UUID, not by drive letter (DESIGN.md §9).
+--
+-- 这里同时是 @.pm@ **状态文件的唯一受信取用口**（'readPmState' \/
+-- 'withPmStateAppend' \/ 'readSideCache' \/ 'writeSideCache'）。见
+-- 'readPmState' 的注释：十一轮之前每个模块自己拼 @.pm@ 路径再按名字打开，
+-- 那个模式在原理上补不完。
 module Pm.Config
   ( Config (..)
   , configFilePath
@@ -28,14 +33,15 @@ module Pm.Config
   , pmSubBackupCache
   , pmSubVaultCache
   , untrustedMsg
-  , readJsonMaybe
+  , readPmState
+  , withPmStateAppend
+  , readSideCache
   , writeSideCache
   ) where
 
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (when)
 import Crypto.Random (getRandomBytes)
-import Data.Aeson (eitherDecodeFileStrict)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
@@ -52,13 +58,23 @@ import System.Directory
   , removeFile
   )
 import System.FilePath ((</>))
-import System.IO (hClose)
+import System.IO (Handle, hClose)
+import System.IO.Error (isDoesNotExistError)
 import Text.Printf (printf)
 import qualified TOML
 
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Types
-import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary, resolveUnder)
+import Pm.Win
+  ( NameKind (..)
+  , flushHandleToDisk
+  , moveFileNoReplace
+  , openFreshBinary
+  , openStateAppend
+  , openStateRead
+  , probeName
+  , resolveUnder
+  )
 
 data Config = Config
   { cfgMainPath :: FilePath
@@ -148,33 +164,47 @@ pmSubVaultCache = "vault-cache"
 -- 探针实证：把 @.pm\/trash@ 本身做成指向库外的 junction 后，落位\/删除侧的
 -- canonical 限域两侧都解析到库外、判定通过，@removeFile@ 删掉了库外文件；
 -- @.pm@ 自身被劫持时 journal\/plan\/manifest\/catalog\/root-id 会**整套**写到
--- 库外。这些入口没有共同的路径参数可校验，但有共同的前提——身份读取
--- （'readRootState'）与 'requireWritable'，闸因此放在这里。
+-- 库外。
 --
--- @.pm@ 尚不存在（新库）放行：无可枚举，pm 自己会创建它。
--- P3b-13（十轮复审 critical）：**不再维护白名单**。前三轮我每次都补一个名字
--- （trash\/tmp\/plans），每次都漏——十轮点出 @backup-cache@ 与 @vault-cache@
--- 从来不在名单里，于是把它做成 junction 后 'writeSideCache' 会删除并替换**库外**
--- 的 catalog.json\/meta.json（探针实证）。用枚举定义可信集合，天生会漏。
+-- P3b-13（十轮复审 critical）：**不再维护白名单**。改为枚举 @.pm@ 下**实际
+-- 存在**的每个条目——pm 现有的、我漏掉的、将来新增的、任何人放进去的，全部
+-- 自动进入检查范围。
 --
--- 改为**枚举盘上实际有什么**：验 @.pm@ 自身，再对它下面每一个真实存在的条目
--- 逐个判定。这样 pm 现有的、我漏掉的、将来新增的子目录，以及任何人放进
--- @.pm@ 的东西，全部自动进入检查范围——"漏枚举"在结构上不再可能。
+-- P3b-14（十一轮复审 minor，探针实证）：@.pm@ 是**普通文件**时旧实现放行——
+-- @doesDirectoryExist@ 为 False 被直接读成"尚不存在（新库）"，于是无可枚举、
+-- 一路 Right。四态分开判：缺失=新库放行，非目录与"查不出"一律拒绝。
+--
+-- 它的作用域是**深度 1**（@.pm@ 自身与它的直接子项）。更深的完整路径由
+-- 'readPmState' \/ 'withPmStateAppend' \/ 'writeSideCache' 在每次取用时逐条
+-- 验——见 'readPmState'。两者是分工，不是重复。
 requirePmTrusted :: FilePath -> IO (Either String ())
 requirePmTrusted root = do
   m <- resolveUnder root ".pm"
   case m of
     Nothing -> pure (Left (untrustedMsg (pmDir root)))
     Just pmAbs -> do
-      -- .pm 尚不存在（新库）→ 无可枚举，通过；pm 自己会创建它。
-      ex <- doesDirectoryExist pmAbs
-      if not ex
-        then pure (Right ())
-        else do
-          er <- try (listDirectory pmAbs) :: IO (Either IOException [FilePath])
-          case er of
-            Left e -> pure (Left (pmAbs <> " 无法枚举（" <> show e <> "），拒绝读写——人工核查"))
-            Right names -> go names
+      k <- probeName pmAbs
+      case k of
+        -- .pm 尚不存在（新库）→ 无可枚举，通过；pm 自己会创建它。
+        NameMissing -> pure (Right ())
+        NameSurrogate -> pure (Left (untrustedMsg (pmDir root)))
+        ProbeUnknown ->
+          pure (Left (pmAbs <> " 存在但查不出是什么（ACL？），拒绝读写——人工核查"))
+        NamePlain -> do
+          isDir <- doesDirectoryExist pmAbs
+          if not isDir
+            then
+              pure
+                ( Left
+                    ( pmAbs <> " 存在但不是目录——正常库里 .pm 必须是普通目录，"
+                        <> "拒绝读写；人工核查（pm 不会替你删它）"
+                    )
+                )
+            else do
+              er <- try (listDirectory pmAbs) :: IO (Either IOException [FilePath])
+              case er of
+                Left e -> pure (Left (pmAbs <> " 无法枚举（" <> show e <> "），拒绝读写——人工核查"))
+                Right names -> go names
  where
   go [] = pure (Right ())
   go (n : rest) = do
@@ -192,14 +222,71 @@ untrustedMsg p =
 rootInfoPath :: FilePath -> FilePath
 rootInfoPath root = pmDir root </> "root-id.json"
 
--- | doesFileExist + decode → Maybe 的共用读取（备份缓存 \/ vault 缓存等可重建
--- 侧缓存共用；损坏文件按缺席处理，各调用点自行决定后续语义）。
-readJsonMaybe :: Aeson.FromJSON a => FilePath -> IO (Maybe a)
-readJsonMaybe fp = do
-  exists <- doesFileExist fp
-  if not exists
-    then pure Nothing
-    else either (const Nothing) Just <$> eitherDecodeFileStrict fp
+-- | @.pm@ 下状态文件的**唯一**受信读取口。@rel@ 是相对 @.pm@ 的路径，可以是
+-- 任意深度（@"catalog.json"@、@"trash\/manifest.ndjson"@、
+-- @"plans\/\<id\>.json"@、@"vault-cache\/catalog.json"@）。
+--
+-- P3b-14（十一轮复审 critical + 两条 major，探针实证）：在这之前 pm 访问
+-- @.pm@ 的模式一律是「拼路径字符串 → （也许）校验字符串 → 再**按名字**打开」。
+-- 这个模式有三个各自独立的洞，十一轮把三个都实证了：
+--
+--  1. **深度**：可信闸只覆盖 @.pm@ 的直接子项，而 @trash\/manifest.ndjson@、
+--     @plans\/\<id\>.json@ 是深度 2，直接 @readFile@\/@decodeFileStrict@。
+--     实测把 @manifest.ndjson@ 做成指向库外的**文件 symlink** 后，正常的
+--     @appendManifest@ 把记录**追加进了库外文件**（critical）。
+--  2. **链接种类**：字符串校验只看得见 reparse point。hardlink 不改名字解析，
+--     'resolveUnder' 在原理上看不见它，而读侧此前**完全没有** link count 判定。
+--     实测 @catalog.json@ 与 @plans\/\<id\>.json@ 被 hardlink 占名后，
+--     @loadCatalog@ 零警告载入库外快照、@loadPlan@ 载入库外计划（major×2）。
+--  3. **重开**：即使两处都校验过，之后仍按名字重新打开一次——校验的对象与
+--     使用的对象是两次独立解析。
+--
+-- 三者只有一个根因：**按名字访问**。所以修法不是再补一处校验，而是把取用
+-- 收成一个口，一次做完三件事：完整相对路径的 'resolveUnder'（任意深度，
+-- 治 1）→ 只打开一次 → 在**句柄**上查 link count（治 2）→ 从**同一句柄**
+-- 读完（治 3）。此后任何模块都不得自己拼 @.pm@ 路径再打开。
+--
+-- 三态返回：@Left@=不可信（拒绝，绝不降级成"空"）、@Right Nothing@=文件不存在、
+-- @Right (Just bytes)@=可信内容。
+readPmState :: FilePath -> FilePath -> IO (Either String (Maybe BS.ByteString))
+readPmState root rel = do
+  m <- resolveUnder root (".pm" </> rel)
+  case m of
+    Nothing -> pure (Left (untrustedMsg (pmDir root </> rel)))
+    Just fp -> do
+      r <- try (bracket (openStateRead fp) hClose BS.hGetContents) :: IO (Either IOException BS.ByteString)
+      pure $ case r of
+        Right bytes -> Right (Just bytes)
+        Left e
+          | isDoesNotExistError e -> Right Nothing
+          -- link count \> 1（hardlink）、ACL 拒绝、目录占名……一律拒绝，不当"缺席"
+          | otherwise ->
+              Left ((pmDir root </> rel) <> " 无法可信读取（" <> show e <> "）——人工核查")
+
+-- | 'readPmState' 的追加写对偶：完整路径 'resolveUnder' → 'openStateAppend'
+-- （打开后立刻查 link count）→ 在该句柄上执行 @act@。journal 与 manifest 是
+-- pm 仅有的两个「必须复用既有名字」的追加目标，都走这里。
+--
+-- 两种拒绝都以 IOException 抛出（与 'openStateAppend' 的既有契约一致）：
+-- 调用点在 Exec 的崩溃处理之内，写不成必须整项中止而不是继续。
+withPmStateAppend :: FilePath -> FilePath -> (Handle -> IO a) -> IO a
+withPmStateAppend root rel act = do
+  m <- resolveUnder root (".pm" </> rel)
+  case m of
+    Nothing -> ioError (userError (untrustedMsg (pmDir root </> rel)))
+    Just fp -> bracket (openStateAppend fp) hClose act
+
+-- | 可重建侧缓存（备份盘缓存 \/ vault 缓存）的受信读取。不可信与损坏都是
+-- 'Nothing' —— 对**可重建**的缓存，"当它不存在、重新算一遍"是保守方向，不会
+-- 让攻击者提供的字节参与决策；而同一条命令随后配对的 'writeSideCache' 会对
+-- 同一路径返回 @Left@，于是不可信状态照样以硬停（vault）或警告（backup）
+-- 暴露给用户，不会被静静吞掉。
+readSideCache :: Aeson.FromJSON a => FilePath -> FilePath -> FilePath -> IO (Maybe a)
+readSideCache root sub name = do
+  r <- readPmState root (sub </> name)
+  pure $ case r of
+    Right (Just bytes) -> either (const Nothing) Just (Aeson.eitherDecodeStrict' bytes)
+    _ -> Nothing
 
 -- | root 标识的三态（P3b-7 复审 major）：缺席与**损坏**必须区分——损坏（半写\/
 -- 手编坏 JSON）若按缺席处理，init\/backup init\/vault push 会用新 UUID 与新
@@ -210,6 +297,8 @@ readJsonMaybe fp = do
 -- 读写 root-id.json。身份读取的唯一入口是 'readRootState'，把可信闸放进它，
 -- 这些 init 旁路一并覆盖。P3b-13（十轮更正）：status / versions 当时**并未**
 -- 被它覆盖（那两条直接调 'Pm.Catalog.loadCatalog'），闸下沉到 loader 后才真正盖住。
+-- P3b-14：标识本身也改走 'readPmState'（hardlink 占名的 root-id.json 此前会
+-- 被当成本库身份读进来）。
 data RootIdState = RootAbsent | RootCorrupt String | RootUntrusted String | RootPresent RootInfo
   deriving (Show, Eq)
 
@@ -219,11 +308,11 @@ readRootState root = do
   case tr of
     Left m -> pure (RootUntrusted m)
     Right () -> do
-      let fp = rootInfoPath root
-      exists <- doesFileExist fp
-      if not exists
-        then pure RootAbsent
-        else either RootCorrupt RootPresent <$> eitherDecodeFileStrict fp
+      r <- readPmState root "root-id.json"
+      pure $ case r of
+        Left m -> RootUntrusted m
+        Right Nothing -> RootAbsent
+        Right (Just bytes) -> either RootCorrupt RootPresent (Aeson.eitherDecodeStrict' bytes)
 
 -- | 只读视图：Present → Just；缺席、损坏与**不可信**都是 Nothing（读者一律按
 -- 「无身份」fail-closed；要改写标识的入口必须用 'readRootState' 分辨这几态）。
@@ -345,6 +434,9 @@ writeCacheFile :: FilePath -> FilePath -> FilePath -> BSL.ByteString -> IO (Eith
 writeCacheFile root sub name bytes = do
   -- 建目录之后再验一次完整路径：把 createDirectoryIfMissing 与写入之间的
   -- TOCTOU 窗口收窄到"创建后立刻"（同 'Pm.Exec' 的动态 tmp 处理）。
+  -- 这一次是**文件级**的：目录级 pre-check 看不见 vault-cache/catalog.json
+  -- 自身被做成 symlink 的形态（P3b-14 十一轮：旧用例只放目录 junction，
+  -- 删掉这一行也照样绿，新用例 caseSideCacheFileLink 钉的就是这里）。
   m <- resolveUnder root (".pm" </> sub </> name)
   case m of
     Nothing -> pure (Left (untrustedMsg (pmDir root </> sub </> name)))
