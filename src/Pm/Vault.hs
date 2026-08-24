@@ -60,7 +60,7 @@ import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
 import Pm.Plan
 import Pm.Types
-import Pm.VaultHold (readHolds, splitHeld)
+import Pm.VaultHold (VaultHold (..), readHolds, splitHeld)
 import Pm.Win (volumeFsType)
 
 -- ─── 纯核心：legacy 算法逐行复刻 ────────────────────────────────────────────
@@ -148,11 +148,6 @@ vaultDiff srcShas vaultByCat =
   matchedNew = [n | (n, _, _, _) <- renamed]
   consumedMissing = [(m, c) | (_, m, c, _) <- renamed]
 
--- | 退出码语义（legacy :237）：duplicate（与 unpushable）不算差异。
-hasDiff :: VaultDiff -> Bool
-hasDiff d =
-  not (null (vdNew d) && null (vdMissing d) && null (vdRenamed d) && null (vdDrift d))
-
 -- ─── JSON 渲染（键名、键序、值形状 = legacy；末尾追加 unpushable） ──────────
 
 renderVaultJson ::
@@ -214,6 +209,9 @@ data VaultCacheMeta = VaultCacheMeta
   , vmVaultPath :: FilePath
   , vmRootId :: Maybe Text
   , vmOk, vmNew, vmMissing, vmRenamed, vmDrift, vmDuplicate, vmUnpushable, vmUnstable :: Int
+  , vmHeld :: Int
+    -- ^ 第九态（P4-7）：已决定「暂不同步」的 NEW 张数。`pm status` 的 vault
+    -- 行用 NEW − HELD 算差异，否则已经做过的决定会永远显示成待办。
   }
   deriving (Show, Eq, Generic)
 
@@ -319,8 +317,11 @@ data VaultReport = VaultReport
 newActive :: VaultReport -> [FilePath]
 newActive r = [n | n <- vdNew (vrDiff r), n `notElem` map fst (vrHeld r)]
 
--- | 报告级的"有差异"：与 'hasDiff' 同构，但 NEW 用 'newActive'——用户已经
--- 决定不同步的照片不该让 `pm status` 永远 exit 1。
+-- | 退出码语义（legacy :237）：duplicate 与 unpushable 不算差异；NEW 用
+-- 'newActive'——用户已经决定暂不同步的照片不该让 `pm vault status` 永远
+-- exit 1。这是**唯一**的"有差异"谓词：曾经并存的 'hasDiff'（按整个 vdNew
+-- 判）已删除——两个同构谓词并存正是调用点用错的温床，codex 二十一轮就抓到
+-- `runVaultPush` 的无项分支还在用旧的那个。
 hasDiffR :: VaultReport -> Bool
 hasDiffR r =
   let d = vrDiff r
@@ -414,45 +415,58 @@ computeVault' quiet cfg vaultDir = do
           (\(n, loc) -> warn ("  ⚠ 读取不稳定（本轮退出六态分类，fail-closed）: " <> loc </> n))
           unstable
         now <- getCurrentTime
-        let vEntries = [e | (_, ps) <- perCat, (_, _, Just e) <- ps]
-            meta =
-              VaultCacheMeta
-                { vmAt = now
-                , vmVaultPath = vaultCanon
-                , vmRootId = riId <$> mVRoot
-                , vmOk = length (vdOk d)
-                , vmNew = length (vdNew d)
-                , vmMissing = length (vdMissing d)
-                , vmRenamed = length (vdRenamed d)
-                , vmDrift = length (vdDrift d)
-                , vmDuplicate = length (vdDuplicate d)
-                , vmUnpushable = length unpushable
-                , vmUnstable = length unstable
-                }
-        -- 缓存目录不可信（junction 化）是硬失败：继续下去等于把 pm 的写
-        -- 交给库外（P3b-13 十轮 critical）。
-        wc <- writeVaultCache root (Catalog "vault-cache" now (entryMap vEntries)) meta
         eholds <- readHolds root
-        case (wc, eholds) of
-          (Left e, _) -> pure (Left (e, 2))
-          (_, Left e) -> pure (Left (e, 2))
-          (Right (), Right holds) ->
-            let (held, heldStale) = splitHeld holds (vdNew d) (`Map.lookup` srcShas)
-             in pure
-            ( Right
-                VaultReport
-                  { vrSrcDir = srcDir
-                  , vrVaultDir = vaultDir
-                  , vrSrcCount = Map.size srcShas
-                  , vrVaultCount = vaultCount
-                  , vrDiff = d
-                  , vrUnpushable = unpushable
-                  , vrUnstable = unstable
-                  , vrSrcMeta = Map.fromList [(n, e) | (n, _, Just e) <- srcTriples]
-                  , vrHeld = held
-                  , vrHeldStale = heldStale
-                  }
-            )
+        case eholds of
+          Left e -> pure (Left (e, 2))
+          Right holds -> do
+            -- 决定的复核**不吃 (size,mtime) 缓存快路**：等长替换 + 还原 mtime
+            -- 时 'shaViaCache' 会复用缓存 sha，旧决定就继续压住新字节
+            -- （codex 二十一轮 major）。空缓存 → 一定走真实重读 + 双 stat。
+            -- 只对「名单里且仍是 NEW」的文件做，数量 = 用户决定不同步的张数。
+            freshHeld <-
+              mapM
+                ( \n -> do
+                    (sha, me) <- shaViaCache Map.empty ("相册" </> n) (srcDir </> n)
+                    pure (n, sha <$ me) -- me == Nothing → 本轮读不稳定
+                )
+                [vhName h | h <- holds, vhName h `elem` vdNew d]
+            let freshMap = Map.fromList freshHeld
+                (held, heldStale) = splitHeld holds (vdNew d) (\n -> maybe Nothing id (Map.lookup n freshMap))
+                vEntries = [e | (_, ps) <- perCat, (_, _, Just e) <- ps]
+                meta =
+                  VaultCacheMeta
+                    { vmAt = now
+                    , vmVaultPath = vaultCanon
+                    , vmRootId = riId <$> mVRoot
+                    , vmOk = length (vdOk d)
+                    , vmNew = length (vdNew d)
+                    , vmMissing = length (vdMissing d)
+                    , vmRenamed = length (vdRenamed d)
+                    , vmDrift = length (vdDrift d)
+                    , vmDuplicate = length (vdDuplicate d)
+                    , vmUnpushable = length unpushable
+                    , vmUnstable = length unstable
+                    , vmHeld = length held
+                    }
+            -- 缓存目录不可信（junction 化）是硬失败：继续下去等于把 pm 的写
+            -- 交给库外（P3b-13 十轮 critical）。
+            wc <- writeVaultCache root (Catalog "vault-cache" now (entryMap vEntries)) meta
+            case wc of
+              Left e -> pure (Left (e, 2))
+              Right () ->
+                pure . Right $
+                  VaultReport
+                    { vrSrcDir = srcDir
+                    , vrVaultDir = vaultDir
+                    , vrSrcCount = Map.size srcShas
+                    , vrVaultCount = vaultCount
+                    , vrDiff = d
+                    , vrUnpushable = unpushable
+                    , vrUnstable = unstable
+                    , vrSrcMeta = Map.fromList [(n, e) | (n, _, Just e) <- srcTriples]
+                    , vrHeld = held
+                    , vrHeldStale = heldStale
+                    }
 
 -- ─── pm vault status [--json] ───────────────────────────────────────────────
 
@@ -620,7 +634,7 @@ runVaultPush runPlan mCat files cfg = do
                   unless (null (newActive r)) $ do
                     putStrLn ("  → " <> show (length (newActive r)) <> " 个 NEW 待分类：pm vault push --category <类目> <文件…>（类目: " <> unwords fixedCategories <> "）")
                   putStrLn "（无可执行项，未生成计划）"
-                  pure (if hasDiff d then 1 else 0)
+                  pure (if hasDiffR r then 1 else 0)
                 else do
                   eplan <- mkVaultPushPlan r allItems
                   case eplan of

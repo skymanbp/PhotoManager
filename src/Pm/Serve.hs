@@ -68,8 +68,8 @@ import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPl
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
 import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newActive, planCategories, renderVaultJson, vaultPushItems)
-import Pm.VaultCmd (holdRequest)
-import Pm.VaultHold (VaultHold (..), readHolds, writeHolds)
+import Pm.VaultCmd (holdRequest, withHoldsTxn)
+import Pm.VaultHold (VaultHold (..), writeHolds)
 import Pm.Win (resolveUnder)
 
 data ServeOpts = ServeOpts
@@ -331,27 +331,25 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
           Just raw -> case Aeson.eitherDecodeStrict' raw of
             Left e -> err status400 ("请求体不是合法 JSON: " <> e)
             Right (HoldReq hs us) -> withMVar (seVaultLock env) $ \_ -> do
-              er <- computeVault True cfg
-              case er of
-                Left (msg, code) -> err (if code == 2 then status404 else status500) msg
-                Right r -> do
-                  let root = cfgMainPath cfg
-                  eholds <- readHolds root
-                  case eholds of
-                    Left m -> err status500 m
-                    Right olds -> do
-                      now <- getCurrentTime
-                      case holdRequest r olds hs us now of
-                        Left errs -> jsonR status400 [] (object ["error" .= ("决定不合法" :: String), "details" .= errs])
-                        Right kept -> do
-                          w <- writeHolds root kept
-                          case w of
-                            Left m -> err status403 ("主库 .pm 不可写: " <> m)
-                            Right () ->
-                              jsonR
-                                status200
-                                []
-                                (object ["held" .= map vhName kept, "count" .= length kept])
+              -- 事务壳带主库 root lock（I10）：进程内 MVar 挡不住第二个 pm
+              -- 进程的读改写丢更新（codex 二十一轮 major）。
+              res <- withHoldsTxn cfg $ \olds r -> do
+                now <- getCurrentTime
+                case holdRequest r olds hs us now of
+                  Left errs -> pure (Left (unlines errs, 400))
+                  Right kept -> do
+                    w <- writeHolds (cfgMainPath cfg) kept
+                    pure $ case w of
+                      Left m -> Left ("主库 .pm 不可写: " <> m, 403)
+                      Right () -> Right kept
+              case res of
+                Left (msg, 400) -> jsonR status400 [] (object ["error" .= ("决定不合法" :: String), "details" .= lines msg])
+                Left (msg, 403) -> err status403 msg
+                Left (msg, 4) -> err status409 msg -- root lock 被别的 pm 占用
+                Left (msg, 2) -> err status404 msg
+                Left (msg, _) -> err status500 msg
+                Right kept ->
+                  jsonR status200 [] (object ["held" .= map vhName kept, "count" .= length kept])
   ("GET", ["api", "plans"]) -> do
     (ps, errs) <- listPlans (cfgMainPath cfg)
     (vps, verrs) <- maybe (pure ([], [])) listPlans (cfgVaultPath cfg)

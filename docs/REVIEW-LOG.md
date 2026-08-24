@@ -559,8 +559,9 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   分类"。设计要点：它**不能**是 vault 的第四个类目（vault 类目 = 展示集 git 仓
   的目录，建目录等于把照片发出去），因此是主库 `.pm/vault-holds.json` 里的
   本地决定；`new` 键不动（对外契约），`newActive` 扣掉 HELD 并据此算退出码；
-  记录存决定当时的 sha，字节一变即失效回到 NEW；`checkAssignments` 拒收 held
-  文件。新模块 `Pm.VaultHold`（状态 + 纯分类器 `splitHeld`）与 `Pm.VaultCmd`
+  记录存决定当时的 sha，字节一变即失效回到 NEW（复核**强制重算** sha，不吃
+  `(size,mtime)` 缓存快路——二十一轮指出走快路时等长替换 + 还原 mtime 会让旧
+  决定继续生效）；`checkAssignments` 拒收 held 文件。新模块 `Pm.VaultHold`（状态 + 纯分类器 `splitHeld`）与 `Pm.VaultCmd`
   （命令层——`Pm.Vault` 触及 750 行预算，同 `Pm.BackupCmd` 先例），`Pm.Config`
   加 `writePmState`（`readPmState` 的对偶：完整路径解析 → 独占 tmp → flush →
   no-replace rename）。第二个写端点 `POST /api/vault/hold` 与 CLI 共用
@@ -568,3 +569,21 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   `splitHeld` 不比对 sha → 失效用例转红；端点去 `seWritable` 闸 → 端点用例转红；
   `checkAssignments` 不拒 held → 往返 + 端点用例转红。**待 codex 二十一轮评审**；
   真实库那 15 张的 hold 在 GO 之后才执行。
+- **二十一轮：NO-GO → 已收口（同日，codex 审 P4-7，40d6ee4..262c2f6，64 次探查）**：
+  两条 major + 一条进了最小修复集的 minor，均已修并各自突变验证。①**复核吃了
+  缓存快路**：`splitHeld` 的比对 sha 取自 `srcShas`，而 `shaViaCache` 在
+  `(size,mtime,lastVerified)` 命中时直接复用主库 catalog 的 sha——等长替换 +
+  还原 mtime 即可让旧决定继续压住新字节 → 改为对"名单里且仍是 NEW"的文件用空
+  缓存强制重读（真实 hash + 双 stat），读不稳定按失效处理。②**名单读改写不是
+  跨进程事务**：serve 的进程内 MVar 挡不住第二个 pm 进程，两边各读旧名单、后写
+  者整份覆盖 → 抽出事务壳 `withHoldsTxn`，整段 compute→读→校验→写在主库
+  `.pm/lock`（I10）里完成，锁被占 CLI exit 2 / API 409。③**残留 `.tmp` 被当成
+  空名单**：覆盖写崩在删旧与 rename 之间会留下 `vault-holds.json.tmp` 而正文
+  缺失，按"没有决定"继续等于静默清零 → `readHolds` 对这一形态 fail-closed，并
+  补名字/sha/唯一性的语义校验。另修四条 minor：`runVaultPush` 的无项分支仍用旧
+  `hasDiff`（held-only 时误报 exit 1）→ 与 `hasDiffR` 统一后**删除** `hasDiff`
+  这个同构谓词；缓存 meta 加 `vmHeld`，`pm status` 的 vault 行按 NEW − HELD 报；
+  GUI 提交期间冻结选择并按响应推进 `heldInitial`（第一步落盘、第二步失败后重试
+  不再重复撤销）；`loadVault` 的失败分支也认 single-flight 代号。文档口径按第 8
+  条修正（README 的两段式例外与 `--writable` 写域、CLI help、§11 九态、I8 退出
+  码语义、REVIEW-LOG 的"字节一变即失效"）。210 测试。

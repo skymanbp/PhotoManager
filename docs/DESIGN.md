@@ -96,7 +96,7 @@ R4 Haskell）落成以下**硬不变量**，每条都有机制背书，不靠自
 | I5 | 目的地已存在且内容不同 → **conflict，停该项，不覆盖，无例外**。vault DRIFT 的 supersede 与备份盘更新**不是覆盖**：先 Quarantine 移出旧文件、再 Copy 落新字节（§6.5），旧字节始终在隔离区可还原 | Plan 生成期检查 + Exec 执行期二次检查 + 落位 rename 的 flags=0 语义三重防线 |
 | I6 | 断电 / 拔盘 / 进程被杀后，`pm doctor` 能检出半成品并安全恢复；恢复矩阵覆盖三种 Op 的全部协议步骤与掉电（journal 尾部丢失）模型 | §6.4 矩阵 + §13 两类故障注入 |
 | I7 | 拓扑不变量持续可校验：vault ⊆ 相册；相册 ⊆ 成片 ∪ inbox-origin（journal 中有 ingest 来源记录的集合）；侧车与主文件同批移动 | Catalog 层校验；ingest 登记来源（§10.3） |
-| I8 | 相册↔vault 差异与 `sync_photos.py` **逐字段值形状兼容**（六态 + 位置元组 + 16 字符截断 hash + 退出码 0/1/2 + 同一文件过滤集合含 .png，case-fold） | §10.1 |
+| I8 | 相册↔vault 差异与 `sync_photos.py` **逐字段值形状兼容**（六态 + 位置元组 + 16 字符截断 hash + 同一文件过滤集合含 .png，case-fold）；退出码仍是 0/1/2，但**语义自 P4-7 起收窄**：NEW 里已决定「暂不同步」的不再算差异（`new` 键本身不变，见 §10.2 第九态） | §10.1 + §10.2 |
 | I9 | pm 绝不执行 git 命令（vault/portfolio 的 add/commit/push 都由用户手动）；对 portfolio `photos.json` 仅只读引用检查 | Vault 模块无 git 调用 |
 | I10 | pm 单实例：mutation 前对 `.pm/lock` 打开句柄并 `hTryLock`（内核级锁，进程死亡自动释放，锁文件残留无害且无需删除） | base `GHC.IO.Handle.Lock`（Windows 走 LockFileEx） |
 | I11 | pm 不在任何 `.gitignore` 未覆盖 `.pm/` 的 git 工作树内建立 root，**任何 role**（主库/备份/vault）一视同仁：`init` / `backup init` / `vault push` 建 root 前检查（经用户确认追加 ignore 行后才建），`pm apply` 取锁前预检 + 锁内按盘上 role 重检；检查是文本级白名单（恰含 `.pm/` 行；`!` 反规则不得含 `.pm` 或通配符 `* ? [ \`，pm 不实现 wildmatch）；所有直接写 `.pm/` 的入口（计划保存、catalog/侧缓存、doctor --repair、trash、undo/resolve）经 `requireWritable` 同一守卫（P3b-7）；建立身份的三条旁路（`init` / `backup init` / 首次 `vault push`）天然走不了它，改由 `readRootState` 的 `RootUntrusted` 态覆盖（P3b-12），`pm doctor` 每次复查 | §5 init + §10.2 P3b-6/P3b-7 + §10.3 |
@@ -475,7 +475,19 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
     决定不同步的照片不该让 `pm status` 永远 exit 1。
   - 记录里存**决定当时的 sha**：照片字节后来被换过（重修图/重导出）→ 决定
     **失效**（`held_stale`），照片回到 NEW 让用户再看一眼。宁可多问一次，也
-    不让一张已经不是当初那张的照片被旧决定永久压住。
+    不让一张已经不是当初那张的照片被旧决定永久压住。复核用的 sha **强制重算**
+    （空缓存调 `shaViaCache` → 真实重读 + 双 stat）：走 `(size,mtime)` 缓存快路
+    时，等长替换 + 还原 mtime 会让旧 sha 被复用、旧决定继续压住新字节（codex
+    二十一轮 major）。代价是每次比对要重读"已决定不同步"的那几张，量级 = 用户
+    自己决定的张数。本轮读不稳定 → 同样按失效处理（fail-closed）。
+  - 名单的「读 → 校验 → 写」是**一个跨进程事务**：整段在主库 `.pm/lock` 里
+    完成（I10）。两个 pm（CLI 与 GUI 的 serve）各读同一份旧名单、各写全量结果，
+    后写者会整份覆盖先写者的决定——serve 的进程内互斥挡不住（二十一轮 major）。
+    锁被占用时不排队，直接告知（CLI exit 2 / API 409）。
+  - 名单本身 fail-closed：解析失败、名字不是平铺 basename、sha 不是 64 hex、
+    同名多条，一律拒绝而不是"跳过坏条目"；正文缺失但残留 `vault-holds.json.tmp`
+    （覆盖写崩在删旧与 rename 之间）同样拒绝——按"空名单"继续等于把用户的决定
+    静默清零。
   - `pm vault push` **拒收**已 HELD 的文件（先 `pm vault unhold`）；CLI 是
     `pm vault hold|unhold <文件…>`，GUI 是分类卡上的第四个按钮。
   - 决定不走两段式计划：它不碰任何照片字节，撤销就是 unhold。身份闸两道：
@@ -550,8 +562,8 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - **GUI（P4-4 UX 重做，用户反馈"清晰优雅、快速上手、直观可视化"+ 三项状态
   可视化）**：左侧导航四页（数字键 1–4 切换）。①**状态**——照片库四张分层卡
   （Raw / 成片 / 相册 / 暂存：文件数、体积、容量占比条）+ 索引时间与「核对新鲜
-  度」；**vault 展示集同步**卡（差异数 chip、八态计数 pill、NEW/MISSING/RENAME/
-  DRIFT/UNSTABLE 可展开清单——"差哪些"）；**备份硬盘同步**卡（未登记 / 上次同步
+  度」；**vault 展示集同步**卡（差异数 chip、九态计数 pill——含 HELD、
+  NEW/HELD/MISSING/RENAME/DRIFT/UNSTABLE 可展开清单——"差哪些"）；**备份硬盘同步**卡（未登记 / 上次同步
   时间 + 滞后 add/update/extra / 缓存不可信）；「下一步」列表把 status 退出码的
   语义翻成可点的动作。②**分类推送**——NEW 缩略图网格（原图 4–75 MB，GUI 侧
   `createImageBitmap(resizeWidth 640)` 缩放后再挂，修掉"滚动后缩略图消失"——
@@ -592,8 +604,9 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - **第二个写端点（P4-7）**：`POST /api/vault/hold`，体
   `{"hold":[名…],"unhold":[名…]}`（两键均可省），同样在 `--writable` 之后、
   同样 64 KiB 上限、同样在 `seVaultLock` 里 compute→校验→写一次持锁完成。
-  写域是**主库**的 `.pm/vault-holds.json`（不是 vault 仓）；校验器
-  `holdRequest` 与 CLI `pm vault hold|unhold` 共用：标记的必须当前是 NEW 且
+  写域是**主库**的 `.pm/vault-holds.json`（不是 vault 仓），整段读改写在主库
+  root lock 里完成（事务壳 `withHoldsTxn`，CLI 与 API 共用；锁被占 → 409）；
+  校验器 `holdRequest` 与 CLI `pm vault hold|unhold` 共用：标记的必须当前是 NEW 且
   本轮读取稳定（要记 sha），撤销的必须在名单里，同一名字不能同时标记与撤销，
   fail-closed 且一次返回全部错误。`GET /api/vault/new` 相应带上 `held` /
   `heldStale`，页面把决定回显成第四个按钮（选中态是灰色而非强调色——它不是

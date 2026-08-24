@@ -408,3 +408,45 @@ vault 写入之前，端点不执行计划、不碰照片；发现均为 minor �
 - 十九轮登记项照旧：跨进程 vault-cache 刷新争用、真开端口 raw HTTP 冒烟、
   Rename/Quarantine 的"返回路径必须被使用"用例、TOCTOU 类（§14 威胁模型）。
 - 覆盖硬化建议未做：合法例未快照三个类目目录、未断言响应 path/apply/gitSteps。
+---
+
+# 第二十一轮（2026-08-24，codex `gpt-5.6-sol`，只读静态；范围 40d6ee4..262c2f6 = P4-7 第九态 HELD「暂不同步」）
+
+**verdict：NO-GO** —— "HELD 的失效判断可能复用旧 SHA，且名单读改写未持跨进程
+root lock，均会让用户决定失真；暂不建议对真实 15 张执行。" 最小修复集三条，
+**已全部在本分支闭合**（210 测试，三处突变各自转红）。
+
+- 决定语义｜三种情况对单条记录穷尽，但未校验重名记录，且"字节一变即失效"会被主 catalog 的 SHA 快路绕过。
+- 写路径｜I11 闸和主库写域正确，但名单更新不满足 I10，崩溃窗口还可能把名单暂时解释为空。
+- GUI｜普通点击转换正确；提交期间仍可改状态/重载，且第一步成功、第二步失败后的重试状态不正确。
+
+## 最小修复集与处置
+
+| # | 评审要求 | 处置（同分支） |
+|---|---|---|
+| 1 | HELD 创建与复核对目标照片强制实际稳定重 hash，补等长/同 mtime 用例 | **已修**：`computeVault` 对「名单里且仍是 NEW」的文件用**空缓存**调 `shaViaCache`（必走真实重读 + 双 stat），读不稳定按失效处理。新例 `caseHoldStaleEqualLen` 刻意造一条必然 `statHitStable` 的主库 catalog 条目，再等长替换 + `setModificationTime` 还原 mtime；突变回 `srcShas` → 该例转红，其余六例仍绿 |
+| 2 | 用跨进程 root lock 包住 holds 的完整读改写事务，补并发丢更新用例 | **已修**：抽出事务壳 `Pm.VaultCmd.withHoldsTxn`，`compute → readHolds → holdRequest → writeHolds` 整段在主库 `.pm/lock`（I10）内；锁被占不排队（CLI exit 2 / API 409）。新例 `caseHoldLock` 在另一线程持锁后调用 `runVaultHold`，断言拒绝且**名单未被覆盖**；突变去锁 → 转红 |
+| 3 | orphan `vault-holds.json.tmp` 不得降级为空名单 | **已修**：`readHolds` 在"正文缺失"时再探一次 `.tmp`，存在即 fail-closed 并给恢复指引；同时补语义校验（名字须平铺 basename、sha 须 64 hex、名字唯一）。新例 `caseHoldFileGuards` 覆盖两种形态；突变去 tmp 分支 → 转红 |
+
+## 其余发现与处置
+
+| 严重级 | 位置 | 内容 | 处置 |
+|---|---|---|---|
+| minor | `src/Pm/Vault.hs` `runVaultPush` | held-only 时无参 `vault push` 仍用旧 `hasDiff` → exit 1；`vmNew` 缓存全量 NEW，顶层 `pm status` 把 HELD 算作待办 | **已修**：统一 `hasDiffR` 并**删除** `hasDiff`（两个同构谓词并存正是用错的温床）；`VaultCacheMeta` 加 `vmHeld`，`pm status` 的 vault 行按 NEW − HELD 报。新例 `caseHoldOnlyExit` 钉住两个退出码 |
+| minor | `gui/ui/app.js` | 提交两步之间可改选择/重载；第一步落盘、第二步失败后重试会重复撤销；`loadVault` 失败分支不认代号 | **已修**：提交开始取快照并置 `submitting` 冻结卡片；hold 成功后按响应推进 `heldInitial`；catch 分支加 `gen` 校验 |
+| minor | `src/Pm/VaultHold.hs` | 手编同名两条不同 sha → 同名同时进 HELD 与 stale | **已修**：`validateHolds` 拒绝重复 name（并入第 3 条） |
+| minor | 文档 | README 的"所有写盘两段式"未声明 hold 例外、`--writable` 写域旧；CLI help 旧；§11 仍写"八态计数"；I8 退出码措辞；REVIEW-LOG"字节一变即失效"过强 | **已修**：五处逐条改准 |
+
+评审确认无误的点（不改）：跨层同名不会误命中（源只扫 `相册`，catalog 键是
+`相册/<name>`）；`holdRequest` 确为 CLI 与 API 唯一判定点且一次返回全部错误；
+端点闸序（writable → 64 KiB → 锁 → 校验 → 写）与 push-plan 一致；写域确是主库
+而非 vault；`HOLD` 哨兵与三个固定类目不冲突；坏 JSON 的硬失败是有意行为（它会
+卡住 vault 相关命令但不卡顶层 `pm status`）。
+
+## 残余（二十一轮末）
+
+- API 侧未直接测 64 KiB / 坏 JSON / 空请求 / 路径型 name 的 hold 拒绝（CLI 与
+  共用校验器已覆盖同一判定）。
+- `applyHoldOps` 的覆盖语义没有独立纯函数用例（经两条入口间接命中）。
+- 二十轮登记项照旧：aeson 重复键/深嵌套、跨进程 vault-cache 刷新争用、真开端口
+  raw HTTP 冒烟、`readBodyCapped` 慢速上传可按 `requestBodyLength` 预拒。

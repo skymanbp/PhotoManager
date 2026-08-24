@@ -4,29 +4,35 @@
 -- （基线：docs\/specs\/sync-photos-legacy-spec.md）。
 module VaultTests (vaultTests) where
 
-import Data.Aeson (decode, object, toJSON, (.=))
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Monad (void)
+import Data.Aeson (decode, encode, object, toJSON, (.=))
 import qualified Data.ByteString.Lazy.Char8 as BSLC
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, setModificationTime)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, removeFile, setModificationTime)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Data.Time (addUTCTime, getCurrentTime)
+import Pm.Catalog (saveCatalog)
 import Pm.Cli (bindExecRoot, executePlanNow)
 import Pm.Commands (resolveKeep)
 import Pm.Config (Config (..), writeRootInfo)
-import Pm.Hash (StatSnap (..), nsToUtc, statHitStable)
+import Pm.Hash (StatSnap (..), nsToUtc, sha256File, statHitStable, statSnap)
+import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
-import Pm.Types (RootInfo (..), RootRole (..))
+import Pm.Types (Entry (..), FileKind (..), RootInfo (..), RootRole (..))
 import Pm.Vault
 import Pm.VaultCmd (runVaultHold)
-import TestUtil (t0)
+import Pm.VaultHold (VaultHold (..), readHolds)
+import TestUtil (mkCat, t0)
 
 vaultTests :: TestTree
 vaultTests =
@@ -56,6 +62,10 @@ vaultTests =
     , testCase "P3b-4 #4 racy 判据 statHitStable：同刻度窗口不信任缓存" caseRacyGuard
     , testCase "P4-7 hold：NEW 标暂不同步 → 移出 newActive、exit 0、push 拒收；非法操作 exit 2；unhold 恢复" caseHoldRoundTrip
     , testCase "P4-7 hold：照片字节换了 → 决定失效，回到 NEW 并报 stale" caseHoldStale
+    , testCase "P4-7 hold 复核不吃缓存快路：等长替换 + 还原 mtime（stat 命中）仍判失效" caseHoldStaleEqualLen
+    , testCase "P4-7 hold 是跨进程事务：root lock 被占用 → 拒绝而不是覆盖名单" caseHoldLock
+    , testCase "P4-7 名单 fail-closed：残留 .tmp 而正文缺失 / 同名两条 → 拒绝，不当空名单" caseHoldFileGuards
+    , testCase "P4-7 held-only：无参 vault push 与 status 都不再报「有事可做」" caseHoldOnlyExit
     ]
 
 h :: Char -> Text
@@ -92,6 +102,110 @@ caseHoldRoundTrip = withSystemTempDirectory "pm-vault" $ \tmp -> do
   doesFileExist (vdir </> "landscape" </> "a.jpg") >>= (@?= False)
   runVaultHold False ["a.jpg"] cfg >>= (@?= 0)
   runVaultStatus False cfg >>= (@?= 1)
+
+-- | 复核**不能**吃 (size,mtime) 缓存快路：等长替换 + 还原 mtime 时，主库
+-- catalog 的 stat 命中会让 'shaViaCache' 复用旧 sha，旧决定就继续压住新字节
+-- （codex 二十一轮 major）。这里刻意造一条会命中的 catalog 条目。
+caseHoldStaleEqualLen :: IO ()
+caseHoldStaleEqualLen = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+      jpg = root </> "相册" </> "a.jpg"
+  mkMain root
+  writeF jpg "AAA"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
+  -- 造一条必然 statHitStable 的主库 catalog 条目（sha 是旧的）
+  snap <- statSnap jpg
+  oldSha <- sha256File jpg
+  saveCatalog
+    root
+    ( mkCat
+        [ Entry
+            ("相册" </> "a.jpg")
+            (ssSize snap)
+            (ssMtimeNs snap)
+            oldSha
+            KindPhoto
+            (Just (addUTCTime 3600 (nsToUtc (ssMtimeNs snap))))
+        ]
+    )
+  -- 等长替换 + 还原 mtime：(size,mtime) 完全不变
+  writeF jpg "BBB"
+  setModificationTime jpg (nsToUtc (ssMtimeNs snap))
+  er <- computeVault True cfg
+  case er of
+    Left (m, _) -> assertFailure ("computeVault: " <> m)
+    Right r -> do
+      vrHeld r @?= [] -- 决定必须失效
+      map fst (vrHeldStale r) @?= ["a.jpg"]
+      newActive r @?= ["a.jpg"]
+
+-- | 名单的读改写是**跨进程**事务（I10）：root lock 被别的 pm 占着时必须拒绝，
+-- 而不是各读各的旧名单、后写者整份覆盖先写者（codex 二十一轮 major）。
+caseHoldLock :: IO ()
+caseHoldLock = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  mkMain root
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  writeF (root </> "相册" </> "b.jpg") "BBB"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
+  gotLock <- newEmptyMVar
+  release <- newEmptyMVar
+  void . forkIO . void $ withRootLock root (putMVar gotLock () >> takeMVar release)
+  takeMVar gotLock
+  code <- runVaultHold True ["b.jpg"] cfg
+  putMVar release ()
+  code @?= 2 -- 拒绝
+  hs <- readHolds root
+  case hs of
+    Left m -> assertFailure ("readHolds: " <> m)
+    Right kept -> map vhName kept @?= ["a.jpg"] -- 名单没被覆盖
+
+-- | 名单文件本身的 fail-closed：覆盖写崩在删旧与 rename 之间会留下 .tmp 而
+-- 正文缺失——按"空名单"继续等于把用户的决定静默清零；同名两条也直接拒绝。
+caseHoldFileGuards :: IO ()
+caseHoldFileGuards = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+      holds = root </> ".pm" </> "vault-holds.json"
+  mkMain root
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
+  -- 崩在中途的形态：正文没了，.tmp 还在
+  hsBytes <- BSLC.readFile holds
+  BSLC.writeFile (holds <> ".tmp") hsBytes
+  removeFile holds
+  readHolds root >>= \r -> case r of
+    Left m -> assertBool ("应点名 .tmp: " <> m) (".tmp" `isInfixOf` m)
+    Right _ -> assertFailure "残留 .tmp 而正文缺失时不得按空名单处理"
+  runVaultStatus False cfg >>= (@?= 2)
+  removeFile (holds <> ".tmp")
+  -- 同名两条（手编）→ 拒绝
+  now <- getCurrentTime
+  BSLC.writeFile holds (encode [VaultHold "a.jpg" (T.replicate 64 "a") now Nothing, VaultHold "a.jpg" (T.replicate 64 "b") now Nothing])
+  readHolds root >>= \r -> case r of
+    Left m -> assertBool ("应点名重复: " <> m) ("多次" `isInfixOf` m)
+    Right _ -> assertFailure "同名两条必须拒绝"
+
+-- | 只剩已决定不同步的 NEW 时，status 与无参 push 都该报"没事可做"。
+caseHoldOnlyExit :: IO ()
+caseHoldOnlyExit = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  mkMain root
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
+  runVaultStatus False cfg >>= (@?= 0)
+  runVaultPush execNow Nothing [] cfg >>= (@?= 0)
 
 -- | 决定记的是「当时那张」：字节换了就失效，照片回到 NEW（宁可多问一次）。
 caseHoldStale :: IO ()

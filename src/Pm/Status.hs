@@ -231,7 +231,8 @@ renderStatus opts r = do
         Just CacheAbsent -> putStrLn "  vault      未比对过 → pm vault status"
         Just (CacheOk v) -> do
           let vstamp = formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz (vmAt v))
-              vlag = vmNew v + vmMissing v + vmRenamed v + vmDrift v
+              -- HELD 是用户已经做过的决定，不该永远显示成待办（P4-7）
+              vlag = vmNew v - vmHeld v + vmMissing v + vmRenamed v + vmDrift v
           -- unstable 不是差异但状态未知（P3b-4 #5）：同样要 ⚠ 提示重跑
           if vlag == 0 && vmUnstable v == 0
             then printf "  vault      上次比对 %s · 无差异（dup %d · unpushable %d）\n" vstamp (vmDuplicate v) (vmUnpushable v)
@@ -240,7 +241,7 @@ renderStatus opts r = do
                 "  ⚠ vault    上次比对 %s · 差异 %d（NEW %d / MISS %d / REN %d / DRIFT %d / 不稳定 %d）→ pm vault status\n"
                 vstamp
                 vlag
-                (vmNew v)
+                (vmNew v - vmHeld v)
                 (vmMissing v)
                 (vmRenamed v)
                 (vmDrift v)

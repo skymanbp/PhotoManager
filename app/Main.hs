@@ -121,7 +121,7 @@ parserInfo =
       ServeOpts
         <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
         <*> switch (long "exit-on-stdin-eof" <> help "stdin 关闭即退出（GUI 拉起时用：父进程一死 serve 随之结束，不留孤儿）")
-        <*> switch (long "writable" <> help "允许 POST 端点生成计划（写域限 vault 的 .pm：plans + 首次的 root-id；不执行、不碰照片）；缺省只读")
+        <*> switch (long "writable" <> help "允许两个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）与记录「暂不同步」决定（写主库的 .pm/vault-holds.json）；都不执行、不碰照片；缺省只读")
   initP =
     fmap CmdInit $
       InitOpts

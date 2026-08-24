@@ -115,6 +115,7 @@
   let vaultGen = 0;   // single-flight 代号：新一轮作废旧一轮
   let vaultDrift = 0; // 没有 NEW 但有 DRIFT 时，也能出纯裁决计划
   let heldInitial = new Set(); // 打开这一页时盘上已有的「暂不同步」决定
+  let submitting = false;      // 提交期间冻结选择：两步必须看同一份快照
   const HOLD = "__hold__";     // 第四个按钮的哨兵值——它不是 vault 类目
   const assign = new Map(); // name -> category | HOLD
   async function shrink(blob) {
@@ -152,7 +153,10 @@
     for (const u of thumbUrls) URL.revokeObjectURL(u); thumbUrls = [];
     assign.clear(); vaultDrift = 0; heldInitial = new Set(); $("#plan-result").className = "banner hidden";
     let meta;
-    try { meta = await getJson("/api/vault/new"); } catch (e) { grid.appendChild(el("div", "muted", "vault 未配置或不可用：" + e.message)); updateProgress(0); return; }
+    try { meta = await getJson("/api/vault/new"); } catch (e) {
+      if (gen !== vaultGen) return; // 旧轮失败：别动新一轮的网格
+      grid.appendChild(el("div", "muted", "vault 未配置或不可用：" + e.message)); updateProgress(0); return;
+    }
     if (gen !== vaultGen) return;
     vaultDrift = (meta.drift || []).length;
     heldInitial = new Set((meta.held || []).map((e) => e.name));
@@ -175,7 +179,7 @@
       // 的一条本地决定，随时能改回类目。
       for (const c of meta.categories.concat([HOLD])) {
         const b = el("button", c === HOLD ? "hold" : null, c === HOLD ? "暂不同步" : c);
-        b.onclick = () => { assign.set(e.name, c); for (const x of seg.children) x.classList.toggle("on", x === b); card.classList.add("done"); updateProgress(items.length); };
+        b.onclick = () => { if (submitting) return; assign.set(e.name, c); for (const x of seg.children) x.classList.toggle("on", x === b); card.classList.add("done"); updateProgress(items.length); };
         if (assign.get(e.name) === c) { b.classList.add("on"); card.classList.add("done"); }
         seg.appendChild(b);
       }
@@ -202,6 +206,9 @@
     const btn = $("#btn-plan"); btn.disabled = true;
     const out = $("#plan-result");
     const lines = [];
+    // 两步之间会 await：先把选择快照下来，提交期间点击也不再改它（submitting）
+    const snap = new Map(assign);
+    submitting = true;
     try {
       // 1) 先落「暂不同步」的增删：服务端拒收 held 文件的 push，撤销必须先生效
       const ops = holdOps();
@@ -209,10 +216,12 @@
         const rh = await post("/api/vault/hold", { hold: ops.hold, unhold: ops.unhold });
         const jh = await rh.json();
         if (!rh.ok) { out.className = "banner bad"; out.textContent = "决定未保存：" + (jh.error || rh.status) + (jh.details ? "\n" + jh.details.join("\n") : ""); btn.disabled = false; return; }
+        // 已落盘 → 立刻推进 baseline：第二步失败后重试不该再撤一次已撤的决定
+        heldInitial = new Set(jh.held || []);
         lines.push(`已记下决定：暂不同步 +${ops.hold.length} / 恢复 ${ops.unhold.length}（名单共 ${jh.count} 条；只写主库 .pm，vault 与照片没动）`);
       }
       // 2) 再按类目生成推送计划（没有类目指派、也没有 DRIFT 就跳过）
-      const assignments = [...assign.entries()].filter(([, c]) => c !== HOLD).map(([name, category]) => ({ name, category }));
+      const assignments = [...snap.entries()].filter(([, c]) => c !== HOLD).map(([name, category]) => ({ name, category }));
       if (assignments.length || vaultDrift) {
         const r = await post("/api/vault/push-plan", { assignments });
         const j = await r.json();
@@ -221,8 +230,10 @@
       }
       out.className = "banner ok";
       out.textContent = lines.length ? lines.join("\n\n") : "没有需要保存的改动。";
+      submitting = false;
       await loadVault();
     } catch (e) { out.className = "banner bad"; out.textContent = "请求失败：" + e.message; btn.disabled = false; }
+    finally { submitting = false; }
   }
 
   // ── 计划 ──
