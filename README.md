@@ -115,9 +115,19 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   catalog/plan 被零警告载入、校验与打开是两次独立解析。readPmState/
   withPmStateAppend/readSideCache 一口做完「完整路径逐级 resolveUnder → 只打开
   一次 → 句柄查 link count → 同一句柄读写」，catalog/journal/manifest/plan/
-  root-id/侧缓存/lock 全部改道；probeName 的 Missing/Unknown 改读
+  root-id/侧缓存的**读与追加**改道；probeName 的 Missing/Unknown 改读
   GetLastError；`.pm` 是普通文件不再被当"尚不存在"；doctor 探测 Unknown
   fail-closed 且删除前重验完整路径；测试拆出 StateGuardTests；181/181 测试）
+- P3b-15 ✅ codex 十二轮复审收口（十一轮收的是**读/追加**，十二轮点出同类的
+  **写与定点探测**仍按名字：`saveCatalog` 的 tmp/base/.1/.2 轮转自身无任何
+  解析——scan/backup 的「load → 长扫描 → save」窗口里 `.pm` 换成 junction 就会
+  在库外建 tmp、删 `.2`、轮转（critical）；doctor 对 trash 载荷按名字核 sha，
+  载荷换成库外 hardlink 会让 `--repair` 补写**虚假 Done**（major）；lock 裸开
+  句柄无 link count；侧缓存读把失信压成缺席，让 `pm status` 静默 exit 0。
+  修复：`resolvePmPath` 使用点解析 + `openStateLock` + doctor `probePmSha`
+  （同句柄 hash）+ 侧缓存读保留三态并计入 status 退出码；`probeName` 的属性与
+  错误码改由 cbits 单次 FFI 取得，消除 threaded RTS 的线程亲和性假设；
+  新增 3 例并对全部新屏障做突变验证；184/184 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

@@ -273,10 +273,12 @@ caseIoCacheDrift = withSystemTempDirectory "pm-vault" $ \tmp -> do
   writeF (vdir </> "landscape" </> "a.jpg") "AAAA"
   code2 <- runVaultStatus False (mkVaultCfg root vdir)
   code2 @?= 1
+  -- P3b-15：readVaultCacheMeta 三态（Left=失信、Right Nothing=缺席）
   mv <- readVaultCacheMeta root
   case mv of
-    Nothing -> assertFailure "vault-cache meta 未写入"
-    Just m -> do
+    Left m -> assertFailure ("vault-cache meta 不可信: " <> m)
+    Right Nothing -> assertFailure "vault-cache meta 未写入"
+    Right (Just m) -> do
       vmDrift m @?= 1
       vmOk m @?= 0
 

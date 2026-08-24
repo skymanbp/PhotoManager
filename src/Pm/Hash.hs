@@ -5,6 +5,7 @@
 -- volatile instead of being indexed with a possibly-torn hash).
 module Pm.Hash
   ( sha256File
+  , sha256Handle
   , copyFileHashed
   , StatSnap (..)
   , statSnap
@@ -30,7 +31,13 @@ chunkSize :: Int
 chunkSize = 1024 * 1024
 
 sha256File :: FilePath -> IO Text
-sha256File fp = withBinaryFile fp ReadMode (go hashInit)
+sha256File fp = withBinaryFile fp ReadMode sha256Handle
+
+-- | 从**已打开的句柄**流式 hash（P3b-15，十二轮 major）：doctor 对 @.pm\/trash@
+-- 载荷的核 sha 必须「先在句柄上判定 link count、再从同一句柄读」——按名字重开
+-- 会让校验与读取变成两次独立解析（正是十一轮那类缺口）。
+sha256Handle :: Handle -> IO Text
+sha256Handle = go hashInit
  where
   go :: Context SHA256 -> Handle -> IO Text
   go !ctx h = do

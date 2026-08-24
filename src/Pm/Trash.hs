@@ -18,7 +18,7 @@ module Pm.Trash
   , trashView
   ) where
 
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (IOException, try)
 import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -29,7 +29,6 @@ import qualified Data.Text as T
 import Data.Time (UTCTime)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, listDirectory, pathIsSymbolicLink)
 import System.FilePath ((</>))
-import System.IO
 import System.IO.Error (isDoesNotExistError)
 
 import Pm.Config (pmDir, pmSubTrash, readPmState, requirePmTrusted, withPmStateAppend)

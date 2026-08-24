@@ -18,7 +18,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.IO (hClose)
 
-import Pm.Config (pmDir, readPmState, requirePmTrusted)
+import Pm.Config (pmDir, readPmState, requirePmTrusted, resolvePmPath)
 import Pm.Op (userRelOk)
 import Pm.Types
 import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary)
@@ -97,8 +97,15 @@ loadCatalog' root = foldM step (Nothing, []) ["catalog.json", "catalog.json.1", 
 saveCatalog :: FilePath -> Catalog -> IO ()
 saveCatalog root cat = do
   createDirectoryIfMissing True (pmDir root)
-  let base = catalogPath root
-      tmp = base <> ".tmp"
+  -- P3b-15（十二轮 critical）：轮转的四条路径在**使用点**逐条解析，操作只用
+  -- 返回路径。此前 tmp/base/.1/.2 全按名字操作、本函数自身无任何解析——
+  -- scan/backup 的「loadCatalog → 长扫描 → saveCatalog」序列里，扫描期间把
+  -- @.pm@ 换成 junction，这里就会在**库外**建 tmp、删 @.2@、轮转 @.1@/base
+  -- （removeFile 沿 junction 删库外文件是 Probe7 起的实测事实）。
+  tmp <- resolvePmPath root "catalog.json.tmp"
+  base <- resolvePmPath root "catalog.json"
+  g1 <- resolvePmPath root "catalog.json.1"
+  g2 <- resolvePmPath root "catalog.json.2"
   -- 独占创建（P3b-11，八轮复审 major）：固定名 + 截断写 = 预置 hardlink 就能
   -- 让这次写落到库外共享对象上（同 'Pm.Hash.copyFileHashed'）。
   bracket (openFreshBinary tmp) hClose $ \h -> do
@@ -106,9 +113,9 @@ saveCatalog root cat = do
     flushHandleToDisk h
   -- Rotate: keep 3 generations. Oldest copy is discarded by design (snapshot
   -- is a cache; the journal is the durable layer).
-  removeIfExists (base <> ".2")
-  renameIfExists (base <> ".1") (base <> ".2")
-  renameIfExists base (base <> ".1")
+  removeIfExists g2
+  renameIfExists g1 g2
+  renameIfExists base g1
   moveFileNoReplace tmp base
 
 removeIfExists :: FilePath -> IO ()

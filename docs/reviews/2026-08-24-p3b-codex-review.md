@@ -581,3 +581,75 @@ manifest/plan 及读侧 hardlink 仍可绕过可信闸；仍属『pm 信任自�
 - `tamperMark` 字符串哨兵；`catalog.json.tmp` 固定名并发；`opSrcAbs` 无 root
   归属校验；`writeConfig` 普通覆盖写；备份盘符 fixture、位移槽 99、root-id tmp
   残留、.gitignore TOCTOU。
+
+---
+
+# 第十二轮（复审 P3b-14，commit d50f530；gpt-5.6-sol 独立评审）
+
+**verdict：NO-GO；收敛性：未收敛**——"读/追加口本身已闭合，但仓库仍有同类
+『拼 `.pm` 路径后按名字操作』的生产入口"。这一轮的价值在于把十一轮的收口
+**补全成一个可陈述的不变式**：十一轮只收了**读与追加**，写（`saveCatalog`
+轮转）、加锁、doctor 的**定点探测**仍在按名字操作。
+
+## 逐条判定与处置
+
+| 发现 | codex 判定 | 核实 | 修复 |
+|---|---|---|---|
+| **critical** `saveCatalog` 轮转 | NOT-FIXED（src/Pm/Catalog.hs:97-122） | **成立**（源码逐行核对：函数自身无 `requirePmTrusted`/`resolveUnder`；攻击窗口由 `Pm.Commands.runScan:232-247`、`Pm.BackupCmd:131-135` 的「load → 长扫描 → save」提供；junction 下 `removeFile` 删库外文件是 Probe7 起的实测事实） | 新增 `Pm.Config.resolvePmPath`（使用点解析，解析不出即抛）；tmp/base/.1/.2 **四条路径逐条解析后只用返回路径**做创建、unlink、rename |
+| **major** doctor 定点跟随 | NOT-FIXED（src/Pm/Doctor.hs:240,246） | **成立**：trash 载荷按名字 `doesFileExist`+`sha256File`，换成指向库外同内容文件的 hardlink 时"核验通过"，`--repair` 补写**虚假 Done** | 新增 `probePmSha`（完整路径 `resolveUnder` → `openStateRead` → **同句柄** `sha256Handle`）+ `probePmExists`；失信只报 `PM-LINK` Bad，**不参与任何 repair 推导**。`Pm.Hash` 导出 `sha256Handle`（按名字重开就等于把校验与读取拆成两次解析） |
+| **minor** lock 裸句柄 | 成立 | 成立 | `Pm.Win.openStateLock`：`ReadWriteMode` 打开一次 → 句柄 link count → 同句柄 `hTryLock` |
+| **minor** 侧缓存三态损失 | 成立，并指出我的注释"不会被静静吞掉"与 `Pm.Status` 实际行为矛盾 | **成立，是我的注释不实**（status 只读，没有配对写侧） | `readSideCache` 恢复 `Either String (Maybe a)`；`Pm.Status` 对 `Left` 报 ⚠ 并**计入退出码**；`computeVault` 弃用失信缓存重算但打印原因 |
+| **minor** 侧缓存读侧用例假绿 | 成立 | **成立**：库外 JSON 是 `{"x":1}`，解不出 `Catalog`，删掉 link count 屏障照样绿 | 改为 pm 自己编码的**合法 Catalog**，断言 `Left`；突变验证确认现在会转红 |
+| 3 FFI 线程亲和性 | PARTIAL：明确标注为**假设**、未作为已证实缺陷 | 假设合理（`GetLastError` 是 per-OS-thread，threaded RTS + `-N`，两次独立 FFI 之间无 bound-thread 保证） | **不登记残余，直接消除**：新增 `cbits/pm_win.c` 的 `pm_get_file_attributes_err`，属性与错误码**同一次调用内**取得。假设不存在了，就不需要压力探针 |
+| 1/2 其余、4 doctor stale、6 文档 | PARTIAL / FIXED / NOT-FIXED | 逐条成立 | 见下「文档更正」 |
+
+## 文档更正（十二轮点名 5 处，全部成立）
+
+- README「lock 与全部状态入口改道」→ 改为「**读与追加**改道」，并新增 P3b-15 行。
+- REVIEW-LOG 十一轮条目补「**十二轮更正**」段（同上，另记侧缓存假绿）。
+- `Pm.Config` 模块头「唯一状态取用口」→ 说明写侧由 `resolvePmPath` 在使用点解析。
+- `readSideCache` 注释删去"不会被静静吞掉"的不实说法，改述三态契约。
+- `openFreshBinary` 注释关于 Catalog 前提的说法随 `saveCatalog` 修复一并更新。
+
+## 突变验证（本轮每条新屏障都做了，不只是"测试通过"）
+
+| 删掉的屏障 | 结果 |
+|---|---|
+| `saveCatalog` 的四条 `resolvePmPath` | `caseSaveCatalogJunction` **FAIL**（1/184） |
+| `openStateLock` 的 link count | `caseLockHardlink` **FAIL**（1/184） |
+| doctor `probePmSha` → 退回按名字 sha | `caseDoctorTrashPayloadLink` **FAIL**（1/184） |
+| `openStateRead` 的 link count | **4 例同时 FAIL**（catalog 读侧、plan、侧缓存读侧、doctor 载荷）——其中侧缓存读侧正是十二轮点出的假绿，现已真正钉住 |
+
+回归：184/184（+3），GHC 警告 0；真实库只读四连不变
+（doctor 0 / trash list 0 / status 1 / vault status 1，doctor 240 ms），
+status 的备份盘/vault 两行走的是 `Right` 分支，无误报失信。
+
+## 残余（更新——十二轮指出上一版清单漏登记了 Catalog/lock/Status/doctor/FFI 五项，本版按其清单逐项补齐或消除）
+
+- **TOCTOU（check-use 窗口）**：受信口把「校验→打开」收成一次，但
+  `resolveUnder` 与 `openStateRead/Append/Lock` 之间仍有换链窗口；
+  `savePlan` 的「resolve → 独占 tmp → 删旧 → 落位」中删旧那步同理
+  （十二轮：单纯再 resolve 一次只能收窄，不能消除**双重换链**）。
+  根治需 handle-relative 原生 API；十二轮另给了一个更轻的收窄方案——打开后
+  在同句柄上 `GetFinalPathNameByHandleW` 与预期 root 比对（需先验证
+  UNC / 卷 GUID / 大小写规范化形态），登记待 P4 前评估。
+- `openExclusiveBinary` 缺外层 `mask`：两段所有权窗口（`createFile` 返回→第一个
+  handler；`hANDLEToHandle` 返回→下一条 `onException`）。
+- `requirePmTrusted` 的深度 1 枚举与使用点是两个快照（深层由取用口逐条兜底）。
+- `createRootInfo` 新建 `.pm` 之后没有再次 resolve（窄 TOCTOU）。
+- `Pm.Config.writeRootInfo` 裸覆盖写（**仅测试 fixture**，生产走 `createRootInfo`）。
+- `Pm.Scan` 的 symlink 探测异常按非 symlink 继续（该 ACL 形态本机构造不出）。
+- `Pm.GitGuard` 读用户 `.gitignore`、`Pm.Vault.photosJsonRef` 读配置指向的
+  `photos.json`——都不是 `.pm` 状态，不属受信取用口辖区（十二轮复核该排除理由成立）。
+- **`probeName` 的错误码集合**：只有 2/3 算缺失，5/15/21/32/53/67/123/206 等一律
+  `ProbeUnknown` fail-closed。十二轮指出这可能拒绝离线/无权限/UNC 断网的库，
+  但**不会误接受**；本机构造不出这些形态的实测反例，登记为已知保守取舍。
+- **未证实项**：8.3 短名、Unicode 兼容等价、保留设备名、云占位/Dedup 的实际
+  reparse 形态、能让 `canonicalizePath` 抛异常的输入、"可读内容但不可读
+  attributes"的 ACL 库。
+- `tamperMark` 字符串哨兵；`opSrcAbs` 无 root 归属校验；`writeConfig` 普通覆盖写；
+  备份盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU。
+- **慢介质开销**（十二轮 dig-deeper）：每次 loader 一次 `.pm` 深度 1 枚举 +
+  每个状态文件的逐级解析；备份发现对每个候选卷调用 `readRootInfo`。源码未设
+  超时，可能累积延迟——**无正常文件被误判的证据**，但 USB 备份盘上的实测待
+  用户插盘后补。

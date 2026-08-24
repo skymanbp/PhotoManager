@@ -22,7 +22,7 @@ import System.IO
 import System.IO.Error (isAlreadyInUseError)
 
 import Pm.Config (pmDir, untrustedMsg)
-import Pm.Win (resolveUnder)
+import Pm.Win (openStateLock, resolveUnder)
 
 -- | Run the action holding the root's exclusive mutation lock; Nothing if
 -- another pm instance holds it.
@@ -30,6 +30,9 @@ import Pm.Win (resolveUnder)
 -- P3b-14（十一轮）：锁文件也先过完整路径 'resolveUnder'。它本身不写字节，
 -- 所以危害低于 journal\/manifest；纳入同一规则是为了让「@.pm@ 下的任何打开都
 -- 先解析完整路径」成为**无例外**的陈述——留一个例外，下一轮就从那里进来。
+-- P3b-15（十二轮 minor）：resolve 只认 symlink，认不出 hardlink——@.pm/lock@
+-- 被 hardlink 到库外文件时 pm 会锁住那个共享对象（跨库互斥\/对外部程序的
+-- DoS）。改用 'openStateLock'：打开后在句柄上查 link count，同句柄 hTryLock。
 withRootLock :: FilePath -> IO a -> IO (Maybe a)
 withRootLock root act = do
   createDirectoryIfMissing True (pmDir root)
@@ -37,8 +40,8 @@ withRootLock root act = do
   lockFp <- case ml of
     Nothing -> ioError (userError (untrustedMsg (pmDir root </> "lock")))
     Just fp -> pure fp
-  -- ReadWriteMode: creates the file if missing, never truncates.
-  r <- try (openBinaryFile lockFp ReadWriteMode)
+  -- ReadWriteMode inside: creates the file if missing, never truncates.
+  r <- try (openStateLock lockFp)
   case r of
     Left (e :: IOException)
       | isAlreadyInUseError e -> pure Nothing
