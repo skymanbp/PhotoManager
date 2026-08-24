@@ -390,8 +390,8 @@ injectionTests =
           now <- getCurrentTime
           let op = OpCopy (dir </> "ghost.jpg") ("相册" </> "a.jpg") "1111beef" 6 0
           withJournal root $ \j -> do
-            jAppend j Barrier (JIntent "p#0" op now)
-            jAppend j Barrier (JDone "p#0" (Just "1111beef") Nothing now)
+            jAppend j Barrier (JIntent (tpOid 0) op now)
+            jAppend j Barrier (JDone (tpOid 0) (Just "1111beef") Nothing now)
           -- 无 CleanShutdown → Done 落在验证窗口内
           rows <- doctorRows root
           assertBool ("expected C4 in " <> show rows) (("C4", Bad) `elem` rows)
@@ -404,7 +404,7 @@ injectionTests =
           writeFile (root </> "相册" </> "a.jpg") "WRONG-CONTENT"
           now <- getCurrentTime
           let op = OpCopy (dir </> "ghost.jpg") ("相册" </> "a.jpg") "beef1234" 5 0
-          withJournal root $ \j -> jAppend j Barrier (JIntent "p#0" op now)
+          withJournal root $ \j -> jAppend j Barrier (JIntent (tpOid 0) op now)
           rows <- doctorRows root
           assertBool ("expected C5 in " <> show rows) (("C5", Bad) `elem` rows)
           c <- readFile (root </> "相册" </> "a.jpg")
@@ -417,7 +417,7 @@ injectionTests =
           writeFile (root </> "new.txt") "N"
           now <- getCurrentTime
           withJournal root $ \j ->
-            jAppend j Barrier (JIntent "p#0" (OpRename "old.txt" "new.txt" (FpFileSha "aa")) now)
+            jAppend j Barrier (JIntent (tpOid 0) (OpRename "old.txt" "new.txt" (FpFileSha "aa")) now)
           rows <- doctorRows root
           assertBool ("expected R3 in " <> show rows) (("R3", Warn) `elem` rows)
     , testCase "P3b-4 #1 / P3b-5: 复位目标被占 → 占位者隔离(~displaced-N) + victim 复位；重跑用新槽位；undo 不含内部事务" $
@@ -501,10 +501,10 @@ injectionTests =
     , testCase "P3b-5 #1 doctor: Q-DONE-LOST 补记前核 sha——trash 内容不符 → Bad 且 --repair 不盲补" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"
-          createDirectoryIfMissing True (trashDir root </> "p")
-          writeFile (trashDir root </> "p" </> "v.jpg") "WRONG"
+          createDirectoryIfMissing True (trashDir root </> T.unpack tpid)
+          writeFile (trashDir root </> T.unpack tpid </> "v.jpg") "WRONG"
           now <- getCurrentTime
-          withJournal root $ \j -> jAppend j Barrier (JIntent "p#0" (OpQuarantine "v.jpg" "beefbeef" "t") now)
+          withJournal root $ \j -> jAppend j Barrier (JIntent (tpOid 0) (OpQuarantine "v.jpg" "beefbeef" "t") now)
           rows <- doctorRows root
           assertBool ("expected Bad Q-DONE-LOST in " <> show rows) (("Q-DONE-LOST", Bad) `elem` rows)
           _ <- runDoctor root (DoctorOpts False True)

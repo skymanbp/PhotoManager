@@ -548,6 +548,18 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   都过同一守卫。B1 `requireMain` 再补 apply 后备份缓存刷新（`afterApply`）、clean
   执行期复验、trash empty 的 clean-staging 屏障——配置主路径与备份盘同为
   RoleBackup 时不再自证三副本。测试 +7（151/151）。归档同上文件第四轮章节。
+- **P3b-8 五轮收口（同日，codex 五轮：major/新 major 2 FIXED；A1/B1/测试 PARTIAL
+  + 1 新 major + 2 新 minor）**：
+  A1 `opIdParts` 的 planId 部分改为必须是生成格式（`isValidPlanId` 移入 `Pm.Op`，
+  Plan 再导出）——此前只排除 `#`/`~`，手编 `../../outside#0` 能让 doctor 把
+  trash/tmp 路径推到 root 之外；`readDigits` 加 18 位上限；`slotOccupied` 提为顶层，
+  两个探测都包 try（非「不存在」异常按占用）。GHC 探针证伪两个子断言：`isDigit`
+  只认 ASCII、`read` 越界静默回绕（已被 `show n == t` 拒绝）。B1 `runClean`/
+  `runImport` 的 `requireRole RoleMain` 移到任何 catalog 读取与三副本判定之前，
+  `runTrash` clean 分支先判 `requireMain` 再读主库侧。测试 fixture `ensureTestRoot`
+  改走 `readRootState` + `createRootInfo`（损坏标识不覆盖）；journal fixture 一律用
+  生成格式 pid。测试 +4（155/155）。归档同上文件第五轮章节；§16 评审摘要拆到
+  `docs/REVIEW-LOG.md`。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -681,68 +693,8 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 
 ---
 
-## 16. 评审记录（v0.1 → v0.2）
+## 16. 评审记录（v0.1 → v0.2 → P3b）
 
-2026-08-22 多智能体对抗评审（5 视角批判 + 逐条怀疑者反驳验证，19 agents）：
-30 条发现 → **12 条确认**（3 critical 数据安全 + 2 critical Windows 工程 +
-1 critical UX + 1 critical vault + 2 critical 性能 + 3 major）、**2 条被实测
-反驳**（exFAT mtime 粒度链条：mtime 从不跨 root 比较、六态只认 filename+sha）、
-16 条容量截断未验证（已由主线逐条裁决吸收）。全部确认项与裁决项已并入本版：
-写协议（§6 全重写：moveFileEx flags=0、持久化屏障、三 Op 矩阵、supersede 复合、
-tmp 移入 .pm/tmp、缓存级/介质级验证分层）、命令面（clean staging、apply/resolve、
-ingest 拆步、status 新鲜度头行、报告规格 §5.1）、vault 对接（值形状兼容、
-UNPUSHABLE、RENAME=BLOCKED、I11 gitignore）、依赖清单（Win32/file-io/JuicyPixels/
-process + P0 冒烟）、性能表（介质分列 + 首备/import 行 + fsync/verify 分项）。
-完整评审原文：`docs/reviews/2026-08-22-design-attack.md`。
-
-2026-08-23 P2 实现独立评审（codex gpt-5.6-sol，对 commit b0a1363）：12 条发现
-（5 critical / 6 major / 1 minor）逐条核实成立，verdict 不放行 → **P2.1 全部
-修复**：Plan 携带 root UUID + 复合组（cx-1/2/4/5，§3/§5/§6.5）、clean 执行期
-三副本重验 + trash empty 终极屏障（cx-3）、见证真实重 hash（mj-6）、目标键
-case-fold + stem 组拒绝（mj-2/3）、Names 空地点/裸后缀拒绝（mj-1）、归档层限
-Raw/成片（mj-5）、backup init 嵌套检查 case-fold（mj-4）、FFI 调用约定 CPP 宏
-（mn-1）。评审归档：`docs/reviews/2026-08-23-p2-codex-review.md`。
-
-同日 codex 二轮复审（对 5ce1ddb）：7 FIXED / 4 PARTIAL / 1 NOT-FIXED +
-1 新 major → **P2.2 补齐**：返修 stem 组悬置（mj-3v2）、无 rootId 全路径
-fail-closed（含 --apply 即时路径）、clean 即时路径同走执行期重验（cx-3
-旁路封堵）、doctor/undo 复位配对改顺序感知 + trash empty 按 trashRel 去重
-（新 major）、foldPath 补 normalise（mj-2）、backup init 改
-canonicalizePath（mj-4）。
-
-同日 codex 三轮聚焦复审（对 c663a48）→ **P2.3 收口**：execPlan 内核自卫
-（有身份 root 拒无身份计划）、doctor 悬挂判定改末事件（重跑次序感知）、
-stem 组键改规范化目标路径、bindExecRoot 身份优先（kind 无关）、backup
-采纳前复验配置 UUID、init 写前重 canonicalize；对抗性 TOCTOU 类按 §14
-威胁模型「缓解+记录+交用户裁定」处置。逐项处置表见评审归档三轮章节。
-
-2026-08-24 P3a/P3b-1 实现独立评审（codex gpt-5.6-sol，对 018fb1c..676426c）：
-verdict NO-GO，6 major 逐条对照源码核实**全部成立** → **P3b-4 全部修复**
-（§10.2 P3b-4 条目：组回滚占位隔离、vaultIgnoreGuard、eePreflight 执行期
-重检 I11、缓存身份绑定 + statHitStable racy 判据统一修、unstable 第八态
-fail-closed、bindExecRoot 恰一命中）；新增 6 测试（128/128）。评审归档：
-`docs/reviews/2026-08-24-p3b-codex-review.md`。
-
-同日 codex 二轮复审（`codex exec` 只读直跑，对 676426c..d8e6d6d）：#5 FIXED、
-其余 5 条 PARTIAL（各留一个可复现边界）+ names/versions 首评 3 major 1 minor
-→ **P3b-5 收口**（§10.2 P3b-5 条目）：位移槽位序号 + doctor 核 sha + undo
-剔除内部事务、守卫 canonical 路径 + case-fold 反规则、I11 下沉内核按 role
-无条件重检、缓存身份双 Just、备份发现全命中、requireRole 统一、递归目录
-指纹、names 文件占位预检；B4 经 I7 反驳不成立。新增 5 测试（133/133）。
-
-同日 codex 三轮复审（`codex exec` 只读直跑；前三次运行模型侧无 exec 工具而
-空跑，改重试循环按事件流 `command_execution` 计数判定，第 1 次重试即真跑：
-132 次命令执行；对 d8e6d6d..e7288ae）：A4/A6/B2/B3 FIXED、B4 反驳被接受；
-A1/A2/A3/B1 各留一个可复现绕过 + init 守卫缺失 major + junction 指纹 minor，
-逐条核实全部成立（A2 另以 git 2.52 `check-ignore` 实证）→ **P3b-6 收口**
-（§10.2 P3b-6 条目）：严格 opId/planId 解析、通配符反规则拒绝、匿名 root
-与 role 改写封堵 + 取锁前预检、requireMain 四入口、init/backup init 守卫、
-指纹不跟随 reparse point；Commands 拆出 Pm.BackupCmd。新增 11 测试（144/144）。
-
-同日 codex 四轮复审（重试循环第 3 次真跑，204 次命令执行，对 e7288ae..a2efb3f）：
-A2/A3/minor/拆分 FIXED；A1/B1/major 各留可复现边界 + 2 新 major（piIx 校验、I11
-未覆盖 doctor --repair/undo/resolve/scan 写入口），逐条核实全部成立（悬空
-junction 下 `doesPathExist=False` 实测）→ **P3b-7 收口**（§10.2 P3b-7 条目）：
-规范十进制 + validatePlan、构造式隔离目录 + doctor 畸形 oid fail-closed、
-RootIdState 三态 + 原子建标识、requireWritable 内嵌 I11 覆盖全部 .pm 写入口、
-requireMain 补 afterApply/clean 复验/trash 屏障。新增 7 测试（151/151）。
+按时间的评审摘要（2026-08-22 多智能体设计评审、P2/P3 各轮 codex 复审与对应
+收口阶段）已拆到 [`docs/REVIEW-LOG.md`](REVIEW-LOG.md)（2026-08-24，本文件触及
+750 行预算）；逐条处置表在 `docs/reviews/`，实现条目在 §10.2。

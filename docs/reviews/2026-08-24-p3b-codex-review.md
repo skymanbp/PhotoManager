@@ -241,3 +241,47 @@ I5 不覆盖；gitStepsLines 纯字符串（pm 零 git 执行）;六态算法/�
 - junction 别名 vault 路径的守卫行为（`canonicalizePath` 一行）仍未自动化。
 - 带 reparse 属性的非链接对象（OneDrive 占位、dedup）在指纹里记为 `l`，其内容
   变化不改变指纹（保守；真实库无此类对象）。
+
+---
+
+# 五轮复审（2026-08-24，`codex exec -s read-only` 直跑，对 a2efb3f..fdcd5e3）
+
+- 取结果：重试循环第 1 次即真跑：178 次命令执行（约 11 分钟）。
+- verdict：**NO-GO**——major/新 major 2 FIXED；A1/B1/测试 PARTIAL + 1 新 major + 2 新
+  minor。逐条对照源码核实：**主体全部成立**；A1 内两个子断言以 GHC 9.10 探针
+  **证伪**（`Data.Char.isDigit` 只认 ASCII：U+0663/U+FF11 → False；`read "9…9"::Int`
+  静默回绕不抛异常，`show n == t` 本已拒绝），不影响主发现（路径型 pid）。同轮修复
+  （P3b-8，155/155，零 GHC 警告）。
+
+## 逐条
+
+| # | 复审判定 | 残留（codex） | 核实 | P3b-8 处置 |
+|---|---|---|---|---|
+| A1 | PARTIAL | `opIdParts` 只排除 `#`/`~`，`../../outside#0` 通过解析，doctor 经 `quarTrashRel`/`pendingTmp` 把 trash/tmp 路径推到 root 之外（内容相符 → Q-DONE-LOST → `--repair` 补 Done）；`readDigits` 对越界/非 ASCII 数字 `read` 不安全；`slotOccupied` 的 `doesPathExist` 未包 try | 路径型 pid **成立**（Op.hs:104 原文只排除 `#`/`~`）；越界/Unicode **不成立**（探针：isDigit ASCII-only，read 回绕后被 `show n == t` 拒绝）；doesPathExist 未包 try **成立**，但探针显示它自己吞掉 InvalidArgument/PermissionDenied 答 False，随后 `pathIsSymbolicLink` 抛非 DNE 异常已落在占用分支 | `isValidPlanId` 移入 `Pm.Op`（Plan 再导出），`opIdParts` 要求 pid 为生成格式；`readDigits` 加 18 位上限（不再依赖回绕语义）；`slotOccupied` 提为顶层并把两个探测都包 try（非 DNE → 占用）。测试：路径型/短名/超长序号 → Nothing、doctor 对 `../../../outside#0` 报 OID-MALFORMED 且 --repair 不补 Done、slotOccupied 非法名 → 占用 |
+| major | FIXED | — | — | — |
+| 新 major 2 | FIXED | — | — | — |
+| B1 | PARTIAL | `runClean` 先 `verifyCandidates` 并打印「三副本已确认」，到写计划前才 `requireRole RoleMain`；`runTrash` clean 分支在 `trashView`/分类后才 `requireMain` | runClean **成立**（Commands.hs:635 vs :650 原文如此）；runTrash **部分成立**：`root` 是 pickRoot 已按槽位验过的作用 root，`trashView` 只读它的 manifest，requireMain 守的是 cfgMainPath 见证——但此前 `loadCatalog (cfgMainPath)` 在 `case emain` 之前执行（读取先于校验） | `runClean`/`runImport`（同类一并）把 `requireRole RoleMain` 移到任何 catalog 读取之前；`runTrash` clean 分支先判 `requireMain` 再读主库 catalog/备份发现（守卫仍在 clean 分支内而非 trashView 前，理由见代码注释）。测试：主路径为 RoleBackup + 索引存在 → runClean/runImport 都 exit 2 且不落计划；同 fixture 换 RoleMain → 1/0（证明 2 来自身份校验） |
+| 测试 | PARTIAL | 未覆盖 runClean 次序、oid 路径穿越、readDigits 越界、slot 探测异常、root-id tmp 残留；`ensureTestRoot` 把损坏 marker 当缺席 `writeRootInfo` 覆盖 | 成立（TestUtil.hs:65-70 原文如此） | `ensureTestRoot` 改走 `readRootState` + `createRootInfo`（Corrupt → 测试失败，不覆盖）；上述各项补测试（root-id tmp 残留见残余）；journal fixture 一律用生成格式 pid（`TestUtil.tpid`） |
+| 新 major | — | 同 A1 路径型 pid | 成立 | 并入 A1 |
+| 新 minor 1 | — | `doesPathExist` 异常中断批次（codex 标注为假设） | 假设不成立（探针），契约改为显式 try | 并入 A1 |
+| 新 minor 2 | — | `ensureTestRoot` 覆盖 RootCorrupt | 成立 | 并入测试项 |
+
+## 附带
+
+- 五轮主发现准确率保持（主体全成立），首次出现两个被探针证伪的子断言（Unicode
+  数字、read 越界异常）——codex 自己把它们写成「没有安全失败」而非实证；处置
+  原则不变：先探针再定论，不预设它错也不预设它对。
+- `Exec.planIdOf`（manifest 元数据）仍是 `takeWhile (/= '#')`：其输入是内核按
+  `validatePlan` 通过的计划生成的 oid，不是外部输入；未改。
+- 真实库 journal 仅一个 pid（`20260823-175905-a06469`，生成格式，无后缀）：
+  `opIdParts` 收紧不会在真实库触发 OID-MALFORMED（`pm doctor` 复核见提交说明）。
+
+## 残余与未自动化项
+
+- `createRootInfo` 在 move 前崩溃会留下 `.pm/root-id.json.<hex8>.tmp`：doctor 只扫
+  `.pm/tmp/`，不会误判为身份/Done；纯残留清理，留待 doctor 增项。
+- `.gitignore` 在 requireWritable 检查与后续 cache/catalog 写入之间被并发改写属
+  未加锁 TOCTOU（Exec 路径锁内重检；非 Exec 写入口无第二次自守卫）。
+- `pm backup` 的 requireMain/requireRole 分支无自动化测试（需盘符发现 fixture）。
+- 位移槽位封顶 99；落位后复核异常路径未做故障注入；junction 别名 vault 守卫、
+  reparse 非链接对象记 `l`（沿前几轮记录）。

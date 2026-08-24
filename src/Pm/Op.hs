@@ -8,6 +8,7 @@ module Pm.Op
   ( Op (..)
   , Fingerprint (..)
   , opId
+  , isValidPlanId
   , OpIdSuffix (..)
   , opIdParts
   , restoreOpId
@@ -87,6 +88,24 @@ instance FromJSON Op where
 opId :: Text -> Int -> Text
 opId pid ix = pid <> "#" <> T.pack (show ix)
 
+-- | 'Pm.Plan.newPlanId' 的生成格式 @YYYYMMDD-HHMMSS-hex6@（hex 小写）。计划文件
+-- 是可手编的外部输入，而 id 参与 opId\/tmp\/trash 路径推导：不合格式的 id（如
+-- 含 @~d@、@#@、路径分隔符、@..@）在装载（'Pm.Plan.loadPlan'）、执行
+-- （'Pm.Exec.execPlan'）与 oid 解析（'opIdParts'）三处都拒绝。定义在本模块
+-- 而非 Plan，是因为 opId 解析也要它（Plan 再导出）。
+isValidPlanId :: Text -> Bool
+isValidPlanId t = case T.splitOn "-" t of
+  [d, hms, hex] ->
+    T.length d == 8
+      && T.all isDigit d
+      && T.length hms == 6
+      && T.all isDigit hms
+      && T.length hex == 6
+      && T.all isHexLower hex
+  _ -> False
+ where
+  isHexLower c = isDigit c || (c >= 'a' && c <= 'f')
+
 -- | opId 后缀 = 内核内部事务约定（P3b-6 复审 A1 统一解析）：无后缀是用户可见
 -- 操作；@~r@ 是 §6.5 组回滚的自动复位 rename；@~d\<N\>@ 是组回滚时占位者的
 -- 第 N 次位移隔离（落 @\<pid\>~displaced-\<N\>\/@）。其它形态都不是 pm 生成的。
@@ -94,14 +113,16 @@ data OpIdSuffix = SfxPlain | SfxRestore | SfxDisplaced Int
   deriving (Show, Eq)
 
 -- | 严格解析 @\<planId\>#\<ix\>[~r|~d\<N\>]@ → (planId, ix, 后缀)。planId 部分
--- 不得含 @#@\/@~@（生成格式 YYYYMMDD-HHMMSS-hex6 由 'Pm.Plan.isValidPlanId'
--- 在装载与执行处另行把关）；ix 与 N 为十进制，N ≥ 1。此前 Trash 用
--- @splitOn "~d"@、Undo 用 @isInfixOf "~d"@ 各自弱解析：planId 含 @~d@ 时前者
--- 把普通隔离推到位移目录、后者把正常操作当内部事务剔出 undo。
+-- 必须是生成格式（'isValidPlanId'）——P3b-8 复审 A1：此前只排除 @#@\/@~@，
+-- 手编 journal 的 @..\/..\/outside#0@ 能通过解析，doctor 随即把 trash\/tmp
+-- 路径推到 root 之外（内容相符即 Q-DONE-LOST，--repair 补 Done）。ix 与 N 为
+-- 规范十进制，N ≥ 1。此前 Trash 用 @splitOn "~d"@、Undo 用 @isInfixOf "~d"@
+-- 各自弱解析：planId 含 @~d@ 时前者把普通隔离推到位移目录、后者把正常操作当
+-- 内部事务剔出 undo。
 opIdParts :: Text -> Maybe (Text, Int, OpIdSuffix)
 opIdParts oid = do
   let (pid, rest) = T.breakOn "#" oid
-  guard (not (T.null pid) && T.all (\c -> c /= '#' && c /= '~') pid)
+  guard (isValidPlanId pid)
   rest' <- T.stripPrefix "#" rest
   let (ixT, sfx) = T.span isDigit rest'
   ix <- readDigits ixT
@@ -116,10 +137,13 @@ opIdParts oid = do
     _ -> Nothing
   pure (pid, ix, s)
  where
-  -- 规范十进制：无前导零、无符号（P3b-7 复审 A1："p#00"、"p#0~d01" 不是 pm
-  -- 生成的，接受它们会让手编 "p#00~r" 抵消真实的 "p#0" Done）。
+  -- 规范十进制：无前导零、无符号、有界（P3b-7 复审 A1："p#00"、"p#0~d01" 不是
+  -- pm 生成的，接受它们会让手编 "p#00~r" 抵消真实的 "p#0" Done）。isDigit 只认
+  -- ASCII 0-9（GHC 9.10 实测 U+0663\/U+FF11 → False）；长度封顶 18 位使 read
+  -- 永不越过 Int（超长串 read 会静默回绕，show n == t 本已拒绝，P3b-8 起不再
+  -- 依赖回绕语义）。
   readDigits t
-    | T.null t || not (T.all isDigit t) = Nothing
+    | T.null t || T.length t > 18 || not (T.all isDigit t) = Nothing
     | otherwise =
         let n = read (T.unpack t) :: Int
          in if T.pack (show n) == t then Just n else Nothing

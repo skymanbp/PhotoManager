@@ -18,6 +18,7 @@ module Pm.Exec
   , execPlan
   , tmpDirFor
   , tmpNameFor
+  , slotOccupied
   , dirFingerprint
   , updateCatalog
   , outcomeLabel
@@ -298,21 +299,27 @@ restoreQuarantine env root j pid (_, qit, trashRel) = do
       | otherwise = do
           occ <- slotOccupied (trashDir root </> quarDirFor pid' (SfxDisplaced n) </> victimRel)
           if occ then go (n + 1) else pure (Just (displacedOpId pid' ix n, n))
-  -- 「占用」= 任何路径条目，**含悬空的 junction/symlink**：doesPathExist 跟随
-  -- 链接，悬空链接会答 False（P3b-7 复审 A1，directory-1.3.8.5 实测），再用
-  -- lstat 语义的 pathIsSymbolicLink 补判；探测异常（非「不存在」）按占用
-  -- 处理——宁可跳槽，不撞 I5。
-  slotOccupied p = do
-    ex <- doesPathExist p
-    if ex
-      then pure True
-      else do
-        r <- try (pathIsSymbolicLink p) :: IO (Either IOException Bool)
-        pure $ case r of
-          Right isLink -> isLink
-          Left e
-            | isDoesNotExistError e -> False
-            | otherwise -> True
+
+-- | 位移槽「占用」= 任何路径条目，**含悬空的 junction\/symlink**：doesPathExist
+-- 跟随链接，悬空链接会答 False（P3b-7 复审 A1，directory-1.3.8.5 实测），再用
+-- lstat 语义的 pathIsSymbolicLink 补判。两个探测都包在 try 里，非「不存在」的
+-- 异常（ACL 拒绝、非法名）一律按占用——宁可跳槽，不撞 I5。P3b-8 复审 A1：
+-- 实测 doesPathExist 自己吞掉这类错误答 False、pathIsSymbolicLink 则抛
+-- InvalidArgument\/PermissionDenied，此前已落在占用分支；包起来是让契约不再
+-- 依赖库的吞错细节。
+slotOccupied :: FilePath -> IO Bool
+slotOccupied p = do
+  ex <- try (doesPathExist p) :: IO (Either IOException Bool)
+  case ex of
+    Right True -> pure True
+    Left e | not (isDoesNotExistError e) -> pure True
+    _ -> do
+      r <- try (pathIsSymbolicLink p) :: IO (Either IOException Bool)
+      pure $ case r of
+        Right isLink -> isLink
+        Left e
+          | isDoesNotExistError e -> False
+          | otherwise -> True
 
 execItem :: ExecEnv -> FilePath -> Journal -> Text -> PlanItem -> IO ItemOutcome
 execItem env root j pid item = case piStatus item of

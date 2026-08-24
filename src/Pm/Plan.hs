@@ -21,7 +21,6 @@ import Crypto.Random (getRandomBytes)
 import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import Data.Char (isDigit)
 import Data.List (nub, sort)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -32,7 +31,7 @@ import System.FilePath ((</>))
 import Text.Printf (printf)
 
 import Pm.Config (pmDir)
-import Pm.Op
+import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
 
 data ItemStatus
   = StPending
@@ -110,22 +109,9 @@ newPlanId = do
       hex = concatMap (printf "%02x") (BS.unpack bytes)
   pure (T.pack (ts <> "-" <> hex))
 
--- | 'newPlanId' 的生成格式 @YYYYMMDD-HHMMSS-hex6@（hex 小写）。计划文件是可手
--- 编的外部输入，而 id 参与 opId\/tmp\/trash 路径推导：不合格式的 id（如含
--- @~d@、@#@、路径分隔符）在装载（'loadPlan'）与执行（'Pm.Exec.execPlan'）两处
--- 都拒绝（P3b-6 复审 A1）。
-isValidPlanId :: Text -> Bool
-isValidPlanId t = case T.splitOn "-" t of
-  [d, hms, hex] ->
-    T.length d == 8
-      && T.all isDigit d
-      && T.length hms == 6
-      && T.all isDigit hms
-      && T.length hex == 6
-      && T.all isHexLower hex
-  _ -> False
- where
-  isHexLower c = isDigit c || (c >= 'a' && c <= 'f')
+-- 'isValidPlanId'（生成格式 @YYYYMMDD-HHMMSS-hex6@）自 P3b-8 起定义在 'Pm.Op'
+-- （'opIdParts' 也要它），本模块再导出；装载（'loadPlan'）与执行
+-- （'Pm.Exec.execPlan'）两处都用它拒绝不合格式的 id（P3b-6 复审 A1）。
 
 -- | 计划的结构性校验（装载与执行两处共用；P3b-7 复审 A1 \/ 新 major）：id 为
 -- 生成格式；@piIx@ 非负且全局唯一——负数会拼出无法解析的 opId，重复序号让
