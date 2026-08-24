@@ -424,7 +424,7 @@ root lock，均会让用户决定失真；暂不建议对真实 15 张执行。"
 
 | # | 评审要求 | 处置（同分支） |
 |---|---|---|
-| 1 | HELD 创建与复核对目标照片强制实际稳定重 hash，补等长/同 mtime 用例 | **已修**：`computeVault` 对「名单里且仍是 NEW」的文件用**空缓存**调 `shaViaCache`（必走真实重读 + 双 stat），读不稳定按失效处理。新例 `caseHoldStaleEqualLen` 刻意造一条必然 `statHitStable` 的主库 catalog 条目，再等长替换 + `setModificationTime` 还原 mtime；突变回 `srcShas` → 该例转红，其余六例仍绿 |
+| 1 | HELD 创建与复核对目标照片强制实际稳定重 hash，补等长/同 mtime 用例 | **当时只修了"复核"一半**（二十二轮 major①）：`computeVault` 对「名单里且仍是 NEW」的文件用**空缓存**调 `shaViaCache`（必走真实重读 + 双 stat），读不稳定按失效处理；新例 `caseHoldStaleEqualLen`。但**创建**仍从 `vrSrcMeta` 取缓存 sha——见第二十二轮章节，P4-7c 抽出 `freshSrcSha` 后两条路径才共用同一取法 |
 | 2 | 用跨进程 root lock 包住 holds 的完整读改写事务，补并发丢更新用例 | **已修**：抽出事务壳 `Pm.VaultCmd.withHoldsTxn`，`compute → readHolds → holdRequest → writeHolds` 整段在主库 `.pm/lock`（I10）内；锁被占不排队（CLI exit 2 / API 409）。新例 `caseHoldLock` 在另一线程持锁后调用 `runVaultHold`，断言拒绝且**名单未被覆盖**；突变去锁 → 转红 |
 | 3 | orphan `vault-holds.json.tmp` 不得降级为空名单 | **已修**：`readHolds` 在"正文缺失"时再探一次 `.tmp`，存在即 fail-closed 并给恢复指引；同时补语义校验（名字须平铺 basename、sha 须 64 hex、名字唯一）。新例 `caseHoldFileGuards` 覆盖两种形态；突变去 tmp 分支 → 转红 |
 
@@ -433,7 +433,7 @@ root lock，均会让用户决定失真；暂不建议对真实 15 张执行。"
 | 严重级 | 位置 | 内容 | 处置 |
 |---|---|---|---|
 | minor | `src/Pm/Vault.hs` `runVaultPush` | held-only 时无参 `vault push` 仍用旧 `hasDiff` → exit 1；`vmNew` 缓存全量 NEW，顶层 `pm status` 把 HELD 算作待办 | **已修**：统一 `hasDiffR` 并**删除** `hasDiff`（两个同构谓词并存正是用错的温床）；`VaultCacheMeta` 加 `vmHeld`，`pm status` 的 vault 行按 NEW − HELD 报。新例 `caseHoldOnlyExit` 钉住两个退出码 |
-| minor | `gui/ui/app.js` | 提交两步之间可改选择/重载；第一步落盘、第二步失败后重试会重复撤销；`loadVault` 失败分支不认代号 | **已修**：提交开始取快照并置 `submitting` 冻结卡片；hold 成功后按响应推进 `heldInitial`；catch 分支加 `gen` 校验 |
+| minor | `gui/ui/app.js` | 提交两步之间可改选择/重载；第一步落盘、第二步失败后重试会重复撤销；`loadVault` 失败分支不认代号 | **部分修**：提交开始取快照并置 `submitting` 冻结**卡片按钮**；hold 成功后按响应推进 `heldInitial`；catch 分支加 `gen` 校验。二十二轮指出导航按钮与数字键仍能重入 `loadVault` → P4-7c 一并冻结 |
 | minor | `src/Pm/VaultHold.hs` | 手编同名两条不同 sha → 同名同时进 HELD 与 stale | **已修**：`validateHolds` 拒绝重复 name（并入第 3 条） |
 | minor | 文档 | README 的"所有写盘两段式"未声明 hold 例外、`--writable` 写域旧；CLI help 旧；§11 仍写"八态计数"；I8 退出码措辞；REVIEW-LOG"字节一变即失效"过强 | **已修**：五处逐条改准 |
 
@@ -450,3 +450,48 @@ root lock，均会让用户决定失真；暂不建议对真实 15 张执行。"
 - `applyHoldOps` 的覆盖语义没有独立纯函数用例（经两条入口间接命中）。
 - 二十轮登记项照旧：aeson 重复键/深嵌套、跨进程 vault-cache 刷新争用、真开端口
   raw HTTP 冒烟、`readBodyCapped` 慢速上传可按 `requestBodyLength` 预拒。
+---
+
+# 第二十二轮（2026-08-24，codex `gpt-5.6-sol`，只读静态；范围 262c2f6..6cfd990 = 二十一轮 NO-GO 的收口）
+
+**verdict：NO-GO** —— "强制重 hash 未覆盖首次/重新 hold，且事务取锁在身份/I11
+零写预检前创建 `.pm/lock`；两项均为 major。" 最小修复集两条，**已全部在本分支
+闭合**（212 测试，三处突变各自转红）。
+
+三条必修的复核结论：**1 未闭合**（只修了复核、没修创建）；**2 FIXED**（事务
+覆盖正确，但发现相邻的取锁前写入 major）；**3 FIXED**（孤儿 tmp 已 fail-closed，
+仍有正常写窗口的 minor 竞态）。
+
+## 两条 major 与处置
+
+| # | 内容 | 处置（同分支） |
+|---|---|---|
+| major① | **创建决定时仍吃缓存 sha**：`holdRequest` 从 `vrSrcMeta` 取 sha，而那来自 `srcTriples`——`(size,mtime,lastVerified)` 命中时是主库 catalog 的旧值。于是"陈旧 catalog + 等长替换 + 还原 mtime"下第一次 hold 会记下**旧 sha**，命令报成功，下一轮复核（已强制重 hash）立刻判失效；再 hold 还是旧值，决定永远落不住 | **已修**：抽出唯一的取法 `Pm.Vault.freshShaAt` / `freshSrcSha`（空缓存 → 必走真实重读 + 双 stat），创建与复核共用；`holdRequest` 改成接收**已重算**的 `[(名, Maybe sha)]`，IO 外壳 `holdOpsIO` 负责重算，CLI 与 API 共用。新例 `caseHoldCreateFreshSha`（先造陈旧 catalog 再 hold）；突变回 `vrSrcMeta` → 该例转红 |
+| major② | **取锁在身份预检之前**：`withHoldsTxn` 先 `withRootLock`，而后者会 `createDirectoryIfMissing (.pm)` 并打开 `.pm/lock`；匿名 root 或 I11 失效的 root 因此会**先落下锁文件再被拒**，违反仓库既有的"取锁前零写预检"（`Pm.Exec` 已是正确次序） | **已修**：`withHoldsTxn` 取锁前先做只读 `requireMain`，锁内 `computeVault` 保留复检。新例 `caseHoldPreflightNoWrite`（匿名主库 → exit 2 且 `.pm` 与 `.pm/lock` 都不存在）；突变去预检 → 该例转红 |
+
+## 其余发现与处置
+
+| 严重级 | 内容 | 处置 |
+|---|---|---|
+| minor | 正常覆盖写的 delete→rename 窗口里，无锁读者可能读到"正文与 tmp 都缺失"而返回空名单 | **已修**：该形态下再读一次正文消歧（`decodeHolds` 抽成共用） |
+| minor | 提交期间导航按钮/数字键仍能重入 `loadVault`，抹掉刚推进的 `heldInitial`，并让第二步读到被清零的 `vaultDrift` | **已修**：`submitting` 期间短路导航与数字键；`vaultDrift` 一并进提交快照 |
+| minor | 文档过度声明：README 首页"一切写盘都是两段式"、§11"唯一写端点"、§14 写域只限 vault、§10.2 身份闸只列两道、REVIEW-LOG 与**二十一轮归档**称创建与复核均已修/GUI 已冻结重载 | **已修**：六处逐条改准，包括把二十一轮章节里我自己写过头的两格改成"当时只修了一半 / 部分修" |
+| minor | `caseHoldFileGuards` 删掉 basename 或 sha 校验不会转红 | **已修**：补路径型 name 与坏 sha 两条断言；突变去 basename 校验 → 转红 |
+| 误报 | `git diff --check` 报 README 八处尾随空白 | README 的 blob 本身以 CRLF 存储（`core.autocrlf=true`，历史遗留），`--check` 把行尾 CR 当尾随空白；实测新增行没有 ASCII 空格/制表符。不改行尾以免整文件噪声 diff |
+
+评审确认无误的点（不改）：`writeHolds` 生产调用点只有 CLI 与 API 两处且都在
+事务内；锁忙的 `Nothing` 翻译正确（CLI exit 2 / API 409）；锁序 `seVaultLock`
+→ root lock 无反序路径；`hasDiff` 已删且 `vmHeld` 已进 meta；旧 meta 缺
+`held` 字段会解析失败 → `readSideCache` 压成"未比对过"，不会静默错报；
+`isHexDigit` 是 ASCII 判定，无 Unicode 绕过（它读了本地 GHC 9.10.3 源码取证）。
+
+## 残余（二十二轮末）
+
+- 名字唯一性是精确比较：大小写变体、Unicode 规范化变体、尾随点/空格的手编
+  名单条目仍能通过校验（但要生效还必须与真实 `vdNew` 名字精确相等，构不成
+  路径穿越）——Windows 规范化硬化待做。
+- `caseHoldLock` 用同进程另一线程持锁代表跨进程；真 subprocess 与 API 409
+  未测。旧 meta 解码、顶层 `pm status` 渲染、GUI 重入未测。
+- 二十/二十一轮登记项照旧：aeson 重复键/深嵌套、跨进程 vault-cache 刷新争用、
+  真开端口 raw HTTP 冒烟、`readBodyCapped` 慢速上传预拒、两次 stat 之间被改
+  又还原 size+mtime 的对手（§14 TOCTOU 模型内）。

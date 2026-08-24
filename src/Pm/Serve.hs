@@ -52,7 +52,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Time (UTCTime, getCurrentTime)
+import Data.Time (UTCTime)
 import Network.HTTP.Types
 import Network.Socket
 import Network.Wai
@@ -68,7 +68,7 @@ import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPl
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
 import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newActive, planCategories, renderVaultJson, vaultPushItems)
-import Pm.VaultCmd (holdRequest, withHoldsTxn)
+import Pm.VaultCmd (holdOpsIO, withHoldsTxn)
 import Pm.VaultHold (VaultHold (..), writeHolds)
 import Pm.Win (resolveUnder)
 
@@ -334,8 +334,8 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
               -- 事务壳带主库 root lock（I10）：进程内 MVar 挡不住第二个 pm
               -- 进程的读改写丢更新（codex 二十一轮 major）。
               res <- withHoldsTxn cfg $ \olds r -> do
-                now <- getCurrentTime
-                case holdRequest r olds hs us now of
+                eops <- holdOpsIO r olds hs us
+                case eops of
                   Left errs -> pure (Left (unlines errs, 400))
                   Right kept -> do
                     w <- writeHolds (cfgMainPath cfg) kept

@@ -587,3 +587,15 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   不再重复撤销）；`loadVault` 的失败分支也认 single-flight 代号。文档口径按第 8
   条修正（README 的两段式例外与 `--writable` 写域、CLI help、§11 九态、I8 退出
   码语义、REVIEW-LOG 的"字节一变即失效"）。210 测试。
+- **二十二轮：NO-GO → 已收口（同日，codex 审二十一轮的收口，262c2f6..6cfd990）**：
+  两条 major。①**上一轮只修了一半**——复核强制重 hash 了，`holdRequest` 的
+  **创建**仍从 `vrSrcMeta` 取 catalog 缓存 sha：陈旧 catalog + 等长替换 + 还原
+  mtime 时，hold 记下旧 sha、命令报成功，下一轮复核立刻判失效，决定永远落不住。
+  修法是抽出唯一取法 `freshShaAt`/`freshSrcSha`（空缓存必走真实重读 + 双 stat），
+  创建与复核共用；`holdRequest` 改收**已重算**的 sha，IO 外壳 `holdOpsIO` 给
+  CLI 与 API 共用。②**取锁在身份预检之前**：`withRootLock` 会先建 `.pm` 并开
+  `.pm/lock`，匿名 / I11 失效的 root 因此先落锁文件再被拒 → 取锁前加只读
+  `requireMain` 预检（锁内复检保留），与 `Pm.Exec` 同序。另修三条 minor：
+  delete→rename 窗口里"正文与 tmp 都缺失"再读一次正文消歧；提交期间导航与
+  数字键不得重入 `loadVault`、`vaultDrift` 进快照；文档六处过度声明（含我在
+  二十一轮归档里自己写过头的两格）。212 测试，三处突变各自转红。

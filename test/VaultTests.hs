@@ -13,7 +13,7 @@ import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, removeFile, setModificationTime)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeFile, setModificationTime)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
@@ -66,6 +66,8 @@ vaultTests =
     , testCase "P4-7 hold 是跨进程事务：root lock 被占用 → 拒绝而不是覆盖名单" caseHoldLock
     , testCase "P4-7 名单 fail-closed：残留 .tmp 而正文缺失 / 同名两条 → 拒绝，不当空名单" caseHoldFileGuards
     , testCase "P4-7 held-only：无参 vault push 与 status 都不再报「有事可做」" caseHoldOnlyExit
+    , testCase "P4-7 决定的**创建**也不吃缓存：陈旧 catalog 下 hold 记的是盘上真实 sha，下一轮仍生效" caseHoldCreateFreshSha
+    , testCase "P4-7 取锁前预检：匿名主库 hold 被拒且 .pm/lock 零写入" caseHoldPreflightNoWrite
     ]
 
 h :: Char -> Text
@@ -193,6 +195,76 @@ caseHoldFileGuards = withSystemTempDirectory "pm-vault" $ \tmp -> do
   readHolds root >>= \r -> case r of
     Left m -> assertBool ("应点名重复: " <> m) ("多次" `isInfixOf` m)
     Right _ -> assertFailure "同名两条必须拒绝"
+  -- 路径型 name（手编）→ 拒绝
+  BSLC.writeFile holds (encode [VaultHold ("sub" </> "a.jpg") (T.replicate 64 "a") now Nothing])
+  readHolds root >>= \r -> case r of
+    Left m -> assertBool ("应点名平铺文件名: " <> m) ("平铺" `isInfixOf` m)
+    Right _ -> assertFailure "带路径的 name 必须拒绝"
+  -- sha 不是 64 位 hex → 拒绝
+  BSLC.writeFile holds (encode [VaultHold "a.jpg" "zz" now Nothing])
+  readHolds root >>= \r -> case r of
+    Left m -> assertBool ("应点名 sha: " <> m) ("hex" `isInfixOf` m)
+    Right _ -> assertFailure "坏 sha 必须拒绝"
+
+-- | 决定的**创建**同样不能吃缓存快路：二十一轮只把"复核"改成强制重 hash，
+-- 创建仍从 'vrSrcMeta' 取 catalog 缓存 sha——于是 hold 会记下陈旧 sha，下一轮
+-- 复核立刻判失效，决定根本落不住（codex 二十二轮 major）。
+caseHoldCreateFreshSha :: IO ()
+caseHoldCreateFreshSha = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+      jpg = root </> "相册" </> "a.jpg"
+  mkMain root
+  writeF jpg "AAA"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  snap <- statSnap jpg
+  staleSha <- sha256File jpg
+  -- 盘上等长替换 + 还原 mtime：catalog 的 (size,mtime) 仍然命中
+  writeF jpg "BBB"
+  setModificationTime jpg (nsToUtc (ssMtimeNs snap))
+  realSha <- sha256File jpg
+  assertBool "构造前提：两个 sha 必须不同" (staleSha /= realSha)
+  saveCatalog
+    root
+    ( mkCat
+        [ Entry
+            ("相册" </> "a.jpg")
+            (ssSize snap)
+            (ssMtimeNs snap)
+            staleSha
+            KindPhoto
+            (Just (addUTCTime 3600 (nsToUtc (ssMtimeNs snap))))
+        ]
+    )
+  runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
+  hs <- readHolds root
+  case hs of
+    Left m -> assertFailure ("readHolds: " <> m)
+    Right kept -> map vhSha kept @?= [realSha] -- 记的是盘上真实 sha
+  -- 决定必须**立刻生效**并保持生效（旧实现会当场判 stale）
+  er <- computeVault True cfg
+  case er of
+    Left (m, _) -> assertFailure ("computeVault: " <> m)
+    Right r -> do
+      map fst (vrHeld r) @?= ["a.jpg"]
+      vrHeldStale r @?= []
+  runVaultStatus False cfg >>= (@?= 0)
+
+-- | 身份预检必须在**取锁之前**：'withRootLock' 会建 @.pm@ 并打开 @.pm/lock@，
+-- 匿名 / I11 失效的 root 若先取锁再校验，就会在被拒之前先落下一个锁文件
+-- （codex 二十二轮 major；与 'Pm.Exec' 的"取锁前预检"同一原则）。
+caseHoldPreflightNoWrite :: IO ()
+caseHoldPreflightNoWrite = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  createDirectoryIfMissing True (root </> "相册") -- 有库、但**没有 root 标识**
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  runVaultHold True ["a.jpg"] cfg >>= (@?= 2)
+  doesDirectoryExist (root </> ".pm") >>= (@?= False)
+  doesFileExist (root </> ".pm" </> "lock") >>= (@?= False)
 
 -- | 只剩已决定不同步的 NEW 时，status 与无参 push 都该报"没事可做"。
 caseHoldOnlyExit :: IO ()
