@@ -49,7 +49,7 @@ import System.FilePath (splitDirectories, takeExtension, (</>))
 import Text.Printf (printf)
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (Config (..), RootIdState (..), createRootInfo, freshRootId, pmDir, pmSubVaultCache, readRootInfo, readRootState, readSideCache, requireMain, writeSideCache)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, freshRootId, pmSubVaultCache, readRootInfo, readRootState, readSideCache, requireMain, writeSideCache)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
@@ -207,17 +207,14 @@ instance ToJSON VaultCacheMeta where
 instance FromJSON VaultCacheMeta where
   parseJSON = genericParseJSON vaultMetaOpts
 
--- 同 'Pm.Backup.cacheDir'：名字取自单一真源，写入走 root-relative API。
-vaultCacheDir :: FilePath -> FilePath
-vaultCacheDir mainRoot = pmDir mainRoot </> pmSubVaultCache
-
 -- P3b-14（十一轮复审 major）：同 'Pm.Backup.readBackupCacheMeta' —— 读侧改走
 -- 受信取用口。vault 缓存参与 sha 复用判定，读到库外字节会直接影响 push 前的
--- 六态判定。
-readVaultCacheMeta :: FilePath -> IO (Maybe VaultCacheMeta)
+-- 六态判定。P3b-15（十二轮 minor）：失信保留为 Left——compute 路径可以弃用
+-- 缓存内容重算（保守方向），但要把失信原因报给用户；status 仪表盘计入退出码。
+readVaultCacheMeta :: FilePath -> IO (Either String (Maybe VaultCacheMeta))
 readVaultCacheMeta mainRoot = readSideCache mainRoot pmSubVaultCache "meta.json"
 
-readVaultCacheCatalog :: FilePath -> IO (Maybe Catalog)
+readVaultCacheCatalog :: FilePath -> IO (Either String (Maybe Catalog))
 readVaultCacheCatalog mainRoot = readSideCache mainRoot pmSubVaultCache "catalog.json"
 
 writeVaultCache :: FilePath -> Catalog -> VaultCacheMeta -> IO (Either String ())
@@ -319,8 +316,16 @@ computeVault' quiet cfg vaultDir = do
         vaultCanon <- canonicalizePath vaultDir
         mVRoot <- readRootInfo vaultDir
         (mcat, _) <- loadCatalog root
-        mMeta <- readVaultCacheMeta root
-        mVCache <- readVaultCacheCatalog root
+        eMeta <- readVaultCacheMeta root
+        eVCache <- readVaultCacheCatalog root
+        -- P3b-15（十二轮）：缓存失信 → 弃用内容全量重算（保守），但失信原因
+        -- 必须报出来，不静默。
+        let warn s = unless quiet (putStrLn s)
+            dropLeft :: Either String (Maybe a) -> IO (Maybe a)
+            dropLeft (Left m) = warn ("⚠ vault 缓存不可信，弃用重算: " <> m) >> pure Nothing
+            dropLeft (Right x) = pure x
+        mMeta <- dropLeft eMeta
+        mVCache <- dropLeft eVCache
         -- P3b-5 复审 #4：双方 root-id 都必须存在且相等才复用（Nothing==Nothing
         -- 不算身份）；路径比较用 canonicalizePath 的精确输出（它已按盘上
         -- 真实大小写解析，不再无条件小写化）。vault root 建立前每次全量重 hash。
@@ -333,7 +338,6 @@ computeVault' quiet cfg vaultDir = do
             resolve cache rel abs' n = do
               (sha, me) <- shaViaCache cache rel abs'
               pure (n, sha, me)
-            warn s = unless quiet (putStrLn s)
         (srcNames, srcSubdirs) <- listFlatPhotos srcDir
         srcTriples <- mapM (\n -> resolve mainCache ("相册" </> n) (srcDir </> n) n) srcNames
         (_, vaultTop) <- listFlatPhotos vaultDir

@@ -15,24 +15,27 @@ module Pm.Doctor
   ) where
 
 import Control.Monad (filterM, forM, forM_, unless)
+import Control.Exception (IOException, bracket, try)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, removeFile)
+import System.IO (hClose)
+import System.IO.Error (isDoesNotExistError)
 import System.FilePath (makeRelative, (</>))
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (pmDir, pmSubTmp, readRootInfo, requireWritable)
+import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
-import Pm.Hash (sha256File)
+import Pm.Hash (sha256File, sha256Handle)
 import Pm.Journal
 import Pm.Op
 import Pm.Plan
 import Pm.Trash
 import Pm.Types
-import Pm.Win (NameKind (..), probeName, resolveUnder)
+import Pm.Win (NameKind (..), openStateRead, probeName, resolveUnder)
 
 data DoctorOpts = DoctorOpts
   { doDeep :: Bool
@@ -202,6 +205,35 @@ classifyPending root (oid, op)
       pure [Finding "OP-PATH" Bad (T.unpack oid <> ": journal 中的 Op 相对路径非法（越界/盘符/ADS/.pm 内部），不推导、不修复（需人工核查）") ""]
   | otherwise = classifyPending' root (oid, op)
 
+-- | @.pm@ 内定点路径（trash 载荷 \/ tmp）的受信探测（P3b-15，十二轮 major）：
+-- 完整路径 'resolveUnder' + 'openStateRead'（句柄 link count）+ **同一句柄**
+-- hash。此前这里直接 @doesFileExist@\/@sha256File@——trash 载荷被换成指向库外
+-- 同内容文件的 symlink\/hardlink 时，doctor 会"核验通过"并让 @--repair@ 补写
+-- **虚假的 Done**，把从未落位的隔离认证成已完成。
+-- 三态：@PmStateBad@=不可信（只报 Bad，不参与任何 repair 推导）、
+-- @PmStateMissing@=缺席、@PmStateSha@=可信内容的 sha。
+data PmProbe = PmStateBad String | PmStateMissing | PmStateSha Text
+
+probePmSha :: FilePath -> FilePath -> IO PmProbe
+probePmSha root rel = do
+  m <- resolveUnder root (".pm" </> rel)
+  case m of
+    Nothing -> pure (PmStateBad (rel <> " 不是 root 下的真实路径（junction/symlink？）"))
+    Just fp -> do
+      r <- try (bracket (openStateRead fp) hClose sha256Handle) :: IO (Either IOException Text)
+      pure $ case r of
+        Right sha -> PmStateSha sha
+        Left e
+          | isDoesNotExistError e -> PmStateMissing
+          | otherwise -> PmStateBad (rel <> " 无法可信读取（" <> show e <> "）")
+
+probePmExists :: FilePath -> FilePath -> IO (Either String Bool)
+probePmExists root rel = do
+  m <- resolveUnder root (".pm" </> rel)
+  case m of
+    Nothing -> pure (Left (rel <> " 不是 root 下的真实路径（junction/symlink？）"))
+    Just fp -> Right <$> doesFileExist fp
+
 classifyPending' :: FilePath -> (Text, Op) -> IO [Finding]
 classifyPending' root (oid, op) = case op of
   OpCopy _ dstRel sha _ _ -> do
@@ -214,11 +246,15 @@ classifyPending' root (oid, op) = case op of
           then pure [Finding "C2" Warn (T.unpack oid <> ": dst 完好、Done 丢失 (" <> dstRel <> ")") "--repair 将补记 Done"]
           else pure [Finding "C5" Bad (T.unpack oid <> ": dst 存在但内容不符 (" <> dstRel <> ")") "--repair 将生成 dst 隔离计划（经 pm apply 确认执行），源文件未受影响"]
       else do
-        let mtmp = pendingTmp root (oid, op)
-        tmpEx <- maybe (pure False) doesFileExist mtmp
-        if tmpEx
-          then pure [Finding "C1" Warn (T.unpack oid <> ": 中断于写 tmp 阶段 (" <> dstRel <> ")") "--repair 将清除 tmp；重跑原计划即可续传"]
-          else pure [Finding "C1" Info (T.unpack oid <> ": Intent 后无痕迹（写 tmp 前中断），重跑原计划即可") ""]
+        -- P3b-15：.pm/tmp 的存在性探测也走受信解析（此前 doesFileExist 会
+        -- 跟随链接，影响 C1 的分类文本；不涉及写，但同规则无例外）。
+        etmp <- case pendingTmp root (oid, op) of
+          Nothing -> pure (Right False)
+          Just tmpAbs -> probePmExists root (makeRelative (pmDir root) tmpAbs)
+        case etmp of
+          Left m -> pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]
+          Right True -> pure [Finding "C1" Warn (T.unpack oid <> ": 中断于写 tmp 阶段 (" <> dstRel <> ")") "--repair 将清除 tmp；重跑原计划即可续传"]
+          Right False -> pure [Finding "C1" Info (T.unpack oid <> ": Intent 后无痕迹（写 tmp 前中断），重跑原计划即可") ""]
   OpRename old new fp -> do
     oldEx <- existsAny (root </> old)
     newEx <- existsAny (root </> new)
@@ -237,23 +273,30 @@ classifyPending' root (oid, op) = case op of
     -- oid 已在 classifyPending 验过语法，此处 Nothing 不可达；仍按 Bad 处理。
     let mTrashRel = quarTrashRel oid victim
     trashRel <- maybe (pure "") pure mTrashRel
-    trashEx <- if isJust mTrashRel then doesFileExist (trashDir root </> trashRel) else pure False
+    -- P3b-15（十二轮 major）：trash 载荷经受信探测核 sha——此前按名字
+    -- doesFileExist + sha256File，载荷被换成指向库外同内容文件的 symlink/
+    -- hardlink 时会"核验通过"，--repair 随即补写虚假 Done。
+    tprobe <-
+      if isJust mTrashRel
+        then probePmSha root (pmSubTrash </> trashRel)
+        else pure PmStateMissing
     victimEx <- doesFileExist (root </> victim)
-    case (trashEx, victimEx) of
-      (True, _) -> do
+    case (tprobe, victimEx) of
+      (PmStateBad m, _) ->
+        pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]
+      (PmStateSha tsha, _) ->
         -- P3b-5 复审 #1：补记 Done 前必须核 sha——trash 位置上可能是别的
         -- 内容（同路径重试残留），盲补会把错误内容认证成「已隔离」。
-        tsha <- sha256File (trashDir root </> trashRel)
         pure
           [ if tsha == sha
               then Finding "Q-DONE-LOST" Warn (T.unpack oid <> ": 已入 trash、Done 丢失 (" <> trashRel <> ")") "--repair 将补记 Done"
               else Finding "Q-DONE-LOST" Bad (T.unpack oid <> ": trash 位置内容与 Intent sha 不符 (" <> trashRel <> ")，需人工核查") ""
           ]
-      (False, True) -> do
+      (PmStateMissing, True) -> do
         vsha <- sha256File (root </> victim)
         let note = if vsha == sha then "victim 原位完好" else "victim 原位但内容已变"
         pure [Finding "Q2" Info (T.unpack oid <> ": 隔离未执行，" <> note <> "，重跑原计划即可") ""]
-      (False, False) -> pure [Finding "Q?" Bad (T.unpack oid <> ": victim 与 trash 均不存在，需人工核查") ""]
+      (PmStateMissing, False) -> pure [Finding "Q?" Bad (T.unpack oid <> ": victim 与 trash 均不存在，需人工核查") ""]
 
 existsAny :: FilePath -> IO Bool
 existsAny p = do
@@ -292,9 +335,10 @@ verifyDone root intents restoredAfter (oid, msha, mtrash) =
                       then
                         pure
                           [Finding "Q-RESTORED" Info (T.unpack oid <> ": 隔离后已被 journaled 复位（" <> trashRel <> "），无需核查") ""]
-                      else checkTarget (trashDir root </> trashRel) trashRel sha
+                      else checkTrashTarget trashRel sha
           _ -> pure [] -- rename Done carries no content claim
  where
+  -- 用户数据目标（root 下的 dstRel）：doctor 读用户文件核 sha 是它的本职。
   checkTarget abs' rel sha = do
     ex <- doesFileExist abs'
     if not ex
@@ -309,6 +353,22 @@ verifyDone root intents restoredAfter (oid, msha, mtrash) =
                   "C4"
                   Bad
                   (T.unpack oid <> ": CORRUPT — Done 记录 sha 与盘面不符 (" <> rel <> ")")
+                  "不删任何东西；将该目标视为未确认副本，重新拷贝并核查介质"
+              ]
+  -- .pm/trash 内的目标（P3b-15）：走受信探测，链接形态只报 Bad 不核证。
+  checkTrashTarget trashRel sha = do
+    p <- probePmSha root (pmSubTrash </> trashRel)
+    case p of
+      PmStateBad m -> pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，Done 不核查（需人工核查）") ""]
+      PmStateMissing -> pure [Finding "C4" Bad (T.unpack oid <> ": Done 记录的目标不存在 (" <> trashRel <> ")") "不删任何东西；该项标回未确认，重新生成计划"]
+      PmStateSha actual
+        | actual == sha -> pure []
+        | otherwise ->
+            pure
+              [ Finding
+                  "C4"
+                  Bad
+                  (T.unpack oid <> ": CORRUPT — Done 记录 sha 与盘面不符 (" <> trashRel <> ")")
                   "不删任何东西；将该目标视为未确认副本，重新拷贝并核查介质"
               ]
 

@@ -37,6 +37,7 @@ module Pm.Win
   , openFreshBinary
   , openStateAppend
   , openStateRead
+  , openStateLock
   , handleIsSingleLink
   , suppressCriticalErrorDialogs
   , DriveKind (..)
@@ -51,15 +52,15 @@ import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word32, Word8)
-import Foreign.Marshal.Alloc (allocaBytes)
+import Foreign.Marshal.Alloc (alloca, allocaBytes)
 import Foreign.Ptr (Ptr, intPtrToPtr, nullPtr)
-import Foreign.Storable (peekByteOff)
+import Foreign.Storable (peek, peekByteOff)
 import System.Directory (canonicalizePath, doesPathExist, removeFile)
 import System.FilePath (splitDirectories, (</>))
 import System.IO
 import qualified System.Win32.Console as Win32Console
 import qualified System.Win32.File as Win32File
-import System.Win32.Types (LPTSTR, getLastError, hANDLEToHandle, peekTString, withHandleToHANDLE, withTString)
+import System.Win32.Types (LPTSTR, hANDLEToHandle, peekTString, withHandleToHANDLE, withTString)
 
 foreign import WINDOWS_CCONV unsafe "windows.h FindFirstFileW"
   c_FindFirstFileW :: LPTSTR -> Ptr Word8 -> IO (Ptr ())
@@ -68,9 +69,12 @@ foreign import WINDOWS_CCONV unsafe "windows.h FindClose"
   c_FindClose :: Ptr () -> IO Bool
 
 -- Win32 包的 getFileAttributes 失败时抛 IOError，错误码被折进异常文本——
--- 'probeName' 需要**原始错误码**来分辨 Missing/Unknown，因此直接绑原 API。
-foreign import WINDOWS_CCONV unsafe "windows.h GetFileAttributesW"
-  c_GetFileAttributesW :: LPTSTR -> IO Word32
+-- 'probeName' 需要**原始错误码**来分辨 Missing/Unknown。P3b-15（十二轮 #3）：
+-- 属性与错误码必须在**同一次** FFI 里取——分成两次 Haskell 调用时，threaded
+-- RTS 可能把它们跑在不同 OS 线程上，而 GetLastError 是 per-OS-thread 的。
+-- cbits/pm_win.c 的包装一次返回两者，不留线程亲和性假设。
+foreign import ccall unsafe "pm_get_file_attributes_err"
+  c_pmGetFileAttributesErr :: LPTSTR -> Ptr Word32 -> IO Word32
 
 -- | Must run before any output (DESIGN.md §14 编码风险).
 setupConsole :: IO ()
@@ -165,18 +169,22 @@ data NameKind = NameMissing | NamePlain | NameSurrogate | ProbeUnknown
 
 -- P3b-14（十一轮 #4）：Missing\/Unknown 的分辨不再用 @doesPathExist@ 二问——
 -- 它把 ACL 拒绝、非法名等错误也吞成 False（本仓 'Pm.Exec' 的注释早已记录这一
--- 点），于是"查不出"仍会塌缩进"不存在"。改为直接读 @GetFileAttributesW@ 失败
--- 时的 @GetLastError@：只有 ERROR_FILE_NOT_FOUND (2) 与 ERROR_PATH_NOT_FOUND
--- (3) 是 'NameMissing'，其余错误码一律 'ProbeUnknown'（fail-closed）。
--- unsafe FFI 调用不让出 capability，紧随其后的 getLastError 读的就是这次调用
--- 的错误码（Win32 包内部 errorWin 同款模式）。
+-- 点），于是"查不出"仍会塌缩进"不存在"。改为读 @GetFileAttributesW@ 失败时的
+-- 错误码：只有 ERROR_FILE_NOT_FOUND (2) 与 ERROR_PATH_NOT_FOUND (3) 是
+-- 'NameMissing'，其余（ACL 5、非法名 123、断网 53、介质异常……）一律
+-- 'ProbeUnknown'（fail-closed——可能拒绝离线\/无权限的库，但不会误接受）。
+-- P3b-15（十二轮 #3）：两次独立 FFI 换成 cbits 单次调用，错误码在同一 OS
+-- 线程内取得，线程亲和性假设不复存在。
 probeName :: FilePath -> IO NameKind
 probeName p = do
-  attrs <- withTString p c_GetFileAttributesW
+  (attrs, ec) <-
+    withTString p $ \wp ->
+      alloca $ \errp -> do
+        a <- c_pmGetFileAttributesErr wp errp
+        e <- peek errp
+        pure (a, e)
   if attrs == invalidFileAttributes
-    then do
-      ec <- getLastError
-      pure (if ec == 2 || ec == 3 then NameMissing else ProbeUnknown)
+    then pure (if ec == 2 || ec == 3 then NameMissing else ProbeUnknown)
     else
       if attrs .&. Win32File.fILE_ATTRIBUTE_REPARSE_POINT == 0
         then pure NamePlain
@@ -269,6 +277,20 @@ openStateRead fp = do
       hClose h
       ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝读取——人工核查"))
 
+-- | 锁文件的受控打开（P3b-15，十二轮 minor）：@ReadWriteMode@（缺失即创建、
+-- 绝不截断）+ 打开后立刻查 link count。@.pm\/lock@ 被 hardlink 到库外文件时，
+-- pm 会锁住那个共享对象——跨库互斥、或对外部程序的 DoS；锁不写任何字节，
+-- 危害低于状态文件，但「@.pm@ 下的打开都过句柄判定」必须无例外。
+openStateLock :: FilePath -> IO Handle
+openStateLock fp = do
+  h <- openBinaryFile fp ReadWriteMode
+  ok <- handleIsSingleLink h
+  if ok
+    then pure h
+    else do
+      hClose h
+      ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝加锁——人工核查"))
+
 -- | @resolveUnder base rel@：从 @base@ 起沿 @rel@ **逐分量下降**，任一级是
 -- reparse point 即 Nothing；成功返回落点的绝对路径。
 --
@@ -349,9 +371,10 @@ openExclusiveBinary fp = do
 -- 走出库外（P3b-12 九轮 critical 实测：@.pm\/tmp\/\<planId\>@ 是 junction 时，
 -- 这个 unlink 删掉了库外的同名文件）。调用方必须保证父目录可信：
 -- 'Pm.Exec' 的 tmp 落位与 'Pm.Config.writeCacheFile' 对**完整路径**做
--- 'resolveUnder'；'Pm.Catalog' 与 'Pm.Config' 的 @.pm@ 顶层 tmp 依赖
--- 'Pm.Config.requirePmTrusted'（它现在枚举 @.pm@ 下的每个条目）——
--- P3b-13 十轮指出旧注释把后者说成"已做完整 resolveUnder"，措辞已更正。
+-- 'resolveUnder'；'Pm.Catalog.saveCatalog' 的 tmp 与三代轮转自 P3b-15 起在
+-- 使用点走 'Pm.Config.resolvePmPath'（十二轮 critical：此前它只依赖
+-- 'requirePmTrusted'，而那道闸与本次写之间隔着一整轮全量扫描，窗口里把
+-- @.pm@ 换成 junction 就能让轮转在库外建 tmp、删旧代）。
 openFreshBinary :: FilePath -> IO Handle
 openFreshBinary fp = do
   lnk <- isNameSurrogate fp
@@ -384,8 +407,8 @@ data DriveKind = DriveRemovable | DriveFixed
 -- once beforehand.
 listCandidateDrives :: IO [(Char, DriveKind)]
 listCandidateDrives = do
-  mask <- Win32File.getLogicalDrives
-  let letters = [toEnum (fromEnum 'A' + i) | i <- [0 .. 25], testBit mask i]
+  driveMask <- Win32File.getLogicalDrives
+  let letters = [toEnum (fromEnum 'A' + i) | i <- [0 .. 25], testBit driveMask i]
   concat <$> mapM probe letters
  where
   probe c = do

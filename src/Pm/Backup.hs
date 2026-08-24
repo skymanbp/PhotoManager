@@ -22,7 +22,7 @@ import qualified Data.Text as T
 import Data.Time (UTCTime)
 import System.FilePath ((</>))
 
-import Pm.Config (Config (..), pmDir, pmSubBackupCache, readRootInfo, readSideCache, writeSideCache)
+import Pm.Config (Config (..), pmSubBackupCache, readRootInfo, readSideCache, writeSideCache)
 import Pm.Types
 import Pm.Win (listCandidateDrives, suppressCriticalErrorDialogs)
 
@@ -103,12 +103,6 @@ instance FromJSON BackupCacheMeta where
       <*> o .: "update"
       <*> o .: "extra"
 
--- 子目录名取自 'Pm.Config' 的单一真源；写入一律走 root-relative 的
--- 'writeSideCache'（P3b-13 十轮 critical：自由拼目录让 junction 化的缓存目录
--- 把 pm 的写引到了库外）。
-cacheDir :: FilePath -> FilePath
-cacheDir mainRoot = pmDir mainRoot </> pmSubBackupCache
-
 -- | Snapshot copy of the backup catalog + meta, kept on the MAIN root
 -- (shared pair-write: Pm.Config.writeSideCache).
 writeBackupCache :: FilePath -> Catalog -> BackupCacheMeta -> IO (Either String ())
@@ -117,5 +111,7 @@ writeBackupCache mainRoot = writeSideCache mainRoot pmSubBackupCache
 -- P3b-14（十一轮复审 major）：读侧与写侧同规格。此前是自由拼路径 + 按名字
 -- decode——写侧从十轮起验完整路径，读侧却没有，@meta.json@ 被 hardlink/symlink
 -- 占名时 pm 会把库外内容当成自己的备份基线。
-readBackupCacheMeta :: FilePath -> IO (Maybe BackupCacheMeta)
+-- P3b-15（十二轮 minor）：失信（Left）不再压成缺席——`pm status` 是只读命令，
+-- 没有配对写侧替它报警，必须自己把失信呈现出来并计入退出码。
+readBackupCacheMeta :: FilePath -> IO (Either String (Maybe BackupCacheMeta))
 readBackupCacheMeta mainRoot = readSideCache mainRoot pmSubBackupCache "meta.json"

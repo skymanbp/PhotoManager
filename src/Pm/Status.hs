@@ -83,24 +83,34 @@ runStatus cfg opts = do
             printf "  ⚠ 暂存区 %d 个事件未归档: %s\n" (length stagingEvents) (show stagingEvents)
             putStrLn "      → pm import"
       -- 备份盘（只读缓存，不探硬件 —— 拔盘状态下也能报，§9）
-      mbk <- readBackupCacheMeta root
-      case mbk of
-        Nothing ->
+      -- P3b-15（十二轮 minor）：status 只读不写，没有配对写侧替它暴露失信——
+      -- 缓存不可信必须在这里报 ⚠ 并计入退出码，不得显示成「未登记」再 exit 0。
+      ebk <- readBackupCacheMeta root
+      bkBad <- case ebk of
+        Left m -> do
+          putStrLn ("  ⚠ 备份盘   缓存不可信: " <> m)
+          pure True
+        Right Nothing -> do
           putStrLn "  备份盘     未登记/未同步 → 插盘后 pm backup init <镜像路径>，再 pm backup"
-        Just m -> do
+          pure False
+        Right (Just m) -> do
           let bstamp = formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz (bmAt m))
               lag = bmAdd m + bmUpdate m
           if lag == 0
             then printf "  备份盘     上次同步 %s · 当时无滞后（EXTRA %d）\n" bstamp (bmExtra m)
             else printf "  ⚠ 备份盘   上次同步 %s · 当时落后 %d 项 → 插盘后 pm backup\n" bstamp lag
+          pure False
       -- vault（只读缓存 —— I11 之前 status 对 vault 目录零接触，§10.1）
-      case cfgVaultPath cfg of
-        Nothing -> pure ()
+      vBad <- case cfgVaultPath cfg of
+        Nothing -> pure False
         Just _ -> do
-          mv <- readVaultCacheMeta root
-          case mv of
-            Nothing -> putStrLn "  vault      未比对过 → pm vault status"
-            Just v -> do
+          ev <- readVaultCacheMeta root
+          case ev of
+            Left m -> do
+              putStrLn ("  ⚠ vault    缓存不可信: " <> m)
+              pure True
+            Right Nothing -> putStrLn "  vault      未比对过 → pm vault status" >> pure False
+            Right (Just v) -> do
               let vstamp = formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz (vmAt v))
                   vlag = vmNew v + vmMissing v + vmRenamed v + vmDrift v
               -- unstable 不是差异但状态未知（P3b-4 #5）：同样要 ⚠ 提示重跑
@@ -116,6 +126,7 @@ runStatus cfg opts = do
                     (vmRenamed v)
                     (vmDrift v)
                     (vmUnstable v)
+              pure False
       -- Freshness sweep（共享实现：Pm.Scan.freshnessSweep）
       pending <-
         if stCached opts
@@ -130,7 +141,8 @@ runStatus cfg opts = do
                 printf "  ⚠ 索引已过期: 新增 %d / 变更 %d / 消失 %d\n" newN changedN missingN
                 putStrLn "      → pm scan"
                 pure (newN + changedN + missingN)
-      pure (if null stagingEvents && pending == 0 then 0 else 1)
+      -- 失信缓存与差异同权计入退出码（P3b-15）
+      pure (if null stagingEvents && pending == 0 && not bkBad && not vBad then 0 else 1)
 
 topComponent :: FilePath -> String
 topComponent rel = case splitDirectories rel of

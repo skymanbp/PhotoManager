@@ -315,3 +315,31 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   hardlink、plan 双形态、`.pm` 普通文件、侧缓存**文件级**链接（十一轮指出旧的
   目录级用例钉不住 `writeCacheFile` 的文件级复检）。归档见
   `docs/reviews/2026-08-24-p3b-codex-review.md` 第十一轮章节。
+  （**十二轮更正**：当时 README/本条写的「lock 与全部状态入口改道」不实——
+  收进受信口的是**读与追加**；`saveCatalog` 的轮转与 lock 的裸句柄仍按名字，
+  由 P3b-15 收口。侧缓存读侧用例当时是**假绿**：库外 JSON 本就解不出 Catalog，
+  删掉 link count 屏障照样通过，十二轮点出后已改为合法 Catalog + 突变验证。）
+- **P3b-15 十二轮收口（同日，codex 十二轮：1 critical + 1 major + 3 minor；
+  仍判「未收敛」）**：十一轮把**读/追加**收进了受信口，十二轮指出**同一类**的
+  写与定点探测还在按名字操作 `.pm`——
+  ①`saveCatalog` 的 tmp/base/.1/.2 轮转自身无任何解析（critical）：生产序列是
+  「`loadCatalog` → 长扫描 → `saveCatalog`」（`Pm.Commands.runScan`、
+  `Pm.BackupCmd`），扫描期间把 `.pm` 换成 junction，保存就会在**库外**建 tmp、
+  删 `.2`、轮转 `.1`/base；②doctor 对 `.pm/trash` 载荷按名字 `doesFileExist` +
+  `sha256File`（major）：载荷换成指向库外同内容文件的 hardlink 时 doctor
+  「核验通过」，`--repair` 随即补写**虚假的 Done**，把从未落位的隔离认证成已
+  完成；③`.pm/lock` 裸 `openBinaryFile`，hardlink 到库外文件即锁住共享对象；
+  ④侧缓存读把失信压成缺席，而 `pm status` 只读无配对写侧，失信被显示成
+  「未登记/未比对过」且可能 exit 0；⑤十一轮的侧缓存读侧用例是假绿。
+  修复：`resolvePmPath`（使用点解析，`saveCatalog` 四条路径逐条解析后只用返回
+  路径）、`Pm.Win.openStateLock`（句柄 link count）、doctor 的 `probePmSha`
+  （完整路径 resolveUnder + `openStateRead` + **同句柄** `sha256Handle`，失信
+  只报 `PM-LINK` Bad 且不参与任何 repair 推导）、`readSideCache` 保留
+  `Either String (Maybe a)` 且 status 对 `Left` 报 ⚠ 并计入退出码。另修
+  `probeName`：属性与 `GetLastError` 改由 `cbits/pm_win.c` **单次 FFI** 取得
+  ——十二轮指出两次独立 FFI 在 threaded RTS 下可能跨 OS 线程，而 GetLastError
+  是 per-OS-thread 的；这是把假设变成事实，而不是登记残余。
+  测试 +3（184/184），并对本轮**每条**新屏障做突变验证（删屏障→用例转红）：
+  saveCatalog 解析、lock link count、doctor 受信探测各自单独转红，删掉
+  `openStateRead` 的 link count 则 4 例同时转红（含被修好的侧缓存读侧用例）。
+  归档见 `docs/reviews/2026-08-24-p3b-codex-review.md` 第十二轮章节。

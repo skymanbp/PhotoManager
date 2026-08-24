@@ -6,10 +6,13 @@
 -- hard-coded); root markers live in @\<root\>\/.pm\/root-id.json@ so roots are
 -- recognized by UUID, not by drive letter (DESIGN.md §9).
 --
--- 这里同时是 @.pm@ **状态文件的唯一受信取用口**（'readPmState' \/
--- 'withPmStateAppend' \/ 'readSideCache' \/ 'writeSideCache'）。见
--- 'readPmState' 的注释：十一轮之前每个模块自己拼 @.pm@ 路径再按名字打开，
--- 那个模式在原理上补不完。
+-- 这里同时是 @.pm@ **状态文件的受信取用口**：读与追加走 'readPmState' \/
+-- 'withPmStateAppend' \/ 'readSideCache'，成对写走 'writeSideCache'，而
+-- 'Pm.Catalog.saveCatalog' 那类**自有多代轮转**在使用点用 'resolvePmPath'
+-- 解析后只操作返回路径。见 'readPmState' 的注释：十一轮之前每个模块自己拼
+-- @.pm@ 路径再按名字打开，那个模式在原理上补不完。
+-- （P3b-15\/十二轮更正：十一轮这里写的"唯一取用口"不实——当时 'saveCatalog'
+-- 的轮转与 'Pm.Lock' 的裸句柄都不经过本模块。）
 module Pm.Config
   ( Config (..)
   , configFilePath
@@ -35,6 +38,7 @@ module Pm.Config
   , untrustedMsg
   , readPmState
   , withPmStateAppend
+  , resolvePmPath
   , readSideCache
   , writeSideCache
   ) where
@@ -276,17 +280,35 @@ withPmStateAppend root rel act = do
     Nothing -> ioError (userError (untrustedMsg (pmDir root </> rel)))
     Just fp -> bracket (openStateAppend fp) hClose act
 
--- | 可重建侧缓存（备份盘缓存 \/ vault 缓存）的受信读取。不可信与损坏都是
--- 'Nothing' —— 对**可重建**的缓存，"当它不存在、重新算一遍"是保守方向，不会
--- 让攻击者提供的字节参与决策；而同一条命令随后配对的 'writeSideCache' 会对
--- 同一路径返回 @Left@，于是不可信状态照样以硬停（vault）或警告（backup）
--- 暴露给用户，不会被静静吞掉。
-readSideCache :: Aeson.FromJSON a => FilePath -> FilePath -> FilePath -> IO (Maybe a)
+-- | 可重建侧缓存（备份盘缓存 \/ vault 缓存）的受信读取。三态：
+-- @Left@=不可信（junction\/hardlink\/ACL）、@Right Nothing@=缺席或损坏 JSON
+-- （可重建缓存按缺席重算即可）、@Right (Just a)@=可信内容。
+--
+-- P3b-15（十二轮 minor）：此前把 @Left@ 也压成 @Nothing@，并声称"配对的
+-- 写侧会暴露失信"——不实：@pm status@ 只读不写，失信被显示成「未登记\/未
+-- 比对过」且可能 exit 0。失信原因必须保留，由调用点决定呈现
+-- （status 报 ⚠ 并计入退出码；vault\/backup 的重算路径可弃用内容但要报警）。
+readSideCache :: Aeson.FromJSON a => FilePath -> FilePath -> FilePath -> IO (Either String (Maybe a))
 readSideCache root sub name = do
   r <- readPmState root (sub </> name)
   pure $ case r of
-    Right (Just bytes) -> either (const Nothing) Just (Aeson.eitherDecodeStrict' bytes)
-    _ -> Nothing
+    Left m -> Left m
+    Right Nothing -> Right Nothing
+    Right (Just bytes) ->
+      Right (either (const Nothing) Just (Aeson.eitherDecodeStrict' bytes))
+
+-- | @.pm@ 内 pm 自有文件的**使用点**路径解析：完整相对路径 'resolveUnder'，
+-- 解析不出即抛（同 'withPmStateAppend' 口径）。P3b-15（十二轮 critical）：
+-- 'Pm.Catalog.saveCatalog' 的轮转（tmp\/base\/.1\/.2 的创建、unlink、rename）
+-- 此前全按名字操作、自身无任何解析——scan\/backup 在 loadCatalog 与保存之间隔
+-- 一次长扫描，期间 @.pm@ 换成 junction，保存就会在**库外**建 tmp、删 @.2@、
+-- 轮转 @.1@\/base。凡「解析后按返回路径操作」的写点都用这里。
+resolvePmPath :: FilePath -> FilePath -> IO FilePath
+resolvePmPath root rel = do
+  m <- resolveUnder root (".pm" </> rel)
+  case m of
+    Nothing -> ioError (userError (untrustedMsg (pmDir root </> rel)))
+    Just fp -> pure fp
 
 -- | root 标识的三态（P3b-7 复审 major）：缺席与**损坏**必须区分——损坏（半写\/
 -- 手编坏 JSON）若按缺席处理，init\/backup init\/vault push 会用新 UUID 与新
