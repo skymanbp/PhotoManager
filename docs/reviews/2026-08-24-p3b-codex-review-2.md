@@ -245,6 +245,51 @@ public 同步：链内首推遇 GitHub 504，手动重推成功（origin/main = 
 **门禁满足 → 按用户 2026-08-24 裁定，AskUserQuestion 请裁定
 `pm apply 20260824-030200-0c238a`（6 项 Raw 事件夹改名，undo 可逆）。**
 
+---
+
+# 第十八轮（P4-1 `pm serve` 首评，commit 7464780；gpt-5.6-sol 独立评审）
+
+**verdict：GO**——"未发现 critical/major；监听、鉴权与只读路由足以支撑 GUI
+骨架"。网络面：确实仅监听 IPv4 loopback（显式 `SockAddrInet 127.0.0.1` 是唯一
+bind，warp `runSettingsSocket` 只在传入 socket 上 accept，不按 `settingsHost`
+再开 0.0.0.0——它读了 warp-3.4.9/Run.hs 与 network Name.hs 取证）；token 常量
+时间比对（长度短路只泄露公开的 32）；Origin 精确白名单、OPTIONS 只回空 204；
+`requestHeaderHost = Nothing` 明确 403。数据面：sha 请求不能构造路径；`listPlans`
+的 `listDirectory` 不算新的按名字 open 入口（枚举的名字先过 isValidPlanId 再走
+受信取用口）；Status 重构与基线 `5813081:src/Pm/Status.hs` 逐行同义、三态保住。
+
+## 逐条判定与处置（全部在分支 p4-2-gui 闭合，200/200）
+
+| 发现 | codex 判定 | 核实 / 处置 |
+|---|---|---|
+| minor `hostOk` 前缀判定 | `127.0.0.1:1@evil` 通过；warp 3.4.9 不解析 authority、原值进 `requestHeaderHost`；不构成浏览器 DNS-rebinding 绕过且仍须 token，但违反 Host 契约 | **成立**：精确解析为 `127.0.0.1` 或 `127.0.0.1:<1-5 位数字>`；+5 断言（含 `:1@evil`、`:abc`、`:`、`:123456`、`:65535`）；突变回前缀 → Host 用例 FAIL |
+| minor `--port 65536` 折回 | `fromIntegral` 到 `PortNumber` 时静默折回 0，负数折回其它端口 | **成立**：`portOk` 0..65535，越界 exit 2 并报出给的值；`caseServePortRange` |
+| minor vault JSON 末尾 LF | CLI `putStrLn` 多一个 LF，"逐字节相同"不成立 | **成立**：API 追加 LF；`caseServeVaultStatusBytes` 用同一 `renderVaultJson` 独立算期望逐字节比对；去掉 LF → FAIL |
+| minor 并发缓存刷新 | `/api/vault/status` 会刷新 `.pm/vault-cache`，warp 并发执行两个 GET 争用固定 `.tmp` 可能 500 | **成立**：`ServeEnv.seVaultLock`（MVar）串行化 `computeVault`，`serveApp` 改收 `ServeEnv`；无并发用例（wai-test 里造不出真并发，登记） |
+| 残余硬化 thumb | `userRelOk` 只是词法闸；扫描后 `相册/a.jpg` 或父目录被换成库外 symlink/junction，授权请求会读链接目标（属既有 TOCTOU 残余，非新 major） | **采纳**：读取前逐级 `resolveUnder`、只读返回路径；`caseServeThumbLink` 把条目换成指向库外 secret 的文件 symlink → 404、库外字节不外泄；删掉解析 → FAIL |
+| 1 网络面 ①②④⑤⑥ | OK | ⑥ warp 锁定默认值：连接超时 30 s、HTTP/1 头 50 KiB、无总 body 上限；只读端点不读 body → 够用；**未来写端点须另加应用级大小与执行超时**（登记） |
+| 2 数据面 ②③ | OK | ③ 默认 cached，`fresh=1` 全树 stat 约 2 s、token 受控，不要求服务端节流；GUI 应避免轮询（登记） |
+| 3 Status 重构 | OK | 逐行同义；`CacheBad/Absent/Ok` 三态，失信计入 exit 1 |
+| 4 测试 | PARTIAL | 五处突变点被钉住；未测项中：恶意 Host 后缀（已补）、thumb 链接越界（已补）、vault/status 精确字节（已补）；仍未测：main+vault plans 合并、并发 vault 刷新；`Network.Wai.Test` 不经 socket/warp HTTP 解析/超时/连接复用，建议 P4-3 前补一条真开端口的 raw HTTP 冒烟（登记） |
+| 5 文档 | PARTIAL | Host 契约措辞与"字节相同"两处 → 已改（DESIGN §11、REVIEW-LOG 十八轮更正） |
+
+## 突变验证（本轮新增两条）
+
+| 删掉的屏障 | 结果 |
+|---|---|
+| thumb 的 `resolveUnder`（改回 `root </> rel` 直接读） | `caseServeThumbLink` **FAIL**（1/4 P4-2 组） |
+| vault/status 末尾 LF | `caseServeVaultStatusBytes` **FAIL**（1/4） |
+| `hostOk` 退回前缀判定（前一提交） | `caseServeHost` **FAIL**（`127.0.0.1:1@evil`） |
+
+## 残余（十八轮起，新增）
+
+- 真开端口的 raw HTTP 冒烟测试（bind / announce / 畸形 Host / 大响应 / 超时）
+  ——目前靠人工 netstat 与 curl 冒烟；`Network.Wai.Test` 覆盖不到 warp 层。
+- `/api/plans` main+vault 合并无用例；并发 vault 刷新无用例（进程内互斥已加）。
+- 未来写端点：应用级 body 大小与执行超时（warp 默认无总 body 上限）。
+- GUI 侧避免轮询 `fresh=1`；如需自动刷新加 single-flight/最小间隔。
+- 其余同十七轮清单。
+
 ## 真实写入（用户裁定"全量执行"，2026-08-24）
 
 `pm apply 20260824-030200-0c238a`：6/6 → DONE，1071 ms。盘上核实

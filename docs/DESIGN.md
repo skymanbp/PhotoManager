@@ -479,7 +479,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P4-2/3 / pm 0.4.1 / 197 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
+  当前实现对应 **P4-2/3 / pm 0.4.1 / 200 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -512,13 +512,18 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - **API（P4-1 落地，`src/Pm/Serve.hs`）**：只绑定 127.0.0.1，端口默认由内核
   随机分配，启动时在 stdout 打印一行 `{"port":N,"token":"…"}`；每个请求须带
   `Authorization: Bearer <token>`（crypton 16 字节熵 hex，常量时间比对）；
-  `Host` 须为 `127.0.0.1[:port]`（挡 DNS rebinding）；带 `Origin` 的请求只接受
-  `tauri://localhost` / `http(s)://tauri.localhost`（预检 OPTIONS 免 token）。
-  只读端点：`GET /api/ping`、`GET /api/status[?fresh=1]`（与 `pm status` 同源
-  的 `StatusReport`，含退出码）、`GET /api/vault/status`（与 `--json` 同一字节）、
-  `GET /api/plans`、`GET /api/plan/<id>`、`GET /api/thumb/<sha>`（只提供
-  catalog 里 JPEG 条目的原字节，缩放由 GUI 做）。**写端点（apply / vault push
-  分类）在 GUI 骨架落地后另开，先过 codex 评审再请用户裁定**（同 P3 门禁）。
+  `Host` 须**恰好**是 `127.0.0.1` 或 `127.0.0.1:<1-5 位十进制端口>`（精确解析，
+  挡 DNS rebinding；十八轮把前缀判定收紧）；`--port` 限 0..65535（越界不静默
+  折回）；带 `Origin` 的请求只接受 `tauri://localhost` / `http(s)://tauri.localhost`
+  （预检 OPTIONS 免 token）。只读端点：`GET /api/ping`、`GET /api/status[?fresh=1]`
+  （与 `pm status` 同源的 `StatusReport`，含退出码）、`GET /api/vault/status`
+  （与 `pm vault status --json` 的 stdout **逐字节相同，含末尾 LF**）、
+  `GET /api/vault/new`、`GET /api/plans`、`GET /api/plan/<id>`、
+  `GET /api/thumb/<sha>`（只提供 catalog 里 JPEG 条目的原字节，读取前逐级
+  `resolveUnder`——扫描后被换成库外链接的条目不跟随；缩放由 GUI 做）。vault
+  两个端点会刷新 `.pm/vault-cache`，进程内互斥串行化（并发争用固定 tmp 名）。
+  **写端点（apply / vault push 分类）在 GUI 骨架落地后另开，先过 codex 评审再
+  请用户裁定**（同 P3 门禁）。
 - GUI 功能 = status 仪表盘 + 计划浏览/勾选/确认 + **vault push 逐张看图分类**
   （核心价值场景，CLI 做不了）。P4-2 骨架（`gui/`）：`ui/` 纯静态
   HTML/JS/CSS（无 npm），三页——仪表盘 / 计划 / 分类（NEW 缩略图网格 + 类目

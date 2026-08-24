@@ -451,7 +451,8 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   stdout 一行 `{"port","token"}`；token = crypton 16 字节熵 hex，`constEq` 常量
   时间比对；`Host` 须 `127.0.0.1[:port]`（DNS rebinding）；`Origin` 只认 Tauri
   来源，预检 OPTIONS 免 token。只读端点：ping / status[?fresh=1] / vault status
-  （与 `--json` **字节相同**，冒烟核实）/ plans / plan/<id> / thumb/<sha>（只提供
+  （JSON 载荷与 `--json` 相同——**十八轮更正**：当时少 CLI 的末尾 LF，"逐字节
+  相同"不成立，P4-2 已追加 LF 并加字节用例）/ plans / plan/<id> / thumb/<sha>（只提供
   catalog 里 JPEG 条目原字节；enPath 来自 loadCatalog 校验）。`Pm.Status` 拆成
   `statusReport`（ToJSON，含退出码）+ `renderStatus`，`runStatus` 组合二者，
   文本逐行同 P3b。`listPlans` 经 requirePmTrusted + 完整路径 resolveUnder，
@@ -483,3 +484,22 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   用已装的 `x86_64-pc-windows-msvc` 目标构建（gnu 下 cdylib "export ordinal
   too large"）。`pm ui` 找不到 pm-ui.exe 时列出查过的路径、exit 2。**写端点仍
   未开**：分类页无提交按钮。在 worktree `p4-2-gui` 开发，待十八轮结论后合并。
+- **十八轮：GO（同日，codex 十八轮首评 P4-1，5813081..7464780，186 次探查；
+  "未发现 critical/major"，4 minor + 1 残余硬化建议）**，全部在同一分支闭合
+  （200/200）：①`hostOk` 前缀判定放过 `127.0.0.1:1@evil`（它说明这不构成浏览器
+  DNS-rebinding 绕过，且仍须 token）→ 精确解析，+5 断言，突变回前缀即转红；
+  ②`--port 65536` 在 `fromIntegral` 到 `PortNumber` 时静默折回 → `portOk`
+  0..65535，越界 exit 2；③"与 `--json` 字节相同"忽略了 CLI `putStrLn` 的末尾
+  LF → API 追加 LF，新增用例用同一 `renderVaultJson` 独立算期望再逐字节比对，
+  去掉 LF 即转红；④两个并发 `/api/vault/status` 争用固定缓存 tmp 名可能 500 →
+  `ServeEnv.seVaultLock` 进程内互斥串行化（`serveApp` 改收 `ServeEnv`）；
+  ⑤残余硬化 thumb：enPath 只过词法闸，扫描后条目被换成库外 symlink 时按名字
+  readFile 会跟随 → 读取前逐级 `resolveUnder` 只读返回路径，新增用例把
+  `相册/a.jpg` 换成指向库外 secret 的文件 symlink → 404 且库外字节不外泄，
+  删掉那次解析即转红。它另确认：显式 `SockAddrInet 127.0.0.1` 是唯一 bind、
+  warp `runSettingsSocket` 不会再按 `settingsHost` 开 0.0.0.0；warp 3.4.9 锁定
+  默认值（连接超时 30 s、HTTP/1 头上限 50 KiB、无总 body 上限——只读端点不读
+  body，未来写端点须另加应用级大小与执行超时）；Status 重构与基线逐行同义；
+  `Network.Wai.Test` 不经 socket/warp 解析/超时/连接复用，建议 P4-3 前补一条
+  真开端口的 raw HTTP 冒烟（登记，未做——目前靠人工 netstat 冒烟）。
+  归档见第二卷第十八轮章节。
