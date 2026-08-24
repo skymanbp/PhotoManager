@@ -653,3 +653,82 @@ status 的备份盘/vault 两行走的是 `Right` 分支，无误报失信。
   每个状态文件的逐级解析；备份发现对每个候选卷调用 `readRootInfo`。源码未设
   超时，可能累积延迟——**无正常文件被误判的证据**，但 USB 备份盘上的实测待
   用户插盘后补。
+
+---
+
+# 第十三轮（复审 P3b-15，commit 1666f4c；gpt-5.6-sol 独立评审）
+
+**verdict：NO-GO；收敛性：未收敛**——它按**自己上一轮给的判据**（"仓库里还有没有
+任何『拼 `.pm` 路径后按名字操作』的生产入口"）重新扫了一遍，并按①受信口内部 /
+②已解析路径 / ③不跟随链接遍历 / ④用户数据 / ⑤裸按名字操作 五类给出了完整归类。
+⑤ 只剩一条**新**缺口 —— 但那条是真的。
+
+## 逐条判定与处置
+
+| 发现 | codex 判定 | 核实 | 修复 |
+|---|---|---|---|
+| **major** doctor 的 restore 源 | NOT-FIXED（src/Pm/Doctor.hs:259） | **成立**：`Pm.Op.isTrashSrcRel`（src/Pm/Op.hs:212-218）明确允许 `OpRename` 的**源**落在 `.pm/trash` 内，而 `classifyPending'` 对它用裸 `existsAny`；`repairDone` 的白名单收 `R2` + `Warn`（src/Pm/Doctor.hs:434），于是 junction 化的复位源 + 指纹相符的目标 → R2 Warn → `--repair` 补**虚假 Done** | `.pm` 侧走 `probePmExists`，失信只报 `PM-LINK` Bad。剥 `.pm` 前缀用 `joinPath (drop 1 (splitDirectories old))` 而非 `makeRelative`——`isTrashSrcRel` 折大小写，`.PM/trash/…` 会让词法剥离失效（我第一版就写成了 `makeRelative`，自查时改掉） |
+| **minor** 突变验证声明过强 | 成立 | **成立，是我的声明不实**：Catalog 用例只钉住"四条解析全部撤回"，单撤一条时其余解析仍在 junction 上失败、用例照样绿 | 为每一代快照（base/.1/.2/.tmp）**单独**构造文件级 symlink 用例；复验单撤 `.1` 一条即转红。README / REVIEW-LOG / 本归档的绝对措辞一并改掉 |
+| 最小修复集 #2「严格兑现『使用返回路径』判据」 | 条件性建议（它把这些归为已登记 TOCTOU，非新缺口） | 成立，且**这是反复出现的形状本身** | **类级修复**：`confinedTmp` / `confinedTrash` 改为返回 `Maybe FilePath`，新增 `confinedUserPath`；Exec 的 tmp 落位、`execRename'` 两侧、`execQuarantine'` 两侧改为接收**已解析的绝对路径**，不再由被调函数重拼 `root </> rel` |
+| 1 saveCatalog | FIXED | — | — |
+| 2 doctor 同句柄 | PARTIAL（同句柄成立；三条 repair 线均不消费 `PmStateBad`；但 restore 分支绕过） | 成立 | 见上 |
+| 3 lock | FIXED（含 `userError` 不会被误当"锁忙"） | — | — |
+| 4 侧缓存三态 | FIXED（并确认 `--json` 不被警告污染） | — | 它建议 DESIGN 的 0/1/2 描述补一句"失信也算 attention"——已在 REVIEW-LOG 记录该语义扩展 |
+| 5 FFI/C wrapper | FIXED；**并明确回答"建议补入 Missing 的错误码：空"** | 采纳 | 保持只有 2/3 算缺失 |
+| 6 测试 | PARTIAL | 成立 | +3 例覆盖它点名的未钉住项：`probePmExists`、status 失信退出码、restore 探测 |
+| 7 文档 | PARTIAL（2 处不符） | 成立 | 逐条更正（见下） |
+
+## 类级修复：限域助手返回路径而非 Bool
+
+这一轮真正的收获不是那条 major，而是它让"为什么同一形状反复出现"有了答案：
+**限域助手返回 `Bool`，调用方只能自己再拼一次名字**——校验的字符串与操作的
+对象因此永远是两次独立解析。十一轮修读、十二轮修写、十三轮修探测，都是这
+一个成因的不同出口。改成返回解析后的路径后，调用方**无从**绕过：
+
+    confinedTrash  :: FilePath -> FilePath -> IO (Maybe FilePath)
+    confinedTmp    :: FilePath -> Text -> FilePath -> IO (Maybe FilePath)
+    confinedUserPath :: FilePath -> FilePath -> IO (Maybe FilePath)
+
+`execRename'` / `execQuarantine'` 的签名相应改为接收已解析的绝对路径
+（`execRename'` 因此不再需要 `root` 参数——它已无处可拼）。
+
+## 突变验证（本轮逐条，且补上了十三轮指出的粒度问题）
+
+| 删掉的屏障 | 结果 |
+|---|---|
+| doctor restore 源的受信探测（退回 `existsAny`） | `caseDoctorRestoreSrcJunction` **FAIL**（1/187） |
+| `probePmExists`（退回 `doesFileExist`） | `caseDoctorPendingTmpProbe` **FAIL**（1/187） |
+| status 退出码去掉 `not bkBad && not vBad` | `caseStatusUntrustedCacheExit` **FAIL**（1/187） |
+| **只撤 `catalog.json.1` 一条** `resolvePmPath` | `caseSaveCatalogJunction` **FAIL**（1/187）——十三轮指出旧写法此时仍绿，现已闭合 |
+
+回归：187/187（+3），GHC 警告 0；真实库只读四连不变
+（doctor 0 / trash list 0 / status 1 / vault status 1，doctor 196 ms）。
+Exec 内核重构后 184 例原集合逐条通过（含全部故障注入矩阵）。
+
+## 残余（更新）
+
+- **TOCTOU（check-use 窗口）**：限域助手现在返回路径，窗口收窄到"解析→使用"
+  之间；`saveCatalog` 的五步轮转仍是最宽的一处（十三轮亦如此判定）。根治需
+  handle-relative 原生 API；十二轮提的
+  `GetFinalPathNameByHandleW` 同句柄比对仍是待评估的轻量方案（需先验证
+  UNC / 卷 GUID / 大小写规范化形态）。
+- `createRootInfo` 建 `.pm` 之后没有再次解析 tmp/final（十三轮最小修复集 #2
+  的后半，窄 TOCTOU，未修，登记）。
+- `openExclusiveBinary` 缺外层 `mask`（两段所有权窗口）。
+- `requirePmTrusted` 的深度 1 枚举与使用点是两个快照。
+- `Pm.Config.writeRootInfo` 裸覆盖写（仅测试 fixture；十三轮复核确认生产调用图
+  不含它）。
+- `Pm.Scan` 的 symlink 探测异常按非 symlink 继续（ACL 形态本机构造不出）。
+- `Pm.GitGuard` / `Pm.Vault.photosJsonRef` 读的是库外用户文件，不属 `.pm` 辖区
+  （十三轮再次复核该排除理由成立）。
+- `probeName` 只把 2/3 当缺失：十三轮明确回答"建议补入的错误码：空"，5/15/21/
+  32/53/67/123/206 都不是"可安全创建的确定缺席"，保持 Unknown fail-closed。
+- **status 语义扩展**：缓存失信现在计入 exit 1。十三轮判定其符合 README
+  「exit 1 表示有事可做」，但 DESIGN §5.1 的 0/1/2 描述宜补一句——已登记。
+- **未证实项**：8.3 短名、Unicode 兼容等价、保留设备名、云占位/Dedup 实际
+  reparse 形态、能让 `canonicalizePath` 抛异常的输入、"可读内容但不可读
+  attributes"的 ACL 库、`.pm` 的 UNC/断网形态。
+- **慢介质开销**：每次 loader 一次深度 1 枚举 + 每状态文件逐级解析；备份发现
+  对每个候选卷 `readRootInfo`。无超时，实测待用户插盘。
+- `tamperMark` 字符串哨兵；`opSrcAbs` 无 root 归属校验；`writeConfig` 普通
+  覆盖写；备份盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU。
