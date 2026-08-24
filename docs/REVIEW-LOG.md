@@ -400,3 +400,11 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   探针，本轮不做、进残余。
   归档见 `docs/reviews/2026-08-24-p3b-codex-review-2.md`（第二卷，第十四轮起；
   第一卷触及 750 行预算）。
+- **P3b-17b 十五轮文档收口（同日，codex 十五轮：0 代码缺陷 + 2 文档 minor）**：
+  十五轮判两条代码判据（按名字操作 / 谓词宽度——后者它**独立**复扫）**均已
+  收敛**、无新运行时缺陷、"无需代码修复"；NO-GO 只因①第二卷谓词表漏列
+  `readJournal` 的旧 `doesFileExist`（同宽；已按删除的谓词实现点逐文件重列），
+  ②README 的 P3b-16 条目仍称"调用方只能用返回值"、与 P3b-17 删 Bool 版矛盾
+  （已加同样的「十四轮更正」）。它还给了"返回路径必须被使用"用例的可行设计
+  （`resolveUnder` 不对 base 调 `probeName`，root 本身可为 junction，在
+  `CpCopyAfterFlush` 改指诱饵库）——登记未做。代码零变化，189/189，0.3.15。

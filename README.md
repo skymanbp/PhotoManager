@@ -133,8 +133,9 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   `.pm/trash/<pid>` 换成 junction 即让复位源判成"不存在"，配上指纹相符的目标
   就得到 R2 Warn，`--repair` 补写**虚假 Done**（major）。同轮把限域助手
   `confinedTmp`/`confinedTrash`/`confinedUserPath` 从返回 Bool 改为**返回解析
-  后的路径**，调用方只能用返回值——这才让"解析后只操作返回路径"这条不变式
-  字面成立，而不是每轮再补一个漏掉的分支。另修：我上一轮"对**每条**新屏障做
+  后的路径**，tmp 落位、rename、quarantine 三条路径只用返回值（**十四轮更正**：
+  当时 Copy 的 dst 仍是 Bool 版 `confinedUser` 预检 + 重拼，"调用方只能用返回
+  值"的绝对表述不实，P3b-17 删掉 Bool 版后才成立）。另修：我上一轮"对**每条**新屏障做
   突变验证"的说法过强（Catalog 只钉住整体撤回），现已为每一代快照单独构造
   文件级链接用例；新增 3 例，全部逐条突变验证；187/187 测试）
 - P3b-17 ✅ codex 十四轮复审收口（十二轮设立的「拼 `.pm` 路径后按名字操作」
