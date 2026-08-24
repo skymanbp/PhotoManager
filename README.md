@@ -102,6 +102,13 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   name-surrogate tag（云占位/Dedup 不再误拒）；journal/manifest 的 append 与
   plan/侧缓存的覆盖写加 link-count 与独占创建防护；`RootUntrusted` 让建身份的
   三条旁路也过闸；`pathAtOrUnder` 改三态消除 fail-open；173/173 测试）
+- P3b-13 ✅ codex 十轮复审收口（**不再用白名单定义可信集合**：可信闸改为枚举
+  `.pm` 下实际存在的每个条目——十轮点出 `backup-cache`/`vault-cache` 从来不在
+  名单里，junction 化后 `pm vault status` 会替换库外的 catalog.json/meta.json；
+  闸同时下沉到 loader（loadCatalog/readJournal/readManifest/loadPlan），覆盖
+  status/versions/apply 这些命令层没盖住的读入口；侧缓存改 root-relative 受信
+  接口；reparse 探测改 Missing/Plain/Surrogate/Unknown 四态且 Unknown
+  fail-closed；176/176 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

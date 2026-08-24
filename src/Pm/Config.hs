@@ -25,6 +25,9 @@ module Pm.Config
   , pmSubTmp
   , pmSubPlans
   , requirePmTrusted
+  , pmSubBackupCache
+  , pmSubVaultCache
+  , untrustedMsg
   , readJsonMaybe
   , writeSideCache
   ) where
@@ -42,8 +45,10 @@ import qualified Data.Text.Encoding as TE
 import System.Directory
   ( XdgDirectory (XdgConfig)
   , createDirectoryIfMissing
+  , doesDirectoryExist
   , doesFileExist
   , getXdgDirectory
+  , listDirectory
   , removeFile
   )
 import System.FilePath ((</>))
@@ -130,38 +135,59 @@ pmDir root = root </> ".pm"
 -- | @.pm@ 下的固定子目录名——单一真源：'Pm.Trash.trashDir'、
 -- 'Pm.Exec.tmpDirFor'、'Pm.Plan.plansDir' 都引用这里，'requirePmTrusted'
 -- 才能保证「校验过的那几条路径」与「实际写入的那几条路径」不会漂移。
-pmSubTrash, pmSubTmp, pmSubPlans :: FilePath
+pmSubTrash, pmSubTmp, pmSubPlans, pmSubBackupCache, pmSubVaultCache :: FilePath
 pmSubTrash = "trash"
 pmSubTmp = "tmp"
 pmSubPlans = "plans"
+pmSubBackupCache = "backup-cache"
+pmSubVaultCache = "vault-cache"
 
--- | @.pm@ 家族的可信性闸（P3b-11，八轮复审 critical）：从 root 起逐级下降，
--- @.pm@ 及其固定子目录都必须是盘上的**真名**，不得是 junction\/symlink。
+-- | @.pm@ 家族的可信性闸（P3b-11，八轮复审 critical）：@.pm@ 及其内容都必须是
+-- 盘上的**真名**，不得是 junction\/symlink。
 --
 -- 探针实证：把 @.pm\/trash@ 本身做成指向库外的 junction 后，落位\/删除侧的
--- canonical 限域（'Pm.Win.pathUnder'）两侧都解析到库外、判定通过，@removeFile@
--- 删掉了库外文件；@.pm@ 自身被劫持时 journal\/plan\/manifest\/catalog\/root-id
--- 会**整套**写到库外。这些入口没有共同的路径参数可校验，但它们有共同的前提
--- ——'requireWritable'。闸放在这里，一次判定覆盖全部 @.pm@ 写入口。
+-- canonical 限域两侧都解析到库外、判定通过，@removeFile@ 删掉了库外文件；
+-- @.pm@ 自身被劫持时 journal\/plan\/manifest\/catalog\/root-id 会**整套**写到
+-- 库外。这些入口没有共同的路径参数可校验，但有共同的前提——身份读取
+-- （'readRootState'）与 'requireWritable'，闸因此放在这里。
 --
--- 尚不存在的子目录放行（新库的 trash\/tmp\/plans 由 pm 自己创建；
--- 'Pm.Win.resolveUnder' 对不存在的分量返回拼接路径）。
+-- @.pm@ 尚不存在（新库）放行：无可枚举，pm 自己会创建它。
+-- P3b-13（十轮复审 critical）：**不再维护白名单**。前三轮我每次都补一个名字
+-- （trash\/tmp\/plans），每次都漏——十轮点出 @backup-cache@ 与 @vault-cache@
+-- 从来不在名单里，于是把它做成 junction 后 'writeSideCache' 会删除并替换**库外**
+-- 的 catalog.json\/meta.json（探针实证）。用枚举定义可信集合，天生会漏。
+--
+-- 改为**枚举盘上实际有什么**：验 @.pm@ 自身，再对它下面每一个真实存在的条目
+-- 逐个判定。这样 pm 现有的、我漏掉的、将来新增的子目录，以及任何人放进
+-- @.pm@ 的东西，全部自动进入检查范围——"漏枚举"在结构上不再可能。
 requirePmTrusted :: FilePath -> IO (Either String ())
-requirePmTrusted root = go [".pm", ".pm" </> pmSubTrash, ".pm" </> pmSubTmp, ".pm" </> pmSubPlans]
+requirePmTrusted root = do
+  m <- resolveUnder root ".pm"
+  case m of
+    Nothing -> pure (Left (untrustedMsg (pmDir root)))
+    Just pmAbs -> do
+      -- .pm 尚不存在（新库）→ 无可枚举，通过；pm 自己会创建它。
+      ex <- doesDirectoryExist pmAbs
+      if not ex
+        then pure (Right ())
+        else do
+          er <- try (listDirectory pmAbs) :: IO (Either IOException [FilePath])
+          case er of
+            Left e -> pure (Left (pmAbs <> " 无法枚举（" <> show e <> "），拒绝读写——人工核查"))
+            Right names -> go names
  where
   go [] = pure (Right ())
-  go (rel : rest) = do
-    m <- resolveUnder root rel
+  go (n : rest) = do
+    m <- resolveUnder root (".pm" </> n)
     case m of
-      Nothing ->
-        pure
-          ( Left
-              ( root </> rel
-                  <> " 不是 root 下的真实目录（junction\\/symlink\\/别名？）——pm 拒绝以它为基准读写。"
-                  <> "人工核查该路径；正常库里 .pm 及其子目录必须是普通目录"
-              )
-          )
+      Nothing -> pure (Left (untrustedMsg (pmDir root </> n)))
       Just _ -> go rest
+
+untrustedMsg :: FilePath -> String
+untrustedMsg p =
+  p
+    <> " 不是 root 下的真实目录项（junction/symlink/别名？）——pm 拒绝以它为基准读写。"
+    <> "人工核查该路径；正常库里 .pm 及其内容必须是普通目录与普通文件"
 
 rootInfoPath :: FilePath -> FilePath
 rootInfoPath root = pmDir root </> "root-id.json"
@@ -182,7 +208,8 @@ readJsonMaybe fp = do
 -- `pm backup init` / 首次 `pm vault push` 建立身份时**还没有身份**，因此天然
 -- 走不了 'requireWritable' —— 九轮据此指出它们能在 `.pm` 是 junction 时到库外
 -- 读写 root-id.json。身份读取的唯一入口是 'readRootState'，把可信闸放进它，
--- 这些 init 旁路连同 status / versions / 备份发现等只读入口一并覆盖。
+-- 这些 init 旁路一并覆盖。P3b-13（十轮更正）：status / versions 当时**并未**
+-- 被它覆盖（那两条直接调 'Pm.Catalog.loadCatalog'），闸下沉到 loader 后才真正盖住。
 data RootIdState = RootAbsent | RootCorrupt String | RootUntrusted String | RootPresent RootInfo
   deriving (Show, Eq)
 
@@ -288,17 +315,40 @@ writeRootInfo root info = do
   createDirectoryIfMissing True (pmDir root)
   BSL.writeFile (rootInfoPath root) (Aeson.encode info)
 
--- | 侧缓存目录的成对覆盖写（catalog.json + meta.json）。备份盘缓存与
--- vault 缓存共用：都是可重建的展示\/加速缓存，纯覆盖写即可——耐久层在
--- 别处（备份盘自己的 .pm、照片文件本身）。
--- P3b-12（九轮复审 major）：覆盖写同样能被 hardlink 引到库外。侧缓存是可重建
--- 的，但"可重建"不等于"可以写到别人的文件上"——与 'Pm.Plan.savePlan' 同款：
--- 独占创建 tmp → 删旧 → no-replace 落位。
-writeSideCache :: Aeson.ToJSON meta => FilePath -> Catalog -> meta -> IO ()
-writeSideCache dir cat meta = do
-  createDirectoryIfMissing True dir
-  writeJsonReplacing (dir </> "catalog.json") (Aeson.encode cat)
-  writeJsonReplacing (dir </> "meta.json") (Aeson.encode meta)
+-- | 侧缓存目录的成对写入（catalog.json + meta.json），备份盘缓存与 vault 缓存
+-- 共用：都是可重建的展示\/加速缓存，耐久层在别处（备份盘自己的 @.pm@、照片
+-- 文件本身）。
+--
+-- P3b-12（九轮）：覆盖写能被 hardlink 引到库外 → 改「独占创建 tmp → 删旧 →
+-- no-replace 落位」。
+-- P3b-13（十轮复审 critical，探针实证）：接口从「给我一个目录」改成
+-- 「给我 root + @.pm@ 下的子目录名」——旧签名让调用方自由拼路径
+-- （'Pm.Backup.cacheDir'、'Pm.Vault.vaultCacheDir'），于是把
+-- @.pm\/vault-cache@ 做成 junction 后，正常的 @pm vault status@ 会删掉并替换
+-- **库外**的 catalog.json\/meta.json（实测库外文件变成了 pm 写的内容）。
+-- 现在每个文件的完整路径在建目录前后各过一次 'resolveUnder'，与 Exec 的
+-- tmp 落位同款。
+writeSideCache :: Aeson.ToJSON meta => FilePath -> FilePath -> Catalog -> meta -> IO (Either String ())
+writeSideCache root sub cat meta = do
+  let dir = pmDir root </> sub
+  pre <- resolveUnder root (".pm" </> sub)
+  case pre of
+    Nothing -> pure (Left (untrustedMsg dir))
+    Just _ -> do
+      createDirectoryIfMissing True dir
+      r1 <- writeCacheFile root sub "catalog.json" (Aeson.encode cat)
+      case r1 of
+        Left e -> pure (Left e)
+        Right () -> writeCacheFile root sub "meta.json" (Aeson.encode meta)
+
+writeCacheFile :: FilePath -> FilePath -> FilePath -> BSL.ByteString -> IO (Either String ())
+writeCacheFile root sub name bytes = do
+  -- 建目录之后再验一次完整路径：把 createDirectoryIfMissing 与写入之间的
+  -- TOCTOU 窗口收窄到"创建后立刻"（同 'Pm.Exec' 的动态 tmp 处理）。
+  m <- resolveUnder root (".pm" </> sub </> name)
+  case m of
+    Nothing -> pure (Left (untrustedMsg (pmDir root </> sub </> name)))
+    Just fp -> Right <$> writeJsonReplacing fp bytes
 
 writeJsonReplacing :: FilePath -> BSL.ByteString -> IO ()
 writeJsonReplacing fp bytes = do

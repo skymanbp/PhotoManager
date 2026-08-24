@@ -18,7 +18,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.IO (hClose)
 
-import Pm.Config (pmDir)
+import Pm.Config (pmDir, requirePmTrusted)
 import Pm.Op (userRelOk)
 import Pm.Types
 import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary)
@@ -44,6 +44,16 @@ tamperMark = "，快照拒绝载入 → pm scan 重建"
 --    fail-closed 到"先 pm scan 重建"。
 loadCatalog :: FilePath -> IO (Maybe Catalog, [String])
 loadCatalog root = do
+  -- P3b-13（十轮复审 major）：闸下沉到 loader。此前只在命令层加闸，于是
+  -- pm status / pm versions / apply 的计划查找都在闸之前就读了 .pm。
+  -- 每一次 root-based 的 .pm 读取都经过这里，一处判定覆盖全部读入口。
+  tr <- requirePmTrusted root
+  case tr of
+    Left m -> pure (Nothing, [m])
+    Right () -> loadCatalog' root
+
+loadCatalog' :: FilePath -> IO (Maybe Catalog, [String])
+loadCatalog' root = do
   let base = catalogPath root
       candidates = [base, base <> ".1", base <> ".2"]
   foldM step (Nothing, []) candidates

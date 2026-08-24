@@ -49,7 +49,7 @@ import System.FilePath (splitDirectories, takeExtension, (</>))
 import Text.Printf (printf)
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (Config (..), RootIdState (..), createRootInfo, freshRootId, pmDir, readJsonMaybe, readRootInfo, readRootState, requireMain, writeSideCache)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, freshRootId, pmDir, pmSubVaultCache, readJsonMaybe, readRootInfo, readRootState, requireMain, writeSideCache)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
@@ -207,8 +207,9 @@ instance ToJSON VaultCacheMeta where
 instance FromJSON VaultCacheMeta where
   parseJSON = genericParseJSON vaultMetaOpts
 
+-- 同 'Pm.Backup.cacheDir'：名字取自单一真源，写入走 root-relative API。
 vaultCacheDir :: FilePath -> FilePath
-vaultCacheDir mainRoot = pmDir mainRoot </> "vault-cache"
+vaultCacheDir mainRoot = pmDir mainRoot </> pmSubVaultCache
 
 readVaultCacheMeta :: FilePath -> IO (Maybe VaultCacheMeta)
 readVaultCacheMeta mainRoot = readJsonMaybe (vaultCacheDir mainRoot </> "meta.json")
@@ -216,8 +217,8 @@ readVaultCacheMeta mainRoot = readJsonMaybe (vaultCacheDir mainRoot </> "meta.js
 readVaultCacheCatalog :: FilePath -> IO (Maybe Catalog)
 readVaultCacheCatalog mainRoot = readJsonMaybe (vaultCacheDir mainRoot </> "catalog.json")
 
-writeVaultCache :: FilePath -> Catalog -> VaultCacheMeta -> IO ()
-writeVaultCache mainRoot = writeSideCache (vaultCacheDir mainRoot)
+writeVaultCache :: FilePath -> Catalog -> VaultCacheMeta -> IO (Either String ())
+writeVaultCache mainRoot = writeSideCache mainRoot pmSubVaultCache
 
 -- ─── IO：列目录 + 缓存感知 sha ──────────────────────────────────────────────
 
@@ -384,20 +385,25 @@ computeVault' quiet cfg vaultDir = do
                 , vmUnpushable = length unpushable
                 , vmUnstable = length unstable
                 }
-        writeVaultCache root (Catalog "vault-cache" now (entryMap vEntries)) meta
-        pure
-          ( Right
-              VaultReport
-                { vrSrcDir = srcDir
-                , vrVaultDir = vaultDir
-                , vrSrcCount = Map.size srcShas
-                , vrVaultCount = vaultCount
-                , vrDiff = d
-                , vrUnpushable = unpushable
-                , vrUnstable = unstable
-                , vrSrcMeta = Map.fromList [(n, e) | (n, _, Just e) <- srcTriples]
-                }
-          )
+        -- 缓存目录不可信（junction 化）是硬失败：继续下去等于把 pm 的写
+        -- 交给库外（P3b-13 十轮 critical）。
+        wc <- writeVaultCache root (Catalog "vault-cache" now (entryMap vEntries)) meta
+        case wc of
+          Left e -> pure (Left (e, 2))
+          Right () ->
+            pure
+            ( Right
+                VaultReport
+                  { vrSrcDir = srcDir
+                  , vrVaultDir = vaultDir
+                  , vrSrcCount = Map.size srcShas
+                  , vrVaultCount = vaultCount
+                  , vrDiff = d
+                  , vrUnpushable = unpushable
+                  , vrUnstable = unstable
+                  , vrSrcMeta = Map.fromList [(n, e) | (n, _, Just e) <- srcTriples]
+                  }
+            )
 
 -- ─── pm vault status [--json] ───────────────────────────────────────────────
 

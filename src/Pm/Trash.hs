@@ -32,7 +32,7 @@ import System.FilePath ((</>))
 import System.IO
 import System.IO.Error (isDoesNotExistError)
 
-import Pm.Config (pmDir, pmSubTrash)
+import Pm.Config (pmDir, pmSubTrash, requirePmTrusted)
 import Pm.Op (OpIdSuffix (..), opIdParts, relPathOk)
 import Pm.Win (flushHandleToDisk, openStateAppend)
 
@@ -109,6 +109,14 @@ appendManifest root r = do
 
 readManifest :: FilePath -> IO ([TrashRecord], [String])
 readManifest root = do
+  -- 闸在 loader 里（P3b-13 十轮 major，同 loadCatalog / readJournal）
+  tr <- requirePmTrusted root
+  case tr of
+    Left m -> pure ([], [m])
+    Right () -> readManifest' root
+
+readManifest' :: FilePath -> IO ([TrashRecord], [String])
+readManifest' root = do
   let fp = manifestPath root
   exists <- doesFileExist fp
   if not exists
