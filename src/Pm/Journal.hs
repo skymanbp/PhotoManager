@@ -27,7 +27,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
 import System.IO
 
-import Pm.Config (pmDir)
+import Pm.Config (pmDir, requirePmTrusted)
 import Pm.Op (Op)
 import Pm.Win (flushHandleToDisk, openStateAppend)
 
@@ -91,6 +91,14 @@ jAppend (Journal h) sync e = do
 -- reported loudly (doctor surfaces both).
 readJournal :: FilePath -> IO ([JEntry], [String])
 readJournal root = do
+  -- 同 'Pm.Catalog.loadCatalog'：闸在 loader 里（P3b-13 十轮 major）
+  tr <- requirePmTrusted root
+  case tr of
+    Left m -> pure ([], [m])
+    Right () -> readJournal' root
+
+readJournal' :: FilePath -> IO ([JEntry], [String])
+readJournal' root = do
   let fp = journalPath root
   exists <- doesFileExist fp
   if not exists

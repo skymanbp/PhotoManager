@@ -121,7 +121,8 @@ Dedup 等非重定向 reparse 不再被误拒——九轮同时点出的可用�
 `openStateAppend` 用 link count 守 journal/manifest，plan 与侧缓存的覆盖写改成
 "独占创建 tmp → 删旧 → no-replace 落位"；`RootIdState` 增 `RootUntrusted` 态并把
 可信闸下沉进 `readRootState`，`pm init` / `pm backup init` / 首次 `vault push`
-这三条**建立身份因而天然走不了 requireWritable** 的旁路一并覆盖，`createRootInfo`
+这三条**建立身份因而天然走不了 requireWritable** 的旁路一并覆盖（**十轮更正**：`pm status` / `pm versions` 当时并未被它覆盖，
+P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo`
 自身再加一道；`pathAtOrUnder` 改三态，消除"解析不出 → 当作不在 .pm 里 → 放行"的
 结构性 fail-open；`openExclusiveBinary` 补句柄异常清理；undo 拒绝无身份计划。
 新增 5 测试（173/173）。
@@ -265,8 +266,27 @@ Dedup 等非重定向 reparse 不再被误拒——九轮同时点出的可用�
   用 link count 守 journal/manifest，plan 与侧缓存的覆盖写改成「独占创建 tmp →
   删旧 → no-replace 落位」；④`RootIdState` 增 `RootUntrusted` 并把可信闸下沉进
   `readRootState`——`pm init` / `pm backup init` / 首次 `vault push` 这三条**建立
-  身份因而天然走不了 `requireWritable`** 的旁路一并覆盖，`createRootInfo` 自身
+  身份因而天然走不了 `requireWritable`** 的旁路一并覆盖（**十轮更正**：`pm status` / `pm versions` 当时并未被它覆盖，
+P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   再加一道（测试实测它此前仍会把标识建到库外）；⑤`pathAtOrUnder` 改三态，消除
   「解析不出 → 当作不在 `.pm` 里 → 放行」的结构性 fail-open；⑥`openExclusiveBinary`
   补句柄异常清理；undo 拒绝无身份计划。新增 5 测试（173/173）。归档见
   `docs/reviews/2026-08-24-p3b-codex-review.md` 第九轮章节。
+- **P3b-13 十轮收口（同日，codex 十轮：1 critical + 2 major + 若干 PARTIAL；
+  它明确判「未收敛」并给出具体依据）**：核心是**我一直在用枚举定义可信集合，
+  而枚举天然会漏**。前三轮每轮补一个子目录名（trash/tmp/plans），十轮点出
+  `backup-cache` 与 `vault-cache` 从来不在名单里——把 `.pm/vault-cache` 做成
+  junction 后，正常的 `pm vault status` 会删除并**替换库外**的
+  catalog.json/meta.json（探针实证：库外两个文件都变成了 pm 写的内容）。
+  修法不是再补一个名字：`requirePmTrusted` 改为**枚举 `.pm` 下实际存在的每个
+  条目**逐一判定，pm 现有的、我漏掉的、将来新增的目录全部自动进入检查范围，
+  "漏枚举"在结构上不再可能。同轮另两处：①闸下沉到 loader
+  （`loadCatalog`/`readJournal`/`readManifest`/`loadPlan`）——命令层加闸盖不住
+  `pm status`/`pm versions`/apply 的计划查找，而每一次 root-based 的 `.pm` 读取
+  都经过 loader；②`writeSideCache` 从「给我一个目录」改成「给我 root + `.pm` 下
+  的子目录名」，完整路径在建目录前后各验一次。另修：reparse 探测改
+  Missing/Plain/Surrogate/Unknown 四态且 Unknown fail-closed（此前"不存在"与
+  "ACL 拒绝"都塌缩成 False）；`reparseTag` 与 `openExclusiveBinary` 加
+  `mask`/`finally`；`admitsUserPath` 判据导出以便测试钉住真实代码。新增 3 测试
+  （176/176），其中一条按十轮给的方法用 `CpCopyAfterIntent` 检查点在两次限域
+  **之间**注入 junction，专门钉住建目录后的复检。

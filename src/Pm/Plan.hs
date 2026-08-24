@@ -33,7 +33,7 @@ import System.FilePath ((</>))
 import System.IO (hClose)
 import Text.Printf (printf)
 
-import Pm.Config (pmDir, pmSubPlans)
+import Pm.Config (pmDir, pmSubPlans, requirePmTrusted)
 import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary)
 import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
 
@@ -166,6 +166,15 @@ loadPlan root pid
   | not (isValidPlanId pid) =
       pure (Left ("计划 id 不符合生成格式（" <> T.unpack pid <> "，应为 YYYYMMDD-HHMMSS-hex6），拒绝装载"))
   | otherwise = do
+      -- 闸在 loader 里（P3b-13 十轮 major）：apply/resolve 的计划查找此前在任何
+      -- 可信判定之前就读了 .pm/plans。
+      tr <- requirePmTrusted root
+      case tr of
+        Left m -> pure (Left m)
+        Right () -> loadPlan' root pid
+
+loadPlan' :: FilePath -> Text -> IO (Either String Plan)
+loadPlan' root pid = do
       let fp = planPath root pid
       exists <- doesFileExist fp
       if not exists

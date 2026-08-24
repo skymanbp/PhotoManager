@@ -41,7 +41,7 @@ module Pm.Win
   , volumeFsType
   ) where
 
-import Control.Exception (SomeException, catch, onException, try)
+import Control.Exception (SomeException, catch, finally, mask, onException, try)
 import Control.Monad (when)
 import Data.Bits (testBit, (.&.))
 import Data.Char (toLower)
@@ -146,36 +146,57 @@ pathAtOrUnder base p = do
 -- @IO_REPARSE_TAG_MOUNT_POINT@ (0xA0000003) 与 @IO_REPARSE_TAG_SYMLINK@
 -- (0xA000000C) 都置了它，云占位\/Dedup 没有。
 --
--- 有 reparse 属性但读不出 tag → True（fail-closed：读不出就当它会重定向）。
--- 名字不存在 → False，由调用方的存在性判断接手。**悬空** junction 仍是 True
--- （属性查询在悬空时照样返回，实测）。
-isNameSurrogate :: FilePath -> IO Bool
-isNameSurrogate p = do
+-- 有 reparse 属性但读不出 tag → 'NameSurrogate'（fail-closed：读不出就当它会
+-- 重定向）。**悬空** junction 也是（属性查询在悬空时照样返回，实测）。
+--
+-- P3b-13（十轮复审 major）：区分"名字不存在"与"属性查得失败"。此前两者都塌
+-- 缩成 False（探针实证：缺失名字抛异常、普通目录返回 16），于是 ACL 拒绝读属性
+-- 时该层会被当成"尚不存在"而放行。三态让调用方对 'ProbeUnknown' fail-closed。
+data NameKind = NameMissing | NamePlain | NameSurrogate | ProbeUnknown
+  deriving (Show, Eq)
+
+probeName :: FilePath -> IO NameKind
+probeName p = do
   ea <- try (Win32File.getFileAttributes p) :: IO (Either SomeException Win32File.FileAttributeOrFlag)
   case ea of
-    Left _ -> pure False -- 名字不存在 / 查不到属性
+    Left _ -> do
+      -- 属性查不到：可能是"不存在"，也可能是 ACL 拒绝之类的"答不上来"。
+      -- doesPathExist 用另一条路径再问一次；它也说不存在才算缺失。
+      ex <- doesPathExist p
+      pure (if ex then ProbeUnknown else NameMissing)
     Right attrs
-      | attrs .&. Win32File.fILE_ATTRIBUTE_REPARSE_POINT == 0 -> pure False
+      | attrs .&. Win32File.fILE_ATTRIBUTE_REPARSE_POINT == 0 -> pure NamePlain
       | otherwise -> do
           mt <- reparseTag p
           pure $ case mt of
-            Nothing -> True -- 是 reparse 但读不出 tag → 保守拒绝
-            Just tag -> tag .&. ioReparseTagNameSurrogate /= 0
+            Nothing -> NameSurrogate -- 是 reparse 但读不出 tag → 保守拒绝
+            Just tag ->
+              if tag .&. ioReparseTagNameSurrogate /= 0 then NameSurrogate else NamePlain
 
--- | @FindFirstFileW@ 的 @WIN32_FIND_DATAW.dwReserved0@ 就是 reparse tag
--- （偏移 36：属性 4 + 三个 FILETIME 24 + 两个 size DWORD 8）。Win32 包不暴露
--- 该字段，故自行声明；结构体 592 字节，只读这一个 DWORD。
+-- | 便捷谓词：仅当明确判定为 name surrogate 时为 True。'ProbeUnknown' 在这里
+-- 是 False —— 调用方若要 fail-closed 必须直接用 'probeName'（'resolveUnder'
+-- 就是这么做的）。
+isNameSurrogate :: FilePath -> IO Bool
+isNameSurrogate p = (== NameSurrogate) <$> probeName p
+
+-- | @FindFirstFileW@ 的 @WIN32_FIND_DATAW.dwReserved0@ 就是 reparse tag。
+-- 偏移核算（x86_64，结构体内无指针字段，故无 8 字节对齐插入）：
+-- @dwFileAttributes@ 0..3、三个 @FILETIME@ 4..27、size high\/low 28..35、
+-- @dwReserved0@ **36..39**、@dwReserved1@ 40..43、@cFileName[260]@ 44..563、
+-- @cAlternateFileName[14]@ 564..591 —— 共 592 字节。Win32 包不暴露该字段。
+--
+-- 失败返回的是 @INVALID_HANDLE_VALUE@，无需 @FindClose@；成功分支用 'bracket'
+-- 关闭，异步异常也不会漏句柄（P3b-13 十轮 minor）。
 reparseTag :: FilePath -> IO (Maybe Word32)
 reparseTag p =
   allocaBytes findDataBytes $ \buf ->
-    withTString p $ \wp -> do
-      h <- c_FindFirstFileW wp buf
-      if h == intPtrToPtr (-1)
-        then pure Nothing
-        else do
-          tag <- peekByteOff buf 36
-          _ <- c_FindClose h
-          pure (Just tag)
+    withTString p $ \wp ->
+      mask $ \restore -> do
+        h <- c_FindFirstFileW wp buf
+        if h == intPtrToPtr (-1)
+          then pure Nothing
+          else
+            (restore (Just <$> peekByteOff buf 36) `finally` c_FindClose h)
  where
   findDataBytes = 592
 
@@ -247,12 +268,14 @@ resolveUnder base rel = do
     | c `elem` [".", "..", ""] = pure Nothing
     | otherwise = do
         let nxt = cur </> c
-        lnk <- isNameSurrogate nxt
-        if lnk
-          then pure Nothing
-          else do
-            ex <- doesPathExist nxt
-            if ex then go nxt cs else pure (Just (foldl (</>) nxt cs))
+        k <- probeName nxt
+        case k of
+          NameSurrogate -> pure Nothing
+          -- P3b-13（十轮复审）：查不出这一层是什么就不往下走，也不当作"缺失"
+          -- 放行 —— 答不上来即拒（fail-closed）。
+          ProbeUnknown -> pure Nothing
+          NameMissing -> pure (Just (foldl (</>) nxt cs))
+          NamePlain -> go nxt cs
 
 -- | 独占创建（@CREATE_NEW@）的二进制写句柄：目标已存在即抛 IOException。
 --
@@ -287,9 +310,11 @@ openExclusiveBinary fp = do
 --
 -- ⚠️ 它只在**父目录已被验过**时才安全：残留的 unlink 会沿父目录的 junction
 -- 走出库外（P3b-12 九轮 critical 实测：@.pm\/tmp\/\<planId\>@ 是 junction 时，
--- 这个 unlink 删掉了库外的同名文件）。调用方必须先对**完整路径**做
--- 'resolveUnder'。'Pm.Exec' 的 tmp 落位、'Pm.Catalog' 与 'Pm.Config' 的
--- @.pm@ 顶层 tmp 都已如此。
+-- 这个 unlink 删掉了库外的同名文件）。调用方必须保证父目录可信：
+-- 'Pm.Exec' 的 tmp 落位与 'Pm.Config.writeCacheFile' 对**完整路径**做
+-- 'resolveUnder'；'Pm.Catalog' 与 'Pm.Config' 的 @.pm@ 顶层 tmp 依赖
+-- 'Pm.Config.requirePmTrusted'（它现在枚举 @.pm@ 下的每个条目）——
+-- P3b-13 十轮指出旧注释把后者说成"已做完整 resolveUnder"，措辞已更正。
 openFreshBinary :: FilePath -> IO Handle
 openFreshBinary fp = do
   lnk <- isNameSurrogate fp

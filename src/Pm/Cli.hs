@@ -306,7 +306,10 @@ refreshBackupCache cfg broot bakCat d = do
   fs <- case broot of
     (c : _) -> volumeFsType c
     _ -> pure Nothing
-  writeBackupCache
+  -- 缓存写被拒（目录不可信）时**没有发生任何写**，库外文件安全；照片本身
+  -- 已经落盘完毕。因此这里报警而不把一次成功的备份判成失败——与 vault status
+  -- 不同：那条命令是只读比对，缓存就是它的输出基线，失败即硬停（P3b-13）。
+  wc <- writeBackupCache
     (cfgMainPath cfg)
     bakCat
     BackupCacheMeta
@@ -317,3 +320,4 @@ refreshBackupCache cfg broot bakCat d = do
       , bmUpdate = length (bdUpdate d)
       , bmExtra = length (bdExtra d)
       }
+  either (\e -> putStrLn ("\9888 备份缓存未写入: " <> e)) pure wc

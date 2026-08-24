@@ -19,6 +19,7 @@ module Pm.Exec
   , tmpDirFor
   , tmpNameFor
   , slotOccupied
+  , admitsUserPath
   , dirFingerprint
   , updateCatalog
   , outcomeLabel
@@ -373,6 +374,17 @@ execItem env root j pid item = case piStatus item of
 -- P3b-12（九轮复审 major）：@.pm@ 排除判定改为三态并只接受明确的
 -- @Just False@。此前 'pathAtOrUnder' 解析失败返回 False，取反后成了"不在
 -- @.pm@ 里 → 放行"，是结构性 fail-open。
+-- | 放行判据（纯函数，导出给测试钉住）：'Pm.Win.pathAtOrUnder' 的三态里，
+-- **只有**明确的"不在 .pm 内"才放行。@Nothing@（答不上来）与 @Just True@
+-- （在 .pm 内）都拒。
+--
+-- P3b-13（十轮复审 #7）：本机构造不出让 'canonicalizePath' 抛异常的输入
+-- （实测：含 NUL 的名字被截断、@CON@\/@NUL@ 正常返回、空路径解析成 cwd），
+-- 所以 @Nothing@ 分支无法从外部触发。判据因此单独导出——测试打在**真实
+-- 判据**上，而不是在用例里复制一份 if 来自证。
+admitsUserPath :: Maybe Bool -> Bool
+admitsUserPath = (== Just False)
+
 confinedUser :: FilePath -> [FilePath] -> IO Bool
 confinedUser root rels = and <$> mapM one rels
  where
@@ -380,7 +392,7 @@ confinedUser root rels = and <$> mapM one rels
     m <- resolveUnder root rel
     case m of
       Nothing -> pure False
-      Just p -> (== Just False) <$> pathAtOrUnder (pmDir root) p
+      Just p -> admitsUserPath <$> pathAtOrUnder (pmDir root) p
 
 -- | @.pm@ 内部落位点（隔离目标）：从 root 起全程下降，@.pm@ 与 @trash@ 这两级
 -- 同样必须是真名——这正是八轮 critical 的攻击面。

@@ -12,12 +12,12 @@
 module PathGuardTests (pathGuardTests) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeDirectoryLink)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeDirectory, removeDirectoryLink)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.IO (hClose)
@@ -27,14 +27,14 @@ import Test.Tasty.HUnit
 
 import Pm.Catalog (catalogPath, loadCatalog, saveCatalog)
 import Pm.Commands (TrashCmd (..), initPreflight, runTrash)
-import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootState, requirePmTrusted, writeRootInfo)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootState, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
 import Pm.Exec
 import Pm.Hash (sha256File)
-import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, withJournal)
+import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, readJournal, withJournal)
 import Pm.Op
 import Pm.Plan
-import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, manifestPath, trashDir, trashView)
+import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, manifestPath, readManifest, trashDir, trashView)
 import Pm.Types (Catalog (..), Entry (..), RootInfo (..), RootRole (..))
 import Pm.Undo (buildUndoPlan)
 import Pm.Win (openExclusiveBinary, pathAtOrUnder, pathUnder, resolveUnder)
@@ -43,7 +43,7 @@ import TestUtil
 pathGuardTests :: TestTree
 pathGuardTests =
   testGroup
-    "P3b-9/10/11/12 路径校验、限域、独占创建与 hardlink 防护（codex 六~九轮）"
+    "P3b-9~13 路径校验、限域、独占创建、hardlink 防护与可信闸（codex 六~十轮）"
     [ testCase "P3b-9 relPathOk/opPathsOk：越界/盘符/ADS/.pm 内部 → validatePlan/execPlan/loadPlan 拒绝" caseOpPathValidation
     , testCase "P3b-9 doctor：合法 oid + 越界 Op/trash 路径 → OP-PATH Bad，不越出 root、--repair 不补" caseDoctorOpPathEscape
     , testCase "P3b-9 manifest trashRel 越界 → 记录剔除，trash empty 不 unlink root 外文件" caseManifestPathEscape
@@ -62,6 +62,9 @@ pathGuardTests =
     , testCase "P3b-12 journal/manifest/plan 被 hardlink 占名 → 拒绝写入，库外对象字节不变" caseStateFileHardlink
     , testCase "P3b-12 pathAtOrUnder 三态：解析不出时不得被当成「不在 .pm 里」放行" casePathAtOrUnderTristate
     , testCase "P3b-12 undo：root 身份不可用 → 拒绝生成，不留计划文件" caseUndoRequiresIdentity
+    , testCase "P3b-13 .pm/vault-cache 是 junction → 枚举式可信闸抓到，侧缓存一个字节都不写" caseSideCacheJunction
+    , testCase "P3b-13 闸下沉到 loader：loadCatalog/readJournal/readManifest/loadPlan 全部拒绝不可信 root" caseLoaderLevelGate
+    , testCase "P3b-13 两次限域之间注入 junction → 第二次检查拦下（钉住建目录后的复检）" caseExecTmpSecondCheck
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -564,6 +567,11 @@ caseStateFileHardlink = withSystemTempDirectory "pm-guard" $ \dir -> do
 
 -- | 九轮 major：'pathAtOrUnder' 此前解析失败返回 False，而调用点取反用作
 -- "不在 .pm 里 → 放行" —— 结构性 fail-open。三态把这个歧义消掉。
+--
+-- P3b-13（十轮复审 #7）：十轮指出本例**没有一个产生 Nothing 的输入**，
+-- 于是"异常路径若错误地返回 Just False，用例仍绿"。补上 Nothing 分支，
+-- 并直接断言 'confinedUser' 对它的处置（放行判据是 @Just False@，不是
+-- "不是 Just True"）。
 casePathAtOrUnderTristate :: IO ()
 casePathAtOrUnderTristate = withSystemTempDirectory "pm-guard" $ \dir -> do
   let root = dir </> "root"
@@ -572,6 +580,13 @@ casePathAtOrUnderTristate = withSystemTempDirectory "pm-guard" $ \dir -> do
   pathAtOrUnder (pmDir root) (pmDir root) >>= (@?= Just True)
   pathAtOrUnder (pmDir root) (pmDir root </> "journal.ndjson") >>= (@?= Just True)
   pathAtOrUnder (pmDir root) (root </> "photo.jpg") >>= (@?= Just False)
+  -- Nothing 分支在本机**触发不了**：实测 canonicalizePath 对含 NUL 的名字截断、
+  -- 对 CON/NUL 正常返回、对空路径解析成 cwd（Probe9 B + 本例最初的错误假设）。
+  -- 因此改为直接钉住导出的判据本身——测真实代码，而不是在用例里复制一份 if。
+  pathAtOrUnder "" (root </> "photo.jpg") >>= (@?= Just False) -- 空基准 = cwd，不抛异常
+  admitsUserPath (Just False) @?= True
+  admitsUserPath (Just True) @?= False
+  admitsUserPath Nothing @?= False -- 答不上来 → 不放行
 
 -- | 九轮 minor：身份不可用时不再生成一份 rootId 为空、execPlan 必然拒绝的
 -- 计划 —— 它已经被 savePlan 写进 .pm/plans 了。
@@ -589,3 +604,102 @@ caseUndoRequiresIdentity = withSystemTempDirectory "pm-guard" $ \dir -> do
     (const (assertFailure "无身份时应拒绝生成撤销计划"))
     r
   doesDirectoryExist (pmDir root </> "plans") >>= (@?= False)
+
+-- ─── P3b-13（十轮） ─────────────────────────────────────────────────────────
+
+-- | 十轮 critical（探针实证）：`.pm/backup-cache` 与 `.pm/vault-cache` 从来不在
+-- 可信闸的白名单里——我前三轮每次补一个名字、每次都漏。把 `vault-cache` 做成
+-- junction 后，正常的 `pm vault status` 会删掉并**替换库外**的
+-- catalog.json/meta.json（实测库外文件变成了 pm 写的内容）。
+--
+-- 修法不是再补一个名字，而是让闸**枚举盘上实际有什么**。本例同时钉住两件事：
+-- ①枚举式闸能抓到白名单永远不会去看的目录；②writeSideCache 的 root-relative
+-- 接口在越界时一个字节都不写。
+caseSideCacheJunction :: IO ()
+caseSideCacheJunction = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside-cache"
+  createDirectoryIfMissing True (pmDir root)
+  createDirectoryIfMissing True outside
+  writeFile (outside </> "catalog.json") "OUTSIDE-CATALOG"
+  writeFile (outside </> "meta.json") "OUTSIDE-META"
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  -- 闸此刻应当放行（.pm 下全是普通条目）
+  requirePmTrusted root >>= either (assertFailure . ("干净 .pm 应当可信: " <>)) pure
+  mkJunction (pmDir root </> "vault-cache") outside
+  -- 枚举式闸抓到它——白名单（trash/tmp/plans）永远不会去看 vault-cache
+  requirePmTrusted root
+    >>= either
+      (\m -> assertBool m ("vault-cache" `isInfixOf` m))
+      (const (assertFailure "枚举式可信闸应当抓到 junction 化的 vault-cache"))
+  -- writeSideCache 拒绝，且**一个字节都不写**
+  w <- writeSideCache root "vault-cache" (mkCat [mkE ("相册" </> "a.jpg") "aa"]) (mkCat [])
+  either (\m -> assertBool m ("vault-cache" `isInfixOf` m)) (const (assertFailure "侧缓存写应被拒绝")) w
+  readFile (outside </> "catalog.json") >>= (@?= "OUTSIDE-CATALOG")
+  readFile (outside </> "meta.json") >>= (@?= "OUTSIDE-META")
+  removeDirectoryLink (pmDir root </> "vault-cache")
+
+-- | 十轮 major：闸此前只在命令层，`pm status` / `pm versions` / apply 的计划
+-- 查找都在闸之前就读了 `.pm`。闸下沉到 loader 后，每一次 root-based 的 `.pm`
+-- 读取都经过它。
+caseLoaderLevelGate :: IO ()
+caseLoaderLevelGate = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside-pm"
+  createDirectoryIfMissing True root
+  createDirectoryIfMissing True outside
+  -- 库外放一份"看起来很正常"的 catalog 与 journal
+  writeFile (outside </> "journal.ndjson") ""
+  mkJunction (pmDir root) outside
+  (mc, cw) <- loadCatalog root
+  mc @?= Nothing
+  assertBool ("loadCatalog 应报不可信: " <> show cw) (any ("不是 root 下的真实目录项" `isInfixOf`) cw)
+  (js, jw) <- readJournal root
+  js @?= []
+  assertBool ("readJournal 应报不可信: " <> show jw) (any ("不是 root 下的真实目录项" `isInfixOf`) jw)
+  (ms, mw) <- readManifest root
+  ms @?= []
+  assertBool ("readManifest 应报不可信: " <> show mw) (any ("不是 root 下的真实目录项" `isInfixOf`) mw)
+  lp <- loadPlan root tpid
+  either
+    (\m -> assertBool m ("不是 root 下的真实目录项" `isInfixOf` m))
+    (const (assertFailure "loadPlan 应拒绝不可信 root"))
+    lp
+  removeDirectoryLink (pmDir root)
+
+-- | 十轮 #7：它指出 'caseExecDynamicTmpJunction' 在**第一次**检查前就放好了
+-- junction，因此删掉建目录**之后**的第二次 confinedTmp 调用，那条用例照样绿。
+-- 这里用 'CpCopyAfterIntent' 检查点在两次检查**之间**注入 junction，专门钉住
+-- 第二次检查：没有它，落位就会沿 junction 走到库外。
+caseExecTmpSecondCheck :: IO ()
+caseExecTmpSecondCheck = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside-plan2"
+  createDirectoryIfMissing True (pmDir root </> "tmp")
+  createDirectoryIfMissing True outside
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  op <- mkCopyOp (dir </> "s.jpg") "SOURCE-BYTES" ("相册" </> "x.jpg")
+  pid <- newPlanId
+  let plan = Plan pid "test" root (Just "m") now [PlanItem 0 op StPending Nothing]
+      pdir = tmpDirFor root pid
+      hostage = outside </> tmpNameFor 0 ("相册" </> "x.jpg")
+  writeFile hostage "OUTSIDE-HOSTAGE"
+  -- 第一次检查时 .pm/tmp/<planId> 尚不存在（合法：pm 自己会建）；
+  -- Intent 落盘后、tmp 写入前，把它换成指向库外的 junction。
+  let env =
+        defaultExecEnv
+          { eeCheckpoint = \c ->
+              when (c == CpCopyAfterIntent) $ do
+                ex <- doesDirectoryExist pdir
+                when ex (removeDirectory pdir)
+                mkJunction pdir outside
+          }
+  r <- execPlan env plan
+  case r of
+    Right [(_, OConflict m)] -> assertBool ("应因第二次限域拒绝: " <> m) ("逐级解析后不在" `isInfixOf` m)
+    other -> assertFailure ("expected second-check confinement OConflict, got " <> show other)
+  doesFileExist hostage >>= (@?= True)
+  readFile hostage >>= (@?= "OUTSIDE-HOSTAGE")
+  removeDirectoryLink pdir

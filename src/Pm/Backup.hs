@@ -22,7 +22,7 @@ import qualified Data.Text as T
 import Data.Time (UTCTime)
 import System.FilePath ((</>))
 
-import Pm.Config (Config (..), pmDir, readJsonMaybe, readRootInfo, writeSideCache)
+import Pm.Config (Config (..), pmDir, pmSubBackupCache, readJsonMaybe, readRootInfo, writeSideCache)
 import Pm.Types
 import Pm.Win (listCandidateDrives, suppressCriticalErrorDialogs)
 
@@ -103,13 +103,16 @@ instance FromJSON BackupCacheMeta where
       <*> o .: "update"
       <*> o .: "extra"
 
+-- 子目录名取自 'Pm.Config' 的单一真源；写入一律走 root-relative 的
+-- 'writeSideCache'（P3b-13 十轮 critical：自由拼目录让 junction 化的缓存目录
+-- 把 pm 的写引到了库外）。
 cacheDir :: FilePath -> FilePath
-cacheDir mainRoot = pmDir mainRoot </> "backup-cache"
+cacheDir mainRoot = pmDir mainRoot </> pmSubBackupCache
 
 -- | Snapshot copy of the backup catalog + meta, kept on the MAIN root
 -- (shared pair-write: Pm.Config.writeSideCache).
-writeBackupCache :: FilePath -> Catalog -> BackupCacheMeta -> IO ()
-writeBackupCache mainRoot = writeSideCache (cacheDir mainRoot)
+writeBackupCache :: FilePath -> Catalog -> BackupCacheMeta -> IO (Either String ())
+writeBackupCache mainRoot = writeSideCache mainRoot pmSubBackupCache
 
 readBackupCacheMeta :: FilePath -> IO (Maybe BackupCacheMeta)
 readBackupCacheMeta mainRoot = readJsonMaybe (cacheDir mainRoot </> "meta.json")

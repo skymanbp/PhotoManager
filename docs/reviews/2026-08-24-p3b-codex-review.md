@@ -447,7 +447,7 @@ reparse 一种，漏掉了 hardlink 这一整类。
 | 项 | codex 判定 | 我的核实 | P3b-12 处置 |
 | --- | --- | --- | --- |
 | 1\/新 critical 动态 tmp 层 | PARTIAL\/critical | 实证成立 | `Pm.Exec.confinedTmp`：`.pm\/tmp\/<planId>\/<name>` 完整路径逐级下降，**创建目录前后各验一次**（把 TOCTOU 收窄到"创建后立刻"） |
-| 4 可信闸覆盖面 | NOT-FIXED | 成立：三条 init 旁路建立身份，天然走不了 `requireWritable` | `RootIdState` 增 `RootUntrusted`，闸下沉进 `readRootState`（身份读取的唯一入口）——init 三旁路 + status\/versions\/备份发现一并覆盖；`createRootInfo` 自身再加一道。GHC 的 `-Wincomplete-patterns` 把三处调用点全指了出来；`initPreflight` 的 catch-all `_ -> Right ()` 是穷尽性检查看不见的第四处，测试抓到 |
+| 4 可信闸覆盖面 | NOT-FIXED | 成立：三条 init 旁路建立身份，天然走不了 `requireWritable` | `RootIdState` 增 `RootUntrusted`，闸下沉进 `readRootState`（身份读取的唯一入口）——init 三旁路覆盖（**十轮更正**：status\/versions 当时并未被覆盖，它们直接调 `loadCatalog`；P3b-13 把闸下沉到 loader 才真正盖住）；`createRootInfo` 自身再加一道。GHC 的 `-Wincomplete-patterns` 把三处调用点全指了出来；`initPreflight` 的 catch-all `_ -> Right ()` 是穷尽性检查看不见的第四处，测试抓到 |
 | 新 major hardlink 状态文件 | 新发现 | 实证成立 | `openStateAppend`（link count \> 1 即拒）守 journal\/manifest；`savePlan` 与 `writeSideCache` 的覆盖写改「独占创建 tmp → 删旧 → no-replace 落位」 |
 | 新 major 非 name-surrogate reparse | 新发现（未证实） | 无法构造反例 | `isNameSurrogate` 按 reparse tag 的 0x20000000 位判定（`FindFirstFileW` 的 `dwReserved0`）；读不出 tag → 仍拒（fail-closed） |
 | 2 `pathAtOrUnder` fail-open | PARTIAL | 结构成立、反例未构造出 | 改三态 `IO (Maybe Bool)`，`confinedUser` 只接受 `Just False` |
@@ -474,3 +474,50 @@ reparse 一种，漏掉了 hardlink 这一整类。
 - `Pm.Config.writeConfig` 仍是普通覆盖写（在用户配置目录，不在库内）。
 - `pm backup` 盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU。
 - `docs/DESIGN.md` 的逐轮收口列表已移入 `docs/REVIEW-LOG.md`（DESIGN 740 → 619 行）。
+
+---
+
+# 十轮复审（对 98f6b72 = P3b-13 之前）→ NO-GO → P3b-13 收口
+
+verdict：**NO-GO**；收敛性判断：**未收敛**（它按提示明确回答了这一问，并给出
+具体依据而非泛泛而谈）。核心指控一句话：**我一直在用「枚举」定义可信集合，
+而枚举天然会漏**——前三轮每轮补一个子目录名，十轮点出 `backup-cache` 与
+`vault-cache` 从来不在名单里。
+
+## 探针实证（Probe10）
+
+| 指控 | 探针结果 | 判定 |
+| --- | --- | --- |
+| `.pm/vault-cache` 是 junction → 侧缓存写替换库外文件（critical） | 库外 `catalog.json` 变成 `"PM-CACHE"`、`meta.json` 变成 `"PM-META"` | ✅ 成立，**数据丢失级** |
+| 修法候选：枚举 `.pm` 实际内容 | 列出 `vault-cache -> REPARSE` —— 白名单永远不会去看它 | ✅ 有效 |
+| `getFileAttributes`：缺失名字 vs 普通目录 | 缺失抛异常、普通目录返回 16 —— 二者今天都塌缩成 False | ✅ 三态确有必要 |
+| `canonicalizePath` 能否被构造成抛异常 | 含 NUL 截断、`CON`\/`NUL` 正常返回、**空路径解析成 cwd**（本例是我先假设后被自己的测试证伪） | ❌ 本机构造不出 |
+
+## 处置
+
+| 项 | codex 判定 | 我的核实 | P3b-13 处置 |
+| --- | --- | --- | --- |
+| 1\/critical 侧缓存父目录 | NOT-FIXED | 实证成立 | **不再补名单**：`requirePmTrusted` 改为验 `.pm` 自身 + `listDirectory` 枚举其下**每个实际存在的条目**逐一判定。漏枚举在结构上不再可能。`writeSideCache` 改 root-relative 接口（root + 子目录名），完整路径在建目录前后各验一次；`Pm.Backup`\/`Pm.Vault` 的缓存目录名并入 `Pm.Config` 单一真源 |
+| 4\/major 读入口 | NOT-FIXED：status\/versions\/loadPlanAnyRoot 在闸之前读 `.pm`；并指出我上一轮归档「status\/versions 已覆盖」的说法不成立 | **成立，是我的文档不实** | 闸下沉到 loader：`loadCatalog`\/`readJournal`\/`readManifest`\/`loadPlan` 各自先过 `requirePmTrusted`。命令层加闸总会漏命令，loader 是所有 root-based `.pm` 读取的必经之地 |
+| 2 reparse 探测 | PARTIAL：偏移核算**正确**（它逐字段复核了 592 与 36）；但"不存在"与"查询失败"塌缩 | 探针证实塌缩 | `probeName` 四态 `NameMissing`\/`NamePlain`\/`NameSurrogate`\/`ProbeUnknown`；`resolveUnder` 对 `ProbeUnknown` **拒绝**。`reparseTag` 的 `FindClose` 用 `mask`+`finally` |
+| 6 句柄 | PARTIAL：两处 `onException` 已覆盖同步异常，缺外层 `mask` | 成立 | `reparseTag` 已加；`openExclusiveBinary` 的 `mask` 列残余（Win32 `createFile` 的返回与第一个 `onException` 之间仍有理论窗口） |
+| 3 hardlink 防护 | PARTIAL：正常库无误报；指出 `writeRootInfo` 仍是裸覆盖写 | 成立（它是测试 fixture helper，生产无调用） | 保留并在 haddock 标注仅供 fixture；列残余 |
+| 5 fail-open 扫描 | PARTIAL：`pathAtOrUnder` 已三态；另指出 `isNameSurrogate` 与 `Pm.Scan` 的探测异常仍按安全值放行 | 前者已随四态修复；`Pm.Scan` 的 symlink 探测形态未证实 | `Pm.Scan` 列残余 |
+| 7 测试 | PARTIAL：**指出三条"绿但没钉住屏障"** | 全部成立 | ①用 `CpCopyAfterIntent` 在两次限域**之间**注入 junction，钉住建目录后的复检；②`admitsUserPath` 判据导出，测试打在真实代码而非用例内自造的 if 上（本机触发不了 `Nothing`，这是诚实的替代）；③`caseInitBypassUntrusted` 的覆盖面在标题与注释中如实说明 |
+| 8 文档 | NOT-FIXED：列出 6 处声明与代码不符 | **全部成立** | 逐条改：`requirePmTrusted` 的"一次覆盖全部写入口"、`openFreshBinary` 关于 Catalog\/Config tmp 的说法、归档里"status\/versions 已覆盖"的错误结论、README\/REVIEW-LOG 的侧缓存声明 |
+
+## 残余（更新）
+
+- **TOCTOU**：逐级判定与实际操作之间的窗口仍在。Copy 的 tmp 与侧缓存都加了
+  "建目录后复检"收窄，根治仍需 handle-relative 的原生 create\/rename\/delete。
+- `openExclusiveBinary` 缺外层 `mask`：`createFile` 返回与第一个 `onException`
+  之间的异步异常窗口（十轮 minor，未修）。
+- `Pm.Config.writeRootInfo` 仍是裸覆盖写——仅测试 fixture 使用，生产走
+  `createRootInfo`。
+- `Pm.Scan` 的 symlink 探测异常按"不是 symlink"处理（该 ACL 形态未证实）。
+- **未证实项**：8.3 短名（本卷 `fsutil` 不支持）、Unicode 兼容等价、保留设备名、
+  云占位\/Dedup 的实际 reparse 形态、能让 `canonicalizePath` 抛异常的输入
+  （本机构造不出，故 `pathAtOrUnder` 的 `Nothing` 分支只能由导出的判据钉住）。
+- `catalog` 的 `tamperMark` 字符串哨兵；固定名 `catalog.json.tmp` 的并发竞态；
+  `opSrcAbs` 不做 root 归属校验；`writeConfig` 普通覆盖写（在用户配置目录）。
+- `pm backup` 盘符 fixture、位移槽 99、root-id tmp 残留、.gitignore TOCTOU。
