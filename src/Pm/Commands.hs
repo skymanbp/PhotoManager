@@ -15,6 +15,7 @@ module Pm.Commands
   , withCfg
   , pickRoot
   , runInit
+  , initPreflight
   , runScanCmd
   , runTrash
   , runUndoCmd
@@ -23,6 +24,7 @@ module Pm.Commands
   , resolveKeep
   , runImport
   , runBackupInit
+  , backupInitPreflight
   , runBackupRun
   , runClean
   ) where
@@ -30,21 +32,23 @@ module Pm.Commands
 import Control.Monad (forM, forM_, unless, when)
 import Data.Char (toLower)
 import Data.Function (on)
-import Data.List (isPrefixOf, nubBy)
+import Data.List (nubBy)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Data.Time (diffUTCTime, getCurrentTime)
 import GHC.Conc (getNumProcessors)
-import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, makeAbsolute, removeFile)
-import System.FilePath (normalise, splitDirectories, splitDrive, splitExtension, (</>))
+import System.Directory (doesDirectoryExist, doesFileExist, makeAbsolute, removeFile)
+import System.FilePath (splitExtension, (</>))
 import Text.Printf (printf)
 
 import Pm.Backup
+import Pm.BackupCmd (BackupCmd (..), backupInitPreflight, runBackupInit, runBackupRun)
 import Pm.Catalog (loadCatalog, saveCatalog)
 import Pm.Clean
 import Pm.Cli
 import Pm.Config
 import Pm.Diff
+import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Hash (sha256File)
 import Pm.Import
 import Pm.Op
@@ -84,9 +88,8 @@ data ResolveOpts = ResolveOpts
   , roKeep :: Maybe String -- src | dst | both
   }
 
-data BackupCmd
-  = BackupInit FilePath
-  | BackupRun GoOpts (Maybe Int)
+-- 备份命令（BackupCmd / runBackupInit / runBackupRun）在 Pm.BackupCmd，
+-- 此处再导出（P3b-6 拆分：本文件触及 750 行预算）。
 
 withCfg :: (Config -> IO Int) -> IO Int
 withCfg act = do
@@ -107,7 +110,11 @@ rootSel False True = Right SelVault
 rootSel False False = Right SelMain
 
 pickRoot :: Config -> RootSel -> IO (Either (String, Int) FilePath)
-pickRoot cfg SelMain = pure (Right (cfgMainPath cfg))
+pickRoot cfg SelMain = do
+  -- P3b-6 复审 B1：doctor --repair / trash empty / undo 默认作用于主库，
+  -- 配置路径指向备份/vault root 时不得放行（与 scan/import 同一 requireMain）。
+  em <- requireMain cfg
+  pure (either (\m -> Left (m, 2)) (const (Right (cfgMainPath cfg))) em)
 pickRoot cfg SelBackup = do
   er <- discoverBackupRoot cfg
   pure $ case er of
@@ -125,13 +132,34 @@ pickRoot cfg SelVault = case cfgVaultPath cfg of
 
 -- ─── init / scan ────────────────────────────────────────────────────────────
 
+-- | pm init 写任何东西（配置、root 标识）之前的守卫（P3b-6 复审 major）：
+-- ①主库若处于 git 工作树内须已忽略 `.pm/`——I11 对所有 role 生效，不只
+-- vault；②路径上已有非 RoleMain 的 root 标识（备份盘\/vault 被误配成主库）
+-- → 拒绝，`--force` 也不覆盖 root 身份。
+initPreflight :: FilePath -> IO (Either String ())
+initPreflight mainPath = do
+  g <- pmIgnoreGuard RoleMain mainPath
+  case g of
+    Left m -> pure (Left m)
+    Right () -> do
+      existing <- readRootInfo mainPath
+      pure $ case existing of
+        Just prior
+          | riRole prior /= RoleMain ->
+              Left (mainPath <> " 已是 " <> show (riRole prior) <> " root，拒绝作为主库初始化（--force 亦不改写 root 身份）")
+        _ -> Right ()
+
 runInit :: InitOpts -> IO Int
 runInit o = do
   mainPath <- makeAbsolute (ioMain o)
   okMain <- doesDirectoryExist mainPath
-  if not okMain
-    then putStrLn ("主库路径不存在: " <> mainPath) >> pure 2
-    else do
+  pre <-
+    if okMain
+      then initPreflight mainPath
+      else pure (Left ("主库路径不存在: " <> mainPath))
+  case pre of
+    Left msg -> putStrLn msg >> pure 2
+    Right () -> do
       cfgFp <- configFilePath
       exists <- doesFileExist cfgFp
       if exists && not (ioForce o)
@@ -536,120 +564,7 @@ runImport go cfg = do
                       , plItems = items
                       }
 
--- ─── backup ─────────────────────────────────────────────────────────────────
-
-runBackupInit :: FilePath -> Config -> IO Int
-runBackupInit path cfg = do
-  -- 评审 mj-4（P2.2 收紧）：canonicalizePath 解析已存在前缀的 junction/
-  -- symlink 与真实大小写，再按 case-fold 组件做祖先判断——文本级
-  -- normalise 挡不住主库别名路径（如经 junction 指向主库）。
-  abs' <- canonicalizePath =<< makeAbsolute path
-  mainC <- canonicalizePath (cfgMainPath cfg)
-  let canonParts p = map (map toLower) (splitDirectories (normalise p))
-      nested a b = canonParts a `isPrefixOf` canonParts b
-  if nested mainC abs' || nested abs' mainC
-    then putStrLn ("备份路径与主库嵌套（" <> abs' <> " vs " <> mainC <> "），拒绝") >> pure 2
-    else do
-      gitEx <- doesDirectoryExist (abs' </> ".git")
-      if gitEx
-        then putStrLn "该路径是 git 工作树（.pm 会污染工作区，I11），拒绝在此建备份 root" >> pure 2
-        else do
-          existing <- readRootInfo abs'
-          case existing of
-            Just info
-              | riRole info == RoleBackup -> do
-                  putStrLn ("✓ 该路径已是备份 root（沿用标识 " <> T.unpack (riId info) <> "）")
-                  register abs' (riId info)
-              | otherwise ->
-                  putStrLn ("该路径已是 " <> show (riRole info) <> " root，拒绝改作备份") >> pure 2
-            Nothing -> do
-              ex <- doesDirectoryExist abs'
-              unless ex $ putStrLn ("· 目录不存在，将创建: " <> abs')
-              rid <- freshRootId
-              now <- getCurrentTime
-              fs <- case abs' of
-                (c : _) -> volumeFsType c
-                _ -> pure Nothing
-              -- P2.3（mj-4 残余缓解）：写身份文件前把路径再 canonicalize
-              -- 复验一次，检查期与写入期之间被换成 junction 的窗口收敛到
-              -- 近零（单机模型下的剩余风险已在评审归档记录）。
-              abs2 <- canonicalizePath abs'
-              if map toLower (normalise abs2) /= map toLower (normalise abs')
-                then putStrLn ("路径在检查后发生变化（" <> abs' <> " → " <> abs2 <> "），拒绝") >> pure 2
-                else do
-                  writeRootInfo abs' (RootInfo rid RoleBackup now fs)
-                  putStrLn ("✓ 备份 root 标识已创建: " <> T.unpack rid <> maybe "" (\t -> "（" <> T.unpack t <> "）") fs)
-                  register abs' rid
- where
-  register abs' rid = do
-    let sub = snd (splitDrive abs')
-    _ <- writeConfig cfg {cfgBackupId = Just rid, cfgBackupSubpath = Just sub}
-    putStrLn ("✓ 已登记到配置（盘符无关，按 UUID + 相对路径 " <> sub <> " 认盘）")
-    putStrLn "下一步: pm backup"
-    pure 0
-
-runBackupRun :: GoOpts -> Maybe Int -> Config -> IO Int
-runBackupRun go mworkers cfg = do
-  eroot <- discoverBackupRoot cfg
-  case eroot of
-    Left msg -> putStrLn msg >> pure 1
-    Right broot -> do
-      minfo <- readRootInfo broot
-      (mMain, _) <- loadCatalog (cfgMainPath cfg)
-      case (minfo, mMain) of
-        (Nothing, _) -> putStrLn "备份 root 标识读取失败（发现后被移除？）" >> pure 2
-        (_, Nothing) -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
-        -- P2.3（复审三轮新发现）：发现后重读到的身份必须仍等于**配置登记的**
-        -- UUID——不采纳盘上任意 id（发现与使用之间路径/卷可能被换）。
-        (Just info, _)
-          | cfgBackupId cfg /= Just (riId info) ->
-              putStrLn "备份 root 身份在发现后发生变化（与配置登记不符），拒绝" >> pure 2
-        (Just info, Just mainCat) -> do
-          putStrLn ("备份盘: " <> broot <> maybe "" (\t -> "（" <> T.unpack t <> "）") (riFsType info))
-          (oldBak, bwarns) <- loadCatalog broot
-          mapM_ (\w -> putStrLn ("⚠ 备份快照损坏已跳过: " <> w)) bwarns
-          let workers = fromMaybe 1 mworkers
-          result <- scanRoot ScanOpts {soWorkers = workers, soProgress = True} oldBak (riId info) broot
-          saveCatalog broot (srCatalog result)
-          reportScanIssues result
-          let bakCat = srCatalog result
-              d = backupDiff mainCat bakCat
-              addBytes = sum (map enSize (bdAdd d))
-          printf
-            "对比: 新增 %d (%.1f GiB) · 更新 %d · 一致 %d · EXTRA(备份盘多出，只读) %d\n"
-            (length (bdAdd d))
-            (fromIntegral addBytes / (1024 * 1024 * 1024 :: Double))
-            (length (bdUpdate d))
-            (bdSame d)
-            (length (bdExtra d))
-          forM_ (take 20 (bdExtra d)) $ \p -> putStrLn ("  EXTRA: " <> p)
-          when (length (bdExtra d) > 20) $
-            printf "  …另有 %d 项 EXTRA\n" (length (bdExtra d) - 20)
-          refreshBackupCache cfg broot bakCat d
-          let items = backupPlanItems (cfgMainPath cfg) d
-          if null items
-            then putStrLn "✓ 备份盘已与主库一致" >> pure 0
-            else do
-              unless (null (bdUpdate d)) $
-                putStrLn "⚠ 更新项 = supersede 复合组（不可拆）：备份盘旧字节先入其 .pm/trash，再落新字节；组内失败自动复位（§6.5）"
-              pid <- newPlanId
-              now <- getCurrentTime
-              code <-
-                savePlanAndMaybeRun
-                  go
-                  Plan
-                    { plId = pid
-                    , plKind = "backup"
-                    , plRootPath = broot
-                    , plRootId = Just (riId info)
-                    , plCreated = now
-                    , plItems = items
-                    }
-              -- apply 之后备份 catalog 已被 executePlanNow 回写，缓存重算
-              when (goApply go) $ do
-                (mBak2, _) <- loadCatalog broot
-                forM_ mBak2 $ \bak2 -> refreshBackupCache cfg broot bak2 (backupDiff mainCat bak2)
-              pure code
+-- ─── backup：见 Pm.BackupCmd（P3b-6 拆分） ──────────────────────────────────
 
 -- ─── clean staging ──────────────────────────────────────────────────────────
 

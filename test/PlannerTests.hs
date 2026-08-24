@@ -471,8 +471,9 @@ groupSemanticsTests =
             Left msg -> assertBool msg ("root 标识不符" `elemSubstr` msg)
             Right _ -> assertFailure "expected refusal on rootId mismatch"
           -- ② P2.3 内核自卫：有身份的 root 拒绝无 rootId 的计划（即使调用方
-          --    不带任何期待——不信任何调用方）
-          r1 <- execPlan defaultExecEnv plan0
+          --    不带任何期待——不信任何调用方）。P3b-6 起 mkPlanIO 会沿用盘上
+          --    标识填 rootId，此处显式抹掉以复现「无 rootId 计划」。
+          r1 <- execPlan defaultExecEnv plan0 {plRootId = Nothing}
           case r1 of
             Left msg -> assertBool msg ("无 rootId" `elemSubstr` msg)
             Right _ -> assertFailure "expected kernel refusal of rootless plan"
@@ -646,15 +647,18 @@ p22Tests =
         c2 @?= 2
     ]
 
--- 本地小工具：直接给 Plan 构造记录（备份/清理 e2e 用）
+-- 本地小工具：直接给 Plan 构造记录（备份/清理 e2e 用）。P3b-6：执行 root
+-- 必须有身份（内核不再放行匿名 root），fixture 先写对应 role 的标识。
 mkBackupPlan :: FilePath -> [PlanItem] -> IO Plan
 mkBackupPlan broot items = do
   pid <- newPlanId
   now <- getCurrentTime
-  pure Plan {plId = pid, plKind = "backup", plRootPath = broot, plRootId = Nothing, plCreated = now, plItems = items}
+  rid <- ensureTestRoot RoleBackup broot
+  pure Plan {plId = pid, plKind = "backup", plRootPath = broot, plRootId = rid, plCreated = now, plItems = items}
 
 mkCleanPlan :: FilePath -> [PlanItem] -> IO Plan
 mkCleanPlan mroot items = do
   pid <- newPlanId
   now <- getCurrentTime
-  pure Plan {plId = pid, plKind = "clean-staging", plRootPath = mroot, plRootId = Nothing, plCreated = now, plItems = items}
+  rid <- ensureTestRoot RoleMain mroot
+  pure Plan {plId = pid, plKind = "clean-staging", plRootPath = mroot, plRootId = rid, plCreated = now, plItems = items}

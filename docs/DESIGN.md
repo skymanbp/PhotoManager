@@ -99,7 +99,7 @@ R4 Haskell）落成以下**硬不变量**，每条都有机制背书，不靠自
 | I8 | 相册↔vault 差异与 `sync_photos.py` **逐字段值形状兼容**（六态 + 位置元组 + 16 字符截断 hash + 退出码 0/1/2 + 同一文件过滤集合含 .png，case-fold） | §10.1 |
 | I9 | pm 绝不执行 git 命令（vault/portfolio 的 add/commit/push 都由用户手动）；对 portfolio `photos.json` 仅只读引用检查 | Vault 模块无 git 调用 |
 | I10 | pm 单实例：mutation 前对 `.pm/lock` 打开句柄并 `hTryLock`（内核级锁，进程死亡自动释放，锁文件残留无害且无需删除） | base `GHC.IO.Handle.Lock`（Windows 走 LockFileEx） |
-| I11 | pm 不在任何 `.gitignore` 未覆盖 `.pm/` 的 git 工作树内建立 root（init 时检测 `.git`，经用户确认追加 ignore 行后才建）；`pm doctor` 每次复查 | §5 init + §10.3 |
+| I11 | pm 不在任何 `.gitignore` 未覆盖 `.pm/` 的 git 工作树内建立 root，**任何 role**（主库/备份/vault）一视同仁：`init` / `backup init` / `vault push` 建 root 前检查（经用户确认追加 ignore 行后才建），`pm apply` 取锁前预检 + 锁内按盘上 role 重检；检查是文本级白名单（恰含 `.pm/` 行；`!` 反规则不得含 `.pm` 或通配符 `* ? [ \`，pm 不实现 wildmatch）；`pm doctor` 每次复查 | §5 init + §10.2 P3b-6 + §10.3 |
 
 **「快」的量化目标**（介质分列，§12）：`pm status` 默认含 stat-only 新鲜度刷新，
 主库（NVMe、热缓存）< 10 s，`--cached` 纯读快照 < 2 s；备份盘（USB HDD、冷态）
@@ -511,6 +511,28 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   收益不成比例，§14 残余风险登记）；B3 names 目标预检文件或目录皆算占用。
   B4（designedPair 排除过宽）**不成立**：豁免仅限恰两份的 成片↔相册 同名对，
   正是 I7 的设计拓扑，相册无「所属事件」概念。归档同上文件第二轮章节。
+- **P3b-6 三轮收口（同日，codex 三轮：A1/A2/A3/B1 PARTIAL + 1 major + 1 minor；
+  A4/A6/B2/B3 FIXED，B4 反驳被接受）**：
+  A1 opId 后缀改 `Pm.Op.opIdParts` 严格解析（`<pid>#<ix>[~r|~d<N>]`，Trash/
+  Undo/Doctor 共用，不再各自 `splitOn`/`isInfixOf "~d"`）；planId 生成格式
+  `isValidPlanId` 在 `loadPlan`（含文件内 id 与文件名一致）与 `execPlan` 两处
+  把关；位移槽位空检改 `doesPathExist`（目录/reparse point 占槽即跳下一槽）。
+  A2 反规则白名单收紧：`!` 行含 `.pm`（case-fold）**或**通配符 `* ? [ \` 即
+  拒绝——git 2.52 实测 `!.[p]m/**`、`!.p\m/**`、`!.?m/**`、`!.*/**` 都能重新
+  包含 `.pm/`；真实 vault `.gitignore` 无 `!` 行，不受影响。
+  A3 内核不再放行匿名 root（无 root-id 一律拒绝；测试 fixture 改为先写标识）；
+  守卫改 `pmIgnoreGuard role` 对**所有** role 无条件执行（改写 marker role 无效）；
+  并在**取锁之前**先做零写入预检——`withRootLock` 会先建 `.pm/lock`，git 树
+  污染不该始于锁文件（锁内仍复检）。
+  B1 `requireMain` 补齐 `computeVault`（相册源 + vault-cache）、`pm backup`、
+  `pickRoot SelMain`（doctor --repair / trash empty / undo 的默认 root）、
+  `pm init`（已有非 RoleMain 标识即拒，`--force` 不改写身份）。
+  major：`pm init` 与 `backup init` 建 root 前走同一守卫（`initPreflight` /
+  `backupInitPreflight`；`.git` 文件与祖先仓不再漏）。minor：`dirFingerprint`
+  对 symlink/junction 记 `l` 条目不跟随（与 Scan 同策略），指回祖先的 junction
+  不再无限递归；真实库无 reparse point，既有 names 计划指纹不变。
+  `Pm.Commands` 触及 750 行预算 → 备份命令拆到 `Pm.BackupCmd`（Commands 再导出）。
+  测试 +11（GuardTests，144/144）。归档同上文件第三轮章节。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -692,3 +714,12 @@ fail-closed、bindExecRoot 恰一命中）；新增 6 测试（128/128）。评�
 剔除内部事务、守卫 canonical 路径 + case-fold 反规则、I11 下沉内核按 role
 无条件重检、缓存身份双 Just、备份发现全命中、requireRole 统一、递归目录
 指纹、names 文件占位预检；B4 经 I7 反驳不成立。新增 5 测试（133/133）。
+
+同日 codex 三轮复审（`codex exec` 只读直跑；前三次运行模型侧无 exec 工具而
+空跑，改重试循环按事件流 `command_execution` 计数判定，第 1 次重试即真跑：
+132 次命令执行；对 d8e6d6d..e7288ae）：A4/A6/B2/B3 FIXED、B4 反驳被接受；
+A1/A2/A3/B1 各留一个可复现绕过 + init 守卫缺失 major + junction 指纹 minor，
+逐条核实全部成立（A2 另以 git 2.52 `check-ignore` 实证）→ **P3b-6 收口**
+（§10.2 P3b-6 条目）：严格 opId/planId 解析、通配符反规则拒绝、匿名 root
+与 role 改写封堵 + 取锁前预检、requireMain 四入口、init/backup init 守卫、
+指纹不跟随 reparse point；Commands 拆出 Pm.BackupCmd。新增 11 测试（144/144）。

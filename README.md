@@ -73,6 +73,10 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   事务、守卫 canonical 路径 + case-fold 反规则、I11 下沉 Pm.GitGuard 由内核按
   role 无条件重检、缓存身份双 Just、备份发现全命中、requireRole 统一、递归
   目录指纹、names 文件占位预检；133/133 测试）
+- P3b-6 ✅ codex 三轮复审收口（严格 opId/planId 解析、通配符反规则 fail-closed
+  （git 2.52 实测）、内核拒绝匿名 root + I11 守卫对所有 role 生效 + 取锁前预检、
+  requireMain 补齐 vault/backup/pickRoot/init 四入口、init/backup init 走同一
+  守卫、目录指纹不跟随 junction；备份命令拆出 Pm.BackupCmd；144/144 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

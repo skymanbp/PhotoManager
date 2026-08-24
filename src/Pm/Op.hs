@@ -8,10 +8,16 @@ module Pm.Op
   ( Op (..)
   , Fingerprint (..)
   , opId
+  , OpIdSuffix (..)
+  , opIdParts
+  , restoreOpId
+  , displacedOpId
   , describeOp
   ) where
 
+import Control.Monad (guard)
 import Data.Aeson
+import Data.Char (isDigit)
 import Data.Text (Text)
 import qualified Data.Text as T
 
@@ -80,6 +86,47 @@ instance FromJSON Op where
 -- | Stable id of item @ix@ inside plan @pid@.
 opId :: Text -> Int -> Text
 opId pid ix = pid <> "#" <> T.pack (show ix)
+
+-- | opId 后缀 = 内核内部事务约定（P3b-6 复审 A1 统一解析）：无后缀是用户可见
+-- 操作；@~r@ 是 §6.5 组回滚的自动复位 rename；@~d\<N\>@ 是组回滚时占位者的
+-- 第 N 次位移隔离（落 @\<pid\>~displaced-\<N\>\/@）。其它形态都不是 pm 生成的。
+data OpIdSuffix = SfxPlain | SfxRestore | SfxDisplaced Int
+  deriving (Show, Eq)
+
+-- | 严格解析 @\<planId\>#\<ix\>[~r|~d\<N\>]@ → (planId, ix, 后缀)。planId 部分
+-- 不得含 @#@\/@~@（生成格式 YYYYMMDD-HHMMSS-hex6 由 'Pm.Plan.isValidPlanId'
+-- 在装载与执行处另行把关）；ix 与 N 为十进制，N ≥ 1。此前 Trash 用
+-- @splitOn "~d"@、Undo 用 @isInfixOf "~d"@ 各自弱解析：planId 含 @~d@ 时前者
+-- 把普通隔离推到位移目录、后者把正常操作当内部事务剔出 undo。
+opIdParts :: Text -> Maybe (Text, Int, OpIdSuffix)
+opIdParts oid = do
+  let (pid, rest) = T.breakOn "#" oid
+  guard (not (T.null pid) && T.all (\c -> c /= '#' && c /= '~') pid)
+  rest' <- T.stripPrefix "#" rest
+  let (ixT, sfx) = T.span isDigit rest'
+  ix <- readDigits ixT
+  s <- case sfx of
+    "" -> Just SfxPlain
+    "~r" -> Just SfxRestore
+    _
+      | Just nT <- T.stripPrefix "~d" sfx
+      , Just n <- readDigits nT
+      , n >= 1 ->
+          Just (SfxDisplaced n)
+    _ -> Nothing
+  pure (pid, ix, s)
+ where
+  readDigits t
+    | T.null t || not (T.all isDigit t) = Nothing
+    | otherwise = Just (read (T.unpack t))
+
+-- | 复位 rename 的 opId（§6.5）。
+restoreOpId :: Text -> Int -> Text
+restoreOpId pid ix = opId pid ix <> "~r"
+
+-- | 第 N 次位移隔离的 opId。
+displacedOpId :: Text -> Int -> Int -> Text
+displacedOpId pid ix n = opId pid ix <> "~d" <> T.pack (show n)
 
 describeOp :: Op -> String
 describeOp (OpCopy s d _ sz _) = "copy " <> s <> " -> " <> d <> " (" <> show sz <> " B)"

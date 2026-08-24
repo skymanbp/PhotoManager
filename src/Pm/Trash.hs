@@ -21,7 +21,6 @@ import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
-import Data.Char (isDigit)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -31,6 +30,7 @@ import System.FilePath ((</>))
 import System.IO
 
 import Pm.Config (pmDir)
+import Pm.Op (OpIdSuffix (..), opIdParts)
 import Pm.Win (flushHandleToDisk)
 
 data TrashRecord = TrashRecord
@@ -76,12 +76,15 @@ manifestPath root = trashDir root </> "manifest.ndjson"
 -- —— 同一计划里 victim 本体已占用前者；带序号是因为同计划重跑可能再次
 -- 位移（P3b-5 复审 #1：固定目录会与上次位移残留撞车，moveFileNoReplace
 -- 失败后复位再被挡住）。两侧不共用此函数就会各推各的。
+-- P3b-6 复审 A1：后缀由 'opIdParts' 严格解析（不再 @splitOn "~d"@——planId
+-- 含 @~d@ 时会把普通隔离推到位移目录）。非 pm 生成的 oid（手编 journal，
+-- doctor 只读分类会遇到）退回普通隔离目录 @\<planId 前缀\>\/@。
 quarTrashRel :: Text -> FilePath -> FilePath
 quarTrashRel oid victim =
-  let pidS = T.unpack (T.takeWhile (/= '#') oid)
-      dir = case T.splitOn "~d" oid of
-        [_, n] | not (T.null n), T.all isDigit n -> pidS <> "~displaced-" <> T.unpack n
-        _ -> pidS
+  let dir = case opIdParts oid of
+        Just (pid, _, SfxDisplaced n) -> T.unpack pid <> "~displaced-" <> show n
+        Just (pid, _, _) -> T.unpack pid
+        Nothing -> T.unpack (T.takeWhile (/= '#') oid)
    in dir </> victim
 
 -- | Write-ahead: flushed to disk before the victim moves (§6.3 step 1).

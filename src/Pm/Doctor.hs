@@ -162,17 +162,13 @@ lastSegment es = go es es
   go _ (JCleanShutdown _ : rest) = go rest rest
   go acc (_ : rest) = go acc rest
 
+-- | Copy 的 tmp 路径只对无后缀的用户可见 oid 有定义（'opIdParts' 统一解析，
+-- P3b-6 复审 A1）。
 pendingTmp :: FilePath -> (Text, Op) -> Maybe FilePath
-pendingTmp root (oid, OpCopy _ dstRel _ _ _) =
-  case T.splitOn "#" oid of
-    [pid, ixT] | Just ix <- readMaybeInt (T.unpack ixT) -> Just (tmpDirFor root pid </> tmpNameFor ix dstRel)
-    _ -> Nothing
-pendingTmp _ _ = Nothing
-
-readMaybeInt :: String -> Maybe Int
-readMaybeInt s = case reads s of
-  [(n, "")] -> Just n
+pendingTmp root (oid, OpCopy _ dstRel _ _ _) = case opIdParts oid of
+  Just (pid, ix, SfxPlain) -> Just (tmpDirFor root pid </> tmpNameFor ix dstRel)
   _ -> Nothing
+pendingTmp _ _ = Nothing
 
 classifyPending :: FilePath -> (Text, Op) -> IO [Finding]
 classifyPending root (oid, op) = case op of
