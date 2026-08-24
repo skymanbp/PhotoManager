@@ -1,18 +1,58 @@
 # PhotoManager (`pm`)
 
-Haskell 编写的照片库管理器：为 `D:\Photography` 三层照片库（Raw → 成片 → 相册）
-提供带完整性校验的索引、归档、备份同步、命名治理与 vault 分发。
+Haskell 写的照片库管理器 + Rust/Tauri 桌面前端：为 `D:\Photography` 三层照片库
+（Raw 原片 → 成片 → 相册收藏）提供带完整性校验的索引、归档、备份盘同步、命名
+治理与展示集（vault）分发。**一切写盘都是两段式**——先生成计划，人看过再
+`pm apply` 执行。
+
+> ### 定位：个人自用，公开可看
+>
+> 这是作者为**自己那一个**照片库写的工具：目录结构、层级语义、vault 类目都按
+> 作者的工作流固定下来。公开是为了可审计、可借鉴（尤其是"怎么让一个会动你
+> 数据的工具值得信任"这件事），**不是发行一个通用产品**——没有支持承诺、没有
+> 兼容承诺，也不打算适配别的目录结构。Issue/PR 可能长期没人看。
+>
+> 但"个人项目"不是安全上打折的理由，照片是不可再生数据：pm **没有删除原语**，
+> 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（至今
+> **二十轮**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉它
+> 就转红"的突变验证用例（203 例，GHC 警告 0）。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
-对抗评审记录：[docs/reviews/](docs/reviews/)（按时间摘要：[docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)）。
+对抗评审记录：[docs/reviews/](docs/reviews/)（时间线摘要：[docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)）。
 
-## 使用
+## 安装（Windows x64）
+
+从 [Releases](https://github.com/skymanbp/PhotoManager/releases) 下载其一：
+
+| 资产 | 说明 |
+|---|---|
+| `pm-ui_<版本>_x64-setup.exe` | 安装包（NSIS，装到当前用户，不要管理员权限）：GUI 与 CLI 装进同一目录 + 开始菜单项 |
+| `pm-<版本>-windows-x64.zip` | 免安装：解压即用，含 `pm.exe`（CLI）与 `pm-ui.exe`（GUI） |
+
+- **要求**：Windows 10/11 x64 + WebView2 运行时（Win11 自带；Win10 一般随 Edge
+  已装，装包在缺失时会拉起微软的官方安装器）。
+- 想在终端直接敲 `pm`，把安装目录加进 `PATH`（安装包不改 `PATH`）。GUI 从开始
+  菜单或 `pm ui` 启动——它会自己拉起 `pm serve` 并在退出时收回，不用手工开服务。
+- 两个资产都**没有代码签名**（个人项目，无证书），首次运行 SmartScreen 会提示
+  "未知发布者"。介意就照下面「从源码构建」自己编，产物一致。
+- 校验：release 说明里附每个资产的 SHA-256。
+
+## 快速上手
 
 ```
 pm init --main D:\Photography    # 一次性：写配置 + root 标识
-pm scan                          # 索引（首次全量 hash，之后增量）
+pm scan                          # 索引（首次全量 hash 约 10–25 min，之后增量 < 10 s）
 pm                               # = pm status，总览仪表盘
+pm ui                            # 桌面 GUI（状态可视化 / 分类推送 / 计划）
+```
 
+GUI 四页：**状态**（Raw·成片·相册·暂存四层卡 + vault 同步差异清单 + 备份盘滞后
++ "下一步"）、**分类推送**（相册里 vault 还没有的照片，缩略图选类目 → 生成推送
+计划）、**计划**（逐项明细）、**上手**。GUI 只生成计划，执行永远在终端。
+
+## 命令
+
+```
 pm import                        # 暂存区 → Raw\年\事件-Raw + 成片\事件 归档计划
 pm backup init E:\Photography    # 一次性：登记备份盘（按 UUID 认盘，不认盘符）
 pm backup                        # 主库 → 备份盘单向增量（EXTRA 只报告永不动）
@@ -25,22 +65,46 @@ pm versions                      # 版本组 / 非设计内精确重复报告（
 
 pm apply <planId>                # 执行计划（--dry 全量预览 / --only 1,3-5 部分执行）
 pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先隔离）
+pm doctor                        # 崩溃恢复对账 + 完整性体检（默认只读）
+pm undo <planId>                 # 整体回滚已执行的计划
+pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读，见 --writable）
 ```
 
-所有命令默认只读（生成计划、exit 1 表示有事可做）；写盘要么 `--apply` 交互
-确认，要么两段式 `pm apply <planId>`。pm 没有删除原语——唯一的移出机制是带
-manifest 的隔离区（`pm trash`）。
+所有命令默认只读（生成计划、exit 1 表示"有事可做"）；写盘要么 `--apply` 交互
+确认，要么两段式 `pm apply <planId>`。
 
-## 构建
+## 安全模型（一页版）
 
-```
-# --no-interleaved-output --dump-logs none 为必须：本机 ACP=CP936，stack 把
-# 依赖包警告（含 •/» 字符）重编码回自己的 stderr 时会崩（GHC 9.10 二进制向
-# 非 UTF-8 管道打印不可编码字符即 commitBuffer 崩溃，已实验证实；
-# GHC_CHARENC 只影响 GHC 编译器自身，救不了 stack）。pm 自身在 main 首行
-# 设 UTF-8（Pm.Win.setupConsole），无此问题。
-stack build --test --no-interleaved-output --no-dump-logs   # GHC 9.10.3 / lts-24.46
-stack install             # 把 pm 放进 %APPDATA%\local\bin
+- **没有删除原语**。唯一移出机制是带 manifest 的隔离区（`pm trash`），
+  `trash empty` 永久删除前还要重验三副本。
+- **两段式写盘**：计划是磁盘上的 JSON，执行有 journal（先写意图再落位）、
+  `pm doctor` 事后对账、`pm undo` 整体回滚。
+- **十一条不变量**（DESIGN §2）在内核层强制，不靠调用方自觉；`.pm` 状态文件
+  只经受信取用口读写（逐级 no-follow 解析 + link-count 校验），挡住 junction /
+  symlink / hardlink 换名一类的库外写入。
+- **GUI 永不直接碰照片**：Rust 壳层只做 spawn / 交 token / kill 三件事，一切经
+  `pm serve`；serve 只绑 127.0.0.1 + 随机端口 + Bearer token，**缺省只读**，
+  `--writable`（只有 GUI 拉起时置位）也只允许"生成计划"，写域限 vault 的 `.pm`。
+- **pm 不执行 git**（I9）：涉及 vault 仓的提交步骤只打印给你自己执行。
+
+## 从源码构建
+
+```bash
+# CLI（GHC 9.10.3 / lts-24.46）
+# --no-interleaved-output --no-dump-logs 为必须：本机 ACP=CP936，stack 把依赖包
+# 警告（含 •/» 字符）重编码回自己的 stderr 时会崩（GHC 9.10 二进制向非 UTF-8
+# 管道打印不可编码字符即 commitBuffer 崩溃，已实验证实；GHC_CHARENC 只影响 GHC
+# 编译器自身，救不了 stack）。pm 自身在 main 首行设 UTF-8（Pm.Win.setupConsole）。
+stack build --test --no-interleaved-output --no-dump-logs
+stack install                    # 把 pm 放进 %APPDATA%\local\bin
+
+# GUI + 安装包（Rust / Tauri v2；Windows 只支持 MSVC 目标）
+cp "$APPDATA/local/bin/pm.exe" gui/src-tauri/binaries/pm-x86_64-pc-windows-msvc.exe
+cd gui/src-tauri
+# remap 掉 cargo registry 源码路径里的用户主目录，别把本机路径编进公开二进制
+RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
+  cargo tauri build --target x86_64-pc-windows-msvc
+# → target/x86_64-pc-windows-msvc/release/bundle/nsis/pm-ui_<版本>_x64-setup.exe
 ```
 
 ## 阶段
@@ -200,8 +264,17 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   `--writable`（`pm ui` 置位）与唯一写端点 `POST /api/vault/push-plan`（与 CLI
   共用校验/构造，只写 `.pm/plans`，64 KiB 上限）；三处闸突变各自转红；202/202；
   渲染经 DPI-aware 窗口截图自验四页含滚动到底）—— **apply 端点仍未开**
-- P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
-- P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
+- **codex 二十轮：GO**（P4-4/5 首评；无 critical/major，合并前最小修复集**空**，
+  6 minor。确认写端点边界成立：`--writable` 判定先于读体与任何写入、只读 serve
+  下 POST 零写入；抽出的校验/构造与 CLI `runVaultPush` 逐行等价）
+- P4-6 ✅ 二十轮收口 + 发布（203/203，GHC 警告 0）：5 条 minor 已修——同一 name
+  重复指派 fail-closed（CLI/API 共用一处判定）、DRIFT-only 也能出纯裁决计划、
+  缩略图缩放失败改挂占位符（不再回退原图）、分类页 single-flight + 忽略
+  `ev.repeat`、首次建 root 的并发 500 改一次持锁；第 6 条（JSON 重复键/深嵌套）
+  登记残余。打包：NSIS 安装包（CLI 作 sidecar 与 GUI 同目录，`pm_exe()` 补
+  "同目录"查找）+ 免安装 zip；实测装到临时目录后 GUI 能靠同目录找到 `pm`、
+  杀掉 GUI 后 serve 零残留、静默卸载后目录与注册表均干净。**apply 端点仍未开**
+- P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License
 

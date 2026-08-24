@@ -147,7 +147,7 @@ waitStdinEof :: IO ()
 waitStdinEof = do
   eof <- try (hIsEOF stdin) :: IO (Either IOException Bool)
   case eof of
-    Right False -> BS.hGetLine stdin >> waitStdinEof
+    Right False -> BC.hGetLine stdin >> waitStdinEof
     _ -> pure ()
 
 bindLoopback :: Int -> IO Socket
@@ -247,10 +247,14 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
                      | n <- vdNew (vrDiff r)
                      , let me = Map.lookup n (vrSrcMeta r)
                      ]
+              , -- 页面要知道「没有 NEW 但有 DRIFT」也能出纯裁决计划（二十轮 minor）
+                "drift" .= [object ["name" .= n, "category" .= c] | (n, c, _, _) <- vdDrift (vrDiff r)]
               ]
           )
-  -- P4-5：唯一的写端点——由页面的分类指派**生成** vault push 计划（只写
-  -- @<vault>/.pm/plans@，不执行、不碰照片；执行仍是另一步，尚无端点）。
+  -- P4-5：唯一的写端点——由页面的分类指派**生成** vault push 计划（不执行、
+  -- 不碰照片；执行仍是另一步，尚无端点）。写域限于 @<vault>/.pm@：计划落在
+  -- @.pm/plans@，首次请求还会经 I11 幂等建 @.pm/root-id@（'mkVaultPushPlan'
+  -- 里的 'ensureVaultRoot'）——二十轮把「只写 plans」这句措辞纠正到这里。
   -- 校验与计划构造和 CLI `pm vault push` 共用（'checkAssignments' /
   -- 'vaultPushItems' / 'mkVaultPushPlan'），落盘前同样过 'requireWritable'。
   ("POST", ["api", "vault", "push-plan"])
@@ -261,13 +265,20 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
           Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
           Just raw -> case Aeson.eitherDecodeStrict' raw of
             Left e -> err status400 ("请求体不是合法 JSON: " <> e)
-            Right (PushPlanReq as)
-              | null as -> err status400 "assignments 为空"
-              | otherwise -> do
-                  er <- vaultReport
-                  case er of
-                    Left (msg, code) -> err (if code == 2 then status404 else status500) msg
-                    Right r -> do
+            -- compute→校验→ensureRoot→落盘在同一次持锁里完成：两个并发 POST
+            -- 在首次建 root 时会都看到 RootAbsent，其中一次 createRootInfo
+            -- （no-replace）必失败 → 500（codex 二十轮 minor）。与 GET 刷新
+            -- vault 缓存用的是同一把 'seVaultLock'。
+            Right (PushPlanReq as) -> withMVar (seVaultLock env) $ \_ -> do
+              er <- computeVault True cfg
+              case er of
+                Left (msg, code) -> err (if code == 2 then status404 else status500) msg
+                Right r
+                  -- 空指派只在「有 DRIFT 待裁决」时有意义（纯裁决计划）——否则
+                  -- vault 只有 DRIFT 时页面按钮永远灰着（二十轮 minor）。
+                  | null as && null (vdDrift (vrDiff r)) ->
+                      err status400 "assignments 为空，且没有 DRIFT 待裁决项——无计划可生成"
+                  | otherwise -> do
                       let pairs' = [(paCategory a, paName a) | a <- as]
                           errs = checkAssignments r pairs'
                       if not (null errs)

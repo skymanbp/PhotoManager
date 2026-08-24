@@ -31,7 +31,7 @@ import Pm.Catalog (saveCatalog)
 import Pm.Config (Config (..), pmDir, writeRootInfo)
 import Pm.Hash (sha256File)
 import Pm.Op (Fingerprint (..), Op (..))
-import Pm.Plan (Plan (..), PlanItem (..), loadPlan, savePlan)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, savePlan)
 import Pm.Serve (ServeEnv, allowedOrigin, hostOk, listPlans, newServeEnv, newToken, portOk, serveApp)
 import Pm.Types (Entry (..), FileKind (..), RootInfo (..), RootRole (..))
 import Pm.Vault (VaultReport (..), computeVault, renderVaultJson)
@@ -53,6 +53,7 @@ serveTests =
     , testCase "P4-2 --port 范围 0..65535（越界不得静默折回）" caseServePortRange
     , testCase "P4-5 POST /api/vault/push-plan：只读 serve → 403；坏 JSON/空指派/非法类目/非 NEW → 400；超大体 → 413" caseServePushPlanGuards
     , testCase "P4-5 POST /api/vault/push-plan：合法指派 → 计划落到 <vault>/.pm/plans，可经 loadPlan 装回，项与指派一致" caseServePushPlanOk
+    , testCase "P4-6 POST /api/vault/push-plan：DRIFT-only（无 NEW）空指派 → 纯裁决计划；照片零改动" caseServePushPlanDrift
     ]
 
 tok :: BS.ByteString
@@ -401,15 +402,31 @@ caseServePushPlanGuards = withSystemTempDirectory "pm-serve" $ \dir -> do
     liftIO' (assertBool "应报类目不存在" ("nope" `BS.isInfixOf` BSL.toStrict (simpleBody r3)))
     r4 <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"ghost.jpg\",\"category\":\"landscape\"}]}"
     assertStatus 400 r4
+    -- 同一 name 指派两个类目：逐条都合法，但会出两个 Copy → 必须整体拒（二十轮 minor）
+    r4a <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"a.jpg\",\"category\":\"landscape\"},{\"name\":\"a.jpg\",\"category\":\"portrait\"}]}"
+    assertStatus 400 r4a
+    liftIO' (assertBool "应列出两个冲突类目" ("landscape portrait" `BS.isInfixOf` BSL.toStrict (simpleBody r4a)))
+    -- 同一 name 同类目重复两次：同样是两个 Copy
+    r4b <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"a.jpg\",\"category\":\"landscape\"},{\"name\":\"a.jpg\",\"category\":\"landscape\"}]}"
+    assertStatus 400 r4b
+    -- 类目大小写变体不是别名（fixedCategories 精确匹配）
+    r4c <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"a.jpg\",\"category\":\"Landscape\"}]}"
+    assertStatus 400 r4c
+    -- 带路径分隔符的 name：NEW 只有平铺 basename → 不在集合里
+    r4d <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"../a.jpg\",\"category\":\"landscape\"}]}"
+    assertStatus 400 r4d
+    r4e <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"sub\\a.jpg\",\"category\":\"landscape\"}]}"
+    assertStatus 400 r4e
     -- 超过 64 KiB 的体：413，不解析
     r5 <- postReq "/api/vault/push-plan" (BSL.fromStrict (BS.replicate (70 * 1024) 32))
     assertStatus 413 r5
     -- GET 不是端点
     r6 <- getReq "/api/vault/push-plan" [] tok
     assertStatus 404 r6
-  -- 全部被拒 → 没有任何计划落盘
+  -- 全部被拒 → 没有任何计划落盘，vault 的 .pm 也不该被建出来（连 root-id 都不建）
   (ps, _) <- listPlans vdir
   ps @?= []
+  doesDirectoryExist (vdir </> ".pm") >>= (@?= False)
 
 -- | 合法指派：计划写进 vault root 的 .pm/plans，响应带计划 + 路径 + apply 提示；
 -- 用 loadPlan 从盘上装回，项数与目标路径与指派一致；照片零改动。
@@ -440,6 +457,41 @@ caseServePushPlanOk = withSystemTempDirectory "pm-serve" $ \dir -> do
   -- 照片零改动、vault 类目目录仍空（只生成计划，不执行）
   BS.readFile (root </> "相册" </> "a.jpg") >>= (@?= jpgBytes)
   doesFileExist (vdir </> "portrait" </> "a.jpg") >>= (@?= False)
+
+-- | P4-6：vault 只有 DRIFT（同名内容不同）、没有 NEW 时，空 assignments 也要
+-- 能出一份纯裁决计划——否则 GUI 的「生成推送计划」按钮永远灰着（二十轮 minor）。
+-- 计划项是 NEEDS-DECISION，vault 与相册的字节都不动。把「空指派 → 400」改回
+-- 无条件，本例转红。
+caseServePushPlanDrift :: IO ()
+caseServePushPlanDrift = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, jpgBytes, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  let vaultCopy = vdir </> "landscape" </> "a.jpg"
+      otherBytes = "\xFF\xD8\xFF\xE0JFIF-vault-side-bytes"
+  BS.writeFile vaultCopy otherBytes
+  env <- mkEnvW cfg
+  pid <- flip runSession (serveApp env) $ do
+    r <- postReq "/api/vault/push-plan" "{\"assignments\":[]}"
+    assertStatus 200 r
+    let v = decodeBody r
+    liftIO' $ do
+      arrLen (field ["plan", "items"] v) @?= Just 1
+      case field ["plan", "id"] v of
+        Just (Aeson.String p) -> pure p
+        other -> assertFailure ("响应缺 plan.id: " <> show other)
+  ep <- loadPlan vdir pid
+  case ep of
+    Left e -> assertFailure ("loadPlan 应装回: " <> e)
+    Right plan -> do
+      map (opDstRel . piOp) (plItems plan) @?= ["landscape" </> "a.jpg"]
+      case map piStatus (plItems plan) of
+        [StNeedsDecision _] -> pure ()
+        other -> assertFailure ("DRIFT 项应为 NEEDS-DECISION: " <> show other)
+  -- 只生成计划：两侧字节都没动
+  BS.readFile vaultCopy >>= (@?= otherBytes)
+  BS.readFile (root </> "相册" </> "a.jpg") >>= (@?= jpgBytes)
 
 caseServePortRange :: IO ()
 caseServePortRange = do

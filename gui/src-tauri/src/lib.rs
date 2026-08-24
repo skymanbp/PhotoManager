@@ -25,10 +25,29 @@ fn api_info(info: tauri::State<ApiInfo>) -> ApiInfo {
     info.inner().clone()
 }
 
-/// Locate `pm`: `PM_EXE` wins (what `pm ui` sets to its own path), otherwise
-/// `pm` on PATH.
+/// Locate `pm`, in order: `PM_EXE` (what `pm ui` sets to its own path) → a
+/// `pm.exe` sitting next to this executable → `pm` on PATH.
+///
+/// The installer ships the CLI as a Tauri sidecar, i.e. right next to
+/// `pm-ui.exe`, and a Start-menu launch has neither `PM_EXE` nor (usually) the
+/// install dir on `PATH` — so the sibling lookup is what makes the packaged
+/// build work at all. Both the bundled name and the raw sidecar name are
+/// tried, so it does not matter whether the bundler stripped the triple.
 fn pm_exe() -> String {
-    std::env::var("PM_EXE").unwrap_or_else(|_| "pm".to_string())
+    if let Ok(p) = std::env::var("PM_EXE") {
+        return p;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for cand in ["pm.exe", "pm-x86_64-pc-windows-msvc.exe"] {
+                let p = dir.join(cand);
+                if p.is_file() {
+                    return p.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+    "pm".to_string()
 }
 
 fn spawn_serve() -> Result<(ApiInfo, Child), String> {

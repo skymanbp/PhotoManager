@@ -593,9 +593,17 @@ runVaultPush runPlan mCat files cfg = do
 -- | 逐条校验「类目, NEW 文件名」指派（fail-closed：任何一条不合法就不出计划）。
 -- 返回全部错误而不是第一条，GUI 能一次把问题都标出来。
 checkAssignments :: VaultReport -> [(String, FilePath)] -> [String]
-checkAssignments r pairs' = [e | p <- pairs', Just e <- [checkSel p]]
+checkAssignments r pairs' = dupErrs <> [e | p <- pairs', Just e <- [checkSel p]]
  where
   d = vrDiff r
+  -- 同一 name 被指派两次（跨类目或同类目重复）：逐条校验各自合法，但计划会
+  -- 带两个 Copy，执行后同一张照片重复入 vault（codex 二十轮 minor）。按 name
+  -- 分组 fail-closed；CLI（`pm vault push a.jpg a.jpg`）与 API 共用这一处。
+  dupErrs =
+    [ f <> " 被重复指派（" <> unwords (sort (nub cs)) <> "）：一个文件只能出现一次、只能进一个类目"
+    | (f, cs) <- Map.toList (Map.fromListWith (<>) [(f, [c]) | (c, f) <- pairs'])
+    , length cs > 1
+    ]
   checkSel (c, f)
     | f `elem` map fst (vrUnstable r) = Just (f <> " 本轮读取不稳定（已退出六态分类，fail-closed），稍后重试")
     | c `notElem` fixedCategories = Just ("类目不存在: " <> c <> "（可选: " <> unwords fixedCategories <> "）")
