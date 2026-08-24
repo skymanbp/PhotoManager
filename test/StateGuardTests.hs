@@ -11,6 +11,7 @@
 module StateGuardTests (stateGuardTests) where
 
 import Control.Exception (SomeException, try)
+import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BSL
 import Data.List (isInfixOf)
@@ -24,14 +25,15 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (loadCatalog, saveCatalog)
-import Pm.Config (pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
+import Pm.Config (Config (..), pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
 import Pm.Hash (sha256File)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, withJournal)
 import Pm.Lock (withRootLock)
-import Pm.Op (Op (..))
+import Pm.Op (Fingerprint (..), Op (..))
 import Pm.Plan (Plan (..), loadPlan, savePlan)
 import Pm.Trash (TrashRecord (..), appendManifest, readManifest, trashDir)
+import Pm.Status (StatusOpts (..), runStatus)
 import Pm.Types (Catalog, RootInfo (..), RootRole (..))
 import TestUtil
 
@@ -47,6 +49,9 @@ stateGuardTests =
     , testCase "P3b-15 扫描窗口内 .pm 变 junction → saveCatalog 拒绝，库外三代快照零改动" caseSaveCatalogJunction
     , testCase "P3b-15 .pm/lock 被 hardlink 占名 → withRootLock 拒绝加锁" caseLockHardlink
     , testCase "P3b-15 trash 载荷是库外 hardlink → doctor 报 PM-LINK，--repair 不补虚假 Done" caseDoctorTrashPayloadLink
+    , testCase "P3b-16 复位源 .pm/trash/<pid> 是 junction → doctor 报 PM-LINK，--repair 不补虚假 Done" caseDoctorRestoreSrcJunction
+    , testCase "P3b-16 .pm/tmp/<planId> 是 junction → C1 的 tmp 探测报 PM-LINK，不穿透库外" caseDoctorPendingTmpProbe
+    , testCase "P3b-16 侧缓存失信 → pm status 报 ⚠ 且退出码 1（不再静默 exit 0）" caseStatusUntrustedCacheExit
     ]
 
 -- 本模块只需要 hardlink（/H）与文件 symlink（无开关）两种形态；目录 junction
@@ -217,6 +222,23 @@ caseSaveCatalogJunction = withSystemTempDirectory "pm-sguard" $ \dir -> do
   readFile (outside </> "catalog.json.2") >>= (@?= "OUTSIDE-G2")
   doesFileExist (outside </> "catalog.json.tmp") >>= (@?= False)
   removeDirectoryLink (pmDir root)
+  -- P3b-16（十三轮 minor）：上面只钉住"四条解析全部撤回"。十三轮指出单撤一条
+  -- 时其余三条仍会在 `.pm` junction 上失败，用例照样绿。这里把每条路径**单独**
+  -- 钉住：`.pm` 是真目录（四条解析都能过），只把**某一代**做成指向库外的文件
+  -- symlink——只有针对该代的那一次解析能拦住它。
+  forM_ ["catalog.json", "catalog.json.1", "catalog.json.2", "catalog.json.tmp"] $ \gen -> do
+    let r2 = dir </> ("root-" <> gen)
+        out2 = dir </> ("outside-" <> gen)
+    createDirectoryIfMissing True (pmDir r2)
+    createDirectoryIfMissing True out2
+    writeFile (out2 </> "hostage") "OUTSIDE-GEN"
+    mkFileLink (pmDir r2 </> gen) (out2 </> "hostage")
+    e <- try (saveCatalog r2 (mkCat [])) :: IO (Either SomeException ())
+    either
+      (const (pure ()))
+      (const (assertFailure ("saveCatalog 应拒绝 symlink 化的 " <> gen)))
+      e
+    readFile (out2 </> "hostage") >>= (@?= "OUTSIDE-GEN")
 
 -- | 十二轮 minor：@.pm/lock@ 被 hardlink 到库外文件时，pm 会锁住那个共享
 -- 对象（跨库互斥 / 对外部程序的 DoS）。resolveUnder 看不见 hardlink，只有
@@ -263,3 +285,83 @@ caseDoctorTrashPayloadLink = withSystemTempDirectory "pm-sguard" $ \dir -> do
   es <- journalEntries root
   assertBool ("--repair 不得补记 Done: " <> show (length es)) (not (any isDone es))
   readFile (outside </> "v.jpg") >>= (@?= "VICTIM-BYTES")
+
+-- ─── P3b-16（十三轮） ───────────────────────────────────────────────────────
+
+-- | 十三轮 **major**：`OpRename` 的**源**允许是 @.pm/trash/…@（'isTrashSrcRel'
+-- 是 pm 唯一允许 Op 触及 `.pm` 内部的形态——undo/组复位把隔离文件搬回原位），
+-- 而 doctor 此前对它用裸 `existsAny`。把 @.pm/trash/<pid>@ 换成指向空目录的
+-- junction，源就被判成"不存在"；再让用户目标的指纹相符，就得到 R2 Warn，
+-- `--repair` 补写**虚假的 Done**——把从未发生的复位认证成已完成。
+-- 修复后 `.pm` 侧走受信探测，失信只报 PM-LINK Bad（进不了 repairDone 的
+-- R2 Warn 白名单）。删掉 Doctor 的 `isTrashSrcRel` 分流，本例转红。
+caseDoctorRestoreSrcJunction :: IO ()
+caseDoctorRestoreSrcJunction = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside-empty"
+      trashSrc = ".pm" </> "trash" </> T.unpack tpid </> "v.jpg"
+  createDirectoryIfMissing True (trashDir root)
+  createDirectoryIfMissing True outside
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  -- 用户目标存在且指纹与 Intent 相符（"看起来 rename 已执行"）
+  writeFile (root </> "v.jpg") "RESTORED-BYTES"
+  vsha <- sha256File (root </> "v.jpg")
+  -- 复位源那一级是 junction → 裸 existsAny 会答"不存在"
+  mkJunction (trashDir root </> T.unpack tpid) outside
+  withJournal root $ \j ->
+    jAppend j Barrier (JIntent (tpOid 0) (OpRename trashSrc "v.jpg" (FpFileSha vsha)) now)
+  rows <- doctorRows root
+  assertBool ("应报 PM-LINK Bad，实得 " <> show rows) (("PM-LINK", Bad) `elem` rows)
+  assertBool ("不得报 R2 Warn（那会让 --repair 补 Done）: " <> show rows)
+    (("R2", Warn) `notElem` rows)
+  _ <- runDoctor root (DoctorOpts False True)
+  es <- journalEntries root
+  assertBool ("--repair 不得补记 Done: " <> show (length es)) (not (any isDone es))
+  removeDirectoryLink (trashDir root </> T.unpack tpid)
+
+-- | 十三轮 #6：`probePmExists`（C1 分支的 tmp 存在性探测）此前没有用例。
+-- @.pm/tmp/<planId>@ 是 junction 时，裸 `doesFileExist` 会穿透到库外，把
+-- "库外恰好有同名文件"读成"中断于写 tmp 阶段"。受信探测让它报 PM-LINK。
+caseDoctorPendingTmpProbe :: IO ()
+caseDoctorPendingTmpProbe = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside-tmp"
+  createDirectoryIfMissing True (pmDir root </> "tmp")
+  createDirectoryIfMissing True outside
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  -- 库外放一个与 pm 确定性 tmp 同名的文件
+  writeFile (outside </> "0-a.jpg") "OUTSIDE-TMP"
+  mkJunction (pmDir root </> "tmp" </> T.unpack tpid) outside
+  -- dst 不存在 → 走 C1 分支的 tmp 探测
+  withJournal root $ \j ->
+    jAppend j Barrier (JIntent (tpOid 0) (OpCopy (dir </> "src.jpg") "a.jpg" "aa" 1 0) now)
+  rows <- doctorRows root
+  assertBool ("应报 PM-LINK Bad，实得 " <> show rows) (("PM-LINK", Bad) `elem` rows)
+  readFile (outside </> "0-a.jpg") >>= (@?= "OUTSIDE-TMP")
+  removeDirectoryLink (pmDir root </> "tmp" </> T.unpack tpid)
+
+-- | 十三轮 #6：status 的失信退出码此前没有用例——`readSideCache` 返回 Left
+-- 时 'Pm.Status' 必须报 ⚠ 且**计入退出码**（十二轮点出旧实现会静默 exit 0）。
+caseStatusUntrustedCacheExit :: IO ()
+caseStatusUntrustedCacheExit = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside"
+      cache = pmDir root </> "backup-cache"
+  createDirectoryIfMissing True cache
+  createDirectoryIfMissing True outside
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  saveCatalog root (mkCat [])
+  -- 先确认干净库下 status 能返回 0（把"退出码 1 来自失信"与"来自其它差异"分开）
+  code0 <- runStatus (mkSCfg root) (StatusOpts True)
+  code0 @?= 0
+  -- 侧缓存 meta 被 hardlink 占名 → 失信
+  BSL.writeFile (outside </> "evil-meta.json") (Aeson.encode (mkCat []))
+  mkHardLink (cache </> "meta.json") (outside </> "evil-meta.json")
+  code1 <- runStatus (mkSCfg root) (StatusOpts True)
+  code1 @?= 1
+
+mkSCfg :: FilePath -> Config
+mkSCfg root = Config root Nothing Nothing Nothing Nothing Nothing

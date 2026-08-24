@@ -127,7 +127,16 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   修复：`resolvePmPath` 使用点解析 + `openStateLock` + doctor `probePmSha`
   （同句柄 hash）+ 侧缓存读保留三态并计入 status 退出码；`probeName` 的属性与
   错误码改由 cbits 单次 FFI 取得，消除 threaded RTS 的线程亲和性假设；
-  新增 3 例并对全部新屏障做突变验证；184/184 测试）
+  新增 3 例并对新屏障做突变验证；184/184 测试）
+- P3b-16 ✅ codex 十三轮复审收口（`OpRename` 的**源**允许是 `.pm/trash/…`
+  （undo/组复位的唯一例外），而 doctor 对它仍用裸 `existsAny`——把
+  `.pm/trash/<pid>` 换成 junction 即让复位源判成"不存在"，配上指纹相符的目标
+  就得到 R2 Warn，`--repair` 补写**虚假 Done**（major）。同轮把限域助手
+  `confinedTmp`/`confinedTrash`/`confinedUserPath` 从返回 Bool 改为**返回解析
+  后的路径**，调用方只能用返回值——这才让"解析后只操作返回路径"这条不变式
+  字面成立，而不是每轮再补一个漏掉的分支。另修：我上一轮"对**每条**新屏障做
+  突变验证"的说法过强（Catalog 只钉住整体撤回），现已为每一代快照单独构造
+  文件级链接用例；新增 3 例，全部逐条突变验证；187/187 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

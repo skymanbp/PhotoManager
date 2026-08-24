@@ -29,7 +29,6 @@ import Control.Exception (IOException, try)
 import Control.Monad (forM)
 import Crypto.Hash (Digest, SHA256 (..), hashWith)
 import Data.List (sort)
-import Data.Maybe (isJust)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -385,6 +384,19 @@ execItem env root j pid item = case piStatus item of
 admitsUserPath :: Maybe Bool -> Bool
 admitsUserPath = (== Just False)
 
+-- | 单条用户路径的限域，返回**解析后的路径**（P3b-16，十三轮）。
+-- 'confinedUser' 是它的多路径 Bool 包装，仅用于"只需判定、不需路径"的前置
+-- 检查（如 Copy 的 dst 预检）。凡随后要 open\/unlink\/rename 的调用点一律用
+-- 本函数的返回值。
+confinedUserPath :: FilePath -> FilePath -> IO (Maybe FilePath)
+confinedUserPath root rel = do
+  m <- resolveUnder root rel
+  case m of
+    Nothing -> pure Nothing
+    Just p -> do
+      ok <- admitsUserPath <$> pathAtOrUnder (pmDir root) p
+      pure (if ok then Just p else Nothing)
+
 confinedUser :: FilePath -> [FilePath] -> IO Bool
 confinedUser root rels = and <$> mapM one rels
  where
@@ -396,8 +408,12 @@ confinedUser root rels = and <$> mapM one rels
 
 -- | @.pm@ 内部落位点（隔离目标）：从 root 起全程下降，@.pm@ 与 @trash@ 这两级
 -- 同样必须是真名——这正是八轮 critical 的攻击面。
-confinedTrash :: FilePath -> FilePath -> IO Bool
-confinedTrash root rel = isJust <$> resolveUnder root (".pm" </> pmSubTrash </> rel)
+--
+-- P3b-16（十三轮）：返回**解析后的路径**而不是 Bool。返回 Bool 时调用方只能
+-- 自己再拼一次名字，于是"校验的字符串"与"操作的对象"又变成两次独立解析——
+-- 那正是十一~十三轮反复出现的同一个形状。返回路径后，调用方**无从**绕过。
+confinedTrash :: FilePath -> FilePath -> IO (Maybe FilePath)
+confinedTrash root rel = resolveUnder root (".pm" </> pmSubTrash </> rel)
 
 -- | pm **自建**的 @.pm\/tmp\/\<planId\>\/\<name\>@ 落位点。
 --
@@ -406,9 +422,10 @@ confinedTrash root rel = isJust <$> resolveUnder root (".pm" </> pmSubTrash </> 
 -- 把 @.pm\/tmp\/\<planId\>@ 预置成指向库外的 junction、并在库外放一个同名的
 -- 确定性 tmp 文件后，'Pm.Win.openFreshBinary' 的残留 unlink **删掉了那个库外
 -- 文件**。动态层必须逐次验——固定层的闸覆盖不到它。
-confinedTmp :: FilePath -> Text -> FilePath -> IO Bool
+-- P3b-16（十三轮）：同 'confinedTrash' —— 返回解析后的路径，调用方只用返回值。
+confinedTmp :: FilePath -> Text -> FilePath -> IO (Maybe FilePath)
 confinedTmp root pid name =
-  isJust <$> resolveUnder root (".pm" </> pmSubTmp </> T.unpack pid </> name)
+  resolveUnder root (".pm" </> pmSubTmp </> T.unpack pid </> name)
 
 escapeOutcome :: ItemOutcome
 escapeOutcome = OConflict "路径逐级解析后不在 root/.pm\\trash 之内（junction/别名/短名？），拒绝执行"
@@ -441,14 +458,13 @@ execCopy' env root j oid ix op = do
               let pid' = planIdOf oid
                   tname = tmpNameFor ix (opDstRel op)
                   tdir = tmpDirFor root pid'
-                  tmp = tdir </> tname
               -- 动态 planId 层的逐级校验（P3b-12 九轮 critical）：固定层的
               -- requirePmTrusted 覆盖不到它，而 copyFileHashed 的残留 unlink
               -- 会沿这一层的 junction 删掉库外同名文件（实测）。
-              okTmp <- confinedTmp root pid' tname
-              if not okTmp
-                then pure escapeOutcome
-                else do
+              mTmp <- confinedTmp root pid' tname
+              case mTmp of
+                Nothing -> pure escapeOutcome
+                Just _ -> do
                   eeCheckpoint env CpCopyAfterDstCheck
                   t1 <- getCurrentTime
                   jAppend j Barrier (JIntent oid op t1)
@@ -457,8 +473,12 @@ execCopy' env root j oid ix op = do
                   -- 目录创建之后再验一次：createDirectoryIfMissing 与写入之间
                   -- 是 P3b-11 起就记录的 TOCTOU 窗口，这一次复检把它收窄到
                   -- "创建后立刻"（§14 单机模型内的残余，见归档）。
-                  okTmp2 <- confinedTmp root pid' tname
-                  if not okTmp2 then pure escapeOutcome else execCopyTmp env root j oid op tmp
+                  -- P3b-16（十三轮）：**用这次解析返回的路径**写，不再自己拼
+                  -- @tdir </> tname@——否则校验与使用仍是两次独立解析。
+                  mTmp2 <- confinedTmp root pid' tname
+                  case mTmp2 of
+                    Nothing -> pure escapeOutcome
+                    Just tmpAbs -> execCopyTmp env root j oid op tmpAbs
 
 execCopyTmp :: ExecEnv -> FilePath -> Journal -> Text -> Op -> FilePath -> IO ItemOutcome
 execCopyTmp env root j oid op tmp = do
@@ -519,17 +539,19 @@ execRename env root j oid op = do
   -- 源与目标都必须逐级下降到 root 内。源走 .pm/trash 例外（undo/组回滚复位）
   -- 时按 trash 内部路径判定——八轮复审 critical 的攻击面正在这条：@.pm@ 或
   -- @trash@ 自身若是 junction，旧的"基准可信"判定会把库外对象搬进库。
-  okOld <-
+  -- P3b-16（十三轮）：两侧都拿**解析后的路径**往下传，不再由 execRename'
+  -- 自己重拼 @root </> rel@。
+  mOld <-
     if isTrashSrcRel (opOldRel op)
-      then isJust <$> resolveUnder root (opOldRel op)
-      else confinedUser root [opOldRel op]
-  okNew <- confinedUser root [opNewRel op]
-  if okOld && okNew then execRename' env root j oid op else pure escapeOutcome
+      then resolveUnder root (opOldRel op)
+      else confinedUserPath root (opOldRel op)
+  mNew <- confinedUserPath root (opNewRel op)
+  case (mOld, mNew) of
+    (Just o, Just n) -> execRename' env j oid op o n
+    _ -> pure escapeOutcome
 
-execRename' :: ExecEnv -> FilePath -> Journal -> Text -> Op -> IO ItemOutcome
-execRename' env root j oid op = do
-  let oldAbs = root </> opOldRel op
-      newAbs = root </> opNewRel op
+execRename' :: ExecEnv -> Journal -> Text -> Op -> FilePath -> FilePath -> IO ItemOutcome
+execRename' env j oid op oldAbs newAbs = do
   oldIsFile <- doesFileExist oldAbs
   oldIsDir <- doesDirectoryExist oldAbs
   newIsFile <- doesFileExist newAbs
@@ -576,14 +598,16 @@ execQuarantine env root j oid trashRel op = do
   -- victim 必须在 root 内且不在 .pm 内；隔离落位从 root 起全程真名下降——
   -- 八轮复审 major：以 trashDir 为基准判定时，trash 自身是 junction 就把
   -- victim 搬出了库。
-  okVictim <- confinedUser root [opVictimRel op]
-  okTrash <- confinedTrash root trashRel
-  if okVictim && okTrash then execQuarantine' env root j oid trashRel op else pure escapeOutcome
+  -- P3b-16（十三轮）：隔离落点用 'confinedTrash' 返回的路径，victim 用
+  -- 'confinedUserPath' 返回的路径；调用方不再自己拼。
+  mVictim <- confinedUserPath root (opVictimRel op)
+  mTrash <- confinedTrash root trashRel
+  case (mVictim, mTrash) of
+    (Just v, Just t) -> execQuarantine' env root j oid trashRel op v t
+    _ -> pure escapeOutcome
 
-execQuarantine' :: ExecEnv -> FilePath -> Journal -> Text -> FilePath -> Op -> IO ItemOutcome
-execQuarantine' env root j oid trashRel op = do
-  let victimAbs = root </> opVictimRel op
-      trashAbs = trashDir root </> trashRel
+execQuarantine' :: ExecEnv -> FilePath -> Journal -> Text -> FilePath -> Op -> FilePath -> FilePath -> IO ItemOutcome
+execQuarantine' env root j oid trashRel op victimAbs trashAbs = do
   ex <- doesFileExist victimAbs
   if not ex
     then do

@@ -24,7 +24,7 @@ import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, removeFile)
 import System.IO (hClose)
 import System.IO.Error (isDoesNotExistError)
-import System.FilePath (makeRelative, (</>))
+import System.FilePath (joinPath, makeRelative, splitDirectories, (</>))
 
 import Pm.Catalog (loadCatalog)
 import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
@@ -256,17 +256,33 @@ classifyPending' root (oid, op) = case op of
           Right True -> pure [Finding "C1" Warn (T.unpack oid <> ": 中断于写 tmp 阶段 (" <> dstRel <> ")") "--repair 将清除 tmp；重跑原计划即可续传"]
           Right False -> pure [Finding "C1" Info (T.unpack oid <> ": Intent 后无痕迹（写 tmp 前中断），重跑原计划即可") ""]
   OpRename old new fp -> do
-    oldEx <- existsAny (root </> old)
-    newEx <- existsAny (root </> new)
-    case (oldEx, newEx) of
-      (True, False) -> pure [Finding "R1" Info (T.unpack oid <> ": rename 未执行 (" <> old <> " → " <> new <> ")，重跑原计划即可") ""]
-      (False, True) -> do
-        ok <- verifyFp (root </> new) fp
-        if ok
-          then pure [Finding "R2" Warn (T.unpack oid <> ": rename 已执行、Done 丢失 (" <> new <> ")") "--repair 将补记 Done"]
-          else pure [Finding "R2" Bad (T.unpack oid <> ": rename 目标存在但指纹不符 (" <> new <> ")，需人工核查") ""]
-      (True, True) -> pure [Finding "R3" Warn (T.unpack oid <> ": rename 未执行且目标被占 (" <> new <> ")" ) "解决占用后重新生成计划"]
-      (False, False) -> pure [Finding "R?" Bad (T.unpack oid <> ": 新旧路径都不存在，超出矩阵，需人工核查") ""]
+    -- P3b-16（十三轮 major）：`old` 允许是 @.pm/trash/…@（undo/组复位的复位
+    -- 源，'Pm.Op.isTrashSrcRel' 明确的唯一例外），而这里此前对它用裸
+    -- `existsAny`。把 @.pm/trash/<pid>@ 换成指向空目录的 junction，旧路径就被
+    -- 判成"不存在"；再让用户目标的指纹相符，就得到 R2 Warn，`--repair` 随即
+    -- 补写**虚假的 Done**——把从未发生的复位认证成已完成。
+    -- `.pm` 侧一律走受信探测，失信只报 PM-LINK Bad（不进入 R 矩阵，因此也
+    -- 进不了 repairDone 的 R2 Warn 白名单）。
+    -- 剥掉首个 @.pm@ 分量得到 @.pm@ 相对路径。不用 makeRelative：
+    -- 'isTrashSrcRel' 是**折大小写**判定的，@.PM\/trash\/…@ 合法，而
+    -- makeRelative 的词法比较区分大小写，那种形态会剥不掉、把绝对路径拼进去。
+    eOldEx <-
+      if isTrashSrcRel old
+        then probePmExists root (joinPath (drop 1 (splitDirectories old)))
+        else Right <$> existsAny (root </> old)
+    case eOldEx of
+      Left m -> pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]
+      Right oldEx -> do
+        newEx <- existsAny (root </> new)
+        case (oldEx, newEx) of
+          (True, False) -> pure [Finding "R1" Info (T.unpack oid <> ": rename 未执行 (" <> old <> " → " <> new <> ")，重跑原计划即可") ""]
+          (False, True) -> do
+            ok <- verifyFp (root </> new) fp
+            if ok
+              then pure [Finding "R2" Warn (T.unpack oid <> ": rename 已执行、Done 丢失 (" <> new <> ")") "--repair 将补记 Done"]
+              else pure [Finding "R2" Bad (T.unpack oid <> ": rename 目标存在但指纹不符 (" <> new <> ")，需人工核查") ""]
+          (True, True) -> pure [Finding "R3" Warn (T.unpack oid <> ": rename 未执行且目标被占 (" <> new <> ")" ) "解决占用后重新生成计划"]
+          (False, False) -> pure [Finding "R?" Bad (T.unpack oid <> ": 新旧路径都不存在，超出矩阵，需人工核查") ""]
   OpQuarantine victim sha _ -> do
     -- P3b-4 评审 #1：trash 路径推导与 Exec 共用（quarDirFor / quarTrashRel，
     -- ~d 位移隔离落 <planId>~displaced-N/，各推各的会在这里指错目录）。

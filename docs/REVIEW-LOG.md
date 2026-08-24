@@ -339,7 +339,30 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   `probeName`：属性与 `GetLastError` 改由 `cbits/pm_win.c` **单次 FFI** 取得
   ——十二轮指出两次独立 FFI 在 threaded RTS 下可能跨 OS 线程，而 GetLastError
   是 per-OS-thread 的；这是把假设变成事实，而不是登记残余。
-  测试 +3（184/184），并对本轮**每条**新屏障做突变验证（删屏障→用例转红）：
+  测试 +3（184/184），并对本轮新屏障做突变验证（删屏障→用例转红）：
   saveCatalog 解析、lock link count、doctor 受信探测各自单独转红，删掉
   `openStateRead` 的 link count 则 4 例同时转红（含被修好的侧缓存读侧用例）。
   归档见 `docs/reviews/2026-08-24-p3b-codex-review.md` 第十二轮章节。
+  （**十三轮更正**：当时写的"对**每条**新屏障做突变验证"过强——saveCatalog
+  那条只钉住"四条解析全部撤回"，单撤一条时其余解析仍会在 `.pm` junction 上
+  失败、用例照样绿；doctor 那条钉住 link count 但不钉"随后必须同句柄读"。
+  P3b-16 已为每一代快照单独构造文件级链接用例并复验单撤一条即转红。）
+- **P3b-16 十三轮收口（同日，codex 十三轮：1 major + 1 minor；仍判「未收敛」）**：
+  major 是 `OpRename` 的**源**——`Pm.Op.isTrashSrcRel` 明确允许它落在
+  `.pm/trash` 内（undo/组复位把隔离文件搬回原位，这是 pm 唯一允许 Op 触及
+  `.pm` 内部的形态），而 `Pm.Doctor` 对它仍用裸 `existsAny`：把
+  `.pm/trash/<pid>` 换成指向空目录的 junction，复位源被判成"不存在"，再让
+  用户目标的指纹相符，就得到 R2 Warn，而 `repairDone` 的白名单收 R2 Warn ——
+  `--repair` 随即补写**虚假的 Done**，把从未发生的复位认证成已完成。修复：
+  `.pm` 侧走 `probePmExists`，失信只报 `PM-LINK` Bad（因此进不了 R 矩阵，也
+  进不了 repairDone）；剥 `.pm` 前缀用分量剥离而非 `makeRelative`——
+  `isTrashSrcRel` 是折大小写判定的，`.PM/trash/…` 会让词法剥离失效。
+  **同轮做了类级修复**：`confinedTmp` / `confinedTrash` / 新增
+  `confinedUserPath` 从返回 `Bool` 改为**返回解析后的路径**，Exec 的 tmp 落位、
+  rename 两侧、quarantine 两侧一律只用返回值。返回 Bool 时调用方只能自己再拼
+  一次名字——"校验的字符串"与"操作的对象"又成了两次独立解析，这正是十一~
+  十三轮反复出现的同一形状；返回路径后调用方**无从**绕过。
+  测试 +3（187/187）并逐条突变验证：撤复位源受信探测 / 撤 `probePmExists` /
+  撤 status 失信退出码各自单独转红；另新增"每一代快照单独 symlink"的用例，
+  单撤 `.1` 一条解析即转红（闭合十三轮 minor）。
+  归档见 `docs/reviews/2026-08-24-p3b-codex-review.md` 第十三轮章节。
