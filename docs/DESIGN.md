@@ -465,6 +465,21 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - 结束打印**显式路径**的 git 步骤：`git add landscape portrait urban`（明确
   禁止 `git add -A`/`git add .`，防把 `.pm/` 等误提交）；pm 不执行 git（I9）。
 - **photos.json 不在 pm 写域**：类别判定/坐标是 AI 视觉判断，属 `/photo-inbox`。
+- **第九态 HELD「暂不同步」（P4-7，用户 2026-08-24 裁定）**：相册里有、但用户
+  决定**先不放进展示集**的照片。它**不是 vault 的第四个类目**——vault 的类目
+  就是展示集 git 仓里的目录，建目录等于把照片发出去，恰好与"不同步"相反。
+  因此它是一条**主库侧的本地决定**，存在主库 `.pm/vault-holds.json`（vault 仓
+  零改动）：`{name, sha, at, note}`。语义：
+  - `new` 键（对外契约、与 sync_photos.py 集合比对面）**不变**，HELD 是它的
+    注解子集；`newActive` = NEW − HELD 才是"待处理"，退出码按它算——用户已经
+    决定不同步的照片不该让 `pm status` 永远 exit 1。
+  - 记录里存**决定当时的 sha**：照片字节后来被换过（重修图/重导出）→ 决定
+    **失效**（`held_stale`），照片回到 NEW 让用户再看一眼。宁可多问一次，也
+    不让一张已经不是当初那张的照片被旧决定永久压住。
+  - `pm vault push` **拒收**已 HELD 的文件（先 `pm vault unhold`）；CLI 是
+    `pm vault hold|unhold <文件…>`，GUI 是分类卡上的第四个按钮。
+  - 决定不走两段式计划：它不碰任何照片字节，撤销就是 unhold。身份闸两道：
+    `computeVault` 的 `requireMain` + `writeHolds` 的 `requireWritable`（I11）。
 - **P3b-1 落锤（2026-08-23）**：CLI 形态 `pm vault push [--category C FILES…]`
   ——NEW 只推显式点名 + 显式类目的文件（无类目零猜测）；DRIFT 生成
   NEEDS-DECISION 项，裁决复用 `pm resolve --keep src`（§6.5 supersede，
@@ -479,7 +494,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P4-6 / pm 0.4.3 / 203 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
+  当前实现对应 **P4-7 / pm 0.4.4 / 206 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -574,6 +589,16 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   类目 / 带路径 name / 拒绝后 vault `.pm` 仍不存在补进闸用例；两处新判定各自
   突变转红（203/203）。另修一条与评审无关的存量警告：`Data.ByteString.hGetLine`
   自 bytestring-0.12 起废弃，改 `Data.ByteString.Char8.hGetLine`，GHC 警告归零。
+- **第二个写端点（P4-7）**：`POST /api/vault/hold`，体
+  `{"hold":[名…],"unhold":[名…]}`（两键均可省），同样在 `--writable` 之后、
+  同样 64 KiB 上限、同样在 `seVaultLock` 里 compute→校验→写一次持锁完成。
+  写域是**主库**的 `.pm/vault-holds.json`（不是 vault 仓）；校验器
+  `holdRequest` 与 CLI `pm vault hold|unhold` 共用：标记的必须当前是 NEW 且
+  本轮读取稳定（要记 sha），撤销的必须在名单里，同一名字不能同时标记与撤销，
+  fail-closed 且一次返回全部错误。`GET /api/vault/new` 相应带上 `held` /
+  `heldStale`，页面把决定回显成第四个按钮（选中态是灰色而非强调色——它不是
+  一个"去处"）。提交顺序：先落 hold/unhold，再生成推送计划（服务端拒收 held
+  的 push，撤销必须先生效）。
 - **打包与发布（P4-6）**：`cargo tauri build --target x86_64-pc-windows-msvc`
   产出 NSIS 安装包（`installMode: currentUser`，不需要 UAC），`pm.exe` 作为
   Tauri **sidecar**（`externalBin`）随安装包落在 `pm-ui.exe` 同目录——因此 Rust
@@ -661,6 +686,7 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |
 | GUI 工具链 | 2026-08-24 改判 Rust/Tauri：cargo、tauri-cli、WebView2、MSVC 本机均已在，零安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
 | 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable`（只有 GUI 拉起时置位）才开唯一的生成计划端点、写域限 vault 的 `.pm`（§11）。同用户的进程若拿到 token 也能打该端点——本节威胁模型不防同机同用户恶意进程；它至多让磁盘上多一个**计划文件**，执行仍需人在终端 `pm apply` |
+| 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha：字节一变即失效并回到 NEW；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |
 | 相册↔成片 1 个例外文件 | doctor 报告单列，结合 inbox-origin 判定（I7），用户裁决 |

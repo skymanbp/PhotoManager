@@ -41,6 +41,7 @@ module Pm.Config
   , resolvePmPath
   , readSideCache
   , writeSideCache
+  , writePmState
   ) where
 
 import Control.Exception (IOException, bracket, try)
@@ -462,6 +463,19 @@ writeCacheFile root sub name bytes = do
   m <- resolveUnder root (".pm" </> sub </> name)
   case m of
     Nothing -> pure (Left (untrustedMsg (pmDir root </> sub </> name)))
+    Just fp -> Right <$> writeJsonReplacing fp bytes
+
+-- | @.pm@ 下**单个** pm 自有状态文件的可信覆盖写，'readPmState' 的对偶。
+-- 侧缓存是成对的（catalog+meta，走 'writeSideCache'）；用户**决定**类的单文件
+-- （vault 的「暂不同步」名单）走这里：完整路径 'resolveUnder' → 独占创建 tmp
+-- → flush → no-replace rename，与 'writeCacheFile' 同款。调用方须先过
+-- 'requireWritable'（I11 + 身份）。
+writePmState :: FilePath -> FilePath -> BSL.ByteString -> IO (Either String ())
+writePmState root rel bytes = do
+  createDirectoryIfMissing True (pmDir root)
+  m <- resolveUnder root (".pm" </> rel)
+  case m of
+    Nothing -> pure (Left (untrustedMsg (pmDir root </> rel)))
     Just fp -> Right <$> writeJsonReplacing fp bytes
 
 writeJsonReplacing :: FilePath -> BSL.ByteString -> IO ()

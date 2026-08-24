@@ -25,6 +25,7 @@ import Pm.Op
 import Pm.Plan
 import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.Vault
+import Pm.VaultCmd (runVaultHold)
 import TestUtil (t0)
 
 vaultTests :: TestTree
@@ -53,10 +54,64 @@ vaultTests =
     , testCase "P3b-4 #6 bindExecRoot：UUID 多重命中/role 不符 拒绝绑定" caseBindAmbiguity
     , testCase "P3b-4 #4 缓存身份绑定：vault 换路径后 (size,mtime) 巧合不复用 sha" caseCacheIdentitySwap
     , testCase "P3b-4 #4 racy 判据 statHitStable：同刻度窗口不信任缓存" caseRacyGuard
+    , testCase "P4-7 hold：NEW 标暂不同步 → 移出 newActive、exit 0、push 拒收；非法操作 exit 2；unhold 恢复" caseHoldRoundTrip
+    , testCase "P4-7 hold：照片字节换了 → 决定失效，回到 NEW 并报 stale" caseHoldStale
     ]
 
 h :: Char -> Text
 h c = T.replicate 64 (T.singleton c)
+
+-- | P4-7「暂不同步」：决定只写主库 .pm，vault 与照片零改动，可撤销。
+caseHoldRoundTrip :: IO ()
+caseHoldRoundTrip = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  mkMain root
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  c1 <- runVaultStatus False cfg
+  c1 @?= 1 -- 一张 NEW → 有事可做
+  -- 非 NEW 的名字不能标；不在名单里的不能撤
+  runVaultHold True ["ghost.jpg"] cfg >>= (@?= 2)
+  runVaultHold False ["a.jpg"] cfg >>= (@?= 2)
+  runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
+  c2 <- runVaultStatus False cfg
+  c2 @?= 0 -- 已决定不同步 → 不再报"有事可做"
+  er <- computeVault True cfg
+  case er of
+    Left (m, _) -> assertFailure ("computeVault: " <> m)
+    Right r -> do
+      map fst (vrHeld r) @?= ["a.jpg"]
+      newActive r @?= []
+      vdNew (vrDiff r) @?= ["a.jpg"] -- 六态集合是对外契约，不因决定而变
+      case checkAssignments r [("landscape", "a.jpg")] of
+        [] -> assertFailure "被 hold 的文件不该能直接 push"
+        (e : _) -> assertBool ("错误应说明暂不同步: " <> e) ("暂不同步" `isInfixOf` e)
+  -- vault 侧零改动
+  doesFileExist (vdir </> "landscape" </> "a.jpg") >>= (@?= False)
+  runVaultHold False ["a.jpg"] cfg >>= (@?= 0)
+  runVaultStatus False cfg >>= (@?= 1)
+
+-- | 决定记的是「当时那张」：字节换了就失效，照片回到 NEW（宁可多问一次）。
+caseHoldStale :: IO ()
+caseHoldStale = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  mkMain root
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
+  writeF (root </> "相册" </> "a.jpg") "AAAA" -- 重修图/重导出
+  er <- computeVault True cfg
+  case er of
+    Left (m, _) -> assertFailure ("computeVault: " <> m)
+    Right r -> do
+      vrHeld r @?= []
+      newActive r @?= ["a.jpg"]
+      map fst (vrHeldStale r) @?= ["a.jpg"]
+  runVaultStatus False cfg >>= (@?= 1)
 
 -- ─── 纯核心 ─────────────────────────────────────────────────────────────────
 
@@ -161,6 +216,8 @@ sampleJson =
     sampleDiff
     [("p.png", "相册"), ("q.png", "landscape")]
     [("w.jpg", "urban")]
+    [("b.jpg", h 'b')]
+    [("gone.jpg", "已不在 NEW")]
 
 caseJsonShape :: IO ()
 caseJsonShape = do
@@ -180,6 +237,8 @@ caseJsonShape = do
               .= [toJSON [toJSON ("a.jpg" :: String), toJSON (["landscape", "portrait"] :: [String])]]
           , "unpushable" .= [["p.png", "相册"] :: [String], ["q.png", "landscape"]]
           , "unstable" .= [["w.jpg", "urban"] :: [String]]
+          , "held" .= [["b.jpg", T.unpack (T.take 16 (h 'b'))] :: [String]]
+          , "held_stale" .= [["gone.jpg", "已不在 NEW"] :: [String]]
           ]
   decode sampleJson @?= Just expected
 
@@ -199,6 +258,8 @@ caseJsonKeyOrder = do
         , "\"duplicate\""
         , "\"unpushable\""
         , "\"unstable\""
+        , "\"held\""
+        , "\"held_stale\""
         ]
       posOf needle = length (fst (breakOn needle s))
       breakOn needle hay = go [] hay

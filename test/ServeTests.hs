@@ -54,6 +54,7 @@ serveTests =
     , testCase "P4-5 POST /api/vault/push-plan：只读 serve → 403；坏 JSON/空指派/非法类目/非 NEW → 400；超大体 → 413" caseServePushPlanGuards
     , testCase "P4-5 POST /api/vault/push-plan：合法指派 → 计划落到 <vault>/.pm/plans，可经 loadPlan 装回，项与指派一致" caseServePushPlanOk
     , testCase "P4-6 POST /api/vault/push-plan：DRIFT-only（无 NEW）空指派 → 纯裁决计划；照片零改动" caseServePushPlanDrift
+    , testCase "P4-7 POST /api/vault/hold：只读 403；标记后 new 移出、held 列出；同名同时标与撤 400；撤销恢复；被 hold 的不能 push" caseServeHold
     ]
 
 tok :: BS.ByteString
@@ -349,7 +350,7 @@ caseServeVaultStatusBytes = withSystemTempDirectory "pm-serve" $ \dir -> do
   er <- computeVault True cfg
   expected <- case er of
     Left (m, _) -> assertFailure ("computeVault 失败: " <> m)
-    Right r -> pure (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r) <> "\n")
+    Right r -> pure (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r) (vrHeld r) (vrHeldStale r) <> "\n")
   env <- mkEnv cfg
   flip runSession (serveApp env) $ do
     r <- getReq "/api/vault/status" [] tok
@@ -492,6 +493,49 @@ caseServePushPlanDrift = withSystemTempDirectory "pm-serve" $ \dir -> do
   -- 只生成计划：两侧字节都没动
   BS.readFile vaultCopy >>= (@?= otherBytes)
   BS.readFile (root </> "相册" </> "a.jpg") >>= (@?= jpgBytes)
+
+-- | P4-7：第二个写端点。决定只落主库 @.pm/vault-holds.json@——照片与 vault
+-- 零改动；只读 serve 拒绝；标记后该名字从 @/api/vault/new@ 的 new 移到 held，
+-- 且不再能 push；撤销后回到 new。去掉 seWritable 闸或 holdRequest 的任一条
+-- 判定，本例转红。
+caseServeHold :: IO ()
+caseServeHold = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, jpgBytes, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  envR <- mkEnv cfg
+  flip runSession (serveApp envR) $ do
+    r <- postReq "/api/vault/hold" "{\"hold\":[\"a.jpg\"]}"
+    assertStatus 403 r
+  doesFileExist (root </> ".pm" </> "vault-holds.json") >>= (@?= False)
+  envW <- mkEnvW cfg
+  flip runSession (serveApp envW) $ do
+    r0 <- getReq "/api/vault/new" [] tok
+    liftIO' (arrLen (field ["new"] (decodeBody r0)) @?= Just 1)
+    -- 同一名字同时标记与撤销：整体拒
+    rBad <- postReq "/api/vault/hold" "{\"hold\":[\"a.jpg\"],\"unhold\":[\"a.jpg\"]}"
+    assertStatus 400 rBad
+    -- 不是 NEW 的名字：拒
+    rGhost <- postReq "/api/vault/hold" "{\"hold\":[\"ghost.jpg\"]}"
+    assertStatus 400 rGhost
+    r1 <- postReq "/api/vault/hold" "{\"hold\":[\"a.jpg\"]}"
+    assertStatus 200 r1
+    liftIO' (arrLen (field ["held"] (decodeBody r1)) @?= Just 1)
+    r2 <- getReq "/api/vault/new" [] tok
+    liftIO' $ do
+      arrLen (field ["new"] (decodeBody r2)) @?= Just 0
+      arrLen (field ["held"] (decodeBody r2)) @?= Just 1
+    -- 已决定暂不同步 → 生成计划端点拒收
+    r3 <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"a.jpg\",\"category\":\"portrait\"}]}"
+    assertStatus 400 r3
+    r4 <- postReq "/api/vault/hold" "{\"unhold\":[\"a.jpg\"]}"
+    assertStatus 200 r4
+    r5 <- getReq "/api/vault/new" [] tok
+    liftIO' (arrLen (field ["new"] (decodeBody r5)) @?= Just 1)
+  -- 照片与 vault 类目目录零改动
+  BS.readFile (root </> "相册" </> "a.jpg") >>= (@?= jpgBytes)
+  doesFileExist (vdir </> "portrait" </> "a.jpg") >>= (@?= False)
 
 caseServePortRange :: IO ()
 caseServePortRange = do

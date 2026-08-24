@@ -84,6 +84,10 @@ h1 { font-size: 1.35rem; margin: 0; } h2.sec { font-size: 1rem; margin: 1.4rem 0
 .seg { display: flex; gap: .3rem; }
 .seg button { flex: 1; font: inherit; font-size: .8rem; padding: .3rem 0; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
 .seg button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.seg { flex-wrap: wrap; }
+.seg button.hold { flex-basis: 100%; margin-top: .3rem; color: var(--muted); }
+.seg button.hold.on { background: var(--muted); color: var(--panel); border-color: var(--muted); }
+.gcard.done:has(.seg button.hold.on) { border-color: var(--muted); }
 
 /* plans */
 .split { display: grid; grid-template-columns: minmax(560px, 1fr) minmax(320px, 1fr); gap: 1rem; align-items: start; }

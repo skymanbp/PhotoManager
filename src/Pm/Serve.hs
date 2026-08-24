@@ -49,9 +49,10 @@ import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BSL
 import Data.Char (isHexDigit)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Time (UTCTime)
+import Data.Time (UTCTime, getCurrentTime)
 import Network.HTTP.Types
 import Network.Socket
 import Network.Wai
@@ -66,7 +67,9 @@ import Pm.Config (Config (..), pmSubPlans, requirePmTrusted, requireWritable, un
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPlan, savePlan)
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
-import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, planCategories, renderVaultJson, vaultPushItems)
+import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newActive, planCategories, renderVaultJson, vaultPushItems)
+import Pm.VaultCmd (holdRequest)
+import Pm.VaultHold (VaultHold (..), readHolds, writeHolds)
 import Pm.Win (resolveUnder)
 
 data ServeOpts = ServeOpts
@@ -228,7 +231,7 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
           ( responseLBS
               status200
               (("Content-Type", "application/json; charset=utf-8") : corsHdrs)
-              (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r) <> "\n")
+              (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r) (vrHeld r) (vrHeldStale r) <> "\n")
           )
   -- P4-2：分类页要按 sha 拉缩略图，而 vault/status 的 "new" 只有文件名；
   -- 这里把 NEW 名字配上主库 catalog 的 Entry（sha/size），仍是只读。
@@ -244,9 +247,17 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
               [ "categories" .= fixedCategories
               , "new"
                   .= [ object ["name" .= n, "sha" .= fmap enSha me, "size" .= fmap enSize me]
-                     | n <- vdNew (vrDiff r)
+                     | n <- newActive r
                      , let me = Map.lookup n (vrSrcMeta r)
                      ]
+              , -- 第九态（P4-7）：已决定「暂不同步」的 NEW。单列出来，页面把
+                -- 决定回显成第四个按钮，随时能改回某个类目。
+                "held"
+                  .= [ object ["name" .= n, "sha" .= fmap enSha me, "size" .= fmap enSize me]
+                     | (n, _) <- vrHeld r
+                     , let me = Map.lookup n (vrSrcMeta r)
+                     ]
+              , "heldStale" .= [object ["name" .= n, "why" .= w] | (n, w) <- vrHeldStale r]
               , -- 页面要知道「没有 NEW 但有 DRIFT」也能出纯裁决计划（二十轮 minor）
                 "drift" .= [object ["name" .= n, "category" .= c] | (n, c, _, _) <- vdDrift (vrDiff r)]
               ]
@@ -307,6 +318,40 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
                                             , "gitSteps" .= gitStepsLines (plRootPath plan) (plId plan) (planCategories plan)
                                             ]
                                         )
+  -- P4-7：第二个写端点——记录/撤销「暂不同步」的决定。写域是**主库**的
+  -- @.pm/vault-holds.json@（vault 仓与照片零改动），校验与 CLI
+  -- `pm vault hold|unhold` 共用 'holdRequest'。同样在 'seVaultLock' 里
+  -- compute→校验→写一次持锁完成。
+  ("POST", ["api", "vault", "hold"])
+    | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝记录决定"
+    | otherwise -> do
+        body <- readBodyCapped req
+        case body of
+          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
+          Just raw -> case Aeson.eitherDecodeStrict' raw of
+            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
+            Right (HoldReq hs us) -> withMVar (seVaultLock env) $ \_ -> do
+              er <- computeVault True cfg
+              case er of
+                Left (msg, code) -> err (if code == 2 then status404 else status500) msg
+                Right r -> do
+                  let root = cfgMainPath cfg
+                  eholds <- readHolds root
+                  case eholds of
+                    Left m -> err status500 m
+                    Right olds -> do
+                      now <- getCurrentTime
+                      case holdRequest r olds hs us now of
+                        Left errs -> jsonR status400 [] (object ["error" .= ("决定不合法" :: String), "details" .= errs])
+                        Right kept -> do
+                          w <- writeHolds root kept
+                          case w of
+                            Left m -> err status403 ("主库 .pm 不可写: " <> m)
+                            Right () ->
+                              jsonR
+                                status200
+                                []
+                                (object ["held" .= map vhName kept, "count" .= length kept])
   ("GET", ["api", "plans"]) -> do
     (ps, errs) <- listPlans (cfgMainPath cfg)
     (vps, verrs) <- maybe (pure ([], [])) listPlans (cfgVaultPath cfg)
@@ -363,6 +408,13 @@ instance Aeson.FromJSON PushPlanReq where
 
 instance Aeson.FromJSON PushAssign where
   parseJSON = Aeson.withObject "assignment" $ \o -> PushAssign <$> o Aeson..: "name" <*> o Aeson..: "category"
+
+-- | @{"hold":["a.jpg"],"unhold":["b.jpg"]}@（两个键都可缺省为空）
+data HoldReq = HoldReq [FilePath] [FilePath]
+
+instance Aeson.FromJSON HoldReq where
+  parseJSON = Aeson.withObject "hold" $ \o ->
+    HoldReq <$> (fromMaybe [] <$> o Aeson..:? "hold") <*> (fromMaybe [] <$> o Aeson..:? "unhold")
 
 validSha :: Text -> Bool
 validSha s = T.length s == 64 && T.all isHexDigit s

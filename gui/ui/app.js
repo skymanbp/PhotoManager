@@ -76,21 +76,31 @@
     // vault（用完整差异接口，"差哪些"）
     try {
       const v = await getJson("/api/vault/status");
-      const diff = v.new.length + v.missing.length + v.renamed.length + v.drift.length + v.unstable.length;
+      // held 是 new 的注解子集（六态集合不变）：算"还差多少"时要扣掉
+      const held = (v.held || []).length;
+      const diff = v.new.length - held + v.missing.length + v.renamed.length + v.drift.length + v.unstable.length;
       const chip = $("#vault-chip"); chip.textContent = diff === 0 ? "已同步" : `${diff} 项差异`; chip.className = "chip " + (diff === 0 ? "ok" : "warn");
       $("#vault-summary").textContent = `相册 ${v.source_count} 张 ↔ vault ${v.vault_count} 张 · ${v.vault_dir}`;
       const pills = $("#vault-pills"); pills.innerHTML = "";
-      for (const [k, label] of [["ok", "一致"], ["new", "NEW 待推送"], ["missing", "vault 多出"], ["renamed", "改名"], ["drift", "内容漂移"], ["duplicate", "重复"], ["unpushable", "不可推"], ["unstable", "读取不稳"]]) {
-        const p = el("span", "pill" + (k !== "ok" && v[k].length ? " hot" : ""), label); p.appendChild(el("b", null, String(v[k].length))); pills.appendChild(p);
+      for (const [k, label] of [["ok", "一致"], ["new", "NEW 待推送"], ["held", "暂不同步"], ["missing", "vault 多出"], ["renamed", "改名"], ["drift", "内容漂移"], ["duplicate", "重复"], ["unpushable", "不可推"], ["unstable", "读取不稳"]]) {
+        const arr = v[k] || [];
+        // NEW 的数字扣掉已决定不同步的；held 自己不算"热"（它是已经做过的决定）
+        const n = k === "new" ? arr.length - held : arr.length;
+        const p = el("span", "pill" + (k !== "ok" && k !== "held" && n ? " hot" : ""), label); p.appendChild(el("b", null, String(n))); pills.appendChild(p);
       }
       const lists = $("#vault-lists"); lists.innerHTML = "";
       const mk = (title, arr, f) => { if (!arr.length) return; const d = el("details"); d.appendChild(el("summary", null, `${title}（${arr.length}）`)); const ul = el("ul"); for (const x of arr) ul.appendChild(el("li", null, f(x))); d.appendChild(ul); lists.appendChild(d); };
-      mk("NEW —— 相册有、vault 没有（去「分类推送」）", v.new, (n) => n);
+      const heldNames = new Set((v.held || []).map(([n]) => n));
+      mk("NEW —— 相册有、vault 没有（去「分类推送」）", v.new.filter((n) => !heldNames.has(n)), (n) => n);
+      mk("暂不同步 —— 你决定先不放进 vault（随时可改）", v.held || [], ([n]) => n);
+      mk("暂不同步 · 决定已失效（回到 NEW）", v.held_stale || [], ([n, why]) => n + "：" + why);
       mk("MISSING —— vault 有、相册没有（只报告，决定权在你）", v.missing, ([n, c]) => c + "/" + n);
       mk("RENAME —— 内容相同、名字不同（只报告）", v.renamed, ([n, m, c]) => `${n} ≡ ${c}/${m}`);
       mk("DRIFT —— 同名但内容不同（推送时出裁决计划）", v.drift, ([n, c]) => c + "/" + n);
       mk("UNSTABLE —— 读取期间在变化，稍后重试", v.unstable, ([n, loc]) => loc + "/" + n);
-      if (v.new.length) steps.push([`${v.new.length} 张 NEW 待分类推送`, "去「分类推送」", "vault"]);
+      const newActive = v.new.length - held;
+      if (newActive) steps.push([`${newActive} 张 NEW 待分类推送`, "去「分类推送」", "vault"]);
+      if ((v.held_stale || []).length) steps.push([`${v.held_stale.length} 条「暂不同步」已失效（照片换过）`, "去「分类推送」重新决定", "vault"]);
       if (v.drift.length) steps.push([`${v.drift.length} 张 DRIFT 待裁决`, "生成推送计划后 pm resolve"]);
     } catch (e) { $("#vault-chip").textContent = "未配置"; $("#vault-chip").className = "chip"; $("#vault-summary").textContent = e.message; }
     // 下一步
@@ -104,7 +114,9 @@
   let thumbUrls = [];
   let vaultGen = 0;   // single-flight 代号：新一轮作废旧一轮
   let vaultDrift = 0; // 没有 NEW 但有 DRIFT 时，也能出纯裁决计划
-  const assign = new Map(); // name -> category
+  let heldInitial = new Set(); // 打开这一页时盘上已有的「暂不同步」决定
+  const HOLD = "__hold__";     // 第四个按钮的哨兵值——它不是 vault 类目
+  const assign = new Map(); // name -> category | HOLD
   async function shrink(blob) {
     // 原图动辄 10–75 MB：交给解码器按目标尺寸缩放，再转成小 JPEG，避免 15 张全分辨率位图撞爆 WebView。
     // 失败返回 null（挂占位符）：回退到原图 = 把已修掉的那条内存路径重新引回来（codex 二十轮 minor）。
@@ -116,10 +128,21 @@
       return await new Promise((res) => cv.toBlob((b) => res(b), "image/jpeg", 0.85));
     } catch { return null; } finally { if (bmp) bmp.close(); }
   }
+  // 与盘上已有决定的差集：只把「改了的」发给服务端。
+  function holdOps() {
+    const now = new Set([...assign.entries()].filter(([, c]) => c === HOLD).map(([n]) => n));
+    return {
+      hold: [...now].filter((n) => !heldInitial.has(n)),
+      unhold: [...heldInitial].filter((n) => !now.has(n)),
+      count: now.size,
+    };
+  }
   function updateProgress(total) {
-    $("#assign-progress").textContent = `已选 ${assign.size} / ${total}` + (vaultDrift ? ` · ${vaultDrift} 项 DRIFT 待裁决` : "");
+    const ops = holdOps();
+    const cats = [...assign.values()].filter((c) => c !== HOLD).length;
+    $("#assign-progress").textContent = `已定 ${assign.size} / ${total}（分类 ${cats} · 暂不同步 ${ops.count}）` + (vaultDrift ? ` · ${vaultDrift} 项 DRIFT 待裁决` : "");
     // DRIFT-only 的 vault（没有 NEW）也要能出纯裁决计划，否则按钮永远灰着（二十轮 minor）。
-    $("#btn-plan").disabled = assign.size === 0 && vaultDrift === 0;
+    $("#btn-plan").disabled = cats === 0 && vaultDrift === 0 && !ops.hold.length && !ops.unhold.length;
   }
   async function loadVault() {
     // single-flight：连按数字键 2 会并发起多轮，旧轮在新轮 revoke 之后
@@ -127,27 +150,33 @@
     const gen = ++vaultGen;
     const grid = $("#vault-grid"); grid.innerHTML = "";
     for (const u of thumbUrls) URL.revokeObjectURL(u); thumbUrls = [];
-    assign.clear(); vaultDrift = 0; $("#plan-result").className = "banner hidden";
+    assign.clear(); vaultDrift = 0; heldInitial = new Set(); $("#plan-result").className = "banner hidden";
     let meta;
     try { meta = await getJson("/api/vault/new"); } catch (e) { grid.appendChild(el("div", "muted", "vault 未配置或不可用：" + e.message)); updateProgress(0); return; }
     if (gen !== vaultGen) return;
     vaultDrift = (meta.drift || []).length;
-    updateProgress(meta.new.length);
-    if (!meta.new.length) {
+    heldInitial = new Set((meta.held || []).map((e) => e.name));
+    for (const n of heldInitial) assign.set(n, HOLD); // 回显盘上已有的决定
+    const items = (meta.new || []).concat(meta.held || []);
+    updateProgress(items.length);
+    if (!items.length) {
       grid.appendChild(el("div", "muted", vaultDrift
         ? `没有待推送的 NEW；但有 ${vaultDrift} 项 DRIFT（同名、内容不同）——点「生成推送计划」出一份纯裁决计划，再在终端 pm resolve。`
         : "没有待推送的 NEW 照片——相册与 vault 已一致。"));
       return;
     }
     const cards = [];
-    for (const e of meta.new) {
+    for (const e of items) {
       const card = el("div", "gcard");
       const ph = el("div", "ph", "加载中…"); card.appendChild(ph);
       const body = el("div", "body"); body.appendChild(el("div", "name", e.name)); body.appendChild(el("div", "meta", e.size != null ? mib(e.size) : ""));
       const seg = el("div", "seg");
-      for (const c of meta.categories) {
-        const b = el("button", null, c);
-        b.onclick = () => { assign.set(e.name, c); for (const x of seg.children) x.classList.toggle("on", x === b); card.classList.add("done"); updateProgress(meta.new.length); };
+      // 三个 vault 类目 + 第四个「暂不同步」：后者不是 vault 目录，只是主库里
+      // 的一条本地决定，随时能改回类目。
+      for (const c of meta.categories.concat([HOLD])) {
+        const b = el("button", c === HOLD ? "hold" : null, c === HOLD ? "暂不同步" : c);
+        b.onclick = () => { assign.set(e.name, c); for (const x of seg.children) x.classList.toggle("on", x === b); card.classList.add("done"); updateProgress(items.length); };
+        if (assign.get(e.name) === c) { b.classList.add("on"); card.classList.add("done"); }
         seg.appendChild(b);
       }
       body.appendChild(seg); card.appendChild(body); grid.appendChild(card);
@@ -168,16 +197,31 @@
       } catch (err) { ph.textContent = "无缩略图：" + err.message; }
     }
   }
+  const post = (path, body) => req(path, { method: "POST", headers: { Authorization: "Bearer " + api.token, "Content-Type": "application/json" }, body: JSON.stringify(body) });
   async function makePlan() {
     const btn = $("#btn-plan"); btn.disabled = true;
     const out = $("#plan-result");
-    const body = { assignments: [...assign.entries()].map(([name, category]) => ({ name, category })) };
+    const lines = [];
     try {
-      const r = await req("/api/vault/push-plan", { method: "POST", headers: { Authorization: "Bearer " + api.token, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const j = await r.json();
-      if (!r.ok) { out.className = "banner bad"; out.textContent = "未生成计划：" + (j.error || r.status) + (j.details ? "\n" + j.details.join("\n") : ""); btn.disabled = false; return; }
+      // 1) 先落「暂不同步」的增删：服务端拒收 held 文件的 push，撤销必须先生效
+      const ops = holdOps();
+      if (ops.hold.length || ops.unhold.length) {
+        const rh = await post("/api/vault/hold", { hold: ops.hold, unhold: ops.unhold });
+        const jh = await rh.json();
+        if (!rh.ok) { out.className = "banner bad"; out.textContent = "决定未保存：" + (jh.error || rh.status) + (jh.details ? "\n" + jh.details.join("\n") : ""); btn.disabled = false; return; }
+        lines.push(`已记下决定：暂不同步 +${ops.hold.length} / 恢复 ${ops.unhold.length}（名单共 ${jh.count} 条；只写主库 .pm，vault 与照片没动）`);
+      }
+      // 2) 再按类目生成推送计划（没有类目指派、也没有 DRIFT 就跳过）
+      const assignments = [...assign.entries()].filter(([, c]) => c !== HOLD).map(([name, category]) => ({ name, category }));
+      if (assignments.length || vaultDrift) {
+        const r = await post("/api/vault/push-plan", { assignments });
+        const j = await r.json();
+        if (!r.ok) { out.className = "banner bad"; out.textContent = (lines.join("\n") + "\n未生成计划：" + (j.error || r.status) + (j.details ? "\n" + j.details.join("\n") : "")).trim(); btn.disabled = false; return; }
+        lines.push(`已生成推送计划 ${j.plan.id}（${j.plan.items.length} 项）——只写了计划文件，照片未动。\n执行：${j.apply}\n计划文件：${j.path}` + (j.gitSteps.length ? "\n执行后的 git 步骤：\n" + j.gitSteps.join("\n") : ""));
+      }
       out.className = "banner ok";
-      out.textContent = `已生成推送计划 ${j.plan.id}（${j.plan.items.length} 项）——只写了计划文件，照片未动。\n执行：${j.apply}\n计划文件：${j.path}` + (j.gitSteps.length ? "\n执行后的 git 步骤：\n" + j.gitSteps.join("\n") : "");
+      out.textContent = lines.length ? lines.join("\n\n") : "没有需要保存的改动。";
+      await loadVault();
     } catch (e) { out.className = "banner bad"; out.textContent = "请求失败：" + e.message; btn.disabled = false; }
   }
 

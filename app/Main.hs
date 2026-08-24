@@ -15,6 +15,7 @@ import Pm.Serve (ServeOpts (..), runServe)
 import Pm.Status (StatusOpts (..), runStatus)
 import Pm.Ui (runUi)
 import Pm.Vault (runVaultPush, runVaultStatus)
+import Pm.VaultCmd (runVaultHold)
 import Pm.Versions (runVersions)
 import Pm.Win (setupConsole)
 
@@ -32,6 +33,7 @@ data Cmd
   | CmdClean GoOpts -- clean staging
   | CmdVaultStatus Bool -- --json（sync_photos.py 兼容输出）
   | CmdVaultPush GoOpts (Maybe String) [FilePath] -- --category + FILES
+  | CmdVaultHold Bool [FilePath] -- 暂不同步（True）/ 恢复（False）；只写主库 .pm
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
   | CmdVersions -- 版本组/精确重复报告（只读）
   | CmdServe ServeOpts -- 127.0.0.1 JSON API（缺省只读；--writable 才开生成计划端点）
@@ -78,6 +80,7 @@ run (CmdBackup (BackupRun go mworkers)) = withCfg (runBackupRun go mworkers)
 run (CmdClean go) = withCfg (runClean go)
 run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
 run (CmdVaultPush go mcat fs) = withCfg (runVaultPush (savePlanAndMaybeRun go) mcat fs)
+run (CmdVaultHold hold fs) = withCfg (runVaultHold hold fs)
 run (CmdNames go) = withCfg (runNames (savePlanAndMaybeRun go))
 run CmdVersions = withCfg runVersions
 run (CmdServe o) = withCfg (\cfg -> runServe cfg o)
@@ -91,7 +94,7 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    infoOption "pm 0.4.3 (P4-6)" (long "version" <> help "打印版本")
+    infoOption "pm 0.4.4 (P4-7)" (long "version" <> help "打印版本")
   backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
   vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =
@@ -173,6 +176,18 @@ parserInfo =
                     <*> many (strArgument (metavar "FILES..." <> help "要推送的 NEW 文件名（相册内文件名，须配 --category）"))
                 )
                 (progDesc "NEW→拷入 vault 类目；DRIFT→生成裁决计划（resolve --keep src 走 supersede）；结束打印显式 git 步骤（pm 不执行 git，I9）")
+            )
+          <> command
+            "hold"
+            ( info
+                (CmdVaultHold True <$> many (strArgument (metavar "FILES..." <> help "决定暂不同步的 NEW 文件名")))
+                (progDesc "把 NEW 标成「暂不同步」：只写主库 .pm 的一条本地决定，vault 与照片零改动，随时 unhold 恢复")
+            )
+          <> command
+            "unhold"
+            ( info
+                (CmdVaultHold False <$> many (strArgument (metavar "FILES..." <> help "要恢复待同步的文件名")))
+                (progDesc "撤销「暂不同步」，文件回到 NEW")
             )
       )
   doctorP =

@@ -554,3 +554,17 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   另一条用例都保持绿——单点粒度成立。**更正**：上一轮我报"警告 0"时读的是
   `tail -45` 截断过的日志，实际存量一条 `-Wdeprecations`（`BS.hGetLine`），
   本轮已修并改用完整日志核对。
+- **P4-7（pm 0.4.4，206/206，GHC 警告 0）——第九态 HELD「暂不同步」**：用户在
+  v0.4.3 发布后裁定"这 15 张暂时先不同步，另给一个专门放决定不同步的照片的
+  分类"。设计要点：它**不能**是 vault 的第四个类目（vault 类目 = 展示集 git 仓
+  的目录，建目录等于把照片发出去），因此是主库 `.pm/vault-holds.json` 里的
+  本地决定；`new` 键不动（对外契约），`newActive` 扣掉 HELD 并据此算退出码；
+  记录存决定当时的 sha，字节一变即失效回到 NEW；`checkAssignments` 拒收 held
+  文件。新模块 `Pm.VaultHold`（状态 + 纯分类器 `splitHeld`）与 `Pm.VaultCmd`
+  （命令层——`Pm.Vault` 触及 750 行预算，同 `Pm.BackupCmd` 先例），`Pm.Config`
+  加 `writePmState`（`readPmState` 的对偶：完整路径解析 → 独占 tmp → flush →
+  no-replace rename）。第二个写端点 `POST /api/vault/hold` 与 CLI 共用
+  `holdRequest`。突变四道：`newActive` 不再扣 HELD → 往返用例 + 端点用例转红；
+  `splitHeld` 不比对 sha → 失效用例转红；端点去 `seWritable` 闸 → 端点用例转红；
+  `checkAssignments` 不拒 held → 往返 + 端点用例转红。**待 codex 二十一轮评审**；
+  真实库那 15 张的 hold 在 GO 之后才执行。
