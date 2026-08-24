@@ -88,6 +88,10 @@ stack install             # 把 pm 放进 %APPDATA%\local\bin
   计划 Op、journal Op 与 Done trashRel、manifest 记录；内核 relOk 换同谓词——
   `\evil`/`c:evil` 在 Windows `</>` 下是整体替换；`.pm` 内部目标拒绝，undo 的
   `.pm/trash/` rename 源除外；158/158 测试）
+- P3b-10 ✅ codex 七轮复审收口（Windows 别名与 junction：`.PM`/`.pm.` 折叠剥除
+  后再判、`canonicalizePath` 限域进 trash empty 唯一 unlink 与 Exec 三个落位点、
+  trash 遍历不跟随 reparse point、catalog `enPath` 校验、undo/pendingTmp 补验；
+  路径用例拆出 PathGuardTests；162/162 测试）
 - P4 GUI（C#，经 pm serve JSON API）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 

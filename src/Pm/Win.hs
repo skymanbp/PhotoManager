@@ -27,20 +27,24 @@ module Pm.Win
   ( setupConsole
   , flushHandleToDisk
   , moveFileNoReplace
+  , pathUnder
   , suppressCriticalErrorDialogs
   , DriveKind (..)
   , listCandidateDrives
   , volumeFsType
   ) where
 
-import Control.Exception (SomeException, catch)
+import Control.Exception (SomeException, catch, try)
 import Control.Monad (when)
 import Data.Bits (testBit)
+import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word32)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Ptr (Ptr, nullPtr)
+import System.Directory (canonicalizePath)
+import System.FilePath (splitDirectories)
 import System.IO
 import qualified System.Win32.Console as Win32Console
 import qualified System.Win32.File as Win32File
@@ -71,6 +75,31 @@ flushHandleToDisk h = do
 -- rename primitive Exec-side code may use (invariant I5).
 moveFileNoReplace :: FilePath -> FilePath -> IO ()
 moveFileNoReplace src dst = Win32File.moveFileEx src (Just dst) 0
+
+-- | @pathUnder base p@ = @p@ **解析后**是否严格落在 @base@ 之内。
+--
+-- P3b-10（七轮复审 major，实测）：词法校验（'Pm.Op.relPathOk'）看不见
+-- junction\/symlink——探针证实 @.pm\/trash\/link@ 指向库外目录时
+-- @doesDirectoryExist@ 为 True、@listDirectory@ 穿透、@removeFile@ 会
+-- **真的删掉库外文件**。'canonicalizePath' 让操作系统回答"这条路径究竟指向
+-- 哪里"：跟随 reparse point、消解 @..@、补齐大小写与 8.3 短名，因此同时覆盖
+-- 大小写别名、尾随点、junction 与任何未预见的等价名。
+--
+-- 任一侧解析失败（路径不存在、ACL 拒绝、名字非法）一律 False —— 这是
+-- fail-closed：调用点用它守卫**删除\/写入**，答不上来就不动。
+pathUnder :: FilePath -> FilePath -> IO Bool
+pathUnder base p = do
+  eb <- try (canonicalizePath base) :: IO (Either SomeException FilePath)
+  ep <- try (canonicalizePath p) :: IO (Either SomeException FilePath)
+  pure $ case (eb, ep) of
+    (Right b, Right q) ->
+      let bs = comps b
+          qs = comps q
+       in length qs > length bs && take (length bs) qs == bs
+    _ -> False
+ where
+  -- NTFS 不分大小写：比较前统一折叠（同 Pm.Op.normComp 的大小写策略）
+  comps = map (map toLower) . splitDirectories
 
 -- ─── Backup-drive discovery primitives (§9) ─────────────────────────────────
 

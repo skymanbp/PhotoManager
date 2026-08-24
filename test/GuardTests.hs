@@ -30,7 +30,8 @@ import Pm.Hash (sha256File)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, withJournal)
 import Pm.Op
 import Pm.Plan
-import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, quarTrashRel, trashDir, trashView)
+-- TrashView/trashView 随 P3b-9/10 路径用例一并迁往 PathGuardTests
+import Pm.Trash (TrashRecord (..), appendManifest, quarTrashRel, trashDir)
 import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.Vault (ensureVaultRoot, runVaultStatus)
 import TestUtil
@@ -61,9 +62,6 @@ guardTests =
     , testCase "P3b-8 A1 slotOccupied：非法名等探测异常按占用；文件当目录用 → 空槽" caseSlotOccupiedProbe
     , testCase "P3b-8 B1 runClean / runImport：主库身份校验先于索引读取与三副本判定" caseCleanImportGuardFirst
     , testCase "P3b-8 minor ensureTestRoot：损坏标识不覆盖；缺席则 no-replace 建立且不改 role" caseFixtureKeepsCorrupt
-    , testCase "P3b-9 major relPathOk/opPathsOk：越界/盘符/ADS/.pm 内部 → validatePlan/execPlan/loadPlan 拒绝" caseOpPathValidation
-    , testCase "P3b-9 major doctor：合法 oid + 越界 Op/trash 路径 → OP-PATH Bad，不越出 root、--repair 不补" caseDoctorOpPathEscape
-    , testCase "P3b-9 major manifest trashRel 越界 → 记录剔除，trash empty 不 unlink root 外文件" caseManifestPathEscape
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -538,88 +536,6 @@ caseFixtureKeepsCorrupt = withSystemTempDirectory "pm-guard" $ \tmp -> do
   ensureTestRoot RoleMain c >>= (@?= Just "test-root")
   fmap riRole <$> readRootInfo c >>= (@?= Just RoleBackup)
 
--- ─── P3b-9（六轮） ──────────────────────────────────────────────────────────
-
-caseOpPathValidation :: IO ()
-caseOpPathValidation = withSystemTempDirectory "pm-guard" $ \dir -> do
-  -- relPathOk 拒绝面（filepath 实测：isRelative "\\evil"/"c:evil" 都是 True，
-  -- 而 root </> 它们是**整体替换**——旧 relOk 挡不住）
-  relPathOk ("a" </> "b.jpg") @?= True
-  relPathOk ("成片" </> "23-04-EU" </> "x.jpg") @?= True
-  relPathOk (".." </> "x") @?= False
-  relPathOk "a/../b" @?= False
-  relPathOk "\\evil" @?= False
-  relPathOk "/evil" @?= False
-  relPathOk "c:evil" @?= False
-  relPathOk "C:\\evil" @?= False
-  relPathOk "a.jpg:ads" @?= False
-  relPathOk "." @?= False
-  relPathOk "" @?= False
-  -- opPathsOk：.pm 内部拒绝；唯一例外是复位/undo rename 的 .pm/trash 源
-  opPathsOk (OpRename (".pm" </> "trash" </> "p" </> "v.jpg") "v.jpg" (FpFileSha "aa")) @?= True
-  opPathsOk (OpRename (".pm" </> "root-id.json") "stolen.bin" (FpFileSha "aa")) @?= False
-  opPathsOk (OpQuarantine (".pm" </> "journal.ndjson") "aa" "t") @?= False
-  -- validatePlan / execPlan（取锁前，零写入）/ loadPlan 三处拒绝
-  let root = dir </> "root"
-  createDirectoryIfMissing True root
-  op <- mkCopyOp (dir </> "s.jpg") "X" ("相册" </> "x.jpg")
-  plan <- mkPlanIO root [op]
-  forM_ [".." </> ".." </> "evil.jpg", "\\evil.jpg", "c:evil.jpg", "x.jpg:ads"] $ \bad -> do
-    let p' = plan {plItems = [PlanItem 0 (OpQuarantine bad "aa" "t") StPending Nothing]}
-    either (const (pure ())) (const (assertFailure ("validatePlan 应拒绝 " <> bad))) (validatePlan p')
-    r <- execPlan defaultExecEnv p'
-    case r of
-      Left m -> assertBool m ("非法相对路径" `isInfixOf` m)
-      Right _ -> assertFailure ("execPlan 应拒绝 " <> bad)
-  jEx <- doesFileExist (journalPath root)
-  jEx @?= False
-  let badPlan = plan {plItems = [PlanItem 0 (OpQuarantine (".." </> ".." </> "evil.jpg") "aa" "t") StPending Nothing]}
-  _ <- savePlan badPlan
-  l <- loadPlan root (plId badPlan)
-  either (\m -> assertBool m ("非法相对路径" `isInfixOf` m)) (const (assertFailure "loadPlan 应拒绝越界路径")) l
-
-caseDoctorOpPathEscape :: IO ()
-caseDoctorOpPathEscape = withSystemTempDirectory "pm-guard" $ \dir -> do
-  -- 合法 oid + 越界路径：旧代码在 root 外做存在性/sha 探测（root/.pm/trash 上
-  -- 跳三级 = 临时根），内容相符即 Q-DONE-LOST → --repair 补 Done
-  let root = dir </> "root"
-      up3 = ".." </> ".." </> ".."
-  createDirectoryIfMissing True root
-  createDirectoryIfMissing True (dir </> "outside")
-  writeFile (dir </> "outside" </> "v.jpg") "V"
-  sha <- sha256File (dir </> "outside" </> "v.jpg")
-  now <- getCurrentTime
-  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
-  withJournal root $ \j -> do
-    -- ① pending Intent：victim 越界
-    jAppend j Barrier (JIntent (tpOid 0) (OpQuarantine (up3 </> "outside" </> "v.jpg") sha "t") now)
-    -- ② Done：Intent 的 victim 合法，但 Done 记录的 trash 路径越界
-    jAppend j Barrier (JIntent (tpOid 1) (OpQuarantine "w.jpg" sha "t") now)
-    jAppend j Barrier (JDone (tpOid 1) (Just sha) (Just (up3 </> "outside" </> "v.jpg")) now)
-  rows <- doctorRows root
-  length (filter (== ("OP-PATH", Bad)) rows) @?= 2
-  assertBool ("越界路径不得进入矩阵推导: " <> show rows)
-    (not (any ((`elem` ["Q-DONE-LOST", "C2", "C4", "C5"]) . fst) rows))
-  _ <- runDoctor root (DoctorOpts False True)
-  es <- journalEntries root
-  length (filter isDone es) @?= 1 -- 仅剩手编的那条，--repair 未补任何 Done
-
-caseManifestPathEscape :: IO ()
-caseManifestPathEscape = withSystemTempDirectory "pm-guard" $ \dir -> do
-  -- 手编 manifest 的 trashRel 越界（.pm/trash 上跳三级 = 临时根）：
-  -- pm trash empty 是全程序唯一 unlink 用户数据的位置，绝不能删 root 外文件
-  let root = dir </> "root"
-      cfg = mkCfg root Nothing
-      escRel = ".." </> ".." </> ".." </> "victim.jpg"
-  createDirectoryIfMissing True (trashDir root)
-  writeFile (dir </> "victim.jpg") "PRECIOUS"
-  now <- getCurrentTime
-  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
-  appendManifest root (TrashRecord "v.jpg" escRel "aa" "test" tpid now)
-  tv <- trashView root
-  tvRegistered tv @?= []
-  assertBool "越界记录应报为损坏行" (not (null (tvWarnings tv)))
-  code <- runTrash cfg (TrashEmpty True) root
-  code @?= 0 -- 无可清除条目（越界记录已剔除）
-  doesFileExist (dir </> "victim.jpg") >>= (@?= True)
-  readFile (dir </> "victim.jpg") >>= (@?= "PRECIOUS")
+-- P3b-9\/P3b-10 的路径类用例（relPathOk\/opPathsOk\/canonical 限域\/manifest\/
+-- catalog\/undo）在 PathGuardTests——本文件触及 750 行预算（同 P3b-6 把备份命令
+-- 拆到 Pm.BackupCmd 的先例）。

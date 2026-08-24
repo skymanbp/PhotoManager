@@ -59,7 +59,7 @@ import Pm.Trash
 import Pm.Types
 import Pm.Undo (buildUndoPlan)
 import Pm.Vault (computeVault, gitStepsLines, planCategories)
-import Pm.Win (volumeFsType)
+import Pm.Win (pathUnder, volumeFsType)
 
 data InitOpts = InitOpts
   { ioMain :: FilePath
@@ -313,9 +313,22 @@ runTrash cfg tc root = do
       -- P2.2（复审新发现）：同计划复位后重跑会为同一 trashRel 追加第二条
       -- manifest 记录（append-only 历史）——按 trashRel 去重，一个文件只
       -- unlink 一次，避免第二次 removeFile 因文件已不存在而炸掉整个批次。
-      let purgeable = nubBy ((==) `on` (trTrashRel . fst)) (plainRecs <> purgeableClean)
+      let candidates = nubBy ((==) `on` (trTrashRel . fst)) (plainRecs <> purgeableClean)
+      -- P3b-10（七轮复审 major，junction 实测）：这是 pm 全程唯一 unlink 用户
+      -- 数据的位置，词法校验（readManifest 的 relPathOk）挡不住别名——
+      -- .pm/trash/link 若是指向库外的 junction，"link\v.jpg" 是完全合法的相对
+      -- 路径，而 removeFile 会顺着链接删掉库外文件（探针已实证）。删除前让
+      -- 操作系统解析每条目标路径，必须仍落在 .pm/trash 之内，否则 HELD。
+      judged <- forM candidates $ \rec@(_, abs') -> do
+        ok <- pathUnder (trashDir root) abs'
+        pure (rec, ok)
+      let purgeable = [rec | (rec, True) <- judged]
+          escaped = [r | ((r, _), False) <- judged]
+      forM_ escaped $ \r ->
+        putStrLn ("  HELD(不删) " <> trTrashRel r <> " —— 解析后不在 .pm/trash 之内（链接/别名？先跑 pm doctor 人工核查）")
+      let heldN = length heldClean + length escaped
       if null purgeable
-        then putStrLn "隔离区没有可清除的已登记条目" >> pure (if null heldClean then 0 else 1)
+        then putStrLn "隔离区没有可清除的已登记条目" >> pure (if heldN == 0 then 0 else 1)
         else do
           putStrLn ("将永久删除以下 " <> show (length purgeable) <> " 个已登记条目:")
           forM_ purgeable $ \(r, _) ->
@@ -325,11 +338,11 @@ runTrash cfg tc root = do
           if not yes
             then putStrLn "确认清除请加 --yes" >> pure 1
             else do
-              -- pm 全程唯一 unlink 用户数据的位置：仅限上面逐项列出的条目
-              -- （DESIGN §5 pm trash empty；I2 的最终出口）。
+              -- pm 全程唯一 unlink 用户数据的位置：仅限上面逐项列出、且已通过
+              -- canonical 限域的条目（DESIGN §5 pm trash empty；I2 的最终出口）。
               forM_ purgeable $ \(_, abs') -> removeFile abs'
               putStrLn ("✓ 已清除 " <> show (length purgeable) <> " 项（manifest 记录保留为历史）")
-              pure 0
+              pure (if heldN == 0 then 0 else 1)
  where
   span' p xs = (filter p xs, filter (not . p) xs)
 

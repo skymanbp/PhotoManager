@@ -179,10 +179,12 @@ lastSegment es = go es es
   go acc (_ : rest) = go acc rest
 
 -- | Copy 的 tmp 路径只对无后缀的用户可见 oid 有定义（'opIdParts' 统一解析，
--- P3b-6 复审 A1）。
+-- P3b-6 复审 A1）。P3b-10（七轮复审 minor）：Op 路径也先过 'opPathsOk'——
+-- 'tmpNameFor' 只取 takeFileName，普通 @..@ 穿越到不了 @.pm\/tmp@ 之外，但
+-- 非法 Op 不该参与"预期 tmp 集合"的计算（否则会影响 TMP-STALE 判定）。
 pendingTmp :: FilePath -> (Text, Op) -> Maybe FilePath
-pendingTmp root (oid, OpCopy _ dstRel _ _ _) = case opIdParts oid of
-  Just (pid, ix, SfxPlain) -> Just (tmpDirFor root pid </> tmpNameFor ix dstRel)
+pendingTmp root (oid, op@(OpCopy _ dstRel _ _ _)) = case opIdParts oid of
+  Just (pid, ix, SfxPlain) | opPathsOk op -> Just (tmpDirFor root pid </> tmpNameFor ix dstRel)
   _ -> Nothing
 pendingTmp _ _ = Nothing
 

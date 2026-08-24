@@ -12,11 +12,13 @@ module Pm.Catalog
 import Control.Monad (foldM, when)
 import Data.Aeson (eitherDecodeFileStrict, encode)
 import qualified Data.ByteString.Lazy as BSL
+import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.IO (IOMode (WriteMode), withBinaryFile)
 
 import Pm.Config (pmDir)
+import Pm.Op (relPathOk)
 import Pm.Types
 import Pm.Win (flushHandleToDisk, moveFileNoReplace)
 
@@ -38,7 +40,15 @@ loadCatalog root = do
       else do
         r <- eitherDecodeFileStrict fp
         case r of
-          Right c -> pure (Just (backfill c), warns)
+          -- P3b-10（七轮复审 major）：快照是可手编的 .pm 文件，而 enPath 会被拼成
+          -- 绝对源路径喂给 backup/import 的 OpCopy（Pm.Diff/Pm.Import）并被 doctor
+          -- --deep / clean 见证直接读取。词法非法的条目 = 有人改过快照：整份拒绝
+          -- （快照是可由 pm scan 重建的缓存，fail-closed 的代价只是重扫）。
+          -- 真实库 4855 条目实测零违规，正常使用不会触发。
+          Right c
+            | (bad : _) <- [enPath e | e <- Map.elems (catEntries c), not (relPathOk (enPath e))] ->
+                pure (Nothing, warns <> [fp <> ": 条目路径非法（" <> bad <> "），快照拒绝载入 → pm scan 重建"])
+            | otherwise -> pure (Just (backfill c), warns)
           Left e -> pure (Nothing, warns <> [fp <> ": " <> e])
   -- 旧快照的条目缺 lastVerified → 该 sha 正是那次扫描真实读盘算出的，
   -- 用快照时间作为验证基线。

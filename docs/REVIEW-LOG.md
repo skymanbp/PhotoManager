@@ -83,3 +83,13 @@ A1/B1/文档 FIXED；余 1 新 major——Doctor 直接拼接手编 journal 的 
 empty unlink → **P3b-9 收口**（§10.2 P3b-9 条目）：共用 `relPathOk`/`opPathsOk`
 谓词进 validatePlan/execItem/Doctor（OP-PATH fail-closed）/readManifest，`.pm`
 内部目标一律拒（undo 的 `.pm/trash/` rename 源除外）。新增 3 测试（158/158）。
+
+同日 codex 七轮复审（中转站断粮 → 用户充值后守候脚本自动重跑，attempt 2 真跑
+54 次命令执行，对 d8316fe）：1 FIXED / 8 PARTIAL / 1 NOT-FIXED + 4 新发现，核心
+指控是**词法校验挡不住 Windows 规范化别名与 junction**。探针逐条核实：`.PM`
+与 `.pm.`（尾随点被剥）确能读到 `.pm` 内文件，`.pm `/`.. `（尾随空格）证伪；
+trash 内 junction 则**实测让 removeFile 删掉了库外文件**（数据丢失级）→
+**P3b-10 收口**（§10.2 P3b-10 条目）：`normComp` 折大小写剥尾随点空格、
+`Pm.Win.pathUnder` canonical 限域进 trash empty 与 Exec 三个落位点、
+`listTrashFiles` 不递归 reparse point、`loadCatalog` 校验 `enPath`、
+`reverseOp`/`pendingTmp` 补验。测试拆出 `PathGuardTests`，新增 4 例（162/162）。

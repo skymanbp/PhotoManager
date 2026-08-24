@@ -18,6 +18,7 @@ module Pm.Trash
   , trashView
   ) where
 
+import Control.Exception (IOException, try)
 import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -26,9 +27,10 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, pathIsSymbolicLink)
 import System.FilePath ((</>))
 import System.IO
+import System.IO.Error (isDoesNotExistError)
 
 import Pm.Config (pmDir)
 import Pm.Op (OpIdSuffix (..), opIdParts, relPathOk)
@@ -123,6 +125,14 @@ readManifest root = do
       pure ([r | Right r <- results], [w | Left w <- results])
 
 -- | Every regular file below .pm/trash/, relative to it (manifest excluded).
+--
+-- P3b-10（七轮复审 major，实测）：**绝不跟随 reparse point**。探针证实
+-- @.pm\/trash\/link@（junction → 库外目录）下 @doesDirectoryExist@ 为 True、
+-- @listDirectory@ 穿透、@removeFile@ 会真的删掉库外文件——若递归进去，手编一条
+-- @link\\v.jpg@ 的 manifest 记录就能让 @pm trash empty@ 认为该"隔离文件在库
+-- 内"。链接本身作为条目列出（doctor 以 UNREGISTERED\/Q1 报出，人工核查），
+-- 但其内容一律不进入清单。同 'Pm.Scan.listTree' \/ 'Pm.Exec.dirFingerprint'
+-- 的既有策略。
 listTrashFiles :: FilePath -> IO [FilePath]
 listTrashFiles root = do
   let base = trashDir root
@@ -135,10 +145,18 @@ listTrashFiles root = do
     fmap concat . mapM (walk base rel) $ names
   walk base rel name = do
     let relPath = if null rel then name else rel </> name
+    isLink <- linkish (base </> relPath)
     isDir <- doesDirectoryExist (base </> relPath)
-    if isDir
-      then go base relPath
-      else pure [relPath | relPath /= "manifest.ndjson"]
+    if isLink
+      then pure [relPath] -- 链接本体记为条目，绝不递归
+      else
+        if isDir
+          then go base relPath
+          else pure [relPath | relPath /= "manifest.ndjson"]
+  -- 探测异常（非「不存在」）按「是链接」处理：不递归即可，保守不误删
+  linkish p = do
+    r <- try (pathIsSymbolicLink p) :: IO (Either IOException Bool)
+    pure (either (not . isDoesNotExistError) id r)
 
 -- | Union view: manifest ∪ on-disk files (review conf-10: orphans surface as
 -- UNREGISTERED instead of being invisible).
