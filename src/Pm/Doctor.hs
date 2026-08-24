@@ -24,7 +24,7 @@ import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, remov
 import System.FilePath ((</>))
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (pmDir, readRootInfo, requireWritable)
+import Pm.Config (pmDir, pmSubTmp, readRootInfo, requireWritable)
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
 import Pm.Hash (sha256File)
 import Pm.Journal
@@ -32,6 +32,7 @@ import Pm.Op
 import Pm.Plan
 import Pm.Trash
 import Pm.Types
+import Pm.Win (isReparsePoint)
 
 data DoctorOpts = DoctorOpts
   { doDeep :: Bool
@@ -311,19 +312,35 @@ verifyDone root intents restoredAfter (oid, msha, mtrash) =
                   "不删任何东西；将该目标视为未确认副本，重新拷贝并核查介质"
               ]
 
+-- | @.pm\/tmp@ 下 pm 自建、已无对应在途计划的孤儿 tmp——@--repair@ 会 unlink
+-- 它们。
+--
+-- P3b-11（八轮复审 major，探针实证）：遍历**逐级 no-follow**。@.pm\/tmp@ 或
+-- 其下的 @\<planId\>@ 目录若是指向库外的 junction，@listDirectory@ 会穿透、
+-- 随后的 @removeFile@ **真的删掉库外文件**（探针把库外 hostage.txt 删掉了）。
+-- 链接本体既不递归也不列出：不列 = 不删（fail-closed），它会以 doctor 的
+-- 其它行\/人工核查暴露；'Pm.Config.requirePmTrusted' 在写入口拒绝这种 root。
 staleTmpFiles :: FilePath -> [FilePath] -> IO [FilePath]
 staleTmpFiles root expected = do
-  let base = pmDir root </> "tmp"
+  let base = pmDir root </> pmSubTmp
+  baseLink <- isReparsePoint base
   ex <- doesDirectoryExist base
-  if not ex
+  if baseLink || not ex
     then pure []
     else do
       plans <- listDirectory base
       files <- concat <$> forM plans (\p -> do
-        isD <- doesDirectoryExist (base </> p)
-        if isD
-          then map ((base </> p) </>) <$> listDirectory (base </> p)
-          else pure [base </> p])
+        let pd = base </> p
+        lnk <- isReparsePoint pd
+        isD <- doesDirectoryExist pd
+        if lnk
+          then pure []
+          else
+            if isD
+              then do
+                inner <- listDirectory pd
+                filterM (fmap not . isReparsePoint) (map (pd </>) inner)
+              else pure [pd])
       onlyFiles <- filterM doesFileExist files
       pure [f | f <- onlyFiles, f `notElem` expected]
 

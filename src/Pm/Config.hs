@@ -21,11 +21,15 @@ module Pm.Config
   , writeRootInfo
   , freshRootId
   , pmDir
+  , pmSubTrash
+  , pmSubTmp
+  , pmSubPlans
+  , requirePmTrusted
   , readJsonMaybe
   , writeSideCache
   ) where
 
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, bracket, try)
 import Crypto.Random (getRandomBytes)
 import Data.Aeson (eitherDecodeFileStrict)
 import qualified Data.Aeson as Aeson
@@ -42,12 +46,13 @@ import System.Directory
   , removeFile
   )
 import System.FilePath ((</>))
+import System.IO (hClose)
 import Text.Printf (printf)
 import qualified TOML
 
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Types
-import Pm.Win (moveFileNoReplace)
+import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary, resolveUnder)
 
 data Config = Config
   { cfgMainPath :: FilePath
@@ -121,6 +126,42 @@ writeConfig c = do
 pmDir :: FilePath -> FilePath
 pmDir root = root </> ".pm"
 
+-- | @.pm@ 下的固定子目录名——单一真源：'Pm.Trash.trashDir'、
+-- 'Pm.Exec.tmpDirFor'、'Pm.Plan.plansDir' 都引用这里，'requirePmTrusted'
+-- 才能保证「校验过的那几条路径」与「实际写入的那几条路径」不会漂移。
+pmSubTrash, pmSubTmp, pmSubPlans :: FilePath
+pmSubTrash = "trash"
+pmSubTmp = "tmp"
+pmSubPlans = "plans"
+
+-- | @.pm@ 家族的可信性闸（P3b-11，八轮复审 critical）：从 root 起逐级下降，
+-- @.pm@ 及其固定子目录都必须是盘上的**真名**，不得是 junction\/symlink。
+--
+-- 探针实证：把 @.pm\/trash@ 本身做成指向库外的 junction 后，落位\/删除侧的
+-- canonical 限域（'Pm.Win.pathUnder'）两侧都解析到库外、判定通过，@removeFile@
+-- 删掉了库外文件；@.pm@ 自身被劫持时 journal\/plan\/manifest\/catalog\/root-id
+-- 会**整套**写到库外。这些入口没有共同的路径参数可校验，但它们有共同的前提
+-- ——'requireWritable'。闸放在这里，一次判定覆盖全部 @.pm@ 写入口。
+--
+-- 尚不存在的子目录放行（新库的 trash\/tmp\/plans 由 pm 自己创建；
+-- 'Pm.Win.resolveUnder' 对不存在的分量返回拼接路径）。
+requirePmTrusted :: FilePath -> IO (Either String ())
+requirePmTrusted root = go [".pm", ".pm" </> pmSubTrash, ".pm" </> pmSubTmp, ".pm" </> pmSubPlans]
+ where
+  go [] = pure (Right ())
+  go (rel : rest) = do
+    m <- resolveUnder root rel
+    case m of
+      Nothing ->
+        pure
+          ( Left
+              ( root </> rel
+                  <> " 不是 root 下的真实目录（junction\\/symlink\\/别名？）——pm 拒绝以它为基准读写。"
+                  <> "人工核查该路径；正常库里 .pm 及其子目录必须是普通目录"
+              )
+          )
+      Just _ -> go rest
+
 rootInfoPath :: FilePath -> FilePath
 rootInfoPath root = pmDir root </> "root-id.json"
 
@@ -162,6 +203,15 @@ readRootInfo root = do
 -- Exec 在取锁前与锁内另有同规则复检。
 requireWritable :: FilePath -> IO (Either String RootInfo)
 requireWritable root = do
+  -- 先问「.pm 家族本身是不是真的」——读 root-id.json 也会穿透 junction，
+  -- 身份判定必须建立在可信基准之上（P3b-11，八轮复审 critical）。
+  tr <- requirePmTrusted root
+  case tr of
+    Left e -> pure (Left e)
+    Right () -> requireWritable' root
+
+requireWritable' :: FilePath -> IO (Either String RootInfo)
+requireWritable' root = do
   st <- readRootState root
   case st of
     RootAbsent ->
@@ -204,7 +254,11 @@ createRootInfo root info = do
   bytes <- getRandomBytes 4
   let final = rootInfoPath root
       tmp = final <> "." <> concatMap (printf "%02x") (BS.unpack bytes) <> ".tmp"
-  BSL.writeFile tmp (Aeson.encode info)
+  -- 独占创建（P3b-11，八轮复审 major）：pm 自建 tmp 一律不覆盖既有名字，
+  -- 预置的 hardlink 会被 CREATE_NEW 拒绝而不是被写穿到库外。
+  bracket (openFreshBinary tmp) hClose $ \h -> do
+    BSL.hPut h (Aeson.encode info)
+    flushHandleToDisk h
   r <- try (moveFileNoReplace tmp final) :: IO (Either IOException ())
   case r of
     Right () -> pure (Right ())

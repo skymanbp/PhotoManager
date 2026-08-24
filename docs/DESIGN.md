@@ -584,6 +584,22 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   point 不递归；`loadCatalog` 校验每条 `enPath`（真实库 4855 条零违规，非法即
   整份拒绝 → `pm scan` 重建）；`reverseOp`\/`pendingTmp` 补验。测试拆出
   `test/PathGuardTests.hs` 并 +4（162/162）。归档同上文件第七轮章节。
+- **P3b-11 八轮收口（同日，codex 八轮：1 critical + 4 major + 1 minor）**：
+  核心是**限域判定的基准自身可能被劫持**——七轮学会了问操作系统"目标在哪"，
+  却仍默认 `root` / `.pm/trash` 这些 pm 拼出来的字符串可信。探针实测五条全部
+  成立：`.pm/trash` 自身是 junction 时 `pathUnder` 两侧一起解析到库外、判定
+  通过，`removeFile` **删掉了库外文件**；`.pm/tmp/<plan>` 同形态让 doctor
+  `--repair` 删库外文件；`root/alias -> .pm` 让 root 级包含判定放行；预置
+  hardlink 占住确定性 tmp 名后 `WriteMode` **覆盖了库外文件内容**。三层修复，
+  各挡一类：①`Pm.Win.resolveUnder` 从基准逐分量 no-follow 下降，路上每一段
+  都必须是盘上真名（挡 junction，含基准自身）；②`pathAtOrUnder` 做 `.pm`
+  语义排除（挡 8.3 短名一类"不是 reparse point 但 canonical 后落进 `.pm`"的
+  别名——本卷 `fsutil` 不支持短名查询，该形态**未证实**，按机制覆盖）；
+  ③`openExclusiveBinary`（`CREATE_NEW`）独占创建，挡 hardlink（它既不是
+  reparse point 也不改 canonical，前两层都看不见）。`requirePmTrusted` 把
+  `.pm` 家族可信性并入 `requireWritable`，一次判定覆盖全部 `.pm` 写入口；
+  `runTrash` 前置同一闸（基准被劫持时连读都不读）；`loadCatalog` 区分"半写可
+  回退"与"语义非法整条链拒"。测试 +6（168/168）。归档同上文件第八轮章节。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 

@@ -28,6 +28,7 @@ import Control.Exception (IOException, try)
 import Control.Monad (forM)
 import Crypto.Hash (Digest, SHA256 (..), hashWith)
 import Data.List (sort)
+import Data.Maybe (isJust)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -48,7 +49,7 @@ import System.Directory
 import System.FilePath (splitDirectories, takeDirectory, takeExtension, takeFileName, (</>))
 import System.IO.Error (isDoesNotExistError)
 
-import Pm.Config (pmDir, readRootInfo)
+import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requirePmTrusted)
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Hash
 import Pm.Journal
@@ -57,8 +58,9 @@ import Pm.Op
 import Pm.Plan
 import Pm.Trash
 import Pm.Types
--- pathUnder = P3b-10 七轮复审 #7 的第二道闸（canonical 限域，挡 junction 别名）
-import Pm.Win (moveFileNoReplace, pathUnder)
+-- P3b-10 七轮：canonical 限域挡 junction 别名。P3b-11 八轮：改用逐级下降的
+-- resolveUnder（基准自身也可能被劫持），pathAtOrUnder 负责 .pm 语义排除。
+import Pm.Win (moveFileNoReplace, pathAtOrUnder, resolveUnder)
 
 -- | Protocol step markers, one between every pair of externally visible
 -- effects (§13 P3 fault injection).
@@ -107,9 +109,12 @@ outcomeLabel ONotExecuted = "未执行"
 outcomeLabel (OConflict m) = "CONFLICT: " <> m
 outcomeLabel (OFailed m) = "FAILED: " <> m
 
+-- 子目录名取自 'Pm.Config' 的单一真源，'requirePmTrusted' 校验的就是这一条。
 tmpDirFor :: FilePath -> Text -> FilePath
-tmpDirFor root pid = pmDir root </> "tmp" </> T.unpack pid
+tmpDirFor root pid = pmDir root </> pmSubTmp </> T.unpack pid
 
+-- | tmp 名是**确定性**的（崩溃重跑要能算出同名，doctor 才能把孤儿 tmp 与在途
+-- tmp 分开）——因此可预测，因此写入必须独占创建（'Pm.Win.openFreshBinary'）。
 tmpNameFor :: Int -> FilePath -> FilePath
 tmpNameFor ix dstRel = show ix <> "-" <> takeFileName dstRel
 
@@ -128,12 +133,20 @@ execPlan env plan = do
   -- 不该落下（git 工作树污染正是 I11 要防的），先做一次零写入预检；锁内
   -- 再按同一规则复检（预检与取锁之间被改仍整批拒绝）。P3b-7：计划结构
   -- （id 格式、序号非负唯一）同样先验。
-  pre <- readRootInfo (plRootPath plan)
-  preOk <- case (validatePlan plan, pre) of
-    (Left e, _) -> pure (Left (planMsg e))
-    (_, Nothing) -> pure (Left noIdentityMsg)
-    (_, Just info) -> pmIgnoreGuard (riRole info) (plRootPath plan)
-  either (pure . Left) (const (execPlan' env plan)) preOk
+  --
+  -- P3b-11（八轮复审 critical）：.pm 家族的可信性排在最前——readRootInfo 读的
+  -- 就是 .pm 里的文件，withRootLock 还会在 .pm 下建锁。.pm 若是 junction，
+  -- 身份判定读的是库外的文件、锁也落在库外，后面全部判定都建立在假地基上。
+  tr <- requirePmTrusted (plRootPath plan)
+  case tr of
+    Left e -> pure (Left e)
+    Right () -> do
+      pre <- readRootInfo (plRootPath plan)
+      preOk <- case (validatePlan plan, pre) of
+        (Left e, _) -> pure (Left (planMsg e))
+        (_, Nothing) -> pure (Left noIdentityMsg)
+        (_, Just info) -> pmIgnoreGuard (riRole info) (plRootPath plan)
+      either (pure . Left) (const (execPlan' env plan)) preOk
 
 noIdentityMsg :: String
 noIdentityMsg =
@@ -182,7 +195,10 @@ execPlan' env plan = do
         -- ExecEnv 钩子，且对**所有** role 无条件执行（只查 RoleVault 会被
         -- 改写 marker role 绕过）——锁内、journal/tmp/trash 任何写入之前；
         -- 计划生成与执行之间 .gitignore 被改则整批拒绝。
-        pf <- pmIgnoreGuard (riRole info) root
+        pf0 <- pmIgnoreGuard (riRole info) root
+        -- .pm 可信性同样锁内复检：预检与取锁之间有人把 .pm/trash 换成 junction
+        -- 的窗口，与 I11 重检是同一类内核自卫（P3b-11）。
+        pf <- either (pure . Left) (const (requirePmTrusted root)) pf0
         case pf of
           Left e -> pure (Left (e <> "（执行期重检，整批拒绝）"))
           Right () -> withJournal root $ \j -> do
@@ -341,23 +357,41 @@ execItem env root j pid item = case piStatus item of
         op@OpQuarantine {} ->
           execQuarantine env root j (opId pid (piIx item)) (quarDirFor pid SfxPlain </> opVictimRel op) op
 
--- | 词法校验（'opPathsOk'）之后的第二道闸：让操作系统解析每个落位\/取用点，
--- 解析后必须仍在给定基准之内。P3b-10（七轮复审 #7，junction 实测）：库内或
--- trash 内的 junction 会让**完全合法**的相对路径指向库外——rename 源走
--- @.pm\/trash@ 例外时尤其危险（能把库外文件搬进库）。解析失败按不通过
--- （fail-closed）。目标尚不存在不影响判定：canonicalizePath 对缺失末段仍返回
--- 规范化路径（实测：新目录名、两层缺失均正常返回）。
-confined :: [(FilePath, FilePath)] -> IO Bool
-confined = fmap and . mapM (uncurry pathUnder)
+-- | 词法校验（'opPathsOk'）之后的第二道闸：让操作系统逐级解析每个落位\/取用
+-- 点。P3b-10（七轮）用 canonical 包含判定；P3b-11（八轮复审 critical，探针
+-- 实证）发现那还不够——包含判定默认**基准可信**，而 @root@\/@.pm\/trash@ 也是
+-- pm 拼出来的字符串：把 @.pm\/trash@ 本身做成指向库外的 junction 后，两侧都
+-- 解析到库外、判定通过。'resolveUnder' 改为从基准逐分量下降，要求路上每一段
+-- 都是盘上的真名，基准与目标同受检。
+--
+-- 用户数据路径另加 @.pm@ 语义排除：@root\/alias -\> root\/.pm@ 这类别名（以及
+-- 卷上若启用的 8.3 短名）逐级下降能挡住 junction 形态，但短名不是 reparse
+-- point——canonical 后落在 @.pm@ 内即拒绝，两条一起才闭合。
+--
+-- 尚不存在的目标不影响判定（'resolveUnder' 对缺失分量返回拼接路径），
+-- 因此 rename 到新名、copy 进新目录不会被误拒。
+confinedUser :: FilePath -> [FilePath] -> IO Bool
+confinedUser root rels = and <$> mapM one rels
+ where
+  one rel = do
+    m <- resolveUnder root rel
+    case m of
+      Nothing -> pure False
+      Just p -> not <$> pathAtOrUnder (pmDir root) p
+
+-- | @.pm@ 内部落位点（隔离目标）：从 root 起全程下降，@.pm@ 与 @trash@ 这两级
+-- 同样必须是真名——这正是八轮 critical 的攻击面。
+confinedTrash :: FilePath -> FilePath -> IO Bool
+confinedTrash root rel = isJust <$> resolveUnder root (".pm" </> pmSubTrash </> rel)
 
 escapeOutcome :: ItemOutcome
-escapeOutcome = OConflict "路径解析后不在 root/.pm\\trash 之内（junction/别名？），拒绝执行"
+escapeOutcome = OConflict "路径逐级解析后不在 root/.pm\\trash 之内（junction/别名/短名？），拒绝执行"
 
 -- ─── Copy (§6.1) ────────────────────────────────────────────────────────────
 
 execCopy :: ExecEnv -> FilePath -> Journal -> Text -> Int -> Op -> IO ItemOutcome
 execCopy env root j oid ix op = do
-  okc <- confined [(root, root </> opDstRel op)]
+  okc <- confinedUser root [opDstRel op]
   if okc then execCopy' env root j oid ix op else pure escapeOutcome
 
 execCopy' :: ExecEnv -> FilePath -> Journal -> Text -> Int -> Op -> IO ItemOutcome
@@ -438,10 +472,15 @@ execCopy' env root j oid ix op = do
 
 execRename :: ExecEnv -> FilePath -> Journal -> Text -> Op -> IO ItemOutcome
 execRename env root j oid op = do
-  -- 源与目标解析后都必须在 root 内。源走 .pm/trash 例外（undo/组回滚复位）时，
-  -- 这一步挡住 trash 内 junction 把库外对象搬进库（七轮复审 #7）。
-  okc <- confined [(root, root </> opOldRel op), (root, root </> opNewRel op)]
-  if okc then execRename' env root j oid op else pure escapeOutcome
+  -- 源与目标都必须逐级下降到 root 内。源走 .pm/trash 例外（undo/组回滚复位）
+  -- 时按 trash 内部路径判定——八轮复审 critical 的攻击面正在这条：@.pm@ 或
+  -- @trash@ 自身若是 junction，旧的"基准可信"判定会把库外对象搬进库。
+  okOld <-
+    if isTrashSrcRel (opOldRel op)
+      then isJust <$> resolveUnder root (opOldRel op)
+      else confinedUser root [opOldRel op]
+  okNew <- confinedUser root [opNewRel op]
+  if okOld && okNew then execRename' env root j oid op else pure escapeOutcome
 
 execRename' :: ExecEnv -> FilePath -> Journal -> Text -> Op -> IO ItemOutcome
 execRename' env root j oid op = do
@@ -490,9 +529,12 @@ execRename' env root j oid op = do
 -- 不同目录）；manifest 的 planId 从 oid 剥离。
 execQuarantine :: ExecEnv -> FilePath -> Journal -> Text -> FilePath -> Op -> IO ItemOutcome
 execQuarantine env root j oid trashRel op = do
-  -- victim 必须在 root 内、隔离落位必须在 .pm/trash 内（七轮复审 #7 同类）
-  okc <- confined [(root, root </> opVictimRel op), (trashDir root, trashDir root </> trashRel)]
-  if okc then execQuarantine' env root j oid trashRel op else pure escapeOutcome
+  -- victim 必须在 root 内且不在 .pm 内；隔离落位从 root 起全程真名下降——
+  -- 八轮复审 major：以 trashDir 为基准判定时，trash 自身是 junction 就把
+  -- victim 搬出了库。
+  okVictim <- confinedUser root [opVictimRel op]
+  okTrash <- confinedTrash root trashRel
+  if okVictim && okTrash then execQuarantine' env root j oid trashRel op else pure escapeOutcome
 
 execQuarantine' :: ExecEnv -> FilePath -> Journal -> Text -> FilePath -> Op -> IO ItemOutcome
 execQuarantine' env root j oid trashRel op = do

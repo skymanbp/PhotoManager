@@ -1,25 +1,32 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | P3b-9\/P3b-10：codex 六轮\/七轮复审的**路径类**收口用例（从 GuardTests 拆
--- 出，该文件触及 750 行预算）。一条主线：凡是能被手编的 @.pm@ 文件（plan \/
--- journal \/ manifest \/ catalog）里的路径字段，都必须先过词法谓词
--- 'relPathOk' \/ 'opPathsOk'，再在真正动盘处过 canonical 限域
--- 'Pm.Win.pathUnder'（junction\/大小写\/尾随点等别名只有操作系统答得准）。
+-- | P3b-9\/P3b-10\/P3b-11：codex 六\/七\/八轮复审的**路径类**收口用例（从
+-- GuardTests 拆出，该文件触及 750 行预算）。三层，一层比一层更不信任自己：
+--
+--  * 词法（'relPathOk' \/ 'userRelOk' \/ 'opPathsOk'）：手编的 @.pm@ 文件
+--    （plan \/ journal \/ manifest \/ catalog）里的路径字段先过纯谓词。
+--  * 解析（'Pm.Win.resolveUnder'）：别名只有操作系统答得准，而且**基准自身**
+--    也可能是 junction——逐级下降要求路上每一段都是盘上的真名。
+--  * 独占创建（'Pm.Win.openExclusiveBinary'）：hardlink 既不是 reparse point
+--    也不改变 canonical 路径，前两层都看不见它。
 module PathGuardTests (pathGuardTests) where
 
+import Control.Exception (SomeException, try)
 import Control.Monad (forM_)
 import Data.List (isInfixOf)
+import qualified Data.Map.Strict as Map
 import Data.Time (getCurrentTime)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeDirectoryLink)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
+import System.IO (hClose)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Catalog (loadCatalog, saveCatalog)
+import Pm.Catalog (catalogPath, loadCatalog, saveCatalog)
 import Pm.Commands (TrashCmd (..), runTrash)
-import Pm.Config (Config (..), pmDir, writeRootInfo)
+import Pm.Config (Config (..), pmDir, requirePmTrusted, writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
 import Pm.Exec
 import Pm.Hash (sha256File)
@@ -27,15 +34,15 @@ import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, withJournal)
 import Pm.Op
 import Pm.Plan
 import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, trashDir, trashView)
-import Pm.Types (RootInfo (..), RootRole (..))
+import Pm.Types (Catalog (..), Entry (..), RootInfo (..), RootRole (..))
 import Pm.Undo (buildUndoPlan)
-import Pm.Win (pathUnder)
+import Pm.Win (openExclusiveBinary, pathUnder, resolveUnder)
 import TestUtil
 
 pathGuardTests :: TestTree
 pathGuardTests =
   testGroup
-    "P3b-9/10 路径校验与限域（codex 六轮/七轮）"
+    "P3b-9/10/11 路径校验、限域与独占创建（codex 六/七/八轮）"
     [ testCase "P3b-9 relPathOk/opPathsOk：越界/盘符/ADS/.pm 内部 → validatePlan/execPlan/loadPlan 拒绝" caseOpPathValidation
     , testCase "P3b-9 doctor：合法 oid + 越界 Op/trash 路径 → OP-PATH Bad，不越出 root、--repair 不补" caseDoctorOpPathEscape
     , testCase "P3b-9 manifest trashRel 越界 → 记录剔除，trash empty 不 unlink root 外文件" caseManifestPathEscape
@@ -43,6 +50,12 @@ pathGuardTests =
     , testCase "P3b-10 trash 内 junction：不递归 + 删除/搬运前 canonical 限域 → 库外文件存活" caseTrashJunctionConfinement
     , testCase "P3b-10 手编 catalog 越界 enPath → 快照拒绝载入（backup/import 拿不到非法 src）" caseCatalogPathValidation
     , testCase "P3b-10 undo：journal 非法 Op/trashRel → 拒绝生成撤销计划" caseUndoRejectsBadPaths
+    , testCase "P3b-11 .pm/trash 自身是 junction（基准被劫持）→ 遍历列空、trash empty HELD、execPlan 拒绝" caseTrashBaseJunction
+    , testCase "P3b-11 root/alias → .pm 的目录别名 → 逐级下降拒绝，root-id.json 搬不走" casePmAliasDir
+    , testCase "P3b-11 预置 hardlink 占用确定性 tmp 名 → 独占创建拒绝，库外内容不被覆盖" caseTmpHardlinkClobber
+    , testCase "P3b-11 .pm/tmp/<plan> 是 junction → doctor --repair 不删库外文件" caseDoctorTmpJunction
+    , testCase "P3b-11 catalog：半写 JSON 回退 .1，语义非法则整条链拒绝（不换一代继续干活）" caseCatalogGenerationSemantics
+    , testCase "P3b-11 undo 一次复位历史 → 反向 Op 以 .pm/trash 为目标，生成时即拒" caseUndoReverseResultValidated
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -234,14 +247,47 @@ caseCatalogPathValidation = withSystemTempDirectory "pm-guard" $ \dir -> do
   (g, w0) <- loadCatalog good
   assertBool "正常快照应载入" (maybe False (const True) g)
   w0 @?= []
-  -- 干净 root：saveCatalog 有三代轮转，同一 root 连写两次会让 loadCatalog
-  -- 拒绝坏 base 后回退到上一代（那是设计内的容错，不是校验失效）
+  -- 单代 root（无 .1）：坏 base 直接判非法
   let bad = dir </> "bad"
   createDirectoryIfMissing True bad
   saveCatalog bad (mkCat [mkE ("成片" </> "ok.jpg") "aa", mkE (".." </> ".." </> "evil.jpg") "bb"])
   (b, ws) <- loadCatalog bad
   b @?= Nothing
   assertBool ("应报路径非法: " <> show ws) (any ("条目路径非法" `isInfixOf`) ws)
+  -- P3b-11：enPath 校验从 relPathOk 收紧到 userRelOk——".pm\journal.ndjson"
+  -- 是完全合法的相对路径，却让 opSrcAbs 指向 pm 自己的状态文件
+  let inpm = dir </> "inpm"
+  createDirectoryIfMissing True inpm
+  saveCatalog inpm (mkCat [mkE (".pm" </> "journal.ndjson") "cc"])
+  (p, wp) <- loadCatalog inpm
+  p @?= Nothing
+  assertBool ("指向 .pm 的条目应拒绝: " <> show wp) (any ("条目路径非法" `isInfixOf`) wp)
+
+-- | P3b-11（八轮复审 #4）：三代轮转对**两类**失败必须给不同答案。
+-- 旧用例的注释声称测了 @.1@ 回退，实际只写过一代——codex 八轮点出，这里补真。
+caseCatalogGenerationSemantics :: IO ()
+caseCatalogGenerationSemantics = withSystemTempDirectory "pm-guard" $ \dir -> do
+  -- ① 半写/损坏 JSON：可回退，这正是三代轮转要救的场景
+  let torn = dir </> "torn"
+  createDirectoryIfMissing True torn
+  saveCatalog torn (mkCat [mkE ("成片" </> "gen1.jpg") "aa"])
+  saveCatalog torn (mkCat [mkE ("成片" </> "gen2.jpg") "bb"])
+  doesFileExist (catalogPath torn <> ".1") >>= (@?= True) -- 确有上一代可退
+  writeFile (catalogPath torn) "{ this is not json"
+  (t, tw) <- loadCatalog torn
+  case t of
+    Nothing -> assertFailure ("半写 base 应回退到 .1: " <> show tw)
+    Just c -> assertBool "回退到的应是上一代内容" (any (("gen1.jpg" `isInfixOf`) . enPath) (Map.elems (catEntries c)))
+  -- ② 语义非法：不是介质事故，是有人手编过——整条链就地终止，不换一代继续干活
+  --（backup 忽略 load warnings 拿 .1 算 diff，会漏备 base 才有的新文件）
+  let tam = dir </> "tampered"
+  createDirectoryIfMissing True tam
+  saveCatalog tam (mkCat [mkE ("成片" </> "gen1.jpg") "aa"])
+  saveCatalog tam (mkCat [mkE (".." </> ".." </> "evil.jpg") "bb"])
+  doesFileExist (catalogPath tam <> ".1") >>= (@?= True) -- 合法的上一代就在那里
+  (m, mw) <- loadCatalog tam
+  m @?= Nothing -- 但绝不回退过去
+  assertBool ("应报路径非法: " <> show mw) (any ("条目路径非法" `isInfixOf`) mw)
 
 caseUndoRejectsBadPaths :: IO ()
 caseUndoRejectsBadPaths = withSystemTempDirectory "pm-guard" $ \dir -> do
@@ -265,3 +311,153 @@ caseUndoRejectsBadPaths = withSystemTempDirectory "pm-guard" $ \dir -> do
     jAppend j Barrier (JDone (tpOid 0) Nothing Nothing now)
   r2 <- buildUndoPlan root2 1
   either (\m -> assertBool m ("路径非法" `isInfixOf` m)) (const (assertFailure "非法 Intent 应拒绝")) r2
+
+-- ─── P3b-11（八轮） ─────────────────────────────────────────────────────────
+
+mkJunction :: FilePath -> FilePath -> IO ()
+mkJunction link target =
+  () <$ readCreateProcess (shell ("mklink /J \"" <> link <> "\" \"" <> target <> "\"")) ""
+
+-- | 八轮 critical：七轮的限域判定问的是"目标解析后在哪"，默认**基准可信**。
+-- 探针实证 @.pm\/trash@ 自身是 junction 时两侧都解析到库外、判定通过，
+-- @removeFile@ 删掉了库外文件。修复是逐级下降（每一段都必须是真名）。
+caseTrashBaseJunction :: IO ()
+caseTrashBaseJunction = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+      cfg = mkCfg root Nothing
+      outside = dir </> "outside-trash"
+  createDirectoryIfMissing True (pmDir root)
+  createDirectoryIfMissing True outside
+  writeFile (outside </> "v.jpg") "PRECIOUS"
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  mkJunction (trashDir root) outside
+  -- 旧判定（canonical 包含）在这里是 True——被劫持的基准与目标一起解析到库外
+  pathUnder (trashDir root) (trashDir root </> "v.jpg") >>= (@?= True)
+  -- 新判定：从 root 起逐级下降，.pm/trash 这一级即拒
+  resolveUnder root (".pm" </> "trash" </> "v.jpg") >>= (@?= Nothing)
+  -- ① .pm 家族可信性闸：所有 .pm 写入口的共同前提
+  requirePmTrusted root >>= either (\m -> assertBool m ("不是 root 下的真实目录" `isInfixOf` m)) (const (assertFailure "requirePmTrusted 应拒绝 junction 基准"))
+  -- ② 遍历侧：库外内容不得被列成"隔离文件"
+  tv <- trashView root
+  tvUnregistered tv @?= []
+  -- ③ 唯一 unlink：合法 manifest 记录 + 被劫持基准 → HELD，库外文件存活
+  appendManifest root (TrashRecord "v.jpg" "v.jpg" "aa" "test" tpid now)
+  code <- runTrash cfg (TrashEmpty True) root
+  code @?= 1
+  doesFileExist (outside </> "v.jpg") >>= (@?= True)
+  readFile (outside </> "v.jpg") >>= (@?= "PRECIOUS")
+  -- ④ Exec：隔离落位会把 victim 搬出库 → 整批在取锁前拒绝
+  writeFile (root </> "keep.jpg") "K"
+  ksha <- sha256File (root </> "keep.jpg")
+  pid <- newPlanId
+  let quar = Plan pid "test" root (Just "m") now [PlanItem 0 (OpQuarantine "keep.jpg" ksha "t") StPending Nothing]
+  r <- execPlan defaultExecEnv quar
+  either (\m -> assertBool m ("不是 root 下的真实目录" `isInfixOf` m)) (const (assertFailure "execPlan 应拒绝被劫持的 .pm/trash")) r
+  doesFileExist (root </> "keep.jpg") >>= (@?= True)
+  removeDirectoryLink (trashDir root)
+
+-- | 八轮 major：@root\/alias@ junction 到 @root\/.pm@。词法上 alias 不是
+-- @.pm@，canonical 后仍在 root 之内——旧的 root 级包含判定放行，可搬走
+-- root-id.json。逐级下降在 alias 那一级就拒（它是 reparse point）。
+casePmAliasDir :: IO ()
+casePmAliasDir = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True (pmDir root)
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  mkJunction (root </> "alias") (pmDir root)
+  -- 词法谓词放行（alias 不是 .pm），旧的 root 级 canonical 包含也放行
+  opPathsOk (OpRename ("alias" </> "root-id.json") "stolen.json" (FpFileSha "aa")) @?= True
+  pathUnder root (root </> "alias" </> "root-id.json") >>= (@?= True)
+  -- 逐级下降拒绝
+  resolveUnder root ("alias" </> "root-id.json") >>= (@?= Nothing)
+  idSha <- sha256File (root </> ".pm" </> "root-id.json")
+  pid <- newPlanId
+  let steal =
+        Plan pid "test" root (Just "m") now
+          [PlanItem 0 (OpRename ("alias" </> "root-id.json") "stolen.json" (FpFileSha idSha)) StPending Nothing]
+  validatePlan steal @?= Right () -- 词法上合法
+  r <- execPlan defaultExecEnv steal
+  case r of
+    Right [(_, OConflict m)] -> assertBool ("应因限域拒绝: " <> m) ("逐级解析后不在" `isInfixOf` m)
+    other -> assertFailure ("expected confinement OConflict, got " <> show other)
+  doesFileExist (root </> "stolen.json") >>= (@?= False)
+  doesFileExist (root </> ".pm" </> "root-id.json") >>= (@?= True)
+  removeDirectoryLink (root </> "alias")
+
+-- | 八轮 major：tmp 名是确定性的（doctor 要能算出来），旧代码用 WriteMode
+-- 截断打开——探针实证预置成库外文件的 hardlink 后，pm 一写就覆盖了库外内容。
+-- hardlink 不是 reparse point，逐级下降与 canonical 都看不见它，只有
+-- CREATE_NEW 独占创建能拒。
+caseTmpHardlinkClobber :: IO ()
+caseTmpHardlinkClobber = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+      shared = dir </> "shared-outside.dat"
+  createDirectoryIfMissing True (pmDir root)
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  writeFile shared "ORIGINAL-OUTSIDE-CONTENT"
+  op <- mkCopyOp (dir </> "s.jpg") "SOURCE-BYTES" ("相册" </> "x.jpg")
+  pid <- newPlanId
+  let plan = Plan pid "test" root (Just "m") now [PlanItem 0 op StPending Nothing]
+      tdir = tmpDirFor root pid
+      tmp = tdir </> tmpNameFor 0 ("相册" </> "x.jpg")
+  createDirectoryIfMissing True tdir
+  _ <- readCreateProcess (shell ("mklink /H \"" <> tmp <> "\" \"" <> shared <> "\"")) ""
+  -- 独占创建本身：同名已存在即抛异常，绝不截断复用
+  ex <- try (openExclusiveBinary tmp >>= hClose) :: IO (Either SomeException ())
+  either (const (pure ())) (const (assertFailure "openExclusiveBinary 不得打开已存在的名字")) ex
+  -- 落位仍应成功：pm 先 unlink 掉占位的目录项再独占创建。对 hardlink，
+  -- DeleteFileW 只减一个目录项——库外原对象的**字节一个不动**（这正是与
+  -- 「已存在即整批失败」相比更优的地方：崩溃重跑不需要人工清 tmp）。
+  r <- execPlan defaultExecEnv plan
+  case r of
+    Right [(_, ODone {})] -> readFile (root </> "相册" </> "x.jpg") >>= (@?= "SOURCE-BYTES")
+    other -> assertFailure ("清掉占位后应正常落位: " <> show other)
+  readFile shared >>= (@?= "ORIGINAL-OUTSIDE-CONTENT")
+  doesFileExist shared >>= (@?= True)
+
+-- | 八轮 major：@.pm\/tmp\/\<planId\>@ 是 junction 时，@--repair@ 的孤儿 tmp
+-- 清理会顺着链接删掉库外文件（探针实证删掉了库外 hostage.txt）。
+caseDoctorTmpJunction :: IO ()
+caseDoctorTmpJunction = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside-tmp"
+      planDir = tmpDirFor root tpid
+  createDirectoryIfMissing True (pmDir root </> "tmp")
+  createDirectoryIfMissing True outside
+  writeFile (outside </> "hostage.txt") "HOSTAGE"
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  mkJunction planDir outside
+  rows <- doctorRows root
+  assertBool
+    ("链接内容不得被报为孤儿 tmp: " <> show rows)
+    (not (any ((== "TMP-STALE") . fst) rows))
+  _ <- runDoctor root (DoctorOpts False True)
+  doesFileExist (outside </> "hostage.txt") >>= (@?= True)
+  readFile (outside </> "hostage.txt") >>= (@?= "HOSTAGE")
+  removeDirectoryLink planDir
+
+-- | 八轮 minor：反转是对称操作，而 'opPathsOk' 的规则不对称——@.pm\/trash@
+-- 只许作 rename 的源。一次合法复位历史的反向 Op 把它变成**目标**，此前
+-- buildUndoPlan 照样成功，非法计划一直写进 .pm\/plans 才在 execItem 被拒。
+caseUndoReverseResultValidated :: IO ()
+caseUndoReverseResultValidated = withSystemTempDirectory "pm-guard" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True root
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  withJournal root $ \j -> do
+    -- 合法历史：把隔离文件从 trash 搬回原位（词法上正当，opPathsOk 通过）
+    let restore = OpRename (".pm" </> "trash" </> "p" </> "v.jpg") "v.jpg" (FpFileSha "aa")
+    opPathsOk restore @?= True
+    jAppend j Barrier (JIntent (tpOid 0) restore now)
+    jAppend j Barrier (JDone (tpOid 0) Nothing Nothing now)
+  r <- buildUndoPlan root 1
+  either
+    (\m -> assertBool m ("生成的反向操作路径非法" `isInfixOf` m))
+    (const (assertFailure "反向 Op 以 .pm/trash 为目标，应在生成时拒绝"))
+    r
+  doesDirectoryExist (pmDir root </> "plans") >>= (@?= False)

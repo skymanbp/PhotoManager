@@ -30,7 +30,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
 import Text.Printf (printf)
 
-import Pm.Config (pmDir)
+import Pm.Config (pmDir, pmSubPlans)
 import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
 
 data ItemStatus
@@ -131,7 +131,7 @@ validatePlan p
   ixs = map piIx (plItems p)
 
 plansDir :: FilePath -> FilePath
-plansDir root = pmDir root </> "plans"
+plansDir root = pmDir root </> pmSubPlans
 
 planPath :: FilePath -> Text -> FilePath
 planPath root pid = plansDir root </> (T.unpack pid <> ".json")

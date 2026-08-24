@@ -13,6 +13,7 @@ module Pm.Hash
   , statHitStable
   ) where
 
+import Control.Exception (bracket)
 import Crypto.Hash (Context, Digest, SHA256, hashFinalize, hashInit, hashUpdate)
 import qualified Data.ByteString as BS
 import Data.Ratio ((%))
@@ -23,7 +24,7 @@ import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import System.Directory (getFileSize, getModificationTime)
 import System.IO
 
-import Pm.Win (flushHandleToDisk)
+import Pm.Win (flushHandleToDisk, openFreshBinary)
 
 chunkSize :: Int
 chunkSize = 1024 * 1024
@@ -40,12 +41,18 @@ sha256File fp = withBinaryFile fp ReadMode (go hashInit)
 
 -- | Stream src into dst while hashing, then FlushFileBuffers the destination
 -- handle before returning (DESIGN.md §6.1 步 4+6.5: data durable before the
--- landing rename). dst is truncated if present — Exec only ever points this
--- at its own @.pm\/tmp\/@ files, never at user data.
+-- landing rename). dst 是 pm 自建的 @.pm\/tmp\/@ 文件，从不指向用户数据。
+--
+-- P3b-11（八轮复审 major，探针实证）：这里原先用 @WriteMode@（已存在即截断）。
+-- tmp 名是确定性的，所以谁先把该名字做成库外文件的 hardlink，pm 一写就**覆盖
+-- 了库外内容**（实测：库外文件真的变成 pm 写的字节）。hardlink 不是 reparse
+-- point，逐级下降与 canonical 判定都看不见它。改用
+-- 'Pm.Win.openFreshBinary'：先删掉同名残留（对 hardlink 只减一个目录项，
+-- 库外原文件完好——实测），再 @CREATE_NEW@ 独占创建，中途被抢占即抛异常。
 copyFileHashed :: FilePath -> FilePath -> IO Text
 copyFileHashed src dst =
   withBinaryFile src ReadMode $ \hs ->
-    withBinaryFile dst WriteMode $ \hd -> do
+    bracket (openFreshBinary dst) hClose $ \hd -> do
       let go :: Context SHA256 -> IO Text
           go !ctx = do
             b <- BS.hGetSome hs chunkSize
