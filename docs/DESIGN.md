@@ -219,7 +219,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm clean staging [--apply]` | **隔离区入口**：仅对「Raw/成片 已有同 sha 副本 **且** 备份 root catalog 也有同 sha 副本」（三副本确认）的 staging 文件生成 Quarantine 计划；不满足的标 `HELD(缺哪份)`；备份盘未挂载 → 不生成任何项，报「无法确认第三副本」。**`待修改\` 永不入清理计划（P2 落锤，与 §7 import 不碰同源）**；catalog 声称的两侧副本在计划期再过一次活体 stat 核对，变了降级 HELD | apply 时 |
 | `pm vault status` | 相册↔vault 六态差异（§10.1 兼容 schema） | 否 |
 | `pm vault push [--apply]` | NEW→定类别后拷入 vault（类别来自 GUI 勾选或 `--category`/计划文件，**CLI 无法看图，不装作能分类**）；DRIFT→确认后 supersede 复合；RENAME→只报告/BLOCKED（§10.2）；结束打印显式 git 步骤 | apply 时 |
-| `pm vault ingest <files> --category <c>` | skill 调用的非交互批量入口：拷 相册/ + 拷 vault 类目 + 冲突检测 + journal 登记 inbox-origin；`--finalize` 单独一步移 `_inbox→_done`（供 skill 在 photos.json 校验通过后调，§10.3） | 是（同协议） |
+| `pm vault ingest`（**计划中，尚未实现**） | skill 调用的非交互批量入口：拷 相册/ + 拷 vault 类目 + 冲突检测 + journal 登记 inbox-origin。`--finalize` 移 `_inbox→_done` 那一步**不会**由 pm 做——`_inbox` 不在任何 pm root 内，给 pm 一条「搬第三处目录里的文件」的能力等于在模型外开口子（同 I9 的处理：打印显式步骤，由 skill 自己做）。落实情况见 DESIGN-COMMANDS §10.3 | — |
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、别名登记、同批目标唯一性校验） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
 | `pm dedupe [--apply]` | **精确重复的逐份裁决计划**（§8.1）：来源就是 `pm versions` 的非设计内精确重复组，每一份出一个 Quarantine 条目、**全部** `NEEDS-DECISION`——留哪一份 pm 判不出就不猜（I1），用 `pm resolve --item N --unskip` 逐份批准。**不**绑复合组（复合组语义是不可拆，而这里要求逐份裁决）；组的完整性由执行期屏障保证：某个 sha 在归档层的最后一份**活**副本不会被隔离掉 | apply 时 |
@@ -431,8 +431,21 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   守卫）——二十轮纠正了此前"只写 plans"的措辞；**不执行、不碰照片**。响应带计划、
   文件路径、`pm apply <id>` 提示与 git 步骤。**apply 端点尚未开**：执行仍在终端；
   届时先过 codex 评审再请用户裁定。
+- **整理新照片（P5-E，GUI 第六页）**：两个端点，都不执行。
+  `GET /api/sort/survey?src=…&gap=…` 是只读提议，走 CLI 同一个
+  `Pm.Sort.surveySort`——页面上的分段与终端建议的命令因此不可能各说各话；
+  `POST /api/sort/plan {src, place|event, from, to}` 走同一个 `runSortPlan`，
+  只写主库的 `.pm/plans`（`--writable` 级，与 push-plan 同级）。页面把每段的
+  起止日期预填进去、地点留空要用户填（相机零 GPS，pm 不猜——I1），同年月已有
+  事件夹一键并入（切成 `--event` 语义）。计划 id 由 `runSortPlan` 直接交回，
+  不从 `.pm/plans` 里挑"最新的那个"——并发生成时那是猜。
+- **GUI 拉起时静音 stdout（P5-E）**：`pm serve --exit-on-stdin-eof` 打完
+  announce 那一行之后把进程 stdout 引到空设备。`pm ui` 只读那一行就丢掉
+  BufReader，此后管道无人排空；库层任何一行 `putStrLn` 都会往里灌，填满
+  64 KiB 缓冲后 serve 卡在写上。逐个端点记得传 sink 治不住——漏一个就复发。
+  手工跑 `pm serve` 时不动 stdout，诊断照旧可见。
 - **GUI（P4-4 UX 重做，用户反馈"清晰优雅、快速上手、直观可视化"+ 三项状态
-  可视化）**：左侧导航五页（数字键 1–5 切换）。①**状态**——照片库四张分层卡
+  可视化）**：左侧导航**六页**（数字键 1–6 切换）。①**状态**——照片库四张分层卡
   （Raw / 成片 / 相册 / 暂存：文件数、体积、容量占比条）+ 索引时间与「核对新鲜
   度」；**vault 展示集同步**卡（差异数 chip、九态计数 pill——含 HELD、
   NEW/HELD/MISSING/RENAME/DRIFT/UNSTABLE 可展开清单——"差哪些"）；**备份硬盘同步**卡（未登记 / 上次同步
@@ -558,12 +571,25 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 
 ## 14. 风险与对策
 
-**威胁模型（P2.3 明文化）**：pm 防**崩溃/掉电/介质错误/并发良性进程**
-（Lightroom、资源管理器等），不防同一台机器上恶意进程的毫秒级 check-use
-竞争（TOCTOU 攻击）——后者需要句柄级 FILE_ID 校验与全程句柄持有，属安全
-软件范畴。设计保证：即使此类窗口被击中，字节也只会进 trash 而非消失，且
-`pm trash empty` 在永久删除前重验三副本（终极屏障）。逐项分析见
-`docs/reviews/2026-08-23-p2-codex-review.md` 三轮章节。
+**威胁模型（P2.3 明文化，P5-D 收窄）**：pm 防**崩溃/掉电/介质错误/并发良性
+进程**（Lightroom、资源管理器等）。同机恶意进程的毫秒级 check-use 竞争
+（TOCTOU）此前整类留白，**P5-D 起读写取用口这一半已经关上**：
+
+- **取用口（读、追加、加锁、内容探测）** 走 `Pm.Win.openBoundTo`——先打开，
+  再用 `GetFinalPathNameByHandleW` 在**句柄**上确认它绑定的正是那条路径。
+  因果方向变了：答案取自要读写的那个对象。开完之后再怎么换目录都改不了句柄
+  指向谁；开之前换过，则实际路径与期望不符、当场拒绝。`resolveUnder` 因此
+  **不再是安全边界**，只是预筛。用例把竞态做成确定性事件（解析成功之后再把
+  中途一层换成 junction），并同时断言**裸 open 在这一步会读到库外文件**——
+  否则只证明新写法拒绝了，不证明它拒绝的是真实存在的危险。
+- **剩下的窗口**：`MoveFileEx` / `RemoveDirectory` 这类只吃**名字**、没有句柄
+  形态的 API（落位 rename、`pm trash empty` 的唯一 unlink）。它们仍由
+  `resolveUnder` + `pathAtOrUnder` 那一层守，窗口照旧存在。设计保证不变：
+  即使被击中，字节也只会进 trash 而非消失，且 `pm trash empty` 在永久删除前
+  重验三副本（终极屏障）。
+
+逐项分析见 `docs/reviews/2026-08-23-p2-codex-review.md` 三轮章节与
+REVIEW-LOG 第 28 轮。
 
 | 风险 | 对策 |
 |---|---|

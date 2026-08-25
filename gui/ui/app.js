@@ -1,9 +1,10 @@
 // pm-ui frontend: vanilla JS, no bundler. Everything comes from `pm serve`
 // over 127.0.0.1 with the session token handed over by the Rust shell.
-// Four writes, none of which moves a photo byte: POST /api/vault/push-plan
-// (generates a plan file), /api/vault/hold (records a "not syncing this yet"
-// decision), /api/config and /api/backup-init. Nothing is executed here —
-// apply stays a terminal step until it gets its own reviewed endpoint.
+// Five writes, none of which moves a photo byte: POST /api/vault/push-plan
+// and /api/sort/plan (both only generate a plan file), /api/vault/hold
+// (records a "not syncing this yet" decision), /api/config and
+// /api/backup-init. Nothing is executed from this page — /api/apply exists
+// but needs `pm serve --allow-apply`, and the GUI never asks for it.
 (async function () {
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -327,7 +328,99 @@
   }
 
   // ── tabs / buttons ──
-  const loaders = { status: () => loadStatus(false), plans: loadPlans, vault: loadVault, config: loadConfig, help: async () => {} };
+  // ── 整理新照片（第六页）──
+  // 只调两个端点：/api/sort/survey（只读提议）与 /api/sort/plan（写 .pm/plans，
+  // 不碰照片）。页面**不**执行任何计划——那是计划页/终端的事。
+  let lastSurvey = null;
+  function sortNote(kind, text) {
+    const b = $("#sort-result"); b.className = "banner " + kind; b.textContent = text;
+  }
+  async function sortScan() {
+    const src = $("#sort-src").value.trim();
+    if (!src) { sortNote("warn", "先填一个源目录（相机卡或下载目录）"); return; }
+    const gap = Number($("#sort-gap").value) || 72;
+    $("#sort-result").className = "banner hidden";
+    $("#sort-segments").innerHTML = ""; $("#sort-left").innerHTML = "";
+    $("#sort-summary").textContent = "扫描中…（读 EXIF 拍摄时间，不改动源目录）";
+    const r = await req("/api/sort/survey?src=" + encodeURIComponent(src) + "&gap=" + gap);
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) { $("#sort-summary").textContent = ""; sortNote("bad", body.error || ("HTTP " + r.status)); return; }
+    lastSurvey = body;
+    renderSurvey(body);
+  }
+  function renderSurvey(sv) {
+    $("#sort-summary").textContent =
+      `源 ${sv.src} · 照片 ${sv.photos} 个：可定时 ${sv.dated} · 读不到拍摄时间 ${sv.undated.length}` +
+      ` · 候选分段 ${sv.segments.length}（间隔 > ${sv.gapHours} 小时切一刀）· 侧车 ${sv.sidecars} 个`;
+    const box = $("#sort-segments"); box.innerHTML = "";
+    if (!sv.segments.length) { box.appendChild(el("div", "muted", "没有可定时的照片——下面列出的每一类都不会被归位。")); }
+    for (const g of sv.segments) {
+      const c = el("div", "seg");
+      const head = el("div", "seg-head");
+      head.appendChild(el("span", "seg-when", `段 ${g.index}　${g.firstAt} → ${g.lastAt}`));
+      head.appendChild(el("span", "seg-meta", `${g.count} 张　首 ${base(g.firstFile)} · 尾 ${base(g.lastFile)}`));
+      c.appendChild(head);
+      const row = el("div", "seg-row");
+      const place = el("input"); place.type = "text"; place.placeholder = "地点，如 Atlanta（相机没有 GPS，只能你给）";
+      const from = el("input"); from.type = "date"; from.value = g.from;
+      const to = el("input"); to.type = "date"; to.value = g.to;
+      const btn = el("button", "btn primary", "生成计划");
+      row.append(place, from, to, btn);
+      c.appendChild(row);
+      if (g.sameMonthEvents.length) {
+        const m = el("div", "seg-merge");
+        m.appendChild(el("span", null, "↺ 已有同年月事件："));
+        for (const ev of g.sameMonthEvents) {
+          const a = el("button", "btn ghost", ev);
+          a.title = "并入这个已有事件夹（用完整事件名，不再自动拼年月）";
+          a.onclick = () => { place.value = ev; place.dataset.event = "1"; };
+          m.appendChild(a);
+        }
+        m.appendChild(el("span", null, " —— 点一下并入它"));
+        c.appendChild(m);
+      }
+      btn.onclick = () => makeSortPlan(sv.src, place, from.value, to.value, btn);
+      box.appendChild(c);
+    }
+    const left = $("#sort-left"); left.innerHTML = "";
+    bucket(left, "读不到拍摄时间", sv.undated, "不猜——请自行放置或先补 EXIF");
+    bucket(left, "无主侧车", sv.homelessSidecars, "同目录同 stem 找不到主文件");
+    bucket(left, "不认识的扩展名", sv.unknown, "不归位，但一定列出来");
+    bucket(left, "遍历错误", sv.errors.map((e) => e.path + " — " + e.why), "");
+    for (const n of sv.notes) left.appendChild(el("div", "muted small", "· " + n));
+  }
+  const base = (p) => p.split(/[\\/]/).pop();
+  function bucket(host, title, xs, why) {
+    if (!xs || !xs.length) return;
+    const d = el("details"); d.appendChild(el("summary", null, `${title} ${xs.length} 个${why ? "（" + why + "）" : ""}`));
+    const ul = el("ul", "steps");
+    for (const x of xs.slice(0, 200)) ul.appendChild(el("li", "mono small", x));
+    if (xs.length > 200) ul.appendChild(el("li", "muted small", `…另有 ${xs.length - 200} 个`));
+    d.appendChild(ul); host.appendChild(d);
+  }
+  async function makeSortPlan(src, placeInput, from, to, btn) {
+    const v = placeInput.value.trim();
+    if (!v) { sortNote("warn", "先填地点（或点上面的已有事件名并入）"); return; }
+    btn.disabled = true;
+    try {
+      const isEvent = placeInput.dataset.event === "1";
+      const payload = { src, from, to };
+      payload[isEvent ? "event" : "place"] = v;
+      const r = await req("/api/sort/plan", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { sortNote("bad", body.error || ("HTTP " + r.status)); return; }
+      if (body.planId) {
+        sortNote("ok", `计划已生成：${body.planId}\n下一步在终端执行 pm apply ${body.planId}（或到「计划」页查看明细）`);
+      } else {
+        sortNote("warn", `没有生成计划（退出码 ${body.code}）——这一段里没有可归位的文件，或有需要你先处理的冲突。详情见终端。`);
+      }
+      await loadPlans().catch(() => {});
+    } finally { btn.disabled = false; }
+  }
+
+  const loaders = { status: () => loadStatus(false), sort: async () => {}, plans: loadPlans, vault: loadVault, config: loadConfig, help: async () => {} };
   async function showTab(name) {
     for (const x of document.querySelectorAll("nav button")) x.classList.toggle("active", x.dataset.tab === name);
     for (const x of document.querySelectorAll(".tab")) x.classList.toggle("active", x.id === "tab-" + name);
@@ -336,8 +429,8 @@
     try { await loaders[name](); } catch (e) { fail(e); }
   }
   for (const b of document.querySelectorAll("nav button")) b.onclick = () => { if (submitting) return; showTab(b.dataset.tab); };
-  // 数字键 1–4 切页（键盘党；也是自动化截图验证用的入口）
-  const keys = { "1": "status", "2": "vault", "3": "plans", "4": "config", "5": "help" };
+  // 数字键 1–6 切页（键盘党；也是自动化截图验证用的入口）
+  const keys = { "1": "status", "2": "sort", "3": "vault", "4": "plans", "5": "config", "6": "help" };
   document.addEventListener("keydown", (ev) => {
     if (submitting) return; // 提交期间不切页：loadVault 会清空刚推进的 baseline
     if (ev.repeat || ev.ctrlKey || ev.altKey || ev.metaKey) return; // 长按连发 → 并发重载
@@ -345,6 +438,8 @@
     if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
     if (keys[ev.key]) showTab(keys[ev.key]);
   });
+  $("#btn-sort-scan").onclick = () => sortScan().catch(fail);
+  $("#sort-src").addEventListener("keydown", (e) => { if (e.key === "Enter") sortScan().catch(fail); });
   $("#btn-fresh").onclick = () => loadStatus(true).catch(fail);
   $("#btn-reload").onclick = () => loadStatus(false).catch(fail);
   $("#btn-plans-reload").onclick = () => loadPlans().catch(fail);

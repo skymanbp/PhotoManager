@@ -39,6 +39,9 @@ module Pm.Win
   , openStateRead
   , openStateLock
   , handleIsSingleLink
+  , handleFinalPath
+  , handleIsAt
+  , openBoundTo
   , FileId (..)
   , handleFileId
   , suppressCriticalErrorDialogs
@@ -77,6 +80,10 @@ foreign import WINDOWS_CCONV unsafe "windows.h FindClose"
 -- cbits/pm_win.c 的包装一次返回两者，不留线程亲和性假设。
 foreign import ccall unsafe "pm_get_file_attributes_err"
   c_pmGetFileAttributesErr :: LPTSTR -> Ptr Word32 -> IO Word32
+
+-- | 见 cbits/pm_win.c。返回写入的 wchar 数（不含结尾 NUL），0 表示失败。
+foreign import ccall unsafe "pm_final_path_by_handle"
+  c_pmFinalPathByHandle :: Ptr () -> LPTSTR -> Word32 -> Ptr Word32 -> IO Word32
 
 -- | Must run before any output (DESIGN.md §14 编码风险).
 setupConsole :: IO ()
@@ -272,19 +279,100 @@ handleFileId h = do
         (FileId (Win32File.bhfiVolumeSerialNumber i) (Win32File.bhfiFileIndex i))
     Left _ -> Nothing
 
+-- | 一个**已打开句柄**当前绑定的路径（@GetFinalPathNameByHandleW@）。
+--
+-- 这是 P5-D 的地基。此前 pm 的访问模式是「'resolveUnder' 逐级下降算出一条
+-- 路径 → 按那个**名字**重新打开」——两步之间有窗口：攻击者在窗口里把中途某
+-- 一层换成 junction，打开的就是库外的对象（codex 二十八轮 #1）。
+--
+-- 句柄反查把因果调了个方向：答案是从**要读的那个对象**上取的。开完之后再
+-- 怎么换目录都改不了这个句柄指向谁；开之前换过，则查出来的路径与期望不符，
+-- 当场拒绝。于是那个窗口不再有意义。
+--
+-- 返回 @\\?\D:\dir\file@ 形态（@FILE_NAME_NORMALIZED | VOLUME_NAME_DOS@）。
+-- 取不到（挂载点没有 DOS 路径、句柄类型不支持…）→ Nothing，调用方一律
+-- fail-closed。
+handleFinalPath :: Handle -> IO (Maybe FilePath)
+handleFinalPath h =
+  withHandleToHANDLE h $ \raw ->
+    allocaBytes (finalPathCch * 2) $ \buf ->
+      alloca $ \errP -> do
+        n <- c_pmFinalPathByHandle raw buf (fromIntegral finalPathCch) errP
+        if n == 0 || n >= fromIntegral finalPathCch
+          then pure Nothing
+          else Just <$> peekTString buf
+
+-- | 缓冲区上限。Win32 长路径上限 32767 wchar；pm 自己的路径预检
+-- （'Pm.Scan' 的 maxPathLen）远低于它，取这个上限只是为了"够不到就算失败"
+-- 而不是截断后误判。
+finalPathCch :: Int
+finalPathCch = 32768
+
+-- | 这个句柄绑定的**就是** @expected@ 这条路径上的对象吗。
+--
+-- 比较前两边都规范化：去掉 @\\?\@ 前缀、按分隔符切开、丢掉空分量、折大小写
+-- （Windows 路径比较不分大小写）。取不到路径 → False（fail-closed）。
+handleIsAt :: Handle -> FilePath -> IO Bool
+handleIsAt h expected = do
+  m <- handleFinalPath h
+  pure $ case m of
+    Nothing -> False
+    Just real -> normPath real == normPath expected
+ where
+  normPath p =
+    [ map toLower c
+    | c <- splitDirectories (dropExtended p)
+    , not (null c)
+    , c /= "\\"
+    , c /= "/"
+    ]
+  dropExtended p = case p of
+    ('\\' : '\\' : '?' : '\\' : rest) -> rest
+    _ -> p
+
 -- | @.pm@ 内状态文件的受控打开：打开后**立刻**查 link count，\>1 即关闭并
 -- 拒绝。@AppendMode@ 不截断，所以"先打开再判"是安全的——判定失败时尚未写入
 -- 任何字节。截断语义（@WriteMode@）不得用此函数：那会在判定之前就毁掉内容，
 -- 覆盖写一律走"独占创建 tmp → 'moveFileNoReplace' 落位"。
 openStateAppend :: FilePath -> IO Handle
 openStateAppend fp = do
-  h <- openBinaryFile fp AppendMode
+  h <- openBoundTo AppendMode fp
   ok <- handleIsSingleLink h
   if ok
     then pure h
     else do
       hClose h
       ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝写入——人工核查"))
+
+-- | **P5-D 的取用口**：打开 @fp@，然后在**句柄**上确认它绑定的正是 @fp@ 这
+-- 条路径上的对象；不是就关掉并拒绝。
+--
+-- 这一步取代了本项目此前的访问模式「'resolveUnder' 逐级下降算出路径 → 按那个
+-- **名字**重新打开」。那个模式的两步之间有窗口：攻击者在窗口里把中途某一层换
+-- 成 junction，打开的就是库外的对象，而校验已经过去了（codex 二十八轮 #1）。
+--
+-- 换过来之后 'resolveUnder' **不再是安全边界**，只是预筛（提前给出人话错误、
+-- 少开一次没用的句柄）。真正的判定长在要读写的那个句柄上：开完之后再怎么换
+-- 目录都改不了它指向谁；开之前换过，则句柄的实际路径与期望不符，当场拒绝。
+--
+-- 边界（也是这条修法的诚实之处）：@MoveFileEx@ / @RemoveDirectory@ 这类只吃
+-- **名字**的 API 没有句柄形态，仍由 'resolveUnder' + 'pathAtOrUnder' 那一层
+-- 守；它们的窗口是另一件事，登记在 DESIGN §14。
+openBoundTo :: IOMode -> FilePath -> IO Handle
+openBoundTo mode fp = do
+  h <- openBinaryFile fp mode
+  ok <- handleIsAt h fp
+  if ok
+    then pure h
+    else do
+      hClose h
+      ioError
+        ( userError
+            ( fp
+                <> ": 打开后句柄绑定的不是这条路径（中途有别名，或在解析与打开之间被替换），"
+                <> "拒绝读写——人工核查"
+            )
+        )
 
 -- | @openStateAppend@ 的只读对偶：打开后立刻查 link count，\>1 即拒绝。
 --
@@ -299,7 +387,7 @@ openStateAppend fp = do
 -- 与使用分成两次独立解析（这正是十一轮那一类缺口的成因）。
 openStateRead :: FilePath -> IO Handle
 openStateRead fp = do
-  h <- openBinaryFile fp ReadMode
+  h <- openBoundTo ReadMode fp
   ok <- handleIsSingleLink h
   if ok
     then pure h
@@ -313,7 +401,7 @@ openStateRead fp = do
 -- 危害低于状态文件，但「@.pm@ 下的打开都过句柄判定」必须无例外。
 openStateLock :: FilePath -> IO Handle
 openStateLock fp = do
-  h <- openBinaryFile fp ReadWriteMode
+  h <- openBoundTo ReadWriteMode fp
   ok <- handleIsSingleLink h
   if ok
     then pure h

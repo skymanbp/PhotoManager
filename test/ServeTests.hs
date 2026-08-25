@@ -16,7 +16,7 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BSL
-import Data.Char (isHexDigit)
+import Data.Char (chr, isHexDigit)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import Network.HTTP.Types
@@ -37,7 +37,8 @@ import Pm.Hash (sha256File)
 import Pm.Op (Fingerprint (..), Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, savePlan)
 import Pm.Serve (ServeEnv, allowedOrigin, hostOk, listPlans, newServeEnv, newToken, portOk, serveApp)
-import Pm.Types (Entry (..), FileKind (..), RootInfo (..), RootRole (..))
+import Pm.Types (Catalog (..), Entry (..), FileKind (..), RootInfo (..), RootRole (..))
+import SortTests (photoAt)
 import Pm.Vault (VaultReport (..), computeVault, renderVaultJson)
 import TestUtil
 
@@ -64,6 +65,8 @@ serveTests =
     , testCase "P5-C POST /api/apply：真执行一个 copy 计划，字节落位、逐项结果与 log 回 JSON（不走 stdout）" caseServeApplyRuns
     , testCase "P5-C POST /api/apply --only：与 CLI 同一个解析，未选中的项不执行" caseServeApplyOnly
     , testCase "P5-C POST /api/apply：执行期屏障对 API 与 CLI 一视同仁（dedupe 计划会隔离最后一份 → 一项都不执行）" caseServeApplyBarrier
+    , testCase "P5-E GET /api/sort/survey：缺 src → 400；有源 → 分段与 CLI 的 surveySort 同源" caseServeSortSurvey
+    , testCase "P5-E POST /api/sort/plan：只读 403；place 与 event 同给/都不给 → 400；合法 → 计划落在 .pm/plans 且照片零改动" caseServeSortPlan
     , -- 下面这些用例都动**同一份**配置（PM_CONFIG 是进程级环境变量，见
       -- Spec.hs）。tasty 缺省并行执行，必须显式串行化，否则互相踩：一个
       -- 用例占着配置锁的时候，另一个的合法写入会变成 409。
@@ -872,3 +875,78 @@ caseServeApplyBarrier = withSystemTempDirectory "pm-serve-apply" $ \root -> do
 
 mkEnt :: FilePath -> T.Text -> Entry
 mkEnt p sha = Entry p 4 0 sha KindPhoto Nothing
+
+-- ─── P5-E：整理新照片（GUI 第六页的两个端点） ────────────────────────────
+
+-- | 铺一个库外源目录（两张相隔很久的照片 → 两段）+ 一个已索引的主库。
+seedSortSrc :: FilePath -> IO (FilePath, Config)
+seedSortSrc tmp = do
+  let src = tmp </> "card"
+      root = tmp </> "lib"
+  createDirectoryIfMissing True (src </> "DCIM")
+  BS.writeFile (src </> "DCIM" </> "a.ARW") (photoAt "2026:08:25 10:00:00")
+  BS.writeFile (src </> "DCIM" </> "b.ARW") (photoAt "2026:11:02 10:00:00")
+  createDirectoryIfMissing True root
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  saveCatalog root (Catalog "m" now mempty)
+  pure (src, mkCfg root)
+
+caseServeSortSurvey :: IO ()
+caseServeSortSurvey = withSystemTempDirectory "pm-serve-sort" $ \tmp -> do
+  (src, cfg) <- seedSortSrc tmp
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
+    bad <- getReq "/api/sort/survey" [] tok
+    liftIO (simpleStatus bad @?= status400)
+    r <- getReq (BC.pack ("/api/sort/survey?src=" <> escape src <> "&gap=72")) [] tok
+    liftIO (simpleStatus r @?= status200)
+    liftIO $ case Aeson.decode (simpleBody r) :: Maybe Aeson.Value of
+      Just (Aeson.Object o) -> do
+        KM.lookup "photos" o @?= Just (Aeson.Number 2)
+        case KM.lookup "segments" o of
+          -- 8 月与 11 月相隔远超 72 小时 → 两段
+          Just (Aeson.Array xs) -> length xs @?= 2
+          other -> assertFailure ("segments 应为两段: " <> show other)
+      other -> assertFailure ("响应不是对象: " <> show other)
+
+caseServeSortPlan :: IO ()
+caseServeSortPlan = withSystemTempDirectory "pm-serve-sort" $ \tmp -> do
+  (src, cfg) <- seedSortSrc tmp
+  let root = cfgMainPath cfg
+      body o = Aeson.encode (Aeson.object o)
+      req0 = ["src" Aeson..= src, "from" Aeson..= ("2026-08-25" :: String), "to" Aeson..= ("2026-08-26" :: String)]
+  envRO <- mkEnv cfg
+  flip runSession (serveApp envRO) $ do
+    r <- postReq "/api/sort/plan" (body (req0 <> ["place" Aeson..= ("Atlanta" :: String)]))
+    liftIO (simpleStatus r @?= status403)
+  envW <- mkEnvW cfg
+  flip runSession (serveApp envW) $ do
+    none <- postReq "/api/sort/plan" (body req0)
+    liftIO (simpleStatus none @?= status400)
+    both <- postReq "/api/sort/plan" (body (req0 <> ["place" Aeson..= ("Atlanta" :: String), "event" Aeson..= ("26-08-Atlanta" :: String)]))
+    liftIO (simpleStatus both @?= status400)
+    ok <- postReq "/api/sort/plan" (body (req0 <> ["place" Aeson..= ("Atlanta" :: String)]))
+    liftIO (simpleStatus ok @?= status200)
+    liftIO $ case Aeson.decode (simpleBody ok) :: Maybe Aeson.Value of
+      Just (Aeson.Object o) -> case KM.lookup "planId" o of
+        Just (Aeson.String pid) -> do
+          -- 计划真的落在主库的 .pm/plans 里，且装得回来
+          e <- loadPlan root pid
+          case e of
+            Left m -> assertFailure ("计划装不回来: " <> m)
+            Right pl -> plKind pl @?= "sort"
+        other -> assertFailure ("planId 应为字符串: " <> show other)
+      other -> assertFailure ("响应不是对象: " <> show other)
+  -- 源目录零改动：sort 是**拷贝**不是移动（不变量 I2），而且这一步只出计划
+  doesFileExist (src </> "DCIM" </> "a.ARW") >>= (@?= True)
+  doesDirectoryExist (root </> "To-Be-Sync'd") >>= (@?= False)
+
+-- | 百分号转义：源路径里有反斜杠与盘符，直接拼进 query 会被解析器吃掉。
+escape :: String -> String
+escape = concatMap one
+ where
+  one c
+    | c `elem` (['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9'] <> "-_.~") = [c]
+    | otherwise = concatMap (\b -> [chr 37, hex (b `div` 16), hex (b `mod` 16)]) (BS.unpack (TE.encodeUtf8 (T.pack [c])))
+  hex n = "0123456789ABCDEF" !! fromIntegral n

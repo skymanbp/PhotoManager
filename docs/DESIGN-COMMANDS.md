@@ -132,6 +132,18 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   「已归档，冗余」；清理走 `pm clean staging`（内建三副本前置条件，§5）。
 - `待修改\` 散文件无事件结构：import 不碰，单列「待修改清单」报告。
 
+### 7.1 只读提议拆成「结果 + 渲染」（P5-E）
+
+`pm sort <源>` 的提议形态拆成 `surveySort`（判定与取数）+ `renderSortSurvey`
+（打印，CLI 输出逐字不变），与 `Pm.Status.statusReport` /
+`Pm.BackupCmd.backupInitRun` 同一形态。GUI 第六页要的是**结果**不是那段文字，
+而两者必须同源——否则页面上看到的分段与终端建议的命令会各说各话。
+
+顺带把 `withSource` 泛化并分成两层：`withSourceQ` 只列举（提议形态要把诊断当
+数据交回），`withSource` 在它之上打印 `sfNotes`（计划形态）。拆 `surveySort`
+时我一度把 `makeAbsolute`/`doesDirectoryExist`/`listSource` 抄了第二遍——正是
+本项目一路在收拾的那种分叉，当场收回一处。
+
 ## 8. 命名治理（`pm names`）
 
 - 事件夹统一到 canonical scheme = **Scheme A `YY-MM-地点-Raw`（用户裁定
@@ -180,8 +192,8 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 七条 finding 逐条第一方核实：**五条成立**、一条（`--apply` 之前不得写盘）
 第一方证伪——那是评审把 DESIGN 的"写盘"读成了"任何字节"，计划文件本来就要在
 没有 `--apply` 时落盘，否则两段式的第二段无从谈起（DESIGN §5 已补明）。
-另一条（`resolveUnder` 与 `openStateRead` 之间的 TOCTOU 窗口）成立但**不在
-本项目的威胁模型内**，作为登记残余，见 REVIEW-LOG。
+另一条（`resolveUnder` 与 `openStateRead` 之间的 TOCTOU 窗口）成立，
+**已在 P5-D 修掉**：取用口改为「打开 → 在句柄上确认绑定路径」，见 DESIGN §14。
 
 - **副本独立性改按文件身份判**，不再用 link count。`nlink == 1` 是**充分而不
   必要**的：一份合法归档照片被去重工具另建一个名字就被一律拒读，
@@ -336,6 +348,32 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 4. `KB-维护速查.md` §📸 与 档案 `CLAUDE.md` 摄影行更新指针；
    `record-structure-version.md` Change Log 补记。
 5. `sync_photos.py` 去留按用户决定落实。
+
+**落实情况（P5-F，2026-08-25，档案 vault commit `3859e1c`）**：
+
+| 项 | 状态 |
+|---|---|
+| 1 `/photo-inbox` 改走 `pm vault ingest` | ⏸ **未做**，见下方说明 |
+| 2 ingest 的 journal 来源登记喂 I7 | ⏸ 随 1 一并 |
+| 3 vault `.gitignore` 追加 `.pm/` | ✅ 已在展示集仓（P3b 时经用户批准，commit `2d81d36`） |
+| 4 `KB-维护速查.md` §📸 / 档案 `CLAUDE.md` / `record-structure-version.md` | ✅ 指针改写 + Change Log 补记 |
+| 5 `sync_photos.py` 去留 | ✅ **退役但保留**：加横幅 + 运行时 stderr 指针，代码冻结 |
+
+第 5 项之所以是"退役但保留"而不是删除：这个脚本同时是 **I8 的字段兼容基线**
+（`docs/specs/sync-photos-legacy-spec.md` 逐条列出 pm 有意偏离它的地方）。
+删掉它，那条验收就失去参照。
+
+**第 1/2 项为什么没做**：`pm vault ingest --finalize` 要把 `_inbox` 里的原图移到
+`_inbox/_done/`，而 `_inbox` 在**档案 vault** 里——不在 pm 的任何 root 之内。
+pm 的整个模型建立在「操作发生在某个有身份的 root 内」之上（root-id、journal、
+隔离区、undo 全挂在 root 上），给它一条"搬第三处目录里的文件"的能力，等于在
+模型外开一个口子。与 I9（pm 不执行 git，只打印显式步骤）同一处理：这一步应当
+**由 skill 自己做**，pm 只负责它 root 内的那两次拷贝。
+把 ingest 拆成「pm 拷贝 + skill 移 inbox」是可行的，但那是一条**新的写路径**，
+按项目规矩要先过 codex 门禁再请用户裁定 —— 留作下一件事，不在本轮伪装成已完成。
+
+DESIGN §5 的命令表曾把 `pm vault ingest` 列成既有命令，这是**记述超前于实现**，
+已改回"计划中"。
 
 ---
 

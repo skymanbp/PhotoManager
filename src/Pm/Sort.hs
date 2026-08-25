@@ -47,6 +47,10 @@ module Pm.Sort
     -- * 命令入口
   , runSortSurvey
   , runSortPlan
+  , SortSurvey (..)
+  , SortSegment (..)
+  , surveySort
+  , renderSortSurvey
   ) where
 
 import Control.Exception (SomeException, try)
@@ -345,20 +349,29 @@ snapshotWith stat hash p = do
   pure (either (\(e :: SomeException) -> Left (show e)) id r)
 
 -- | 两种形态共用的源目录入口：解析成绝对路径、确认存在、分三摞列出。
-withSource :: FilePath -> (FilePath -> SourceFiles -> IO Int) -> IO Int
-withSource src k = do
+-- **静默**——不打印任何东西，因为提议形态要把诊断当**数据**交回
+-- （'SortSurvey'），计划形态才当场打印。
+--
+-- @onMissing@ 是源目录不存在时的返回值：两种形态的返回类型不同（一个是退出码，
+-- 一个是 @Either@），所以它由调用方给，而不是在这里写死一个 2。
+withSourceQ :: FilePath -> a -> (FilePath -> SourceFiles -> IO a) -> IO a
+withSourceQ src onMissing k = do
   absSrc <- makeAbsolute src
   ok <- doesDirectoryExist absSrc
   if not ok
-    then putStrLn ("源目录不存在: " <> absSrc) >> pure 2
-    else do
-      sf <- listSource absSrc
-      -- 'sfNotes' 在这里打印，而不是在两种形态各自的汇总里：这是两条路唯一
-      -- 共同经过的地方。第 27 轮把诊断从 'sfErrors' 分出来之后**没接输出**，
-      -- 于是"分开"变成了静默丢弃——一条本来会打印的说明反而消失了
-      -- （codex 二十八轮 #7）。它不计入"未入计划 N 个"，那正是分开的目的。
-      mapM_ (\n -> putStrLn ("· " <> n)) (sfNotes sf)
-      k absSrc sf
+    then putStrLn ("源目录不存在: " <> absSrc) >> pure onMissing
+    else listSource absSrc >>= k absSrc
+
+-- | 同上，并把 'sfNotes' 打印出来——计划形态用。
+--
+-- 第 27 轮把诊断从 'sfErrors' 分出来之后**没接输出**，于是"分开"变成了静默
+-- 丢弃：一条本来会打印的说明反而消失了（codex 二十八轮 #7）。它不计入
+-- "未入计划 N 个"，那正是分开的目的。提议形态的同一件事由
+-- 'renderSortSurvey' 做。
+withSource :: FilePath -> a -> (FilePath -> SourceFiles -> IO a) -> IO a
+withSource src onMissing k = withSourceQ src onMissing $ \absSrc sf -> do
+  mapM_ (\n -> putStrLn ("· " <> n)) (sfNotes sf)
+  k absSrc sf
 
 -- | @pm sort@ **不进计划**的每一类，逐类留底。
 --
@@ -439,64 +452,138 @@ reportAccounting ac = do
 
 -- ─── 形态一：只读提议 ───────────────────────────────────────────────────────
 
--- | @pm sort \<源\>@：扫描 + 分段 + 打印每段该敲的命令。**不写任何文件。**
-runSortSurvey :: FilePath -> Double -> Config -> IO Int
-runSortSurvey src gapHours cfg = do
+-- | 一段候选分段（提议级；边界最终由用户给的 @--from\/--to@ 定）。
+data SortSegment = SortSegment
+  { sgIndex :: Int
+  , sgFrom :: Day
+  , sgTo :: Day
+  , sgFirstAt :: LocalTime
+  , sgLastAt :: LocalTime
+  , sgCount :: Int
+  , sgFirstFile :: FilePath
+  , sgLastFile :: FilePath
+  , sgSameMonthEvents :: [String]
+    -- ^ 已有的同年月 Raw 事件夹：要并入就用 @--event@ 而不是 @--place@
+  }
+  deriving (Show, Eq)
+
+-- | @pm sort \<源\>@ 只读提议的**结果**。
+--
+-- 与 'Pm.Status.statusReport' / 'Pm.BackupCmd.backupInitRun' 同一形态：判定与
+-- 取数在这里，打印在 'renderSortSurvey'。GUI 第六页要的是结果不是那段文字，
+-- 而两者必须同源——否则页面上看到的分段与终端建议的命令会各说各话。
+data SortSurvey = SortSurvey
+  { ssSrcAbs :: FilePath
+  , ssGapHours :: Double
+  , ssSegments :: [SortSegment]
+  , ssPhotoCount :: Int
+  , ssDatedCount :: Int
+  , ssSidecarCount :: Int
+  , ssUndated :: [FilePath]
+  , ssHomelessCars :: [FilePath]
+  , ssUnknown :: [FilePath]
+  , ssErrors :: [(FilePath, String)]
+  , ssNotes :: [String]
+  }
+  deriving (Show, Eq)
+
+-- | **不写任何文件。**
+surveySort :: FilePath -> Double -> Config -> IO (Either String SortSurvey)
+surveySort src gapHours cfg = do
   let root = cfgMainPath cfg
   er <- requireRole RoleMain root
   case er of
-    Left msg -> putStrLn msg >> pure 2
-    Right _ -> withSource src $ \absSrc sf -> do
-      (dated, undated) <- readTimes (sfPhotos sf)
-      existing <- existingEvents root
-      let segs = segmentBy (realToFrac (gapHours * 3600)) dated
-      printf
-        "pm sort · 源 %s → 暂存区 %s\\Raw\\\n  照片 %d 个：可定时 %d · 读不到拍摄时间 %d · 候选分段 %d（间隔 > %.0f 小时切一刀）\n  侧车 %d 个（跟随各自主文件，不单独分段）· 不认识的 %d 个 · 遍历错误 %d 个\n"
-        absSrc
-        stagingTop
-        (length (sfPhotos sf))
-        (length dated)
-        (length undated)
-        (length segs)
-        gapHours
-        (length (sfSidecars sf))
-        (length (sfUnknown sf))
-        (length (sfErrors sf))
-      forM_ (zip [1 :: Int ..] segs) (printSegment absSrc existing)
-      -- 提议阶段没有区间，所以「区间外」这一格此刻不适用（由形态二在拿到
-      -- --from/--to 之后才算得出来）。但「无主侧车」有一半是**与区间无关**的：
-      -- 同目录同 stem 在整个源里都没有主文件的侧车，此刻就能判定，也就此刻
-      -- 该报——否则用户要等到生成计划时才第一次看到它（codex 二十六轮 #7）。
-      let stems = Set.fromList [stemOf p | p <- sfPhotos sf]
-          homeless = [c | c <- sfSidecars sf, not (Set.member (stemOf c) stems)]
-      _ <-
-        reportAccounting
-          Accounting
-            { acUndated = undated
-            , acOutOfRange = []
-            , acOrphanCars = homeless
-            , acUnknown = sfUnknown sf
-            , acErrors = sfErrors sf
-            }
-      putStrLn "\n（分段只是提议：时间切不开首尾相接的两趟旅程，边界以你给的 --from/--to 为准）"
-      pure 0
-
-printSegment :: FilePath -> [String] -> (Int, [(FilePath, LocalTime)]) -> IO ()
-printSegment _ _ (_, []) = pure ()
-printSegment absSrc existing (i, seg@((p0, t0) : _)) = do
-  -- 段尾用 reverse 后模式匹配取，不用部分函数 last/head：段虽已知非空，但那是
+    Left msg -> pure (Left msg)
+    Right _ -> withSourceQ src (Left ("源目录不存在: " <> src)) $ \absSrc sf -> do
+          (dated, undated) <- readTimes (sfPhotos sf)
+          existing <- existingEvents root
+          let segs = segmentBy (realToFrac (gapHours * 3600)) dated
+              -- 「无主侧车」有一半**与区间无关**：同目录同 stem 在整个源里都
+              -- 没有主文件的，此刻就能判定，也就此刻该报（codex 二十六轮 #7）。
+              stems = Set.fromList [stemOf p | p <- sfPhotos sf]
+              homeless = [c | c <- sfSidecars sf, not (Set.member (stemOf c) stems)]
+          pure . Right $
+            SortSurvey
+              { ssSrcAbs = absSrc
+              , ssGapHours = gapHours
+              , ssSegments = [g | (i, seg) <- zip [1 ..] segs, Just g <- [mkSeg existing i seg]]
+              , ssPhotoCount = length (sfPhotos sf)
+              , ssDatedCount = length dated
+              , ssSidecarCount = length (sfSidecars sf)
+              , ssUndated = undated
+              , ssHomelessCars = homeless
+              , ssUnknown = sfUnknown sf
+              , ssErrors = sfErrors sf
+              , ssNotes = sfNotes sf
+              }
+ where
+  -- 段尾用 reverse 后模式匹配取，不用部分函数 last\/head：段虽已知非空，但那是
   -- 人看出来的，编译器看不出来——留 head 就是留一个将来重构时会炸的口子。
-  let (pN, tN) = case reverse seg of ((a, b) : _) -> (a, b); [] -> (p0, t0)
-      d0 = localDay t0
-  printf "\n段 %d  %s → %s · %d 张\n" i (show t0) (show tN) (length seg)
-  printf "      首 %s   尾 %s\n" (takeFileName p0) (takeFileName pN)
-  forM_ (sameMonth existing d0) $ \ev ->
+  mkSeg _ _ [] = Nothing
+  mkSeg existing i seg@((p0, t0) : _) =
+    let (pN, tN) = case reverse seg of ((a, b) : _) -> (a, b); [] -> (p0, t0)
+     in Just
+          SortSegment
+            { sgIndex = i
+            , sgFrom = localDay t0
+            , sgTo = localDay tN
+            , sgFirstAt = t0
+            , sgLastAt = tN
+            , sgCount = length seg
+            , sgFirstFile = p0
+            , sgLastFile = pN
+            , sgSameMonthEvents = sameMonth existing (localDay t0)
+            }
+
+-- | 渲染 = CLI 的那段输出，逐字不变。
+renderSortSurvey :: SortSurvey -> IO Int
+renderSortSurvey sv = do
+  mapM_ (\n -> putStrLn ("· " <> n)) (ssNotes sv)
+  printf
+    "pm sort · 源 %s → 暂存区 %s\\Raw\\\n  照片 %d 个：可定时 %d · 读不到拍摄时间 %d · 候选分段 %d（间隔 > %.0f 小时切一刀）\n  侧车 %d 个（跟随各自主文件，不单独分段）· 不认识的 %d 个 · 遍历错误 %d 个\n"
+    (ssSrcAbs sv)
+    stagingTop
+    (ssPhotoCount sv)
+    (ssDatedCount sv)
+    (length (ssUndated sv))
+    (length (ssSegments sv))
+    (ssGapHours sv)
+    (ssSidecarCount sv)
+    (length (ssUnknown sv))
+    (length (ssErrors sv))
+  forM_ (ssSegments sv) (printSegment (ssSrcAbs sv))
+  _ <-
+    reportAccounting
+      Accounting
+        { acUndated = ssUndated sv
+        , -- 提议阶段没有区间，「区间外」这一格此刻不适用（形态二拿到
+          -- --from/--to 之后才算得出来）。
+          acOutOfRange = []
+        , acOrphanCars = ssHomelessCars sv
+        , acUnknown = ssUnknown sv
+        , acErrors = ssErrors sv
+        }
+  putStrLn "\n（分段只是提议：时间切不开首尾相接的两趟旅程，边界以你给的 --from/--to 为准）"
+  pure 0
+
+runSortSurvey :: FilePath -> Double -> Config -> IO Int
+runSortSurvey src gapHours cfg = do
+  r <- surveySort src gapHours cfg
+  case r of
+    Left msg -> putStrLn msg >> pure 2
+    Right sv -> renderSortSurvey sv
+
+printSegment :: FilePath -> SortSegment -> IO ()
+printSegment absSrc g = do
+  printf "\n段 %d  %s → %s · %d 张\n" (sgIndex g) (show (sgFirstAt g)) (show (sgLastAt g)) (sgCount g)
+  printf "      首 %s   尾 %s\n" (takeFileName (sgFirstFile g)) (takeFileName (sgLastFile g))
+  forM_ (sgSameMonthEvents g) $ \ev ->
     putStrLn ("      ↺ 已有同年月事件 " <> ev <> " —— 要并入就把下面的 --place 换成 --event " <> ev)
   printf
     "      → pm sort \"%s\" --place <地点> --from %s --to %s\n"
     absSrc
-    (show d0)
-    (show (localDay tN))
+    (show (sgFrom g))
+    (show (sgTo g))
 
 -- | 暂存区与归档层里已有的事件夹名（用来提议复用，避免又造出跨夹重复）。
 existingEvents :: FilePath -> IO [String]
@@ -528,14 +615,16 @@ sameMonth evs d =
 -- @To-Be-Sync'd\\Raw\\\<事件\>@。
 --
 -- 是拷贝不是移动：源可能是相机卡，pm 不删任何东西（I2）。清卡由用户自己做。
-runSortPlan :: GoOpts -> FilePath -> Either String String -> Day -> Day -> Config -> IO Int
+-- 返回 (退出码, 生成的计划 id)。id 只在真出了计划时是 Just——GUI 第六页要用
+-- 它，而从 @.pm\/plans@ 里挑"最新的那个"是猜不是知道（并发生成时会挑错）。
+runSortPlan :: GoOpts -> FilePath -> Either String String -> Day -> Day -> Config -> IO (Int, Maybe T.Text)
 runSortPlan go src placeOrEvent from to cfg = do
   let root = cfgMainPath cfg
   -- 与 runImport 同一次序：身份校验先于任何读取与判定。
   er <- requireRole RoleMain root
   case er of
-    Left msg -> putStrLn msg >> pure 2
-    Right info -> withSource src $ \_ sf -> do
+    Left msg -> putStrLn msg >> pure (2, Nothing)
+    Right info -> withSource src (2, Nothing) $ \_ sf -> do
       (dated, undated) <- readTimes (sfPhotos sf)
       let pick = pickFiles (sfSidecars sf) from to dated
       -- 交代先于计划：留下的每一类都在用户看到"待拷 N 张"之前就列出来。
@@ -564,24 +653,24 @@ runSortPlan go src placeOrEvent from to cfg = do
           reportChosen pick
           unless (left == 0) $
             printf "另有 %d 个文件因上列其他原因被留下。\n" left
-          pure 2
+          pure (2, Nothing)
         (_, []) -> do
           putStrLn "该区间内没有可定时的照片"
           unless (left == 0) $
             printf "（源里另有 %d 个文件因上列原因未被归位）\n" left
-          pure 1
+          pure (1, Nothing)
         (_, taken@((_, t1) : _)) -> do
           unless (left == 0) $
             printf "\n（以上 %d 个文件**不在**本次计划里；清卡前请自行确认）\n" left
           case resolveEvent (localDay t1) placeOrEvent of
             -- 与撞名同类：计划前失败，被选中的文件一个都没搬走，同样要交代。
-            Left why -> putStrLn ("✗ " <> why) >> reportChosen pick >> pure 2
+            Left why -> putStrLn ("✗ " <> why) >> reportChosen pick >> pure (2, Nothing)
             Right ev -> do
               -- 新鲜度不过同样是**计划前失败**：选中的文件一个都没搬走，
               -- 要与撞名/事件名非法一样逐条交代（codex 二十八轮 #4）。
               ecat <- freshStagingCatalog root
               case ecat of
-                Left m -> putStrLn ("✗ " <> m) >> reportChosen pick >> pure 2
+                Left m -> putStrLn ("✗ " <> m) >> reportChosen pick >> pure (2, Nothing)
                 Right cat ->
                   buildPlan cfg go info ev (map fst taken <> spSidecars pick) cat
 
@@ -605,7 +694,7 @@ resolveEvent d poe = do
 
 -- root 不再单独传：它恒等于 @cfgMainPath cfg@，两个参数表达同一件事时，
 -- 迟早会有一处传错。计划的执行期复验钩子也要 Config（'Pm.Cli.preExecFor'）。
-buildPlan :: Config -> GoOpts -> RootInfo -> String -> [FilePath] -> Catalog -> IO Int
+buildPlan :: Config -> GoOpts -> RootInfo -> String -> [FilePath] -> Catalog -> IO (Int, Maybe T.Text)
 buildPlan cfg go info ev picked cat = do
   let root = cfgMainPath cfg
   snaps <- forM picked $ \p -> (,) p <$> snapshotSrc p
@@ -618,7 +707,7 @@ buildPlan cfg go info ev picked cat = do
       -- 读得出的那些也一个都没搬走：只列失败项，等于让人以为其余的进了计划
       -- （codex 二十八轮 #4，与第 27 轮 #4 同一形状——那次只扫了一半）。
       reportChosenFiles picked
-      pure 2
+      pure (2, Nothing)
     [] -> do
       let judged0 = judge cat ev [(p, sha, st) | (p, Right (sha, st)) <- snaps]
       judged <- verifySkips root judged0
@@ -702,7 +791,7 @@ verifySkips root = mapM check
         -- 归档层同名异容是 import 的返修裁决管的事，照常拷进暂存区。
         | otherwise -> j {jVerdict = VCopy}
 
-emit :: Config -> GoOpts -> RootInfo -> [Judged] -> IO Int
+emit :: Config -> GoOpts -> RootInfo -> [Judged] -> IO (Int, Maybe T.Text)
 emit cfg go info judged = do
   let root = cfgMainPath cfg
   printf
@@ -716,21 +805,23 @@ emit cfg go info judged = do
   forM_ (take 10 [j | j <- judged, jVerdict j == VArchived]) $ \j ->
     putStrLn ("  · 已归档，不重复搬: " <> takeFileName (jSrc j))
   if null items
-    then putStrLn "✓ 没有需要归位的新照片" >> pure 0
+    then putStrLn "✓ 没有需要归位的新照片" >> pure (0, Nothing)
     else do
       pid <- newPlanId
       now <- getCurrentTime
-      savePlanAndMaybeRun
-        cfg
-        go
-        Plan
-          { plId = pid
-          , plKind = "sort"
-          , plRootPath = root
-          , plRootId = Just (riId info)
-          , plCreated = now
-          , plItems = items
-          }
+      code <-
+        savePlanAndMaybeRun
+          cfg
+          go
+          Plan
+            { plId = pid
+            , plKind = "sort"
+            , plRootPath = root
+            , plRootId = Just (riId info)
+            , plCreated = now
+            , plItems = items
+            }
+      pure (code, Just pid)
  where
   tally f = length [() | j <- judged, f (jVerdict j)]
   items =

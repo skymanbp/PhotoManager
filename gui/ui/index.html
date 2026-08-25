@@ -10,6 +10,7 @@
     <div class="brand"><span class="logo">pm</span><span class="sub">照片库管理器</span></div>
     <nav>
       <button data-tab="status" class="active"><span class="ic">◉</span>状态</button>
+      <button data-tab="sort"><span class="ic">▦</span>整理新照片</button>
       <button data-tab="vault"><span class="ic">◈</span>分类推送</button>
       <button data-tab="plans"><span class="ic">▤</span>计划</button>
       <button data-tab="config"><span class="ic">⚙</span>设置</button>
@@ -52,6 +53,25 @@
 
       <h2 class="sec">下一步</h2>
       <ul id="next-steps" class="steps"></ul>
+    </section>
+
+    <!-- ── 整理新照片 ── -->
+    <section id="tab-sort" class="tab">
+      <header class="page-head">
+        <h1>整理新照片 <span class="muted small">相机卡 / 下载目录 → 暂存区事件夹（源目录只读，绝不改动）</span></h1>
+        <div class="actions">
+          <button id="btn-sort-scan" class="btn primary">扫描并分段</button>
+        </div>
+      </header>
+      <div class="row sort-src">
+        <input id="sort-src" type="text" spellcheck="false" placeholder="源目录，例如 E:\DCIM 或 D:\Downloads\相机卡">
+        <label class="muted small">间隔阈值<input id="sort-gap" type="number" min="1" max="720" value="72" step="1"> 小时</label>
+      </div>
+      <p class="muted small">分段<strong>只是提议</strong>：时间切不开首尾相接的两趟旅程，边界以你给的日期为准。地点也只能你来给——相机没有 GPS，pm 不猜（不变量 I1）。</p>
+      <div id="sort-result" class="banner hidden"></div>
+      <div id="sort-summary" class="line muted"></div>
+      <div id="sort-segments" class="segs"></div>
+      <div id="sort-left" class="lists"></div>
     </section>
 
     <!-- ── 分类推送 ── -->
