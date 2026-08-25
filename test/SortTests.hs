@@ -31,6 +31,8 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (catalogPath, saveCatalog)
+import Pm.Hash (ContentProbe (..), probeConfined)
+import Pm.Scan (DotDirs (..), listTreeWith)
 import Pm.Cli (GoOpts (..))
 import Pm.Config (Config (..))
 import Pm.Exif (parseCaptureTime, parseExifDateTime)
@@ -79,6 +81,13 @@ sortTests =
     , testCase "E2E：源里的 junction 不跟随；认不出的扩展名单列不吞掉" caseSortE2ETraversal
     , testCase "EXIF：IFD 偏移必须 ≥ 8；声明「没有 IFD」的文件不得返回时间" caseExifIfdOffset
     , testCase "classifyExt：相机原生 raw 与 classifyExt 必须同一份清单" caseRawExts
+    , testCase "EXIF：IFD 声明的条目数必须自洽，谎报 count 整个 IFD 作废" caseExifIfdCount
+    , testCase "遍历：源里的点目录必须走进去，不能像库根那样静默跳过" caseSourceDotDirs
+    , testCase "限域：目标路径中途是 junction → CpEscaped，不据此跳过" caseProbeConfined
+    , testCase "遍历：源根自身是 junction → 明确告知实际整理的是哪个目录" caseSourceRootLink
+    , testCase "EXIF：count 未超上限但声明的 IFD 装不下 → 仍整体作废" caseExifIfdFits
+    , testCase "限域：目标存在却读不出（末段是目录）→ CpUnreadable，不当缺席" caseProbeUnreadable
+    , testCase "遍历：目录列举失败变成一条带路径的错误，异常不得逃逸" caseListDirFails
     ]
 
 -- ─── pm sort 纯核心 ────────────────────────────────────────────────────────
@@ -624,4 +633,153 @@ caseSortE2ETraversal = withSystemTempDirectory "pm-sort-tv" $ \tmp -> do
   map takeFileName (sfUnknown sf) @?= ["notes.txt"] -- 认不出但**列出来**
   -- junction 被跳过并记成一条错误，而不是静默跟随，也不是静默丢弃
   map (takeFileName . fst) (sfErrors sf) @?= ["link"]
+
+-- | IFD 声明的条目数必须自洽。此前是**截断**（取前 4096 条，越界条目由
+-- sliceAt 悄悄丢掉），于是一个谎报 count=65535、实际只有 1 条的文件照样
+-- 返回时间。截断等于接受一个前缀，而损坏文件的正解是 fail-closed。
+-- （codex 二十六轮 #6；修复前本地探针四种 count 全部返回 Just）
+caseExifIfdCount :: IO ()
+caseExifIfdCount = do
+  -- 偏移由程序算，不手写：本轮两次手算偏移都错了，错的夹具会让用例假绿。
+  let subAt = 200
+      litAt = subAt + 18
+      mk cnt =
+        let head8 = ascii "II" <> [0x2A, 0x00] <> u32e True 8
+            ifd0 = u16e True cnt <> u16e True 0x8769 <> u16e True 4 <> u32e True 1 <> u32e True subAt
+            pad = replicate (subAt - (length head8 + length ifd0)) 0x00
+            sub =
+              u16e True 1
+                <> u16e True 0x9003
+                <> u16e True 2
+                <> u32e True 20
+                <> u32e True litAt
+                <> u32e True 0
+         in head8 <> ifd0 <> pad <> sub <> ascii sample <> [0x00]
+  -- 诚实声明：照读（这道闸不能把正常文件一起关在门外）
+  show (parseCaptureTime (bs (mk 1))) @?= want
+  -- count=3 **不是**这道闸能抓的谎：3 条条目的字节确实都在缓冲区里（多出的
+  -- 两条读到填充零），声明与盘面自洽。"声明数超过有意义的条目数"原理上不可
+  -- 判定——尾部的零条目与填充无从区分。所以这里断言它照读，把这道闸的边界
+  -- 写清楚，而不是假装它管得更宽。
+  show (parseCaptureTime (bs (mk 3))) @?= want
+  -- 真正的谎报：声明的 IFD 整个装不下（2 + n*12 越出缓冲区）→ 作废
+  parseCaptureTime (bs (mk 5000)) @?= Nothing -- 60002 字节，缓冲区只有 238
+  parseCaptureTime (bs (mk 65535)) @?= Nothing -- 786422 字节
+  -- 上限本身也是一道独立的闸：即使缓冲区足够大，超过 maxIfdEntries 也作废
+  parseCaptureTime (bs (mk 5000 <> replicate 100000 0x00)) @?= Nothing
+
+-- | 库根的遍历策略（跳过 .pm/.git 且不报告）不能原样用在**源目录**上：
+-- 那里点开头的目录只是普通文件夹，里面完全可能有照片。
+-- （codex 二十六轮 #3：修复前 card\.hidden\a.ARW 连一条记录都不留地消失）
+caseSourceDotDirs :: IO ()
+caseSourceDotDirs = withSystemTempDirectory "pm-sort-dot" $ \tmp -> do
+  let src = tmp </> "card"
+  createDirectoryIfMissing True (src </> ".hidden")
+  createDirectoryIfMissing True (src </> "DCIM")
+  BS.writeFile (src </> "DCIM" </> "a.ARW") (photoAt "2026:08:25 10:00:00")
+  BS.writeFile (src </> ".hidden" </> "b.ARW") (photoAt "2026:08:26 10:00:00")
+  sf <- listSource src
+  sort (map takeFileName (sfPhotos sf)) @?= ["a.ARW", "b.ARW"]
+
+-- | 校验性读取必须**逐级限域**后再打开。库内某层是 junction 时，被"验证"的
+-- 其实是库外的文件——这个结论下游是「已归档，不用搬」与（clean 那侧）
+-- 「副本还在，可以永久删」。（codex 二十六轮 #1）
+caseProbeConfined :: IO ()
+caseProbeConfined = withSystemTempDirectory "pm-probe" $ \tmp -> do
+  let root = tmp </> "lib"
+      outside = tmp </> "outside"
+  createDirectoryIfMissing True (root </> "Raw")
+  createDirectoryIfMissing True outside
+  BS.writeFile (root </> "Raw" </> "real.ARW") "inside"
+  BS.writeFile (outside </> "bait.ARW") "outside-bait"
+  -- 正常路径：读得到内容
+  p1 <- probeConfined root ("Raw" </> "real.ARW")
+  case p1 of
+    CpSha _ -> pure ()
+    v -> assertFailure ("库内普通文件应读到 sha，得到 " <> show v)
+  -- 不存在：缺席，与"读不到"必须区分开
+  probeConfined root ("Raw" </> "nope.ARW") >>= (@?= CpMissing)
+  -- 中途一层是 junction → 拒绝，不返回库外文件的 sha
+  _ <- readCreateProcess (shell ("mklink /J " <> q (root </> "Raw" </> "link") <> " " <> q outside)) ""
+  probeConfined root ("Raw" </> "link" </> "bait.ARW") >>= (@?= CpEscaped)
+ where
+  q p = [dq] <> p <> [dq]
+  dq = toEnum 34
+
+-- | 源根**自身**是 junction：listTree 只探子项、不探根。根由用户显式指定，
+-- 与「库根放在 junction 上」一样是合法用法，所以不拒绝——但必须告诉用户他
+-- 实际在整理哪个目录。（codex 二十六轮 #5，判定为告知而非拒绝）
+caseSourceRootLink :: IO ()
+caseSourceRootLink = withSystemTempDirectory "pm-sort-root" $ \tmp -> do
+  let real = tmp </> "real"
+      link = tmp </> "card"
+  createDirectoryIfMissing True real
+  BS.writeFile (real </> "a.ARW") (photoAt "2026:08:25 10:00:00")
+  _ <- readCreateProcess (shell ("mklink /J " <> q link <> " " <> q real)) ""
+  sf <- listSource link
+  map takeFileName (sfPhotos sf) @?= ["a.ARW"]
+  -- 照片照常列出，但源根是链接这件事必须出现在交代里
+  any (elemSub "源根本身是 symlink/junction" . snd) (sfErrors sf) @?= True
+ where
+  q p = [dq] <> p <> [dq]
+  dq = toEnum 34
+  elemSub needle hay = any (\i -> take (length needle) (drop i hay) == needle) [0 .. length hay]
+
+-- | 'wholeIfdFits' 必须能**单独**转红。上一版用例的 count=5000/65535 同时也被
+-- 'maxIfdEntries' 拦下，于是拆掉 wholeIfdFits 时无一用例转红（突变 Q1 全绿）。
+-- 这里取 count=100：远低于 4096 上限，但 2 + 100*12 = 1202 字节装不进这个
+-- 238 字节的缓冲区——只有 wholeIfdFits 能拦它。
+caseExifIfdFits :: IO ()
+caseExifIfdFits = do
+  let subAt = 200
+      litAt = subAt + 18
+      mk cnt =
+        let head8 = ascii "II" <> [0x2A, 0x00] <> u32e True 8
+            ifd0 = u16e True cnt <> u16e True 0x8769 <> u16e True 4 <> u32e True 1 <> u32e True subAt
+            pad = replicate (subAt - (length head8 + length ifd0)) 0x00
+            sub =
+              u16e True 1
+                <> u16e True 0x9003
+                <> u16e True 2
+                <> u32e True 20
+                <> u32e True litAt
+                <> u32e True 0
+         in head8 <> ifd0 <> pad <> sub <> ascii sample <> [0x00]
+  length (mk 100) @?= 238 -- 钉住前提：缓冲区确实只有 238 字节
+  parseCaptureTime (bs (mk 100)) @?= Nothing
+  -- 同一个 count，把缓冲区补大到装得下 → 恢复照读，证明拦它的确实是"装不下"
+  -- 而不是"100 这个数字"
+  show (parseCaptureTime (bs (mk 100 <> replicate 1200 0x00))) @?= want
+
+-- | 「存在但读不出」必须与「缺席」分开：两者的安全方向相反（缺席 → 照搬，
+-- 读不出 → 保守拒绝）。末段是**目录**是本机可移植地造出这一态的办法
+-- （实测 getFileSize 对目录返回 0，随后按文件打开报 permission denied）。
+-- 突变 Q5（把 CpUnreadable 塌缩成 CpMissing）此前无一用例转红。
+caseProbeUnreadable :: IO ()
+caseProbeUnreadable = withSystemTempDirectory "pm-probe2" $ \tmp -> do
+  let root = tmp </> "lib"
+  createDirectoryIfMissing True (root </> "Raw" </> "adir")
+  p <- probeConfined root ("Raw" </> "adir")
+  case p of
+    CpUnreadable _ -> pure ()
+    v -> assertFailure ("存在但读不出应为 CpUnreadable，得到 " <> show v)
+  -- 与真正的缺席分开
+  probeConfined root ("Raw" </> "nope") >>= (@?= CpMissing)
+
+-- | 目录列举失败必须变成一条**带路径的错误**，异常不得逃出去。
+--
+-- 这条用例暴露过一个真缺陷：'listDirectory' 是
+-- @filter f \<$\> getDirectoryContents@，返回**惰性**列表，@try@ 只求值到
+-- WHNF，异常会在消费列表时才炸——正好在 try 之外。所以光包 try 不够，必须
+-- 在 try 内部强制列表脊。（突变 Q7 全绿暴露）
+caseListDirFails :: IO ()
+caseListDirFails = withSystemTempDirectory "pm-lsfail" $ \tmp -> do
+  let f = tmp </> "notadir.txt"
+  BS.writeFile f "x"
+  r <- listTreeWith WalkDotDirs f
+  fst r @?= []
+  map fst (snd r) @?= ["."]
+  any (elemSub "目录列举失败" . snd) (snd r) @?= True
+ where
+  elemSub needle hay = any (\i -> take (length needle) (drop i hay) == needle) [0 .. length hay]
 

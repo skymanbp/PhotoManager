@@ -30,6 +30,7 @@ module Pm.Exif
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import Data.Char (isDigit)
+import Data.Maybe (isJust)
 import Data.Time (LocalTime (..), fromGregorianValid, makeTimeOfDayValid)
 import Data.Word (Word16, Word32)
 import System.IO (IOMode (ReadMode), hClose, openBinaryFile)
@@ -146,6 +147,10 @@ endianAt bs off = case sliceAt bs off 4 of
   Just "MM\x00\x2A" -> Just False
   _ -> Nothing
 
+-- | 单个 IFD 的条目数上限。正常 IFD 只有几十条。
+maxIfdEntries :: Int
+maxIfdEntries = 4096
+
 data IfdEntry = IfdEntry {eTag :: Word16, eType :: Word16, eCount :: Word32, eVal :: Word32}
 
 -- | 读一个 IFD 的全部条目。@base@ 是 TIFF 头在缓冲里的位置，@rel@ 是 IFD
@@ -159,20 +164,29 @@ data IfdEntry = IfdEntry {eTag :: Word16, eType :: Word16, eCount :: Word32, eVa
 -- （codex 二十五轮 #1；本地探针复现：直 TIFF 与 JPEG APP1 两条路都返回
 -- @Just 2026-08-25 13:45:07@）。
 --
--- 条目数上限 4096——正常 IFD 只有几十条，这道闸挡住损坏文件里的天文数字
--- 导致的长循环。
+-- 条目数上限 'maxIfdEntries'——正常 IFD 只有几十条，这道闸挡住损坏文件里的
+-- 天文数字导致的长循环。
 ifdEntries :: Bool -> BS.ByteString -> Int -> Word32 -> [IfdEntry]
 ifdEntries end bs base rel
   | rel < 8 = []
+  | rel > fromIntegral (BS.length bs) = []
   | otherwise = case u16 end bs at of
       Nothing -> []
-      Just n ->
-        [ e
-        | i <- [0 .. min 4095 (fromIntegral n - 1)]
-        , Just e <- [entryAt (at + 2 + i * 12)]
-        ]
+      Just n
+        -- **声明的结构必须自洽，否则整个 IFD 作废**。此前是"截断"：取前 4096
+        -- 条、越界的条目由 sliceAt 悄悄丢掉——于是一个谎报 @count = 65535@
+        -- 而实际只有 1 条的文件照样返回时间（codex 二十六轮 #6，本地探针复现
+        -- 为 @Just 2026-08-25 13:45:07@）。截断等于**接受一个前缀**，而损坏
+        -- 文件的正解是 fail-closed：读不到就读不到，交人判断。
+        | fromIntegral n > maxIfdEntries -> []
+        | not (wholeIfdFits (fromIntegral n)) -> []
+        | otherwise ->
+            [e | i <- [0 .. fromIntegral n - 1], Just e <- [entryAt (at + 2 + i * 12)]]
  where
   at = base + fromIntegral rel
+  -- 2 字节计数 + n×12 字节条目必须整个落在缓冲区内。n 至多 65535（Word16），
+  -- 2 + 65535*12 = 786422，Int 装得下，不会绕回。
+  wholeIfdFits n = isJust (sliceAt bs at (2 + n * 12))
   entryAt p =
     IfdEntry
       <$> u16 end bs p
@@ -192,8 +206,13 @@ asciiTag _ bs base t es = do
     then Nothing
     else -- BS.copy：切片与父缓冲共享 ForeignPtr，不复制的话这 20 字节会把整个
     -- 256 KiB 头一起钉在堆上——与 readCaptureTime 的 evaluate 是同一泄漏的两半。
-      BC.unpack . BS.copy . BS.takeWhile (/= 0)
-        <$> sliceAt bs (base + fromIntegral (eVal e)) (fromIntegral (eCount e))
+    -- eVal 是 Word32，转 Int 前先按 Integer 比一次上界：64 位下这一步是恒真，
+    -- 但"恒真"依赖平台字长，写出来就不必再依赖它（codex 二十六轮 #6 后半）。
+      if toInteger (eVal e) > toInteger (BS.length bs)
+        then Nothing
+        else
+          BC.unpack . BS.copy . BS.takeWhile (/= 0)
+            <$> sliceAt bs (base + fromIntegral (eVal e)) (fromIntegral (eCount e))
 
 -- ─── 时间字面量 ─────────────────────────────────────────────────────────────
 

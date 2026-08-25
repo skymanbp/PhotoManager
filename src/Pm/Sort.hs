@@ -65,19 +65,25 @@ import Data.Time
   , getCurrentTime
   , toGregorian
   )
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute)
+import System.Directory
+  ( canonicalizePath
+  , doesDirectoryExist
+  , listDirectory
+  , makeAbsolute
+  , pathIsSymbolicLink
+  )
 import System.FilePath (takeBaseName, takeDirectory, takeExtension, takeFileName, (</>))
 import Text.Printf (printf)
 
 import Pm.Cli (GoOpts (..), savePlanAndMaybeRun, withFreshStagingCatalog)
 import Pm.Config (Config (..), requireRole)
 import Pm.Exif (readCaptureTime)
-import Pm.Hash (StatSnap (..), sha256File, statSnap)
+import Pm.Hash (ContentProbe (..), StatSnap (..), probeConfined, sha256File, statSnap)
 import Pm.Import (foldPath, stagingTop)
 import Pm.Names (canonProcessedEvent, canonRawEvent)
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), newPlanId)
-import Pm.Scan (listTree)
+import Pm.Scan (DotDirs (..), listTreeWith)
 import Pm.Types
 
 -- ─── 纯核心 ─────────────────────────────────────────────────────────────────
@@ -251,28 +257,48 @@ listSource dir = do
   if not isDir
     then pure (SourceFiles [] [] [] [])
     else do
-      (rels, errs) <- listTree dir
+      -- 'WalkDotDirs'：源是**用户随手指的一个目录**，里面点开头的目录只是普通
+      -- 文件夹。'listTree' 的默认策略是给**库根**写的（@.pm@/@.git@ 是元数据，
+      -- 跳过且不报告），原样搬过来会让 @card\\.hidden\\a.ARW@ 连一条记录都不留
+      -- 地消失（codex 二十六轮 #3）。
+      (rels, errs) <- listTreeWith WalkDotDirs dir
+      -- 源根自身是不是 reparse point：'listTree' 只探子项，不探根。根由用户
+      -- 显式指定（与 root 放在 junction 上一样是合法用法，见 'resolveUnder'
+      -- 的说明），所以**不拒绝**，但必须告诉用户他实际在整理哪个目录
+      -- （codex 二十六轮 #5）。
+      rootLink <- either (const False) id <$> tryLink dir
+      real <- if rootLink then Just <$> canonicalizePath dir else pure Nothing
       let abs' = map (dir </>) (sort rels)
           pick k = [p | p <- abs', classifyExt (takeExtension p) == k]
+          rootNote =
+            [ (dir, "源根本身是 symlink/junction，实际整理的是 " <> fromMaybe "?" real)
+            | rootLink
+            ]
       pure
         SourceFiles
           { sfPhotos = pick KindPhoto
           , sfSidecars = pick KindSidecar
           , sfUnknown = pick KindMeta
-          , sfErrors = [(dir </> r, e) | (r, e) <- errs]
+          , sfErrors = rootNote <> [(dir </> r, e) | (r, e) <- errs]
           }
+ where
+  tryLink p = try (pathIsSymbolicLink p) :: IO (Either SomeException Bool)
 
 -- | (源目录, 折叠后的 stem) → 该 stem 的侧车。按目录分键：不同目录下同名的
 -- 两组照片各有各的侧车，全局按 stem 索引会把它们串在一起。
+-- | 侧车与主文件的配对键：(所在目录, 折叠后的 stem)。'sidecarIndex' 与
+-- 「无主侧车」两处共用，免得配对口径分成两份。
+stemOf :: FilePath -> (FilePath, FilePath)
+stemOf p = (foldPath (takeDirectory p), foldPath (takeBaseName p))
+
 sidecarIndex :: [FilePath] -> Map.Map (FilePath, FilePath) [FilePath]
 sidecarIndex ps =
   Map.fromListWith
     (<>)
-    [((foldPath (takeDirectory p), foldPath (takeBaseName p)), [p]) | p <- ps]
+    [(stemOf p, [p]) | p <- ps]
 
 lookupSidecars :: Map.Map (FilePath, FilePath) [FilePath] -> FilePath -> [FilePath]
-lookupSidecars ix p =
-  Map.findWithDefault [] (foldPath (takeDirectory p), foldPath (takeBaseName p)) ix
+lookupSidecars ix p = Map.findWithDefault [] (stemOf p) ix
 
 -- | 读一批文件的拍摄时间，分成「可定时」与「读不到」。'readCaptureTime' 自身
 -- 已 fail-closed（读不到即 'Nothing'，不猜、不回退到文件修改时间）。
@@ -400,14 +426,18 @@ runSortSurvey src gapHours cfg = do
         (length (sfUnknown sf))
         (length (sfErrors sf))
       forM_ (zip [1 :: Int ..] segs) (printSegment absSrc existing)
-      -- 提议阶段还没有区间，所以「区间外」与「无主侧车」这两格此刻为空——
-      -- 它们由形态二在拿到 --from/--to 之后才算得出来。
+      -- 提议阶段没有区间，所以「区间外」这一格此刻不适用（由形态二在拿到
+      -- --from/--to 之后才算得出来）。但「无主侧车」有一半是**与区间无关**的：
+      -- 同目录同 stem 在整个源里都没有主文件的侧车，此刻就能判定，也就此刻
+      -- 该报——否则用户要等到生成计划时才第一次看到它（codex 二十六轮 #7）。
+      let stems = Set.fromList [stemOf p | p <- sfPhotos sf]
+          homeless = [c | c <- sfSidecars sf, not (Set.member (stemOf c) stems)]
       _ <-
         reportAccounting
           Accounting
             { acUndated = undated
             , acOutOfRange = []
-            , acOrphanCars = []
+            , acOrphanCars = homeless
             , acUnknown = sfUnknown sf
             , acErrors = sfErrors sf
             }
@@ -481,21 +511,33 @@ runSortPlan go src placeOrEvent from to cfg = do
             , acUnknown = sfUnknown sf
             , acErrors = sfErrors sf
             }
-      unless (left == 0) $
-        printf "\n（以上 %d 个文件**不在**本次计划里；清卡前请自行确认）\n" left
       case (spCollide pick, spTake pick) of
         (cs@(_ : _), _) -> do
+          -- 撞名是**整批拒绝**：这一趟没有任何文件进入计划。所以这里不能沿用
+          -- 上面那句「以上 N 个不在本次计划里」——那会让人以为其余的进了。
+          -- 说清楚"一个都没进"，才是对这一格的如实交代（codex 二十六轮 #7）。
           putStrLn "✗ 同名文件来自多个源路径，整批拒绝（不替你挑哪一个）："
           forM_ cs $ \(n, srcs) -> do
             putStrLn ("    " <> n <> ":")
             forM_ srcs $ \s -> putStrLn ("        " <> s)
+          printf
+            "\n本次**没有任何文件**进入计划（撞名 %d 组；另有 %d 个文件因上列原因被留下）。\n"
+            (length cs)
+            left
           pure 2
-        (_, []) -> putStrLn "该区间内没有可定时的照片" >> pure 1
-        (_, taken@((_, t1) : _)) -> case resolveEvent (localDay t1) placeOrEvent of
-          Left why -> putStrLn ("✗ " <> why) >> pure 2
-          Right ev ->
-            withFreshStagingCatalog root $
-              buildPlan go root info ev (map fst taken <> spSidecars pick)
+        (_, []) -> do
+          putStrLn "该区间内没有可定时的照片"
+          unless (left == 0) $
+            printf "（源里另有 %d 个文件因上列原因未被归位）\n" left
+          pure 1
+        (_, taken@((_, t1) : _)) -> do
+          unless (left == 0) $
+            printf "\n（以上 %d 个文件**不在**本次计划里；清卡前请自行确认）\n" left
+          case resolveEvent (localDay t1) placeOrEvent of
+            Left why -> putStrLn ("✗ " <> why) >> pure 2
+            Right ev ->
+              withFreshStagingCatalog root $
+                buildPlan go root info ev (map fst taken <> spSidecars pick)
 
 -- | 决定事件夹名：@--place@ 自动补 @YY-MM@（取该段起始日），@--event@ 直接用。
 -- 两条最后都要过 'canonRawEvent'——那是 import 认这个目录的同一把尺子，
@@ -582,6 +624,11 @@ judge cat ev rows =
 --    裁决（@irRework@）管的事，sort 把文件送进暂存区即可，抢在它前面裁决会让
 --    同一件事有两套判据。
 --  * 目标压根不存在（索引说有）→ 'VCopy'，照搬。
+-- 读取走 'probeConfined'：**逐级限域后再打开**，而不是 @root \</\> rel@ 直接
+-- 开。库内任何一层是 junction 时，被"验证"的其实是库外的文件，而这个结论会
+-- 被当成「已归档，不用搬」——本项目已经为这条反模式开过三轮评审，这里不能
+-- 再开一个新口子（codex 二十六轮 #1）。同一个 helper 也给
+-- 'Pm.Clean.anyWitnessAlive' 用，两处不再各写一遍。
 verifySkips :: FilePath -> [Judged] -> IO [Judged]
 verifySkips root = mapM check
  where
@@ -590,18 +637,18 @@ verifySkips root = mapM check
     VArchived -> recheck j (jArch j) False
     _ -> pure j
   recheck j rel isStaging = do
-    let abs' = root </> rel
-    ex <- doesFileExist abs'
-    if not ex
-      then pure j {jVerdict = VCopy}
-      else do
-        r <- try (sha256File abs') :: IO (Either SomeException Text)
-        pure $ case r of
-          Left e -> j {jVerdict = VConflict (T.pack ("目标无法核对: " <> show e))}
-          Right actual
-            | actual == jSha j -> j
-            | isStaging -> j {jVerdict = VConflict "暂存目标实际内容与索引不符"}
-            | otherwise -> j {jVerdict = VCopy}
+    p <- probeConfined root rel
+    pure $ case p of
+      -- 索引说有、盘上没有 → 照搬。
+      CpMissing -> j {jVerdict = VCopy}
+      -- **读不到不等于不存在**：两者的安全方向相反（缺席→照搬，读不到→保守）。
+      CpUnreadable e -> j {jVerdict = VConflict (T.pack ("目标读不到，无法确认可跳过: " <> e))}
+      CpEscaped -> j {jVerdict = VConflict "目标路径中途有 reparse point，拒绝据此跳过"}
+      CpSha actual
+        | actual == jSha j -> j
+        | isStaging -> j {jVerdict = VConflict "暂存目标实际内容与索引不符"}
+        -- 归档层同名异容是 import 的返修裁决管的事，照常拷进暂存区。
+        | otherwise -> j {jVerdict = VCopy}
 
 emit :: GoOpts -> FilePath -> RootInfo -> [Judged] -> IO Int
 emit go root info judged = do

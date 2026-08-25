@@ -62,6 +62,24 @@
   junction 会让递归无限下降，指向外部的会把源范围之外的照片纳入计划）、过长
   路径报错而非静默丢弃、点开头目录跳过。改为直接用 `listTree`。
 
+第 26 轮门禁又收紧四处：
+
+- **校验性读取必须先限域**。`verifySkips` 与（安全内核那侧的）
+  `Pm.Clean.anyWitnessAlive` 都是 `root </> rel` 直接打开去核对内容。库内任何
+  一层是 junction 时，被"验证"的其实是**库外**的文件——这个结论的下游一边是
+  「已归档，不用搬」，另一边是 `pm trash empty` 的**永久删除**屏障。收成
+  `Pm.Hash.probeConfined` 一处（`resolveUnder` 后再开），两个调用点共用。
+- **遍历策略必须按用途区分**。`listTree` 跳过点目录是给**库根**写的
+  （`.pm`/`.git` 是元数据）；`pm sort` 的源是用户随手指的目录，那里点开头的
+  目录只是普通文件夹。策略参数化为 `SkipDotDirs`/`WalkDotDirs`，否则
+  `card\.hidden\a.ARW` 连一条记录都不留地消失。
+- **结构性声明不自洽即整体作废**。EXIF 的 IFD 条目数此前是**截断**（取前 4096
+  条，越界的由 `sliceAt` 悄悄丢掉），于是谎报 `count=65535` 的文件照样返回时间。
+  截断等于接受一个前缀；损坏文件的正解是 fail-closed。
+- **缺席与读不到必须分开**。两者的安全方向相反：缺席 → 照搬/照删；读不到 →
+  保守拒绝。`ContentProbe` 四态（`CpSha`/`CpMissing`/`CpEscaped`/`CpUnreadable`），
+  且只捕 `IOException`——`SomeException` 会把 Ctrl-C 一起吞成"读不到"。
+
 **并且 `pm sort` 现在对它看到的每一个文件都有交代**（`Accounting`）：读不到
 拍摄时间 / 可定时但在区间外 / 无区间内主文件的侧车 / 扩展名不认识 / 遍历出错，
 逐类列出并给出「不在本次计划里」的总数。此前只有第一类被报告，其余四类**既不
