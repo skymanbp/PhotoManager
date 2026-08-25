@@ -79,7 +79,7 @@ pm doctor                        # 崩溃恢复对账 + 完整性体检（默认
 pm undo <planId>                 # 整体回滚已执行的计划
 pm config                        # 打印配置与每条路径的健康状态（只读）
 pm config set --vault <目录>     # 改 vault / --photos-json / --workers（主库路径只读，用 pm init）
-pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读，见 --writable）
+pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读，见 --writable / --allow-apply）
 ```
 
 所有命令默认只读（生成计划、exit 1 表示"有事可做"）；**动照片字节**要么
@@ -346,7 +346,7 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   "sha 在库里出现过"（后者会把合法属于第二个事件的照片静默丢掉）；侧车跟随
   主文件（否则清卡后调色参数永久丢失）；源 hash 前后双 stat + 逐文件 try，
   读取失败整批拒绝。此后连过两轮 codex 门禁：第 25 轮 6 条、第 26 轮 7 条，逐条第一方核实（第 26 轮有一条部分证伪），按根因各改一处。第 26 轮最重的一条不是新缺陷而是**跨模块的类**——校验性读取未限域，同样写法早已在 `pm clean staging` 的永久删除屏障里出厂，已收成一个 helper 两处共用。连过三轮 codex 门禁（25 轮 6 条、26 轮 7 条、27 轮 5 条），逐条第一方核实，其中两条部分证伪、三条是我方结论或期望有误并已公开更正。三十二道闸各自突变转红（纯核心 8 + IO 层 5 + 25 轮 7 + 26 轮 7 + 27 轮 5）。经过见 REVIEW-LOG。
-- P5-B ✅ `pm dedupe`（262 例，GHC 警告 0）：把 `pm versions` 报出来的非设计内
+- P5-B ✅ `pm dedupe`（273 例，GHC 警告 0）：把 `pm versions` 报出来的非设计内
   精确重复变成**逐份可裁决**的隔离计划。候选组直接取自 `versionsReport`——不另
   写一套判据，否则「看到的报告」与「能操作的计划」迟早对不上。每一份都是
   `NEEDS-DECISION`：留哪一份取决于事件夹归属、命名偏好、是否被外部引用，pm 判

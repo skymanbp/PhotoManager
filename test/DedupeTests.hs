@@ -14,7 +14,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
@@ -42,7 +42,8 @@ dedupeTests =
     , testCase "隔离 reason 带 dedupe 前缀（trash empty 据此分流到本类屏障）" caseReasonPrefix
     , testCase "批准 N-1 份 → 放行；批准全部 N 份 → 全部降级待裁决" caseBarrierKeepsOne
     , testCase "幸存者 catalog 有、盘上没有 → 降级（catalog 是快照不是证据）" caseBarrierSurvivorMissing
-    , testCase "幸存者是 hardlink（同一对象两个名字）→ 降级，不算独立副本" caseBarrierSurvivorHardlink
+    , testCase "幸存者是 hardlink 但与受害者是不同对象 → 放行（旧的 link count 判据会在这里假 HELD）" caseBarrierSurvivorHardlink
+    , testCase "受害者与幸存者互为 hardlink（同一对象）→ 降级，同一对象不算两份副本" caseBarrierSameObject
     , testCase "受害者名单 case-fold：只差大小写仍算同一份，屏障照样拦" caseBarrierCaseFold
     , testCase "暂存区的同 sha 副本不算归档层幸存者" caseStagingIsNotSurvivor
     , testCase "preExecFor 表里有 dedupe 这一行（apply 与 --apply 共用同一张表）" casePreExecRow
@@ -107,13 +108,30 @@ caseBarrierSurvivorMissing = withDup $ \root sha a b -> do
   p <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha)]
   map statusTag (plItems p) @?= ["DECIDE"]
 
--- | 幸存者是 hardlink：'Pm.Win.openStateRead' 在句柄上查 link count 后拒绝，
--- 于是"读不到" → 屏障拦下。方向是对的——同一个对象出现在两个名字下不是两份
--- 独立副本，把它当第二份就等于批准删掉唯一的那份。
+-- | 幸存者 b 是 hardlink，但它的另一端在库外的第三个名字上——它与受害者 a
+-- 仍是**两个不同的对象**，屏障应当放行。
+--
+-- 这正是旧判据（link count == 1）的假阴性：nlink 2 就一律拒读，于是一份合法
+-- 归档照片被去重工具另建一个名字之后，clean staging / trash empty 永远 HELD
+-- （codex 二十八轮 #2）。
 caseBarrierSurvivorHardlink :: IO ()
 caseBarrierSurvivorHardlink = withDup $ \root sha a b -> do
+  let outside = takeDirectory root </> "outside-name.arw"
   removeFile (root </> b)
-  _ <- readCreateProcess (shell ("mklink /H \"" <> (root </> b) <> "\" \"" <> (root </> a) <> "\"")) ""
+  writeFile outside dupBody
+  _ <- readCreateProcess (shell ("mklink /H " <> q (root </> b) <> " " <> q outside)) ""
+  p <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha)]
+  map statusTag (plItems p) @?= ["PENDING"]
+
+-- | 受害者与幸存者互为 hardlink：**同一个对象**的两个名字。隔离掉 a 之后
+-- 「归档层还有一份」在物理上是假的——两个名字下只有一份字节。屏障必须拦。
+--
+-- 这是身份判据要守住的那一半：路径名单挡不住它（两条路径确实不同），
+-- 只有 (卷序列号, 文件索引) 相等这一条看得见。
+caseBarrierSameObject :: IO ()
+caseBarrierSameObject = withDup $ \root sha a b -> do
+  removeFile (root </> b)
+  _ <- readCreateProcess (shell ("mklink /H " <> q (root </> b) <> " " <> q (root </> a))) ""
   p <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha)]
   map statusTag (plItems p) @?= ["DECIDE"]
 
@@ -229,3 +247,10 @@ statusTag it = case piStatus it of
   StPending -> "PENDING"
   StSkippedByUser -> "SKIPPED"
   StNeedsDecision _ -> "DECIDE"
+
+
+-- | 引号包路径：路径里有空格时 mklink 会把参数拆开。
+q :: FilePath -> String
+q p = [dq] <> p <> [dq]
+ where
+  dq = toEnum 34

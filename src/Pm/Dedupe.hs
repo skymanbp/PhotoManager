@@ -39,7 +39,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import System.FilePath (splitDirectories)
 
-import Pm.Hash (anyCopyAlive)
+import Data.Maybe (isJust)
+
+import Pm.Hash (ContentProbe (..), anyCopyAliveExcept, probeConfined)
+import Pm.Win (FileId)
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..))
 import Pm.Types
@@ -115,16 +118,19 @@ survivingArchiveCopies cat victims sha =
 -- （再往下是 @pm trash empty@ 的永久删除）。读取走 'anyCopyAlive'：逐级限域、
 -- 只打开一次、句柄上查 link count、同句柄读完。同一个对象出现在两个名字下
 -- 不算两份，所以 hardlink 一并拒绝。
-archiveCopyAlive :: FilePath -> Catalog -> Set.Set String -> Text -> IO Bool
-archiveCopyAlive root cat victims sha =
-  anyCopyAlive root sha (survivingArchiveCopies cat victims sha)
+-- @excl@ = 本次被批准隔离的那些**对象**的身份。路径名单挡住"同一条路径"，
+-- 身份名单挡住"受害者与幸存者其实是同一个对象的两个名字"——两道都要
+-- （codex 二十八轮 #2）。
+archiveCopyAlive :: FilePath -> Catalog -> Set.Set String -> [FileId] -> Text -> IO Bool
+archiveCopyAlive root cat victims excl sha =
+  isJust <$> anyCopyAliveExcept root sha excl (survivingArchiveCopies cat victims sha)
 
 -- | 「归档层现在还有这个 sha 的活副本吗」——不排除任何路径。
 --
 -- @pm trash empty@ 的永久删除前屏障用它：受害者此刻已经在 @.pm\/trash@ 里、
 -- 不在归档层，所以没有需要排除的名单。与 'archiveCopyAlive' 同一实现，只是
 -- 名单为空——不另写一遍循环。
-anyArchiveCopyAlive :: FilePath -> Catalog -> Text -> IO Bool
+anyArchiveCopyAlive :: FilePath -> Catalog -> [FileId] -> Text -> IO Bool
 anyArchiveCopyAlive root cat = archiveCopyAlive root cat Set.empty
 
 -- | 执行期屏障：批准隔离的条目中，同一个 sha 不得把**最后一份**归档层副本也
@@ -147,7 +153,13 @@ recheckDedupeItems root cat plan = do
         ]
       victims = Set.fromList [foldPath v | (v, _) <- pending]
       shas = Set.toList (Set.fromList (map snd pending))
-  judged <- forM shas $ \sha -> (,) sha <$> archiveCopyAlive root cat victims sha
+  -- 受害者的**对象身份**：幸存者与它们中的任何一个同身份都不算另一份副本。
+  -- 读不到身份的受害者不进名单——它本来也执行不了（execQuarantine 会先核 sha）。
+  vids <- forM (map fst pending) $ \v -> do
+    p <- probeConfined root v
+    pure (case p of CpSha _ fid -> [fid]; _ -> [])
+  let excl = concat vids
+  judged <- forM shas $ \sha -> (,) sha <$> archiveCopyAlive root cat victims excl sha
   let doomed = Set.fromList [sha | (sha, False) <- judged]
   items' <- forM (plItems plan) $ \it -> case (piStatus it, piOp it) of
     (StPending, OpQuarantine v sha _)

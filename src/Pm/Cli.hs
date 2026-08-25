@@ -9,6 +9,7 @@ module Pm.Cli
   , confirm
   , renderPlanBrief
   , executePlanNow
+  , executePlanNowWith
   , savePlanAndMaybeRun
   , savePlanAndMaybeRunWith
   , bindExecRoot
@@ -20,6 +21,7 @@ module Pm.Cli
   , parseOnly
   , stagingFresh
   , withFreshStagingCatalog
+  , freshStagingCatalog
   , reportScanIssues
   , refreshBackupCache
   ) where
@@ -40,6 +42,7 @@ import Text.Read (readMaybe)
 import Pm.Backup
 import Pm.Catalog (loadCatalog, saveCatalog)
 import Pm.Clean (threeCopiesStillExist)
+import Pm.Hash (ContentProbe (..), probeConfined)
 import Pm.Config (Config (..), readRootInfo, requireMain, requireWritable)
 import Pm.Dedupe (recheckDedupeItems)
 import Pm.Diff (BackupDiff (..))
@@ -84,14 +87,26 @@ renderPlanBrief plan = do
 -- P2.2 fail-closed（复审 cx-1 残留）：CLI 层一律拒绝执行无 rootId 的计划，
 -- 包括 --apply 即时路径——root 没有身份就没有执行资格，没有例外。
 executePlanNow :: Plan -> IO Int
-executePlanNow plan = case plRootId plan of
-  Nothing -> do
-    putStrLn "计划缺 root 标识，拒绝执行（cx-1 fail-closed）→ pm init 建立 root 标识后重新生成计划"
-    pure 2
-  Just _ -> executePlanNow' plan
+executePlanNow = fmap fst . executePlanNowWith putStrLn
 
-executePlanNow' :: Plan -> IO Int
-executePlanNow' plan = do
+-- | 同上，但**打印口由调用方给**，且把逐项结果一并交回。
+--
+-- 为什么打印必须可替换：`pm ui` 只从 serve 的 stdout 读**一行** announce，随后
+-- 就丢掉那个 BufReader——管道之后再无人排空。API 的 apply 端点若照着 stdout 打
+-- 逐项结果，一个上千项的计划会先填满管道缓冲、然后 serve 卡在写上（或拿到
+-- broken pipe）。端点因此传一个把行收进 IORef 的 sink，把它们放进 JSON 响应体。
+--
+-- 逐项结果同样交回：CLI 只要退出码，API 要把每一项的结局报给页面。两者共用
+-- **同一次**执行与同一次 catalog 回写，不另起一条执行路径。
+executePlanNowWith :: (String -> IO ()) -> Plan -> IO (Int, [(PlanItem, ItemOutcome)])
+executePlanNowWith sink plan = case plRootId plan of
+  Nothing -> do
+    sink "计划缺 root 标识，拒绝执行（cx-1 fail-closed）→ pm init 建立 root 标识后重新生成计划"
+    pure (2, [])
+  Just _ -> executePlanNow' sink plan
+
+executePlanNow' :: (String -> IO ()) -> Plan -> IO (Int, [(PlanItem, ItemOutcome)])
+executePlanNow' sink plan = do
   let root = plRootPath plan
       env =
         defaultExecEnv
@@ -100,20 +115,20 @@ executePlanNow' plan = do
           }
   r <- execPlan env plan
   case r of
-    Left e -> putStrLn e >> pure 2
+    Left e -> sink e >> pure (2, [])
     Right results -> do
       forM_ results $ \(it, out) ->
-        printf "  %3d → %s\n" (piIx it) (outcomeLabel out)
+        sink (printf "  %3d → %s" (piIx it) (outcomeLabel out))
       (mcat, _) <- loadCatalog root
       case mcat of
-        Nothing -> putStrLn "（root 尚无索引，跳过 catalog 回写；之后 pm scan 会补齐）"
+        Nothing -> sink "（root 尚无索引，跳过 catalog 回写；之后 pm scan 会补齐）"
         Just cat -> do
           now <- getCurrentTime
           saveCatalog root (updateCatalog now results cat)
       let bad = [() | (_, out) <- results, isBad out]
       unless (null bad) $
-        printf "⚠ %d 项 CONFLICT/FAILED（其余不受影响；详见上方逐项结果）\n" (length bad)
-      pure (if null bad then 0 else 1)
+        sink (printf "⚠ %d 项 CONFLICT/FAILED（其余不受影响；详见逐项结果）" (length bad))
+      pure (if null bad then 0 else 1, results)
  where
   isBad (OConflict _) = True
   isBad (OFailed _) = True
@@ -228,7 +243,13 @@ recheckCleanItems :: FilePath -> Catalog -> FilePath -> Catalog -> Plan -> IO Pl
 recheckCleanItems mroot mainCat broot bakCat plan = do
   items' <- forM (plItems plan) $ \it -> case (piStatus it, piOp it) of
     (StPending, OpQuarantine v sha _) -> do
-      ok <- threeCopiesStillExist mroot mainCat broot bakCat sha
+      -- 将被移走的就是 victim 本身：见证与它同身份不算另一份副本
+      -- （codex 二十八轮 #2）。读不到它的身份就没法做这个判断 → 判不过
+      -- （fail-closed；victim 读不到时这一项本来也执行不了）。
+      pv <- probeConfined mroot v
+      ok <- case pv of
+        CpSha _ vid -> threeCopiesStillExist mroot mainCat broot bakCat [vid] sha
+        _ -> pure False
       if ok
         then pure it
         else do
@@ -338,6 +359,21 @@ stagingFresh root cat = do
 --
 -- 「无索引」必须是**拒绝**而不是"当作目标为空"：后者是默认覆盖的方向，
 -- 与 I5（不静默覆盖）恰好相反。
+-- | 同上，但把失败**交回调用方**而不是自己打印后返回 2。
+--
+-- @pm sort@ 需要这一层：它在这里失败时，已经选中的照片一个都不会被搬走，
+-- 而调用方必须把它们逐条列出来（codex 二十八轮 #4）。自己打印就等于替调用方
+-- 决定了"说这么多就够了"。
+freshStagingCatalog :: FilePath -> IO (Either String Catalog)
+freshStagingCatalog root = do
+  (mcat, warns) <- loadCatalog root
+  mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
+  case mcat of
+    Nothing -> pure (Left "主库尚未索引 → 先 pm scan")
+    Just cat -> do
+      fr <- stagingFresh root cat
+      pure (either Left (const (Right cat)) fr)
+
 withFreshStagingCatalog :: FilePath -> (Catalog -> IO Int) -> IO Int
 withFreshStagingCatalog root k = do
   (mcat, warns) <- loadCatalog root

@@ -200,6 +200,12 @@ Haskell 侧无图像解码依赖。
 
 所有命令**默认只读**（打印报告/计划），写盘要么 `--apply`（展示计划后交互
 y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <planId>`。
+
+这里的「写盘」指的是**照片字节**。计划文件本身是 pm 自己的状态：不给 `--apply`
+时它照样落在 `<root>/.pm/plans/<id>.json`——两段式的第二段 `pm apply <planId>`
+读的就是它，命令末尾也明明白白打印「计划已存 …／执行: pm apply …」。把这句话
+读成"没有 `--apply` 就一个字节都不许写"会得出计划器违反不变量的结论（codex
+二十八轮 #5 即如此，已第一方证伪）。
 零参数 `pm` = `pm status`。全部支持 `--json`。
 
 | 命令 | 语义 | 写盘? |
@@ -400,8 +406,20 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `GET /api/thumb/<sha>`（只提供 catalog 里 JPEG 条目的原字节，读取前逐级
   `resolveUnder`——扫描后被换成库外链接的条目不跟随；缩放由 GUI 做）。vault
   两个端点会刷新 `.pm/vault-cache`，进程内互斥串行化（并发争用固定 tmp 名）。
+- **三级授权（P5-C）**：`serve` 的授权分三级、缺省最弱——①无开关＝只读；
+  ②`--writable`＝POST 端点可**生成计划**（只写 `.pm/plans` 与少量 pm 自身状态，
+  **不执行、不碰照片**）；③`--allow-apply`＝才允许 `POST /api/apply` **执行**已存
+  的计划（唯一会动照片字节的端点，蕴含 ②）。第 ③ 级单独一个开关而不是并进
+  `--writable`：后者的契约「不执行、不碰照片」写在帮助文本、本节、README 与
+  GUI 四处，悄悄放宽它等于让所有按 ② 理解去用它的地方（含 `pm ui` 自己的拉起
+  参数）无声地获得动照片的能力。端点不新增任何执行能力：装载／按 UUID 绑 root／
+  `--only` 组闭包走 CLI 同一个 `prepareApply`，执行期复验走同一张 `preExecFor`
+  表，执行与 catalog 回写走同一个 `executePlanNowWith`。逐项结果与提示**走 JSON
+  响应体**，不走 stdout——`pm ui` 只读一行 announce 就丢掉 BufReader，serve 的
+  stdout 此后无人排空，照着打会填满管道缓冲。
 - **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
-  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。目前共**四个**写端点——
+  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。目前共**四个**生成计划类
+  写端点——
   `POST /api/vault/push-plan`（P4-5，本条）、`POST /api/vault/hold`（P4-7）、
   `POST /api/config` 与 `POST /api/backup-init`（P4-8，均见下）；
   **apply 端点仍未开**。第一个是 `POST /api/vault/push-plan`，

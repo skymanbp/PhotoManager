@@ -39,6 +39,8 @@ module Pm.Win
   , openStateRead
   , openStateLock
   , handleIsSingleLink
+  , FileId (..)
+  , handleFileId
   , suppressCriticalErrorDialogs
   , DriveKind (..)
   , listCandidateDrives
@@ -51,7 +53,7 @@ import Data.Bits (testBit, (.&.))
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Word (Word32, Word8)
+import Data.Word (Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (alloca, allocaBytes)
 import Foreign.Ptr (Ptr, intPtrToPtr, nullPtr)
 import Foreign.Storable (peek, peekByteOff)
@@ -242,6 +244,33 @@ handleIsSingleLink h = do
   pure $ case r of
     Right i -> Win32File.bhfiNumberOfLinks i <= 1
     Left _ -> False -- 查不出就不写（fail-closed）
+
+-- | 文件**对象**的身份：卷序列号 + 文件索引。两条路径指向同一个对象，当且
+-- 仅当二者相等。
+--
+-- 这是「三份副本是不是三个独立对象」的正确判据。此前用的是
+-- 'handleIsSingleLink'（link count == 1）——**充分而不必要**：每份只有一个
+-- 名字确实蕴含彼此不同，但一份合法归档照片被去重工具另建一个名字（nlink 2）
+-- 就被判成不可信，@pm clean staging@ 与 @pm trash empty@ 于是长期 HELD。
+-- 方向是安全的，代价是永远清不掉（codex 二十八轮 #2）。
+--
+-- nlink 判定**仍然保留**在 @.pm@ 状态文件的三个打开口（'openStateAppend' /
+-- 'openStateRead' / 'openStateLock'）——那里问的是另一件事：pm 自己的状态
+-- 不得与任何别的名字共享同一个对象，nlink == 1 正是那个问题的正解。
+data FileId = FileId {fidVolume :: Word32, fidIndex :: Word64}
+  deriving (Eq, Ord, Show)
+
+-- | 从**已打开的句柄**取身份。与内容读自同一句柄——按名字重开等于把校验与
+-- 使用分成两次独立解析，正是本项目十一~十三轮反复收拾的那个形状。
+-- 取不到就是 Nothing，调用方一律 fail-closed（不得当作"身份不同"）。
+handleFileId :: Handle -> IO (Maybe FileId)
+handleFileId h = do
+  r <- try (withHandleToHANDLE h Win32File.getFileInformationByHandle) :: IO (Either SomeException Win32File.BY_HANDLE_FILE_INFORMATION)
+  pure $ case r of
+    Right i ->
+      Just
+        (FileId (Win32File.bhfiVolumeSerialNumber i) (Win32File.bhfiFileIndex i))
+    Left _ -> Nothing
 
 -- | @.pm@ 内状态文件的受控打开：打开后**立刻**查 link count，\>1 即关闭并
 -- 拒绝。@AppendMode@ 不截断，所以"先打开再判"是安全的——判定失败时尚未写入

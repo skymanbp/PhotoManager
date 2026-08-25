@@ -35,7 +35,7 @@ import qualified Data.Text.Encoding as TE
 import Pm.Config (Config (..), configFilePath, loadConfig, pmDir, withConfigLock, writeConfig, writeRootInfo)
 import Pm.Hash (sha256File)
 import Pm.Op (Fingerprint (..), Op (..))
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, savePlan)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, savePlan)
 import Pm.Serve (ServeEnv, allowedOrigin, hostOk, listPlans, newServeEnv, newToken, portOk, serveApp)
 import Pm.Types (Entry (..), FileKind (..), RootInfo (..), RootRole (..))
 import Pm.Vault (VaultReport (..), computeVault, renderVaultJson)
@@ -60,6 +60,10 @@ serveTests =
     , testCase "P4-6 POST /api/vault/push-plan：DRIFT-only（无 NEW）空指派 → 纯裁决计划；照片零改动" caseServePushPlanDrift
     , testCase "P4-7 POST /api/vault/hold：只读 403；标记后 new 移出、held 列出；同名同时标与撤 400；撤销恢复；被 hold 的不能 push" caseServeHold
     , testCase "P4-8 GET /api/config：路径与健康状态；主库恒 editable=false" caseServeConfigGet
+    , testCase "P5-C POST /api/apply：--writable 不够 → 403（执行是另一级授权）；坏 JSON 400；超大体 413；不存在的计划 409" caseServeApplyGuards
+    , testCase "P5-C POST /api/apply：真执行一个 copy 计划，字节落位、逐项结果与 log 回 JSON（不走 stdout）" caseServeApplyRuns
+    , testCase "P5-C POST /api/apply --only：与 CLI 同一个解析，未选中的项不执行" caseServeApplyOnly
+    , testCase "P5-C POST /api/apply：执行期屏障对 API 与 CLI 一视同仁（dedupe 计划会隔离最后一份 → 一项都不执行）" caseServeApplyBarrier
     , -- 下面这些用例都动**同一份**配置（PM_CONFIG 是进程级环境变量，见
       -- Spec.hs）。tasty 缺省并行执行，必须显式串行化，否则互相踩：一个
       -- 用例占着配置锁的时候，另一个的合法写入会变成 409。
@@ -89,10 +93,14 @@ seedConfig root = () <$ writeConfig (mkCfg root)
 
 -- | 缺省只读（与 `pm serve` 不带 --writable 相同）。
 mkEnv :: Config -> IO ServeEnv
-mkEnv cfg = newServeEnv cfg tok False
+mkEnv cfg = newServeEnv cfg tok False False
 
 mkEnvW :: Config -> IO ServeEnv
-mkEnvW cfg = newServeEnv cfg tok True
+mkEnvW cfg = newServeEnv cfg tok True False
+
+-- | 第三级授权：允许执行。缺省与 --writable 都到不了这里。
+mkEnvA :: Config -> IO ServeEnv
+mkEnvA cfg = newServeEnv cfg tok False True
 
 -- | 带 Host + Bearer 的 POST（JSON 体）。
 postReq :: BS.ByteString -> BSL.ByteString -> Session SResponse
@@ -739,3 +747,128 @@ caseServePortRange = do
 -- 'Network.Wai.Test.Session' 是 ReaderT/StateT 叠 IO；HUnit 断言直接 liftIO。
 liftIO' :: IO a -> Session a
 liftIO' = liftIO
+
+
+-- ─── P5-C：POST /api/apply ─────────────────────────────────────────────────
+
+-- | 建一个只有 copy 的真实计划：源在 root 外，目标是 @成片\/<名>@。
+seedApplyPlan :: FilePath -> [(String, String)] -> IO T.Text
+seedApplyPlan root files = do
+  createDirectoryIfMissing True (root </> "src")
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  ops <- mapM (\(n, body) -> mkCopyOp (root </> "src" </> n) body ("成片" </> n)) files
+  plan <- mkPlanIO root ops
+  _ <- savePlan plan
+  pure (plId plan)
+
+caseServeApplyGuards :: IO ()
+caseServeApplyGuards = withSystemTempDirectory "pm-serve-apply" $ \root -> do
+  pid <- seedApplyPlan root [("a.jpg", "AAA")]
+  let cfg = mkCfg root
+  -- --writable 到不了执行：这是本端点单独一个开关的全部意义。
+  envW <- mkEnvW cfg
+  flip runSession (serveApp envW) $ do
+    r <- postReq "/api/apply" (Aeson.encode (Aeson.object ["planId" Aeson..= pid]))
+    liftIO (simpleStatus r @?= status403)
+  liftIO (doesFileExist (root </> "成片" </> "a.jpg") >>= (@?= False))
+  envA <- mkEnvA cfg
+  flip runSession (serveApp envA) $ do
+    bad <- postReq "/api/apply" "{"
+    liftIO (simpleStatus bad @?= status400)
+    big <- postReq "/api/apply" (BSL.replicate (64 * 1024 + 1) 120)
+    liftIO (simpleStatus big @?= status413)
+    -- 格式合法但盘上没有这个计划
+    miss <- postReq "/api/apply" (Aeson.encode (Aeson.object ["planId" Aeson..= ("20260101-000000-abcdef" :: T.Text)]))
+    liftIO (simpleStatus miss @?= status409)
+  -- 四次被拒之后，照片一个字节都不该动
+  doesFileExist (root </> "成片" </> "a.jpg") >>= (@?= False)
+
+caseServeApplyRuns :: IO ()
+caseServeApplyRuns = withSystemTempDirectory "pm-serve-apply" $ \root -> do
+  pid <- seedApplyPlan root [("a.jpg", "AAA"), ("b.jpg", "BBB")]
+  envA <- mkEnvA (mkCfg root)
+  flip runSession (serveApp envA) $ do
+    r <- postReq "/api/apply" (Aeson.encode (Aeson.object ["planId" Aeson..= pid]))
+    liftIO (simpleStatus r @?= status200)
+    let v = Aeson.decode (simpleBody r) :: Maybe Aeson.Value
+    liftIO $ case v of
+      Just (Aeson.Object o) -> do
+        KM.lookup "code" o @?= Just (Aeson.Number 0)
+        -- 逐项结果回 JSON；log 也回 JSON（**不**打到 stdout：pm ui 只读一行
+        -- announce 就丢掉 BufReader，之后无人排空那根管道）
+        case KM.lookup "items" o of
+          Just (Aeson.Array xs) -> length xs @?= 2
+          other -> assertFailure ("items 应为两项: " <> show other)
+        -- 非空：逐项那两行必须**在响应体里**。若 sink 换回 putStrLn，
+        -- 这里会是空数组——那正是会填满 pm ui 那根无人排空的管道的写法。
+        case KM.lookup "log" o of
+          Just (Aeson.Array xs) -> assertBool "log 不应为空" (not (null xs))
+          other -> assertFailure ("log 应为非空数组: " <> show other)
+      other -> assertFailure ("响应不是对象: " <> show other)
+  readFile (root </> "成片" </> "a.jpg") >>= (@?= "AAA")
+  readFile (root </> "成片" </> "b.jpg") >>= (@?= "BBB")
+
+caseServeApplyOnly :: IO ()
+caseServeApplyOnly = withSystemTempDirectory "pm-serve-apply" $ \root -> do
+  pid <- seedApplyPlan root [("a.jpg", "AAA"), ("b.jpg", "BBB")]
+  envA <- mkEnvA (mkCfg root)
+  flip runSession (serveApp envA) $ do
+    r <- postReq "/api/apply" (Aeson.encode (Aeson.object ["planId" Aeson..= pid, "only" Aeson..= ("0" :: String)]))
+    liftIO (simpleStatus r @?= status200)
+  doesFileExist (root </> "成片" </> "a.jpg") >>= (@?= True)
+  doesFileExist (root </> "成片" </> "b.jpg") >>= (@?= False)
+
+-- | API 路径**必须**走同一张 'preExecFor' 表。这条用例造一个把某内容在归档层
+-- 的两份副本**全部**批准隔离的 dedupe 计划：屏障应把两项都降级，端点因此一项
+-- 都不执行，两个文件原地不动。
+--
+-- 少了它，把端点里的 preExecFor 换成 `pure` 全绿——也就是说 GUI 点一下就能绕过
+-- 「至少留一份」这道屏障，而没有任何东西会发现。
+caseServeApplyBarrier :: IO ()
+caseServeApplyBarrier = withSystemTempDirectory "pm-serve-apply" $ \root -> do
+  let a = "Raw" </> "2025" </> "25-01-X-Raw" </> "dup.arw"
+      b = "成片" </> "2025" </> "dup.jpg"
+  mapM_ (createDirectoryIfMissing True) [root </> "Raw" </> "2025" </> "25-01-X-Raw", root </> "成片" </> "2025"]
+  mapM_ (\p -> writeFile (root </> p) "SAME") [a, b]
+  sha <- sha256File (root </> a)
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  saveCatalog root (mkCat [mkEnt a sha, mkEnt b sha])
+  pid <- newPlanId
+  _ <-
+    savePlan
+      Plan
+        { plId = pid
+        , plKind = "dedupe"
+        , plRootPath = root
+        , plRootId = Just "m"
+        , plCreated = now
+        , plItems =
+            [ PlanItem ix (OpQuarantine v sha "dedupe:同 sha 2 份之一") StPending Nothing
+            | (ix, v) <- zip [0 ..] [a, b]
+            ]
+        }
+  envA <- mkEnvA (mkCfg root)
+  flip runSession (serveApp envA) $ do
+    r <- postReq "/api/apply" (Aeson.encode (Aeson.object ["planId" Aeson..= pid]))
+    liftIO (simpleStatus r @?= status200)
+    liftIO $ case Aeson.decode (simpleBody r) :: Maybe Aeson.Value of
+      Just (Aeson.Object o) -> case KM.lookup "items" o of
+        Just (Aeson.Array xs) -> do
+          length xs @?= 2
+          -- 精确到标签：'Pm.Exec.outcomeLabel' ONotExecuted = "未执行"。
+          -- 模糊判据（比如「不含 DONE」）会被 CONFLICT 蒙混过去。
+          map outcomeOf (foldr (:) [] xs) @?= [Just "未执行", Just "未执行"]
+        other -> assertFailure ("items 应为两项: " <> show other)
+      other -> assertFailure ("响应不是对象: " <> show other)
+  -- 屏障的全部意义：两份都还在原位
+  mapM_ (\p -> doesFileExist (root </> p) >>= (@?= True)) [a, b]
+ where
+  outcomeOf (Aeson.Object it) = case KM.lookup "outcome" it of
+    Just (Aeson.String t) -> Just t
+    _ -> Nothing
+  outcomeOf _ = Nothing
+
+mkEnt :: FilePath -> T.Text -> Entry
+mkEnt p sha = Entry p 4 0 sha KindPhoto Nothing

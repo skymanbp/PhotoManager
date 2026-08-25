@@ -20,6 +20,7 @@ module Pm.Commands
   , runTrash
   , runUndoCmd
   , runApply
+  , prepareApply
   , afterApply
   , loadPlanAnyRoot
   , runResolve
@@ -53,7 +54,7 @@ import Pm.Dedupe
 import Pm.Config
 import Pm.Diff
 import Pm.GitGuard (pmIgnoreGuard)
-import Pm.Hash (sha256File)
+import Pm.Hash (ContentProbe (..), probeConfined, sha256File)
 import Pm.Import
 import Pm.Op
 import Pm.Plan
@@ -391,14 +392,20 @@ purgeBarriers cfg guarded
                         pure (maybe (Left "备份盘无索引") (Right . (,) broot) mb)
                   else pure (Left "本批无 clean-staging 记录")
               judged <- forM guarded $ \(b, rec@(r, _)) -> do
+                -- 即将被永久删除的那个对象 = 隔离区里的载荷。见证与它**同身份**
+                -- 就不是另一份副本——同一个对象出现在两个名字下不算两份
+                -- （codex 二十八轮 #2；此前这一条由 link count 代劳，代价是把
+                -- 合法 hardlink 的归档见证也一并拒了，长期 HELD）。
+                pp <- probeConfined (cfgMainPath cfg) (".pm" </> pmSubTrash </> trTrashRel r)
+                let excl = case pp of CpSha _ fid -> [fid]; _ -> []
                 v <- case b of
                   BThreeCopies -> case bak of
                     Left msg -> pure (Left msg)
                     Right (broot, bakCat) -> do
-                      ok <- threeCopiesStillExist (cfgMainPath cfg) mainCat broot bakCat (trSha r)
+                      ok <- threeCopiesStillExist (cfgMainPath cfg) mainCat broot bakCat excl (trSha r)
                       pure (if ok then Right () else Left "三副本复验不过")
                   BArchiveCopyLeft -> do
-                    ok <- anyArchiveCopyAlive (cfgMainPath cfg) mainCat (trSha r)
+                    ok <- anyArchiveCopyAlive (cfgMainPath cfg) mainCat excl (trSha r)
                     pure (if ok then Right () else Left "归档层已无此内容的活副本（这可能是最后一份）")
                 pure (rec, v)
               pure
@@ -446,34 +453,44 @@ loadPlanAnyRoot cfg pid = do
                 Right p -> Right p
                 Left _ -> Left (mainErr <> "（vault/备份 root 也没有）")
 
-runApply :: ApplyOpts -> Config -> IO Int
-runApply o cfg = do
-  ep <- loadPlanAnyRoot cfg (aoId o)
+-- | @pm apply@ 的**决定**部分：装载 → 按 UUID 重新绑定 root（评审 cx-1）→
+-- @--only@ 展开到复合组闭包（评审 cx-2）。返回可执行的计划，以及因组闭包被
+-- 追加进来的序号。
+--
+-- 抽出来是因为 CLI 与 @POST \/api\/apply@ 必须对「这个计划该怎么执行」给出
+-- **同一个**答案。两处各写一遍 load\/bind\/only，就会有一处忘了按 UUID 绑
+-- root、或忘了把组闭包补齐——前者会改错库，后者会把 supersede 拆成半个。
+-- 执行期复验（'preExecFor'）故意留在**调用方**：@--dry@ 只看不执行，不该触发
+-- 任何复验副作用。
+prepareApply :: Config -> T.Text -> Maybe String -> IO (Either String (Plan, [Int]))
+prepareApply cfg pid only = do
+  ep <- loadPlanAnyRoot cfg pid
   case ep of
-    Left e -> putStrLn e >> pure 2
+    Left e -> pure (Left e)
     Right plan0 -> case plRootId plan0 of
-      Nothing -> do
-        putStrLn "计划缺 root 标识（P2.1 之前的旧格式）→ 重新生成计划后再执行（评审 cx-1）"
-        pure 2
+      Nothing -> pure (Left "计划缺 root 标识（P2.1 之前的旧格式）→ 重新生成计划后再执行（评审 cx-1）")
       Just rid -> do
         ebound <- bindExecRoot cfg plan0 rid
-        case ebound of
-          Left e -> putStrLn e >> pure 2
-          Right plan1 -> case applyOnlyToPlan (aoOnly o) plan1 of
-            Left e -> putStrLn e >> pure 2
-            Right (plan2, added) -> do
-              unless (null added) $
-                putStrLn ("· --only 已扩到复合组（不可拆），追加条目: " <> show added)
-              mapM_ putStrLn (renderPlan plan2)
-              if aoDry o
-                then pure 0
-                else do
-                  -- 执行期复验钩子按种类取自唯一一张表（'preExecFor'）；
-                  -- 各命令 --apply 的即时路径经 savePlanAndMaybeRun 取同一张。
-                  plan3 <- preExecFor cfg (plKind plan2) plan2
-                  code <- executePlanNow plan3
-                  afterApply cfg plan3 code
-                  pure code
+        pure (ebound >>= applyOnlyToPlan only)
+
+runApply :: ApplyOpts -> Config -> IO Int
+runApply o cfg = do
+  r <- prepareApply cfg (aoId o) (aoOnly o)
+  case r of
+    Left e -> putStrLn e >> pure 2
+    Right (plan2, added) -> do
+      unless (null added) $
+        putStrLn ("· --only 已扩到复合组（不可拆），追加条目: " <> show added)
+      mapM_ putStrLn (renderPlan plan2)
+      if aoDry o
+        then pure 0
+        else do
+          -- 执行期复验钩子按种类取自唯一一张表（'preExecFor'）；各命令 --apply
+          -- 的即时路径经 savePlanAndMaybeRun 取同一张；API 的 apply 端点亦然。
+          plan3 <- preExecFor cfg (plKind plan2) plan2
+          code <- executePlanNow plan3
+          afterApply cfg plan3 code
+          pure code
 
 -- | apply 之后的缓存/提示收尾（可测）。P3b-7 复审 B1：备份缓存写进
 -- @\<cfgMainPath\>\/.pm\/backup-cache@，主路径必须是 RoleMain root——

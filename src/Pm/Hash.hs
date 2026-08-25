@@ -14,7 +14,7 @@ module Pm.Hash
   , statHitStable
   , ContentProbe (..)
   , probeConfined
-  , anyCopyAlive
+  , anyCopyAliveExcept
   ) where
 
 import Control.Exception (IOException, bracket, try)
@@ -29,7 +29,7 @@ import System.Directory (getFileSize, getModificationTime)
 import System.IO.Error (isDoesNotExistError)
 import System.IO
 
-import Pm.Win (flushHandleToDisk, openFreshBinary, openStateRead, resolveUnder)
+import Pm.Win (FileId, flushHandleToDisk, handleFileId, openFreshBinary, resolveUnder)
 
 chunkSize :: Int
 chunkSize = 1024 * 1024
@@ -40,7 +40,9 @@ chunkSize = 1024 * 1024
 -- 调用方就会把一个 ACL 拒绝当成"文件不在了"——两个结论的安全方向恰好相反
 -- （缺席 → 照搬\/照删；读不到 → 保守拒绝）。codex 二十六轮 #2。
 data ContentProbe
-  = CpSha Text
+  = -- | 读到的内容 sha **与该文件对象的身份**。身份是判断"这是不是另一份
+    -- 独立副本"的唯一正确依据（codex 二十八轮 #2）。
+    CpSha Text FileId
   | -- | 路径解析后不存在
     CpMissing
   | -- | 中途有 reparse point\/别名，解析结果逃出 root
@@ -79,9 +81,19 @@ probeConfined root rel = do
   case m of
     Nothing -> pure CpEscaped
     Just fp -> do
-      r <- try (bracket (openStateRead fp) hClose sha256Handle) :: IO (Either IOException Text)
+      r <-
+        try
+          ( bracket (openBinaryFile fp ReadMode) hClose $ \h -> do
+              -- 身份先取：'sha256Handle' 会把句柄读到 EOF。两者同一句柄。
+              mfid <- handleFileId h
+              sha <- sha256Handle h
+              pure (mfid, sha)
+          ) ::
+          IO (Either IOException (Maybe FileId, Text))
       pure $ case r of
-        Right sha -> CpSha sha
+        Right (Just fid, sha) -> CpSha sha fid
+        -- 取不到身份就无法判断它是不是另一份独立副本 → fail-closed。
+        Right (Nothing, _) -> CpUnreadable "取不到文件身份（GetFileInformationByHandle 失败）"
         Left e
           | isDoesNotExistError e -> CpMissing
           | otherwise -> CpUnreadable (show e)
@@ -96,14 +108,17 @@ probeConfined root rel = do
 --
 -- fail-closed：只有 'CpSha' 且**等于**期望值才算数。缺席、逃出 root、读不到
 -- （占用\/ACL\/介质错误）一律不算——"读不到"绝不能被当成"还在"。
-anyCopyAlive :: FilePath -> Text -> [FilePath] -> IO Bool
-anyCopyAlive root sha = go
+anyCopyAliveExcept :: FilePath -> Text -> [FileId] -> [FilePath] -> IO (Maybe FileId)
+anyCopyAliveExcept root sha excl = go
  where
-  go [] = pure False
+  go [] = pure Nothing
   go (rel : rest) = do
     p <- probeConfined root rel
     case p of
-      CpSha actual | actual == sha -> pure True
+      -- 内容相符**且**不是即将被移走的那个对象本身。同一个对象出现在两个
+      -- 名字下不是两份副本——这一条此前由 link count 代劳，现在按身份直判，
+      -- 于是合法的 hardlink 不再被误拒（codex 二十八轮 #2）。
+      CpSha actual fid | actual == sha, fid `notElem` excl -> pure (Just fid)
       _ -> go rest
 
 sha256File :: FilePath -> IO Text

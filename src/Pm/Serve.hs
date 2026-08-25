@@ -3,8 +3,19 @@
 -- | @pm serve@ —— 127.0.0.1 loopback JSON API（DESIGN §11，P4-1）。
 --
 -- 架构边界（不变量级）：GUI 是独立进程、**永不直接触碰照片文件**，一切经
--- 这里说话。P4-1/2 只有**只读**端点；写端点（apply / vault push 分类）在 GUI
--- 骨架落地、过 codex 评审与用户裁定之后再开（DESIGN §11）。
+-- 这里说话。
+--
+-- 三级授权，逐级更强，缺省最弱：
+--
+--   1. 无开关 —— 只读端点。
+--   2. @--writable@（P4-5）—— POST 端点可**生成计划**：只写 @.pm\/plans@ 与
+--      少数 pm 自身状态（vault holds、config、备份 root 标识），**不执行、
+--      不碰照片**。这句契约同时写在帮助文本、DESIGN §11、README 与 GUI 里。
+--   3. @--allow-apply@（P5-C）—— 才允许 @POST \/api\/apply@ **执行**已存的计划。
+--
+-- 第 3 级单独开一个开关、而不是并进 @--writable@：执行是另一个量级的授权，
+-- 把既有开关的含义悄悄放宽，等于让所有已经按第 2 级理解去用它的地方（含
+-- @pm ui@ 自己的拉起参数）无声地获得了动照片的能力。
 --
 -- 安全模型（单机、同用户；§14 威胁模型）：
 --   * 只绑定 127.0.0.1，端口默认由内核随机分配，启动时在 stdout 打印一行
@@ -38,7 +49,7 @@ module Pm.Serve
 
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Control.Exception (IOException, bracket, try)
 import Crypto.Random (getRandomBytes)
 import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
@@ -63,10 +74,12 @@ import System.FilePath (dropExtension, takeExtension, (</>))
 import System.IO (hFlush, hIsEOF, stdin, stdout)
 
 import Pm.Catalog (loadCatalog)
-import Pm.Commands (loadPlanAnyRoot)
+import Pm.Cli (executePlanNowWith, preExecFor)
+import Pm.Commands (afterApply, loadPlanAnyRoot, prepareApply)
 import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, pmSubPlans, requirePmTrusted, requireWritable, untrustedMsg, withConfigLock)
 import Pm.ConfigEdit (checkPatch, configTxn)
 import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
+import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPlan, savePlan)
 import Pm.Status (StatusOpts (..), statusReport)
@@ -86,7 +99,10 @@ data ServeOpts = ServeOpts
     -- 退出——否则 serve 会成为孤儿一直监听。
   , soWritable :: Bool
     -- ^ P4-5：允许 POST 端点**生成计划**（只写 @.pm/plans@，不执行、不碰照片）。
-    -- 缺省只读；`pm ui` 拉起时置位。apply 端点尚不存在（后置，另评审）。
+    -- 缺省只读；`pm ui` 拉起时置位。
+  , soAllowApply :: Bool
+    -- ^ P5-C：允许 @POST /api/apply@ **执行**已存的计划（唯一会动照片字节的
+    -- 端点）。蕴含 'soWritable'——能执行却不能生成计划是没有意义的组合。
   }
 
 -- | 一次 serve 会话的状态：配置、token、可写开关、vault 缓存刷新的进程内互斥。
@@ -96,13 +112,18 @@ data ServeEnv = ServeEnv
     -- 必须立刻按新配置回答，否则用户改完路径还要重启 GUI（P4-8）。
   , seToken :: BS.ByteString
   , seWritable :: Bool
+  , seAllowApply :: Bool
   , seVaultLock :: MVar ()
+  , seApplyLock :: MVar ()
+    -- ^ 同一 serve 进程内的 apply 串行化。跨进程另有 root 锁（I10）——这把只是
+    -- 让页面连点两下得到的是排队，而不是一条 "lock busy"。
   }
 
-newServeEnv :: Config -> BS.ByteString -> Bool -> IO ServeEnv
-newServeEnv cfg tok writable = do
+-- | @allowApply@ 蕴含 writable：见模块头的三级授权。
+newServeEnv :: Config -> BS.ByteString -> Bool -> Bool -> IO ServeEnv
+newServeEnv cfg tok writable allowApply = do
   ref <- newIORef cfg
-  ServeEnv ref tok writable <$> newMVar ()
+  ServeEnv ref tok (writable || allowApply) allowApply <$> newMVar () <*> newMVar ()
 
 -- | POST 请求体上限（十八轮：warp 默认无总 body 上限，写端点须自设）。一次
 -- 分类指派最多几十条 name/category，64 KiB 绰绰有余。
@@ -135,7 +156,7 @@ runServe cfg o = case soPort o of
     pure 2
   _ -> do
     tok <- newToken
-    env <- newServeEnv cfg tok (soWritable o)
+    env <- newServeEnv cfg tok (soWritable o) (soAllowApply o)
     r <- try (bracket (bindLoopback (maybe 0 id (soPort o))) close $ \sock -> do
       port <- socketPort sock
       BSL.putStr (encode (Announce (fromIntegral port) (T.pack (BC.unpack tok))))
@@ -436,6 +457,49 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
   -- P4-8：第四个写端点——登记备份盘。它会在**目标盘**上建立备份 root 标识
   -- （或沿用已有的）并把 UUID + 相对路径写进配置；守卫链与 CLI `pm backup
   -- init` 完全相同（共用 'backupInitRun'，本端点只负责渲染结果）。
+  -- P5-C：唯一会**动照片字节**的端点。它不新增任何执行能力——装载、按 UUID
+  -- 绑 root、--only 组闭包全部走 CLI 的同一个 'prepareApply'，执行期复验走同一
+  -- 张 'preExecFor' 表，执行与 catalog 回写走同一个 'executePlanNowWith'。API
+  -- 与 CLI 对「这个计划该怎么执行」只有一个答案。
+  --
+  -- 逐项结果与提示**走 JSON 响应体**，不走 stdout：`pm ui` 只读一行 announce
+  -- 就丢掉 BufReader，serve 的 stdout 此后无人排空，照着打会填满管道缓冲。
+  ("POST", ["api", "apply"])
+    | not (seAllowApply env) ->
+        err status403 "serve 未以 --allow-apply 启动，拒绝执行计划（--writable 只允许生成计划，不执行）"
+    | otherwise -> do
+        body <- readBodyCapped req
+        case body of
+          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
+          Just raw -> case Aeson.eitherDecodeStrict' raw of
+            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
+            Right (ApplyReq pid only) -> withMVar (seApplyLock env) $ \_ -> do
+              prep <- prepareApply cfg pid only
+              case prep of
+                Left m -> err status409 m
+                Right (plan, added) -> do
+                  logRef <- newIORef []
+                  plan' <- preExecFor cfg (plKind plan) plan
+                  (code, results) <-
+                    executePlanNowWith (\l -> modifyIORef' logRef (l :)) plan'
+                  afterApply cfg plan' code
+                  logs <- reverse <$> readIORef logRef
+                  jsonR
+                    status200
+                    []
+                    ( object
+                        [ "planId" .= plId plan'
+                        , "kind" .= plKind plan'
+                        , "root" .= plRootPath plan'
+                        , "addedByGroupClosure" .= added
+                        , "code" .= code
+                        , "items"
+                            .= [ object ["ix" .= piIx it, "outcome" .= outcomeLabel out]
+                               | (it, out) <- results
+                               ]
+                        , "log" .= logs
+                        ]
+                    )
   ("POST", ["api", "backup-init"])
     | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝登记备份盘"
     | otherwise -> do
@@ -510,6 +574,14 @@ readBodyCapped req = go [] 0
          in if n' > maxBodyBytes then pure Nothing else go (chunk : acc) n'
 
 -- | @{"assignments":[{"name":"a.jpg","category":"landscape"},…]}@
+-- | @{"planId": "...", "only": "1,3-5"}@。@only@ 缺省 = 全量；语法与 CLI 的
+-- @--only@ 逐字相同（同一个 'Pm.Cli.applyOnlyToPlan' 解析）。
+data ApplyReq = ApplyReq Text (Maybe String)
+
+instance Aeson.FromJSON ApplyReq where
+  parseJSON = Aeson.withObject "apply" $ \o ->
+    ApplyReq <$> o Aeson..: "planId" <*> o Aeson..:? "only"
+
 newtype PushPlanReq = PushPlanReq [PushAssign]
 
 data PushAssign = PushAssign {paName :: FilePath, paCategory :: String}

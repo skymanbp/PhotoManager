@@ -25,7 +25,10 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import System.FilePath (splitDirectories)
 
-import Pm.Hash (anyCopyAlive)
+import Data.Maybe (isJust)
+
+import Pm.Hash (ContentProbe (..), anyCopyAliveExcept, probeConfined)
+import Pm.Win (FileId)
 import Pm.Import (stagingTop)
 import Pm.Op
 import Pm.Plan (ItemStatus (..), PlanItem (..))
@@ -99,34 +102,50 @@ verifyCandidates mainRoot backupRoot = foldM step ([], [])
  where
   step (ok, held) c = do
     let sha = enSha (ccStaging c)
-    aOk <- anyWitnessAlive mainRoot sha (ccArchiveCopies c)
-    bOk <- anyWitnessAlive backupRoot sha (ccBackupCopies c)
-    pure $ case (aOk, bOk) of
-      (True, True) -> (ok <> [c], held)
-      (False, _) -> (ok, held <> [(enPath (ccStaging c), "HELD(归档副本内容核对不过 → 先 pm scan)")])
-      (_, False) -> (ok, held <> [(enPath (ccStaging c), "HELD(备份副本内容核对不过 → 先 pm backup)")])
+        stgRel = enPath (ccStaging c)
+    -- 将被移走的就是这个暂存文件本身。见证不能与它是**同一个对象**——
+    -- 同一个对象出现在两个名字下不是两份副本。读不到它的身份就没法判，
+    -- fail-closed（codex 二十八轮 #2）。
+    stg <- probeConfined mainRoot stgRel
+    case stg of
+      CpSha _ sid -> do
+        -- 链式排除：归档见证 ∉ {暂存件}，备份见证 ∉ {暂存件, 归档见证}。
+        -- 「三副本」要的是三个**不同对象**（物理冗余）；跨卷时后一条天然成立，
+        -- 但主库与备份被配成同一卷时它就是唯一防线。
+        ma <- witnessId mainRoot sha [sid] (ccArchiveCopies c)
+        case ma of
+          Nothing -> pure (ok, held <> [(stgRel, "HELD(归档副本内容核对不过，或与暂存件是同一对象 → 先 pm scan)")])
+          Just aid -> do
+            mb <- witnessId backupRoot sha [sid, aid] (ccBackupCopies c)
+            pure $ case mb of
+              Just _ -> (ok <> [c], held)
+              Nothing -> (ok, held <> [(stgRel, "HELD(备份副本内容核对不过，或与归档副本是同一对象 → 先 pm backup)")])
+      _ -> pure (ok, held <> [(stgRel, "HELD(暂存文件本身读不到，无法确认见证与它不是同一对象)")])
 
--- | 至少一个见证**条目**在盘上重读出期望 sha 才算副本仍然存在。
+-- | 见证条目里第一条内容相符、且身份不在 @excl@ 里的那个的**身份**。
 --
--- 本函数只负责「从 catalog 条目取相对路径」；判定本体在 'anyCopyAlive'
--- （逐级限域 → 只打开一次 → 句柄上查 link count → 同句柄读完）。它的下游是
--- **永久删除**（@pm trash empty@ 的最终屏障 'threeCopiesStillExist'），而
--- @pm dedupe@ 的「至少留一份」屏障问的是同一件事——两处共用同一个实现，免得
--- 再分叉出一个忘了限域的副本（codex 二十六轮 #1 / 二十七轮 #1 都是这条）。
-anyWitnessAlive :: FilePath -> Text -> [Entry] -> IO Bool
-anyWitnessAlive root' sha = anyCopyAlive root' sha . map enPath
+-- 判定本体在 'Pm.Hash.anyCopyAliveExcept'（逐级限域 → 只打开一次 → 同句柄取
+-- 身份与内容）。它的下游是 @pm trash empty@ 的永久删除，与 @pm dedupe@ 的
+-- 「至少留一份」屏障共用同一个实现——两处分叉就会有一处忘了限域
+-- （codex 二十六轮 #1 / 二十七轮 #1）。交回身份而不是 Bool，是为了让调用方
+-- 做**链式排除**：三副本要的是三个不同对象。
+witnessId :: FilePath -> Text -> [FileId] -> [Entry] -> IO (Maybe FileId)
+witnessId root' sha excl = anyCopyAliveExcept root' sha excl . map enPath
 
 -- | @pm trash empty@ 对 clean-staging 隔离记录的最终屏障（评审 cx-3）：
 -- 永久删除前按**当前** catalog + 真实重 hash 重新确认「归档层 + 备份盘」
 -- 各有一份同 sha 副本仍然在盘。任何一侧不过 → 该条目 HELD 不删。
-threeCopiesStillExist :: FilePath -> Catalog -> FilePath -> Catalog -> Text -> IO Bool
-threeCopiesStillExist mainRoot mainCat backupRoot bakCat sha = do
+-- @excl@ = **即将被永久删除的那个对象**的身份（隔离区里的载荷）。见证与它
+-- 同身份不算一份副本。
+threeCopiesStillExist :: FilePath -> Catalog -> FilePath -> Catalog -> [FileId] -> Text -> IO Bool
+threeCopiesStillExist mainRoot mainCat backupRoot bakCat excl sha = do
   let inArchiveLayer e = take 1 (splitDirectories (enPath e)) `elem` [["Raw"], ["成片"]]
       archiveWits = [e | e <- Map.elems (catEntries mainCat), inArchiveLayer e, enSha e == sha]
       backupWits = [e | e <- Map.elems (catEntries bakCat), enSha e == sha]
-  aOk <- anyWitnessAlive mainRoot sha archiveWits
-  bOk <- anyWitnessAlive backupRoot sha backupWits
-  pure (aOk && bOk)
+  ma <- witnessId mainRoot sha excl archiveWits
+  case ma of
+    Nothing -> pure False
+    Just aid -> isJust <$> witnessId backupRoot sha (aid : excl) backupWits
 
 -- | Quarantine items for the candidates that survived the CLI's live stat
 -- verification. Victims keep their staging-relative path inside the trash,

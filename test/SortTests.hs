@@ -12,6 +12,7 @@ import Control.Exception (SomeException, bracket, finally, try)
 import Control.Monad (forM_)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BC
 import Data.List (sort)
 import qualified Data.Text as T
 import Data.Time (Day, LocalTime (..), TimeOfDay (..), fromGregorian)
@@ -49,7 +50,7 @@ import Pm.Hash (ContentProbe (..), probeConfined)
 import Pm.Scan (DotDirs (..), listTreeWith)
 import Pm.Cli (GoOpts (..))
 import Pm.Config (Config (..))
-import Pm.Exif (parseCaptureTime, parseExifDateTime)
+import Pm.Exif (parseCaptureTime, parseExifDateTime, readCaptureTime)
 import Pm.Hash (StatSnap (..))
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, planPath)
@@ -64,6 +65,7 @@ import Pm.Sort
   , listSource
   , resolveEvent
   , runSortPlan
+  , runSortSurvey
   , segmentBy
   , snapshotWith
   )
@@ -106,6 +108,12 @@ sortTests =
     , testCase "限域：hardlink 到库外的目标不得被当成可信副本" caseProbeHardlink
     , testCase "限域：目标被独占占用 → CpUnreadable，不得判成 CpMissing" caseProbeLocked
     , testCase "撞名整批拒绝时，被选中的照片与侧车必须逐条出现在输出里" caseCollisionReportsAll
+    , testCase "遍历：普通的、名叫 .pm 的用户目录要走进去（判身份靠内容不靠名字）" caseUserDotPmIsWalked
+    , testCase "EXIF：子 IFD 缺 4 字节 next-IFD offset → 结构不完整，读不到时间" caseIfdNeedsNextOffset
+    , testCase "诊断要真的印出来：源根是 junction 时 sfNotes 出现在输出里" caseNotesArePrinted
+    , testCase "暂存区新鲜度不过 → 被选中的文件逐条列出（计划前失败的第三条路径）" caseFreshnessAbortReportsAll
+    , testCase "源文件读取失败整批拒绝 → 读得出的那些也要列出（第四条路径）" caseSnapshotAbortReportsAll
+    , testCase "被选中清单不得截断：超过 40 个也要逐条列全" caseChosenNotTruncated
     ]
 
 -- ─── pm sort 纯核心 ────────────────────────────────────────────────────────
@@ -713,7 +721,7 @@ caseProbeConfined = withSystemTempDirectory "pm-probe" $ \tmp -> do
   -- 正常路径：读得到内容
   p1 <- probeConfined root ("Raw" </> "real.ARW")
   case p1 of
-    CpSha _ -> pure ()
+    CpSha _ _ -> pure ()
     v -> assertFailure ("库内普通文件应读到 sha，得到 " <> show v)
   -- 不存在：缺席，与"读不到"必须区分开
   probeConfined root ("Raw" </> "nope.ARW") >>= (@?= CpMissing)
@@ -809,6 +817,10 @@ caseSourceSkipsPmDir = withSystemTempDirectory "pm-src-root" $ \tmp -> do
   let src = tmp </> "library"
   createDirectoryIfMissing True (src </> ".pm" </> "tmp" </> "p")
   createDirectoryIfMissing True (src </> ".pm" </> "trash" </> "17")
+  -- 新判据按**内容**认 pm 状态目录：有 root-id.json 才是。一个真正的 pm 根
+  -- 按定义就有它，所以 fixture 补上——这不是放宽，是把判据从名字换成身份
+  -- （codex 二十八轮 #3）。
+  writeFile (src </> ".pm" </> "root-id.json") "{}"
   createDirectoryIfMissing True (src </> ".hidden")
   createDirectoryIfMissing True (src </> "DCIM")
   BS.writeFile (src </> "DCIM" </> "real.ARW") (photoAt "2026:08:25 10:00:00")
@@ -823,8 +835,12 @@ caseSourceSkipsPmDir = withSystemTempDirectory "pm-src-root" $ \tmp -> do
   any (elemSub "pm 状态目录" . snd) (sfErrors sf) @?= True
 
 -- | 'resolveUnder' 原理上看不见 hardlink，而 probeConfined 的下游一边是
--- 「三副本齐了，可以永久删」——三份必须是三个**独立对象**。句柄上的
--- link count 判定是这一半的唯一防线（codex 二十七轮 #1）。
+-- 「三副本齐了，可以永久删」——三份必须是三个**独立对象**。
+--
+-- 判据在第 28 轮从 link count 换成了**文件身份**（codex 二十八轮 #2）：
+-- nlink == 1 是充分而不必要的，一份合法归档照片被去重工具另建一个名字就会被
+-- 一律拒读、长期 HELD。真正要钉住的性质是这一条——同一个对象的两个名字身份
+-- **相同**，内容相同的两个独立文件身份**不同**。屏障据此判断"还剩几份"。
 caseProbeHardlink :: IO ()
 caseProbeHardlink = withSystemTempDirectory "pm-hl" $ \tmp -> do
   let root = tmp </> "lib"
@@ -832,16 +848,20 @@ caseProbeHardlink = withSystemTempDirectory "pm-hl" $ \tmp -> do
   createDirectoryIfMissing True (root </> "Raw")
   BS.writeFile outside "shared-object"
   _ <- readCreateProcess (shell ("mklink /H " <> q (root </> "Raw" </> "hl.ARW") <> " " <> q outside)) ""
-  p <- probeConfined root ("Raw" </> "hl.ARW")
-  case p of
-    CpUnreadable _ -> pure ()
-    v -> assertFailure ("hardlink 到库外的目标不应被当成可信副本，得到 " <> show v)
-  -- 对照：同目录下的普通文件照常读得到，证明拦它的是 link count 而非路径
-  BS.writeFile (root </> "Raw" </> "plain.ARW") "plain"
-  pp <- probeConfined root ("Raw" </> "plain.ARW")
-  case pp of
-    CpSha _ -> pure ()
-    v -> assertFailure ("普通文件应读到 sha，得到 " <> show v)
+  _ <- readCreateProcess (shell ("mklink /H " <> q (root </> "Raw" </> "hl2.ARW") <> " " <> q outside)) ""
+  -- 同内容、**独立**的第三个文件
+  BS.writeFile (root </> "Raw" </> "plain.ARW") "shared-object"
+  [a, b, c] <-
+    mapM (probeConfined root . ("Raw" </>)) ["hl.ARW", "hl2.ARW", "plain.ARW"]
+  case (a, b, c) of
+    (CpSha s1 i1, CpSha s2 i2, CpSha s3 i3) -> do
+      -- 三者内容相同
+      (s1 == s2, s2 == s3) @?= (True, True)
+      -- 同一对象的两个名字：身份相同 → 不算两份副本
+      assertBool "同一对象的两个名字身份应相同" (i1 == i2)
+      -- 独立文件：身份不同 → 算另一份副本
+      assertBool "独立文件的身份应不同" (i1 /= i3)
+    v -> assertFailure ("三者都应读到 sha 与身份，得到 " <> show v)
  where
   q p = [dq] <> p <> [dq]
   dq = toEnum 34
@@ -930,3 +950,132 @@ caseCollisionReportsAll = withSystemTempDirectory "pm-coll" $ \tmp -> do
   elemSub "没有任何文件" out @?= True
   doesDirectoryExist (plansDirOf root) >>= (@?= False)
 
+
+
+-- | 反向：卡上一个**普通**的、名叫 @.pm@ 的用户目录必须被走进去。
+--
+-- 按名字判会把它整个跳过——里面的照片既不进计划，也不落进任何 Accounting
+-- 格，正是本命令契约里最忌讳的那种静默缺席（codex 二十八轮 #3）。
+caseUserDotPmIsWalked :: IO ()
+caseUserDotPmIsWalked = withSystemTempDirectory "pm-src-udot" $ \tmp -> do
+  let src = tmp </> "card"
+  createDirectoryIfMissing True (src </> ".pm" </> "sub")
+  BS.writeFile (src </> ".pm" </> "sub" </> "mine.ARW") (photoAt "2026:08:25 10:00:00")
+  sf <- listSource src
+  map takeFileName (sfPhotos sf) @?= ["mine.ARW"]
+  any (elemSub "pm 状态目录" . snd) (sfErrors sf) @?= False
+
+-- | TIFF 规定每个 IFD 以 4 字节 next-IFD offset 结尾（无后继时为 0）。
+-- 少算那 4 字节等于接受一个结构不完整的 IFD：本机探针实证，一个 64 字节的
+-- TIFF（子 IFD 条目数组正好在缓冲区末尾结束）此前返回
+-- @Just 2026-08-25 13:45:07@（codex 二十八轮 #6）。
+caseIfdNeedsNextOffset :: IO ()
+caseIfdNeedsNextOffset = withSystemTempDirectory "pm-ifd" $ \tmp -> do
+  let body = "2026:08:25 13:45:07\0"
+      -- II*\0 | IFD0@8 | 1 条 | 0x8769 LONG 1 -> 50 | next=0 | 时间串@26 | pad
+      -- | 子 IFD@50: 1 条 | 0x9003 ASCII 20 -> 26   ← 到 64 字节正好结束
+      core =
+        BS.concat
+          [ BC.pack "II", le16 42, le32 8
+          , le16 1, entryB 0x8769 4 1 50, le32 0
+          , BC.pack body, BS.replicate 4 0
+          , le16 1, entryB 0x9003 2 20 26
+          ]
+      truncated = tmp </> "truncated.tif"
+      wellformed = tmp </> "wellformed.tif"
+  BS.length core @?= 64
+  BS.writeFile truncated core
+  BS.writeFile wellformed (core <> le32 0)
+  readCaptureTime truncated >>= (@?= Nothing)
+  -- 补上那 4 字节即恢复可读——证明拒绝的原因**就是**它，不是别的
+  readCaptureTime wellformed >>= (@?= Just (LocalTime (d 2026 8 25) (TimeOfDay 13 45 7)))
+ where
+  le16 :: Int -> BS.ByteString
+  le16 n = BS.pack [fromIntegral (n `mod` 256), fromIntegral (n `div` 256 `mod` 256)]
+  le32 :: Int -> BS.ByteString
+  le32 n = le16 (n `mod` 65536) <> le16 (n `div` 65536)
+  entryB t ty c v = BS.concat [le16 t, le16 ty, le32 c, le32 v]
+
+
+-- | 第 27 轮把「源根是 junction」这类诊断从 sfErrors 里分出来，好让它不计入
+-- "未入计划 N 个"——但**忘了接输出**，于是一条本来会打印的说明彻底消失了
+-- （codex 二十八轮 #7）。分开的目的是不计数，不是不说。
+caseNotesArePrinted :: IO ()
+caseNotesArePrinted = withSystemTempDirectory "pm-notes" $ \tmp -> do
+  let real = tmp </> "real"
+      link = tmp </> "link"
+      root = tmp </> "lib"
+  createDirectoryIfMissing True (real </> "DCIM")
+  BS.writeFile (real </> "DCIM" </> "a.ARW") (photoAt "2026:08:25 10:00:00")
+  _ <- readCreateProcess (shell ("mklink /J " <> qq link <> " " <> qq real)) ""
+  createDirectoryIfMissing True root
+  _ <- ensureTestRoot RoleMain root
+  scanQuiet "test-root" root >>= saveCatalog root
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+  (out, _) <- captureStdout (runSortSurvey link 72 cfg)
+  elemSub "源根本身是 symlink/junction" out @?= True
+
+-- | 计划前失败的第三条路径：暂存区与索引不一致。选中的文件一个都没搬走，
+-- 必须与撞名/事件名非法一样逐条交代（codex 二十八轮 #4）。
+caseFreshnessAbortReportsAll :: IO ()
+caseFreshnessAbortReportsAll = withLib $ \src root cfg -> do
+  -- 扫描之后往暂存区放一个文件：索引里没有它 → 新鲜度守卫拒绝
+  createDirectoryIfMissing True (root </> "To-Be-Sync'd" </> "Raw" </> "26-01-X")
+  BS.writeFile (root </> "To-Be-Sync'd" </> "Raw" </> "26-01-X" </> "stale.ARW") "drifted"
+  (out, rc) <- captureStdout (sortPlan src cfg)
+  rc @?= 2
+  -- 断言只匹配**本用例独有**的路径：captureStdout 重定向的是进程级 stdout，
+  -- tasty 并行跑的别的用例也写进这个句柄（见 captureStdout 的注释）。
+  elemSub (src </> "DCIM" </> "a.ARW") out @?= True
+  elemSub (src </> "DCIM" </> "a.xmp") out @?= True
+
+-- | 第四条路径：源文件读取失败整批拒绝。此前只列失败的那个，读得出的那些
+-- 一个字都不出现——等于让人以为其余的进了计划（与第 27 轮 #4 同一形状，
+-- 那一轮只扫了一半）。
+caseSnapshotAbortReportsAll :: IO ()
+caseSnapshotAbortReportsAll = withLib $ \src root cfg -> do
+  _ <- pure root
+  -- 占住的必须是**侧车**：锁一个 .ARW 只会让 readCaptureTime 读不到时间，
+  -- 它随即被判成"读不到拍摄时间"、压根不进 pick，打不中 snapshotSrc 那条
+  -- 分支。侧车不过 EXIF 读取，由主文件认领后直接进 picked。
+  -- GHC 句柄锁不许"已开写"的文件再被开读，抛 ResourceBusy。
+  let car = src </> "DCIM" </> "a.xmp"
+  r <- try (openBinaryFile car ReadWriteMode) :: IO (Either SomeException Handle)
+  case r of
+    Left e -> assertFailure ("占用失败，用例前提不成立: " <> show e)
+    Right h -> do
+      (out, rc) <- captureStdout (sortPlan src cfg)
+      hClose h
+      rc @?= 2
+      elemSub car out @?= True -- 失败的那个
+      -- 读得出、但同样没搬走的那些——此前一个字都不出现
+      elemSub (src </> "DCIM" </> "a.ARW") out @?= True
+      elemSub (src </> "DCIM" </> "b.ARW") out @?= True
+
+-- | 中止路径的清单**不得截断**。此前在 40 项处截断并打一行"另有 N 个"——
+-- 用户要据此判断卡上还剩什么，"另有 N 个"帮不上任何忙（codex 二十八轮 #4）。
+caseChosenNotTruncated :: IO ()
+caseChosenNotTruncated = withSystemTempDirectory "pm-trunc" $ \tmp -> do
+  let src = tmp </> "card"
+      root = tmp </> "lib"
+      names = ["f" <> pad3 i <> ".ARW" | i <- [1 .. 45 :: Int]]
+  createDirectoryIfMissing True (src </> "A")
+  createDirectoryIfMissing True (src </> "B")
+  mapM_ (\n -> BS.writeFile (src </> "A" </> n) (photoAt "2026:08:25 10:00:00")) names
+  -- 一个撞名的主文件 → 整批拒绝，45 个全在"被选中但未归位"里
+  BS.writeFile (src </> "B" </> "f001.ARW") (photoAt "2026:08:25 11:00:00")
+  createDirectoryIfMissing True root
+  _ <- ensureTestRoot RoleMain root
+  scanQuiet "test-root" root >>= saveCatalog root
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+  (out, rc) <- captureStdout (sortPlan src cfg)
+  rc @?= 2
+  -- 第 45 个（远在 40 之后）必须出现。用带本次临时目录的完整路径，既独有、
+  -- 又能证明它是被**逐条**列出来的而不是被折成一行摘要。
+  -- 不用"某串不出现"这类否定断言：进程级 stdout 里混着别的并行用例的输出。
+  elemSub (src </> "A" </> "f045.ARW") out @?= True
+ where
+  pad3 i = let t = show i in replicate (3 - length t) '0' <> t
+
+qq :: FilePath -> String
+qq p = [toEnum 34] <> p <> [toEnum 34]

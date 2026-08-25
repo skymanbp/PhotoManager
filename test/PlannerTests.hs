@@ -373,11 +373,11 @@ cleanTests =
           mcat <- scanQuiet "m" mroot
           bcat <- scanQuiet "b" broot
           sha <- sha256File (mroot </> "成片" </> "c.jpg")
-          ok1 <- threeCopiesStillExist mroot mcat broot bcat sha
+          ok1 <- threeCopiesStillExist mroot mcat broot bcat [] sha
           ok1 @?= True
           -- 备份见证内容改变（catalog 未变）→ 拒绝
           writeFile (broot </> "成片" </> "c.jpg") "Z9"
-          ok2 <- threeCopiesStillExist mroot mcat broot bcat sha
+          ok2 <- threeCopiesStillExist mroot mcat broot bcat [] sha
           ok2 @?= False
     ]
 

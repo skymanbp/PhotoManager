@@ -75,7 +75,7 @@ import System.Directory
 import System.FilePath (takeBaseName, takeDirectory, takeExtension, takeFileName, (</>))
 import Text.Printf (printf)
 
-import Pm.Cli (GoOpts (..), savePlanAndMaybeRun, withFreshStagingCatalog)
+import Pm.Cli (GoOpts (..), freshStagingCatalog, savePlanAndMaybeRun)
 import Pm.Config (Config (..), requireRole)
 import Pm.Exif (readCaptureTime)
 import Pm.Hash (ContentProbe (..), StatSnap (..), probeConfined, sha256File, statSnap)
@@ -351,7 +351,14 @@ withSource src k = do
   ok <- doesDirectoryExist absSrc
   if not ok
     then putStrLn ("源目录不存在: " <> absSrc) >> pure 2
-    else listSource absSrc >>= k absSrc
+    else do
+      sf <- listSource absSrc
+      -- 'sfNotes' 在这里打印，而不是在两种形态各自的汇总里：这是两条路唯一
+      -- 共同经过的地方。第 27 轮把诊断从 'sfErrors' 分出来之后**没接输出**，
+      -- 于是"分开"变成了静默丢弃——一条本来会打印的说明反而消失了
+      -- （codex 二十八轮 #7）。它不计入"未入计划 N 个"，那正是分开的目的。
+      mapM_ (\n -> putStrLn ("· " <> n)) (sfNotes sf)
+      k absSrc sf
 
 -- | @pm sort@ **不进计划**的每一类，逐类留底。
 --
@@ -373,14 +380,22 @@ data Accounting = Accounting
 -- （本该进计划），侧车已被主文件认领（所以不算 'spOrphanCars'）。不列出来，
 -- 它们就是这条路径上的静默缺席（codex 二十七轮 #4）。
 reportChosen :: SortPick -> IO ()
-reportChosen pick = do
-  let chosen = map fst (spTake pick) <> spSidecars pick
+reportChosen pick = reportChosenFiles (map fst (spTake pick) <> spSidecars pick)
+
+-- | pick 之后**没有产出计划**的每一条路径都从这里出去。
+--
+-- 四条：撞名整批拒绝、事件名非法、暂存区新鲜度不过、源文件读取失败。第 27 轮
+-- 只补了前两条，后两条一样一个文件都不出现在输出里（codex 二十八轮 #4）。
+--
+-- **不截断**。此前在 40 项处截断并打一行"另有 N 个"——这与本命令的契约直接
+-- 矛盾：这是一条中止路径，用户要据此判断卡上还剩什么，"另有 2960 个"帮不上
+-- 任何忙。清单长是因为源大，那就打印那么长。
+reportChosenFiles :: [FilePath] -> IO ()
+reportChosenFiles chosen = do
   printf
     "\n本次**没有任何文件**进入计划。被选中但未归位的 %d 个（含侧车）：\n"
     (length chosen)
-  forM_ (take 40 chosen) $ \c -> putStrLn ("    " <> c)
-  unless (length chosen <= 40) $
-    printf "    …另有 %d 个\n" (length chosen - 40)
+  forM_ chosen $ \c -> putStrLn ("    " <> c)
 
 -- | 逐类打印，返回被留下的文件总数（0 = 源里每个文件都进了计划）。
 reportAccounting :: Accounting -> IO Int
@@ -561,9 +576,14 @@ runSortPlan go src placeOrEvent from to cfg = do
           case resolveEvent (localDay t1) placeOrEvent of
             -- 与撞名同类：计划前失败，被选中的文件一个都没搬走，同样要交代。
             Left why -> putStrLn ("✗ " <> why) >> reportChosen pick >> pure 2
-            Right ev ->
-              withFreshStagingCatalog root $
-                buildPlan cfg go info ev (map fst taken <> spSidecars pick)
+            Right ev -> do
+              -- 新鲜度不过同样是**计划前失败**：选中的文件一个都没搬走，
+              -- 要与撞名/事件名非法一样逐条交代（codex 二十八轮 #4）。
+              ecat <- freshStagingCatalog root
+              case ecat of
+                Left m -> putStrLn ("✗ " <> m) >> reportChosen pick >> pure 2
+                Right cat ->
+                  buildPlan cfg go info ev (map fst taken <> spSidecars pick) cat
 
 -- | 决定事件夹名：@--place@ 自动补 @YY-MM@（取该段起始日），@--event@ 直接用。
 -- 两条最后都要过 'canonRawEvent'——那是 import 认这个目录的同一把尺子，
@@ -595,6 +615,9 @@ buildPlan cfg go info ev picked cat = do
     failed@(_ : _) -> do
       putStrLn "✗ 源文件读取失败，整批不出计划："
       forM_ failed $ \(p, why) -> putStrLn ("    " <> p <> " — " <> why)
+      -- 读得出的那些也一个都没搬走：只列失败项，等于让人以为其余的进了计划
+      -- （codex 二十八轮 #4，与第 27 轮 #4 同一形状——那次只扫了一半）。
+      reportChosenFiles picked
       pure 2
     [] -> do
       let judged0 = judge cat ev [(p, sha, st) | (p, Right (sha, st)) <- snaps]
@@ -673,7 +696,7 @@ verifySkips root = mapM check
       -- **读不到不等于不存在**：两者的安全方向相反（缺席→照搬，读不到→保守）。
       CpUnreadable e -> j {jVerdict = VConflict (T.pack ("目标读不到，无法确认可跳过: " <> e))}
       CpEscaped -> j {jVerdict = VConflict "目标路径中途有 reparse point，拒绝据此跳过"}
-      CpSha actual
+      CpSha actual _
         | actual == jSha j -> j
         | isStaging -> j {jVerdict = VConflict "暂存目标实际内容与索引不符"}
         -- 归档层同名异容是 import 的返修裁决管的事，照常拷进暂存区。
