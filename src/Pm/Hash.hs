@@ -25,9 +25,10 @@ import qualified Data.Text as T
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
 import System.Directory (getFileSize, getModificationTime)
+import System.IO.Error (isDoesNotExistError)
 import System.IO
 
-import Pm.Win (flushHandleToDisk, openFreshBinary, resolveUnder)
+import Pm.Win (flushHandleToDisk, openFreshBinary, openStateRead, resolveUnder)
 
 chunkSize :: Int
 chunkSize = 1024 * 1024
@@ -56,20 +57,33 @@ data ContentProbe
 -- 永久删除）或「已归档，不用搬」（@pm sort@ 据此跳过）。两个调用点共用这一处，
 -- 免得再分叉（codex 二十六轮 #1）。
 --
+-- 形态与 'Pm.Config.readPmState' **逐字一致**，因为要治的是同三件事：
+-- 完整相对路径 'resolveUnder' → **只打开一次** → 在句柄上查 link count →
+-- 从**同一句柄**读完。第一版这里是 @getFileSize@ 探一次存在性、再按名字
+-- @sha256File@ 打开第二次——「校验的对象」与「读的对象」又成了两次独立解析，
+-- 正是本项目十一\/十二\/十三轮反复收拾的那个形状（codex 二十七轮 #1）。
+--
+-- link count \> 1 一并拒绝：'resolveUnder' 原理上看不见 hardlink，而这个判定
+-- 的下游一边是「三副本齐了，可以永久删」——三份副本必须是三个**独立对象**，
+-- 同一个对象出现在两个名字下不算两份。
+--
 -- 只捕 'IOException'：@SomeException@ 会把 @UserInterrupt@\/@ThreadKilled@
--- 一起吞掉，让 Ctrl-C 变成一条"读不到"。
+-- 一起吞掉，让 Ctrl-C 变成一条"读不到"。@isDoesNotExistError@ 把**缺席**从
+-- 其余错误里分出来——两者安全方向相反，塌缩成一个答案就等于把 ACL 拒绝
+-- 当成"文件不在了"（codex 二十七轮 #2：独占打开触发的
+-- @ERROR_SHARING_VIOLATION@ 此前被判成 'CpMissing'）。
 probeConfined :: FilePath -> FilePath -> IO ContentProbe
 probeConfined root rel = do
   m <- resolveUnder root rel
   case m of
     Nothing -> pure CpEscaped
-    Just abs' -> do
-      ex <- try (getFileSize abs') :: IO (Either IOException Integer)
-      case ex of
-        Left _ -> pure CpMissing
-        Right _ -> do
-          r <- try (sha256File abs') :: IO (Either IOException Text)
-          pure (either (CpUnreadable . show) CpSha r)
+    Just fp -> do
+      r <- try (bracket (openStateRead fp) hClose sha256Handle) :: IO (Either IOException Text)
+      pure $ case r of
+        Right sha -> CpSha sha
+        Left e
+          | isDoesNotExistError e -> CpMissing
+          | otherwise -> CpUnreadable (show e)
 
 sha256File :: FilePath -> IO Text
 sha256File fp = withBinaryFile fp ReadMode sha256Handle

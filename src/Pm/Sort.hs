@@ -240,6 +240,9 @@ data SourceFiles = SourceFiles
     -- ^ 扩展名不认识。不归位，但一定列出来——用户得知道卡上还剩什么。
   , sfErrors :: [(FilePath, String)]
     -- ^ 遍历时就出问题的（reparse point、路径过长、读不到）。
+  , sfNotes :: [String]
+    -- ^ **诊断**，不是"没归位的文件"。混进 'sfErrors' 会让"未入计划 N 个"
+    -- 多算（codex 二十七轮 #5：源根是 junction 时 left 多算 1）。
   }
 
 -- | 列出源目录下的全部文件（绝对路径）。
@@ -255,7 +258,7 @@ listSource :: FilePath -> IO SourceFiles
 listSource dir = do
   isDir <- doesDirectoryExist dir
   if not isDir
-    then pure (SourceFiles [] [] [] [])
+    then pure (SourceFiles [] [] [] [] [])
     else do
       -- 'WalkDotDirs'：源是**用户随手指的一个目录**，里面点开头的目录只是普通
       -- 文件夹。'listTree' 的默认策略是给**库根**写的（@.pm@/@.git@ 是元数据，
@@ -266,23 +269,27 @@ listSource dir = do
       -- 显式指定（与 root 放在 junction 上一样是合法用法，见 'resolveUnder'
       -- 的说明），所以**不拒绝**，但必须告诉用户他实际在整理哪个目录
       -- （codex 二十六轮 #5）。
-      rootLink <- either (const False) id <$> tryLink dir
-      real <- if rootLink then Just <$> canonicalizePath dir else pure Nothing
+      rootLink <- either (const False) id <$> tryIO (pathIsSymbolicLink dir)
+      real <-
+        if rootLink
+          then either (const Nothing) Just <$> tryIO (canonicalizePath dir)
+          else pure Nothing
       let abs' = map (dir </>) (sort rels)
           pick k = [p | p <- abs', classifyExt (takeExtension p) == k]
-          rootNote =
-            [ (dir, "源根本身是 symlink/junction，实际整理的是 " <> fromMaybe "?" real)
-            | rootLink
-            ]
       pure
         SourceFiles
           { sfPhotos = pick KindPhoto
           , sfSidecars = pick KindSidecar
           , sfUnknown = pick KindMeta
-          , sfErrors = rootNote <> [(dir </> r, e) | (r, e) <- errs]
+          , sfErrors = [(dir </> r, e) | (r, e) <- errs]
+          , sfNotes =
+              [ "源根本身是 symlink/junction，实际整理的是 " <> fromMaybe "（解析失败）" real
+              | rootLink
+              ]
           }
  where
-  tryLink p = try (pathIsSymbolicLink p) :: IO (Either SomeException Bool)
+  tryIO :: IO a -> IO (Either SomeException a)
+  tryIO = try
 
 -- | (源目录, 折叠后的 stem) → 该 stem 的侧车。按目录分键：不同目录下同名的
 -- 两组照片各有各的侧车，全局按 stem 索引会把它们串在一起。
@@ -359,6 +366,21 @@ data Accounting = Accounting
   , acUnknown :: [FilePath]
   , acErrors :: [(FilePath, String)]
   }
+
+-- | **计划前失败**时（撞名整批拒绝、事件名不合法）把本次选中的全部文件列出来。
+--
+-- 这些文件一个都没搬走，却不属于 'Accounting' 的任何一格：照片在 'spTake' 里
+-- （本该进计划），侧车已被主文件认领（所以不算 'spOrphanCars'）。不列出来，
+-- 它们就是这条路径上的静默缺席（codex 二十七轮 #4）。
+reportChosen :: SortPick -> IO ()
+reportChosen pick = do
+  let chosen = map fst (spTake pick) <> spSidecars pick
+  printf
+    "\n本次**没有任何文件**进入计划。被选中但未归位的 %d 个（含侧车）：\n"
+    (length chosen)
+  forM_ (take 40 chosen) $ \c -> putStrLn ("    " <> c)
+  unless (length chosen <= 40) $
+    printf "    …另有 %d 个\n" (length chosen - 40)
 
 -- | 逐类打印，返回被留下的文件总数（0 = 源里每个文件都进了计划）。
 reportAccounting :: Accounting -> IO Int
@@ -520,10 +542,13 @@ runSortPlan go src placeOrEvent from to cfg = do
           forM_ cs $ \(n, srcs) -> do
             putStrLn ("    " <> n <> ":")
             forM_ srcs $ \s -> putStrLn ("        " <> s)
-          printf
-            "\n本次**没有任何文件**进入计划（撞名 %d 组；另有 %d 个文件因上列原因被留下）。\n"
-            (length cs)
-            left
+          -- 光打印撞名的那几个名字不够：被选中的**其余**照片、以及跟着它们的
+          -- 侧车同样不会被搬走，而它们既不在 'spCollide' 里，也不在
+          -- 'spOrphanCars'（侧车已被认领，所以不算无主）——于是一个都不出现在
+          -- 输出里（codex 二十七轮 #4）。把本次选中的全部文件逐条列出来。
+          reportChosen pick
+          unless (left == 0) $
+            printf "另有 %d 个文件因上列其他原因被留下。\n" left
           pure 2
         (_, []) -> do
           putStrLn "该区间内没有可定时的照片"
@@ -534,7 +559,8 @@ runSortPlan go src placeOrEvent from to cfg = do
           unless (left == 0) $
             printf "\n（以上 %d 个文件**不在**本次计划里；清卡前请自行确认）\n" left
           case resolveEvent (localDay t1) placeOrEvent of
-            Left why -> putStrLn ("✗ " <> why) >> pure 2
+            -- 与撞名同类：计划前失败，被选中的文件一个都没搬走，同样要交代。
+            Left why -> putStrLn ("✗ " <> why) >> reportChosen pick >> pure 2
             Right ev ->
               withFreshStagingCatalog root $
                 buildPlan go root info ev (map fst taken <> spSidecars pick)

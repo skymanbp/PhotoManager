@@ -17,6 +17,7 @@ module Pm.Scan
 import Control.Concurrent.Async (replicateConcurrently_)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM)
+import Data.Char (toLower)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -112,7 +113,15 @@ listTreeWith dots root = go ""
                   isDir <- doesDirectoryExist abs'
                   if isDir
                     then case dots of
-                      WalkDotDirs -> go relPath
+                      -- 'WalkDotDirs' 的唯一例外：pm 自己的状态目录。源恰好是
+                      -- 一个 pm 库根时，@.pm\\tmp@ 里是**半写入**的临时文件、
+                      -- @.pm\\trash@ 里是已隔离的文件——它们头部有合法 EXIF，
+                      -- 会被当成待归位的照片拷走（codex 二十七轮 #3）。跳过，
+                      -- 但**记一条**，不静默。
+                      WalkDotDirs
+                        | map toLower (takeFileName name) == ".pm" ->
+                            pure ([], [(relPath, "pm 状态目录（tmp/trash/plans），源遍历不进入")])
+                        | otherwise -> go relPath
                       SkipDotDirs
                         | take 1 (takeFileName name) == "." -> pure ([], [])
                         | otherwise -> go relPath
