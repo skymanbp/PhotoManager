@@ -1021,3 +1021,107 @@ finding 讲的就是**印了什么**，只能真去捕获 stdout；断言 `SortP
 新鲜度失败列出选中文件 / snapshot 失败列出选中文件 / 清单不截断 / 身份排除集
 生效 / 内容读取不再用 link count 判据。
 
+## 第 29 轮（P5-B…F 六个提交）——NO-GO 7 条，**逐条独立核实后**处置
+
+评审自陈沙箱里跑不了 `stack test`，结论是静态源码评审。7 条因此全部送并行
+独立核实（每条一个 agent，判成 CONFIRMED 的再过一遍对抗复核 agent），核实
+提示词要求分清三件事：**代码事实成立** / **已登记残余** / **威胁模型内可达**。
+核下来行号系统性不准（#1 全错、#5 差 20 行、#6 差 28 行、#2 把
+`copyFileHashed` 的 dst 侧说反了），但其中一条是真的、且比它自己描述的更容易
+触发。
+
+**7 条塌缩成 3 个根**——这是本轮方法上的主要收获：逐条修会重复第 27/28 轮
+「同形状只扫了一半」的错误。
+
+### 根 A（#3，critical，成立且对抗复核未能驳倒）→ 已修
+
+**执行期组屏障跑在 root 锁外。** `preExecFor` 在 `Cli.hs` / `Commands.hs` /
+`Serve.hs` 三处都在 `execPlan` **之前**调用，而锁在 `execPlan'` 里面
+（全库 `withRootLock` 只有 `Exec.hs` 与 `VaultCmd.hs` 两处）；锁内只复核
+victim 自己的 sha，从不重算「该 sha 在归档层还留一份」。
+
+对抗复核给出的触发路径比原 finding 更省：**一份计划就够**——两个终端各跑
+`pm apply <同一 id> --only 1` 与 `--only 2`。`applyOnlyToPlan` 把未选中项改写
+成 `StSkippedByUser`，而 `recheckDedupeItems` 的 victims 只取 `StPending`，
+于是双方各自看见对方那份还活着，双双放行，只需 2 份副本。
+
+后果不是字节丢失（`pm trash empty` 的 `BArchiveCopyLeft` 屏障会让三条全部
+HELD，`pm undo` 可逐条搬回），是 DESIGN-COMMANDS §8.1 的不变量被破坏 +
+照片从库里静默消失，因此判 major 而非 critical。**不是已登记残余**：§14 的
+残余段只点名 `MoveFileEx`/`RemoveDirectory`，且那一段的对手是恶意进程；本条
+的两个行为体都是良性 pm 进程，正是 §14 明写要防、I10 负责的那一类。相反，
+DESIGN-COMMANDS §10 记的二十一轮裁定（vault-holds 名单的「读→校验→写」整段
+进 I10 锁）与本条**同形**，等于反证它偏离了已确立的纪律。
+
+**修法**：屏障装进 `ExecEnv.eeBarrier`，由内核在 `withRootLock` 内调用。
+「哪些种类要屏障」提成 `Pm.Plan.kindNeedsBarrier`（内核与命令层读同一张表），
+**该有而没有 = 整批拒绝**——P3b-5/A3 的教训在这里的落法不是把闸搬进内核
+（内核算不出「归档层还剩几份」），而是让**缺席本身**成为硬失败。内核还核对
+屏障只做了降级：把条目升级回 `pending` 或改写 Op 一律整批拒绝。
+装配点收成一处（`executePlanNowWith`），三处调用点里的 `preExecFor` 全部删除，
+`savePlanAndMaybeRunWith` 一并删除——「传哪个钩子」不再是调用方的决定。
+
+**同根第二处（rule 09 统一修复）**：`pm trash empty` 是 pm 全程唯一 unlink
+用户数据的路径，它的屏障判据与 `removeFile` 之间同样全程不取锁。整段
+（判定 → 列表 → unlink）搬进 `withRootLock`；`--yes` 是命令行开关而非交互
+提问，锁内不会停下来等人。
+
+**四道新闸各自突变转红（4/4，每次恰好一个用例）**：缺屏障改成静默放行 →
+`caseKernelRefusesMissingBarrier`；屏障搬回锁外 → `caseBarrierRunsInsideLock`
+（该用例在屏障里再取一次同一把锁，`withRootLock` 不可重入，取得到就说明在
+锁外）；去掉「不许升级回 pending」→ `caseBarrierMayNotPromote`；trash empty
+去掉取锁 → `caseTrashEmptyTakesLock`。
+
+内核的 fail-closed 当场抓到第一个真实调用者：`PlannerTests` 那条端到端用例
+用 `defaultExecEnv` 执行 `clean-staging` 计划。它考的是 Quarantine 落 trash 的
+机制而非三副本屏障，改为显式挂 `Just pure`——**显式**正是这次改动要的效果。
+
+### 根 B（#1 #2 #5 #6，4 条）→ 一行代码 + 作用域文档
+
+四条攻击的是同一句**无限定**的声称：§14「取用口（读、追加、加锁、内容探测）
+走 `openBoundTo`」。事实上走它的只有 `.pm` 状态文件的三个打开口与
+`probeConfined`；Exec 三条 Op 的用户数据内容读仍是裸 `withBinaryFile`。
+一句没有限定词的绝对化保证会**每一轮生出一批 finding**，这才是根因。
+
+- **#2 thumb（唯一的代码改动）**：`GET /api/thumb` 在 `resolveUnder` 之后按
+  名字 `BS.readFile`，而该端点的既定意图已被用例钉成「库外字节不外泄」。
+  改走 `openBoundTo ReadMode`。#2 里关于 EXIF 的那一半**证伪**：
+  `readCaptureTime` 的唯一调用者是 `Pm.Sort.readTimes`，入参来自库外源目录，
+  全程没有 `resolveUnder`，也没有任何限域承诺；「扫描的 EXIF 读取」更是纯错误
+  （`Pm.Scan` 不读 EXIF）。改它反而会把「源根自身是 junction」这一合法用法判死。
+- **#1 Exec 的 `sha256File`**：代码事实成立，但绑定读口**不改变可利用性**——
+  三条路径的形状都是「读 sha 当闸 → 紧接着对同一路径 `moveFileNoReplace`」，
+  赢得下读那一跳的攻击者同样赢得下 move 那一跳，后果由 move 产生。换成
+  `openBoundTo` 只会造出"读口已关"的假象。登记残余。
+- **#5 `handleIsAt` 的手写规范化**、**#6 `openFreshBinary` / trash unlink 的
+  名字口**：登记残余（#6 的后果本就已在 §14 逐字登记）。
+
+§14 因此改写成**带作用域的保证 + 六条逐项登记的残余**，让下一位评审有东西可
+**核对**而不是有东西可**攻击**。§6.7 并发防护同时补上「判据与动盘是同一个
+跨进程事务」这一条纪律。
+
+### 根 C（#4）→ 只改文档
+
+`FileId` 确实是 32 位卷序列号 + 64 位索引，不是 ReFS 的 128 位 `FILE_ID_INFO`
+（实测：Win32-2.14.1.0 的 `.hi` 里对 `FILE_ID_INFO` / `getFileInformationByHandleEx`
+零命中，换过去要新写 FFI）。但**风险方向反了**：窄化是一个函数，只可能把两个
+不同对象并成一个（→ 多拒一次 HELD），数学上产不出「把同一个对象拆成两个」
+因而放行最后一份。方向与 `nlink == 1` 判据相同，按同样写法把「为什么不换
+FFI」钉在 DESIGN-COMMANDS §8.1 原地。
+
+### #7 证伪
+
+「静音 stdout 吞掉端口冲突」不成立：`bindLoopback` 在 `bracket` 的 **acquire**
+位（`Serve.hs:181`），`muteStdout` 在 body 里（`Serve.hs:193`），端口冲突必然
+发生在静音之前。GUI 那一侧把原始行原样嵌进自己的错误消息经 stderr 报出。
+
+### 核实顺带捞出、评审没报的两条
+
+1. **`purgeBarriers` 与 `recheckCleanItems` 对「读不到 victim 身份」处置不
+   一致**：前者 `excl = []` 继续，后者 fail-closed 判否。**分析后判定非隐患**：
+   trash 载荷不在归档层路径上，排除集只影响「归档层某文件与载荷同身份」这一
+   种情形，而那种情形下删掉 trash 那个名字，字节仍活在归档层的名字下。
+   `excl = []` 在此是**正确**而非放松。记录在案，不改。
+2. `pm trash empty` 不取锁 —— 已随根 A 一并修（见上）。
+
+**281 tests（277 + 4 新），GHC warnings 0。**

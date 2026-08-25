@@ -76,10 +76,10 @@ import Network.Wai.Handler.Warp (defaultSettings, runSettingsSocket)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (dropExtension, takeExtension, (</>))
 import GHC.IO.Handle (hDuplicateTo)
-import System.IO (IOMode (WriteMode), hClose, hFlush, hIsEOF, openFile, stdin, stdout)
+import System.IO (IOMode (ReadMode, WriteMode), hClose, hFlush, hIsEOF, openFile, stdin, stdout)
 
 import Pm.Catalog (loadCatalog)
-import Pm.Cli (GoOpts (..), executePlanNowWith, preExecFor)
+import Pm.Cli (GoOpts (..), executePlanNowWith)
 import Pm.Commands (afterApply, loadPlanAnyRoot, prepareApply)
 import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, pmSubPlans, requirePmTrusted, requireWritable, untrustedMsg, withConfigLock)
 import Pm.ConfigEdit (checkPatch, configTxn)
@@ -93,7 +93,7 @@ import Pm.Types
 import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newActive, planCategories, renderVaultJson, vaultPushItems)
 import Pm.VaultCmd (holdOpsIO, withHoldsTxn)
 import Pm.VaultHold (VaultHold (..), writeHolds)
-import Pm.Win (resolveUnder)
+import Pm.Win (openBoundTo, resolveUnder)
 
 data ServeOpts = ServeOpts
   { soPort :: Maybe Int
@@ -541,18 +541,20 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                 Left m -> err status409 m
                 Right (plan, added) -> do
                   logRef <- newIORef []
-                  plan' <- preExecFor cfg (plKind plan) plan
+                  -- 屏障不在这里调：它随 cfg 装进 ExecEnv，由内核在 root 锁内
+                  -- 跑（二十九轮 critical）。seApplyLock 只是**进程内**互斥，
+                  -- 挡不住第二个 pm；跨进程那一半现在由 I10 锁负责。
                   (code, results) <-
-                    executePlanNowWith (\l -> modifyIORef' logRef (l :)) plan'
-                  afterApply cfg plan' code
+                    executePlanNowWith cfg (\l -> modifyIORef' logRef (l :)) plan
+                  afterApply cfg plan code
                   logs <- reverse <$> readIORef logRef
                   jsonR
                     status200
                     []
                     ( object
-                        [ "planId" .= plId plan'
-                        , "kind" .= plKind plan'
-                        , "root" .= plRootPath plan'
+                        [ "planId" .= plId plan
+                        , "kind" .= plKind plan
+                        , "root" .= plRootPath plan
                         , "addedByGroupClosure" .= added
                         , "code" .= code
                         , "items"
@@ -613,7 +615,15 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
             case m of
               Nothing -> err status404 "条目路径不是库内真实路径（链接？），不提供"
               Just abs' -> do
-                eb <- try (BS.readFile abs') :: IO (Either IOException BS.ByteString)
+                -- 二十九轮：resolveUnder 只是**预筛**——它验的是路径，返回后
+                -- 到 readFile 之间中途一层仍可被换成 junction。改成「先开，
+                -- 再问句柄它绑在哪条路径上」（P5-D 的同一条纪律），与 §14
+                -- 「取用口走 openBoundTo」的措辞对齐。
+                -- 残余：openBoundTo 对**库内 hardlink 判是**，所以它关掉的是
+                -- 竞态那一半，不是别名那一半（后者要句柄身份判据）。
+                eb <-
+                  try (bracket (openBoundTo ReadMode abs') hClose BS.hGetContents)
+                    :: IO (Either IOException BS.ByteString)
                 case eb of
                   Left e -> err status500 ("读取失败: " <> show e)
                   Right bytes ->

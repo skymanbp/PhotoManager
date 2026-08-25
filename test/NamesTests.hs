@@ -94,7 +94,8 @@ caseNamesE2E = withSystemTempDirectory "pm-names" $ \tmp -> do
   writeF (evOld </> "x.ARW") "RAWBYTES"
   createDirectoryIfMissing True (root </> "成片" </> "25-01-Alaska")
   writeRootInfo root (RootInfo "names-test-root" RoleMain t0 Nothing)
-  code <- runNames (\p -> savePlan p >> executePlanNow p) (mkMainCfg cfgLike)
+  let cfg = mkMainCfg cfgLike
+  code <- runNames (\p -> savePlan p >> executePlanNow cfg p) cfg
   code @?= 0
   oldEx <- doesDirectoryExist evOld
   newEx <- doesDirectoryExist evNew
@@ -104,7 +105,7 @@ caseNamesE2E = withSystemTempDirectory "pm-names" $ \tmp -> do
   -- undo 完整回滚（P3 验收标准）
   eundo <- buildUndoPlan root 1
   uplan <- either (\e -> assertFailure e >> undefined) pure eundo
-  ucode <- executePlanNow uplan
+  ucode <- executePlanNow cfg uplan
   ucode @?= 0
   oldEx2 <- doesDirectoryExist evOld
   newEx2 <- doesDirectoryExist evNew

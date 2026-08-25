@@ -364,6 +364,12 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - mutation 前打开 `.pm/lock` 句柄 `hTryLock`（内核锁，崩溃自动释放，I10）；
 - Plan 带 (size,mtime) 前提，Exec 逐项复核（防 Lightroom 并发改动）；
 - scan 对每文件 hash 前后双 stat，不一致 → 标 volatile 本轮不入索引。
+- **判据与动盘是同一个跨进程事务**：凡是「读证据 → 判定 → 动盘」的整段，
+  必须整段在 I10 锁内完成。执行期组屏障（dedupe 的"至少留一份"、clean-staging
+  的三副本）由内核在 `withRootLock` **内**调用，`pm trash empty` 的屏障与
+  唯一那次 unlink 同样整段在锁内（二十九轮 critical；与二十一轮 vault-holds
+  名单同一裁定）。进程内互斥（serve 的 MVar）不算——它挡不住第二个 pm。
+  内核对「该有屏障而调用方没给」整批拒绝，缺席不会退化成静默跳过。
 
 ---
 
@@ -575,18 +581,42 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 进程**（Lightroom、资源管理器等）。同机恶意进程的毫秒级 check-use 竞争
 （TOCTOU）此前整类留白，**P5-D 起读写取用口这一半已经关上**：
 
-- **取用口（读、追加、加锁、内容探测）** 走 `Pm.Win.openBoundTo`——先打开，
-  再用 `GetFinalPathNameByHandleW` 在**句柄**上确认它绑定的正是那条路径。
-  因果方向变了：答案取自要读写的那个对象。开完之后再怎么换目录都改不了句柄
-  指向谁；开之前换过，则实际路径与期望不符、当场拒绝。`resolveUnder` 因此
-  **不再是安全边界**，只是预筛。用例把竞态做成确定性事件（解析成功之后再把
-  中途一层换成 junction），并同时断言**裸 open 在这一步会读到库外文件**——
-  否则只证明新写法拒绝了，不证明它拒绝的是真实存在的危险。
-- **剩下的窗口**：`MoveFileEx` / `RemoveDirectory` 这类只吃**名字**、没有句柄
-  形态的 API（落位 rename、`pm trash empty` 的唯一 unlink）。它们仍由
-  `resolveUnder` + `pathAtOrUnder` 那一层守，窗口照旧存在。设计保证不变：
-  即使被击中，字节也只会进 trash 而非消失，且 `pm trash empty` 在永久删除前
-  重验三副本（终极屏障）。
+- **走 `Pm.Win.openBoundTo` 的取用口**——先打开，再用
+  `GetFinalPathNameByHandleW` 在**句柄**上确认它绑定的正是那条路径。因果方向
+  变了：答案取自要读写的那个对象。开完之后再怎么换目录都改不了句柄指向谁；
+  开之前换过，则实际路径与期望不符、当场拒绝。`resolveUnder` 因此**不再是
+  安全边界**，只是预筛。用例把竞态做成确定性事件（解析成功之后再把中途一层
+  换成 junction），并同时断言**裸 open 在这一步会读到库外文件**——否则只证明
+  新写法拒绝了，不证明它拒绝的是真实存在的危险。
+
+  **作用域**（二十九轮：此处此前无限定，是四条 finding 的共同来源）：
+  `.pm` 状态文件的三个打开口（`openStateRead` / `openStateAppend` /
+  `openStateLock`）、内容探测 `probeConfined`、以及 GUI 的 `GET /api/thumb`。
+  **不含** Exec 三条 Op 里的用户数据内容读（`sha256File`）——见下。
+
+- **剩下的窗口**（逐条登记，不是"属安全软件范畴"一句带过）：
+  1. `MoveFileEx` / `RemoveDirectory` 这类只吃**名字**、没有句柄形态的 API
+     （落位 rename、`pm trash empty` 的唯一 unlink）。仍由 `resolveUnder` +
+     `pathAtOrUnder` 守。
+  2. Exec 三条 Op 的内容复核（`sha256File`：Copy 的落点同内容判定、Rename 的
+     旧名复核、Quarantine 的 victim 复核）按名字打开。**这不是独立窗口**：每
+     一条读之后紧接着就是同一路径上的 `moveFileNoReplace`，赢得下读那一跳的
+     攻击者同样赢得下 move 那一跳，后果由 move 产生。把读口换成 `openBoundTo`
+     会造出"读口已关"的假象而实际什么都没关——真要关这一类，方向是落位
+     rename 改成句柄形态（`SetFileInformationByHandle` + `FILE_RENAME_INFO`）。
+  3. `openBoundTo` 只比对**路径**，对库内 hardlink 判是。所以它关掉的是竞态
+     那一半，别名那一半（同一对象两个名字）要靠 `FileId`，thumb 尚未用它。
+  4. `handleIsAt` 的路径规范化是手写的（去 `\\?\` 前缀、按分隔符切、折
+     大小写），对 `\\?\UNC\`、卷 GUID 路径、8.3 短名、尾随点/空格、NFC/NFD
+     未逐一处理。方向是**多拒**（比不上就拒绝，fail-closed），不是放行。
+  5. 挂载卷若无 DOS 路径，`GetFinalPathNameByHandleW` 反查失败 → 判否 →
+     该配置下取用口全部拒绝。已知代价，非静默失败。
+  6. **库外源目录不做限域**：`pm sort` 的卡/收件目录不在任何 root 之内，
+     `Pm.Exif.readCaptureTime` 按名字打开是设计如此（源根自身是 junction 属
+     合法用法）。那里没有边界可越——能换掉源文件的人已经能写那个目录。
+
+  设计保证不变：即使被击中，字节也只会进 trash 而非消失，且 `pm trash empty`
+  在永久删除前重验三副本（终极屏障），该屏障走的是已绑定的 `probeConfined`。
 
 逐项分析见 `docs/reviews/2026-08-23-p2-codex-review.md` 三轮章节与
 REVIEW-LOG 第 28 轮。

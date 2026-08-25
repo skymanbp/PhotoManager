@@ -371,7 +371,16 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   删了那条验收就没参照），检测口改指 `pm vault status`；两个 skill、vault
   `CLAUDE.md`、`record-structure-version.md`、`KB-维护速查.md` 指针一并改写。
   `photo-place` skill：看图给每段建议地点，只出建议、由用户确认，走同一条计划
-  路径（pm 内核里没有任何 AI 判断）
+  路径（pm 内核里没有任何 AI 判断）
+- P5-G ✅ **判据与动盘收进同一个跨进程事务**（第 29 轮 critical，对抗复核
+  未能驳倒）：执行期组屏障此前跑在 root 锁外，两个终端各跑同一计划的
+  `--only 1` / `--only 2` 就能让同一内容的两份副本一起进隔离区。屏障改由
+  内核在 `withRootLock` 内调用，装配点收成一处；「哪些种类要屏障」提成
+  `kindNeedsBarrier`，**该有而没有 = 整批拒绝**。`pm trash empty`（全程唯一
+  unlink 用户数据的路径）同根一并搬进锁内。四道新闸各自突变转红。
+  同轮的另外 4 条 finding 塌缩成同一个根因：DESIGN §14 一句**无限定**的
+  「取用口都走 openBoundTo」——改写成带作用域的保证 + 六条逐项登记的残余，
+  代码只动 thumb 一行
 
 ## License
 

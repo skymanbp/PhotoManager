@@ -11,7 +11,6 @@ module Pm.Cli
   , executePlanNow
   , executePlanNowWith
   , savePlanAndMaybeRun
-  , savePlanAndMaybeRunWith
   , bindExecRoot
   , preExecFor
   , recheckCleanPlan
@@ -86,8 +85,8 @@ renderPlanBrief plan = do
 -- （可移动介质，§9）；执行 root 的 UUID 在锁内复验（cx-1）。
 -- P2.2 fail-closed（复审 cx-1 残留）：CLI 层一律拒绝执行无 rootId 的计划，
 -- 包括 --apply 即时路径——root 没有身份就没有执行资格，没有例外。
-executePlanNow :: Plan -> IO Int
-executePlanNow = fmap fst . executePlanNowWith putStrLn
+executePlanNow :: Config -> Plan -> IO Int
+executePlanNow cfg = fmap fst . executePlanNowWith cfg putStrLn
 
 -- | 同上，但**打印口由调用方给**，且把逐项结果一并交回。
 --
@@ -98,20 +97,26 @@ executePlanNow = fmap fst . executePlanNowWith putStrLn
 --
 -- 逐项结果同样交回：CLI 只要退出码，API 要把每一项的结局报给页面。两者共用
 -- **同一次**执行与同一次 catalog 回写，不另起一条执行路径。
-executePlanNowWith :: (String -> IO ()) -> Plan -> IO (Int, [(PlanItem, ItemOutcome)])
-executePlanNowWith sink plan = case plRootId plan of
+executePlanNowWith :: Config -> (String -> IO ()) -> Plan -> IO (Int, [(PlanItem, ItemOutcome)])
+executePlanNowWith cfg sink plan = case plRootId plan of
   Nothing -> do
     sink "计划缺 root 标识，拒绝执行（cx-1 fail-closed）→ pm init 建立 root 标识后重新生成计划"
     pure (2, [])
-  Just _ -> executePlanNow' sink plan
+  Just _ -> executePlanNow' cfg sink plan
 
-executePlanNow' :: (String -> IO ()) -> Plan -> IO (Int, [(PlanItem, ItemOutcome)])
-executePlanNow' sink plan = do
+executePlanNow' :: Config -> (String -> IO ()) -> Plan -> IO (Int, [(PlanItem, ItemOutcome)])
+executePlanNow' cfg sink plan = do
   let root = plRootPath plan
       env =
         defaultExecEnv
           { eeDoneSync = if plKind plan == "backup" then Barrier else Buffered
           , eeExpectRootId = plRootId plan
+          , -- 二十九轮 critical：屏障装进 ExecEnv，由内核在 withRootLock **内**
+            -- 跑。此前三条执行路径各自在锁外调一次 preExecFor——判据与动盘不在
+            -- 同一个跨进程事务里，两个 pm 进程可以双双放行同一内容的不同副本。
+            -- 现在这是唯一一处装配点：调用方连"跳过屏障"这个选项都没有，而
+            -- 'Pm.Plan.kindNeedsBarrier' 说要却没装上时内核整批拒绝。
+            eeBarrier = preExecFor cfg (plKind plan)
           }
   r <- execPlan env plan
   case r of
@@ -141,22 +146,23 @@ executePlanNow' sink plan = do
 -- 'savePlanAndMaybeRunWith' 又一次。P2.2 封堵的正是其中一条路径漏掉复验的
 -- 旁路——两处写同一件事，迟早会有一处忘记跟上。现在加一种需要执行期屏障的
 -- 计划 = 在这张表里加一行，两条路径同时生效。
-preExecFor :: Config -> T.Text -> (Plan -> IO Plan)
+--
+-- 与 'Pm.Plan.kindNeedsBarrier' 是同一张表的两半：那边说**要不要**（内核据此
+-- fail-closed），这边说**是哪个**。两边必须逐 kind 一致，用例 caseBarrierTable
+-- 钉住这一点。
+preExecFor :: Config -> T.Text -> Maybe (Plan -> IO Plan)
 preExecFor cfg kind
-  | kind == "clean-staging" = recheckCleanPlan cfg
-  | kind == "dedupe" = recheckDedupePlan cfg
-  | otherwise = pure
+  | kind == "clean-staging" = Just (recheckCleanPlan cfg)
+  | kind == "dedupe" = Just (recheckDedupePlan cfg)
+  | otherwise = Nothing
 
--- | 存盘 → 展示 → 确认 → （按种类复验）→ 执行。'preExecFor' 在这里自动生效，
--- 调用方不必也不能选择跳过它。
+-- | 存盘 → 展示 → 确认 → 执行。执行期屏障由 'executePlanNowWith' 装进
+-- ExecEnv、由内核在锁内跑，这里既不必也不能选择跳过它。
+--
+-- 二十九轮之前这里还有一个 @savePlanAndMaybeRunWith@ 收 @preExec@ 钩子的变体，
+-- 现已删除：屏障装配点收成一处之后，"传哪个钩子"不再是调用方的决定。
 savePlanAndMaybeRun :: Config -> GoOpts -> Plan -> IO Int
-savePlanAndMaybeRun cfg go plan =
-  savePlanAndMaybeRunWith (preExecFor cfg (plKind plan)) go plan
-
--- | 同上，但确认后、执行前先过 @preExec@ 钩子（P2.2：`pm clean staging
--- --apply` 的即时路径也要走执行期三副本重验，复审 cx-3 旁路封堵）。
-savePlanAndMaybeRunWith :: (Plan -> IO Plan) -> GoOpts -> Plan -> IO Int
-savePlanAndMaybeRunWith preExec go plan = do
+savePlanAndMaybeRun cfg go plan = do
   -- P3b-7 复审新 major：savePlan 写 <root>/.pm/plans/，是 .pm 写入口——root
   -- 须有可解析身份且过 I11，否则不落盘。
   w <- requireWritable (plRootPath plan)
@@ -169,7 +175,7 @@ savePlanAndMaybeRunWith preExec go plan = do
       putStrLn ("执行: pm apply " <> T.unpack (plId plan))
       ok <- confirm go
       if ok
-        then preExec plan >>= executePlanNow
+        then executePlanNow cfg plan
         else pure 1
 
 -- | 评审 cx-1：执行 root 由 UUID 重新发现并绑定，绝不信计划里存的盘符路径

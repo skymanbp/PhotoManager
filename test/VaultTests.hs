@@ -277,7 +277,7 @@ caseHoldOnlyExit = withSystemTempDirectory "pm-vault" $ \tmp -> do
   createDirectoryIfMissing True (vdir </> "landscape")
   runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
   runVaultStatus False cfg >>= (@?= 0)
-  runVaultPush execNow Nothing [] cfg >>= (@?= 0)
+  runVaultPush (execNow cfg) Nothing [] cfg >>= (@?= 0)
 
 -- | 决定记的是「当时那张」：字节换了就失效，照片回到 NEW（宁可多问一次）。
 caseHoldStale :: IO ()
@@ -532,8 +532,8 @@ caseIoCacheDrift = withSystemTempDirectory "pm-vault" $ \tmp -> do
 -- ─── P3b push ───────────────────────────────────────────────────────────────
 
 -- | 立即执行的 runPlan（测试用：跳过交互确认，仍走完整 Exec 内核）。
-execNow :: Plan -> IO Int
-execNow p = savePlan p >> executePlanNow p
+execNow :: Config -> Plan -> IO Int
+execNow cfg p = savePlan p >> executePlanNow cfg p
 
 casePushI11 :: IO ()
 casePushI11 = withSystemTempDirectory "pm-vault" $ \tmp -> do
@@ -560,7 +560,7 @@ casePushNewLands = withSystemTempDirectory "pm-vault" $ \tmp -> do
   mkMain root
   writeF (root </> "相册" </> "a.jpg") "AAA"
   createDirectoryIfMissing True (vdir </> "landscape")
-  code <- runVaultPush execNow (Just "landscape") ["a.jpg"] (mkVaultCfg root vdir)
+  code <- runVaultPush (execNow (mkVaultCfg root vdir)) (Just "landscape") ["a.jpg"] (mkVaultCfg root vdir)
   code @?= 0
   landed <- readFile (vdir </> "landscape" </> "a.jpg")
   landed @?= "AAA"
@@ -576,15 +576,15 @@ casePushRefusals = withSystemTempDirectory "pm-vault" $ \tmp -> do
   writeF (root </> "相册" </> "p.png") "PNG"
   writeF (root </> "相册" </> "ok.jpg") "OK"
   writeF (vdir </> "landscape" </> "ok.jpg") "OK"
-  cPng <- runVaultPush execNow (Just "landscape") ["p.png"] cfg
+  cPng <- runVaultPush (execNow cfg) (Just "landscape") ["p.png"] cfg
   cPng @?= 2
   pngLanded <- doesFileExist (vdir </> "landscape" </> "p.png")
   pngLanded @?= False
-  cNotNew <- runVaultPush execNow (Just "landscape") ["ok.jpg"] cfg
+  cNotNew <- runVaultPush (execNow cfg) (Just "landscape") ["ok.jpg"] cfg
   cNotNew @?= 2
-  cNoCat <- runVaultPush execNow Nothing ["p.png"] cfg
+  cNoCat <- runVaultPush (execNow cfg) Nothing ["p.png"] cfg
   cNoCat @?= 2
-  cBadCat <- runVaultPush execNow (Just "scenery") ["p.png"] cfg
+  cBadCat <- runVaultPush (execNow cfg) (Just "scenery") ["p.png"] cfg
   cBadCat @?= 2
 
 casePushDriftSupersede :: IO ()
@@ -609,7 +609,7 @@ casePushDriftSupersede = withSystemTempDirectory "pm-vault" $ \tmp -> do
       rc @?= 0
       eplan <- loadPlan vdir (plId plan)
       plan' <- either (\e -> assertFailure e >> undefined) pure eplan
-      code <- executePlanNow plan'
+      code <- executePlanNow cfg plan'
       code @?= 0
       landed <- readFile (vdir </> "landscape" </> "d.jpg")
       landed @?= "NEWBYTES"
@@ -711,7 +711,7 @@ caseApplyI11Recheck = withSystemTempDirectory "pm-vault" $ \tmp -> do
   -- 计划生成后 ignore 行被移除 → apply 执行期 preflight 必须整批拒绝，
   -- vault 工作树内不得出现 journal（评审 #3 的污染路径）
   writeF (vdir </> ".gitignore") "_site/\n"
-  code <- executePlanNow plan
+  code <- executePlanNow cfg plan
   code @?= 2
   jEx <- doesFileExist (vdir </> ".pm" </> "journal.ndjson")
   jEx @?= False

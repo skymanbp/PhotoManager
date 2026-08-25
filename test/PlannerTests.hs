@@ -353,7 +353,9 @@ cleanTests =
           -- 备份 catalog 直接用主库 catalog 模拟（clean 只看 sha 集合）
           let rep = planClean mcat mcat
           plan <- mkCleanPlan mroot (cleanPlanItems (clEligible rep))
-          rs <- execOk plan
+          -- 这条考的是 Quarantine 落 trash 的机制，不是三副本屏障（那在
+          -- GuardTests / CleanTests 里）；clean-staging 要屏障，显式放行。
+          rs <- execOkWith defaultExecEnv {eeBarrier = Just pure} plan
           map (outcomeLabel . snd) rs @?= ["DONE"]
           stEx <- doesFileExist (mroot </> srel)
           stEx @?= False
