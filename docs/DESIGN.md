@@ -514,7 +514,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P4-8 / pm 0.4.5 / 215 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
+  当前实现对应 **P4-8b / pm 0.4.6 / 219 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -558,9 +558,10 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `resolveUnder`——扫描后被换成库外链接的条目不跟随；缩放由 GUI 做）。vault
   两个端点会刷新 `.pm/vault-cache`，进程内互斥串行化（并发争用固定 tmp 名）。
 - **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
-  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。目前共**两个**写端点——
-  `POST /api/vault/push-plan`（P4-5，本条）与 `POST /api/vault/hold`（P4-7，
-  见下）；**apply 端点仍未开**。第一个是 `POST /api/vault/push-plan`，
+  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。目前共**四个**写端点——
+  `POST /api/vault/push-plan`（P4-5，本条）、`POST /api/vault/hold`（P4-7）、
+  `POST /api/config` 与 `POST /api/backup-init`（P4-8，均见下）；
+  **apply 端点仍未开**。第一个是 `POST /api/vault/push-plan`，
   体 `{"assignments":[{"name","category"},…]}`，上限 64 KiB（413）；校验与计划
   构造和 CLI `pm vault push` **共用**（`checkAssignments` / `vaultPushItems` /
   `mkVaultPushPlan`，fail-closed：任一指派不合法整体 400 并列出全部错误）；落盘
@@ -570,7 +571,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   文件路径、`pm apply <id>` 提示与 git 步骤。**apply 端点尚未开**：执行仍在终端；
   届时先过 codex 评审再请用户裁定。
 - **GUI（P4-4 UX 重做，用户反馈"清晰优雅、快速上手、直观可视化"+ 三项状态
-  可视化）**：左侧导航四页（数字键 1–4 切换）。①**状态**——照片库四张分层卡
+  可视化）**：左侧导航五页（数字键 1–5 切换）。①**状态**——照片库四张分层卡
   （Raw / 成片 / 相册 / 暂存：文件数、体积、容量占比条）+ 索引时间与「核对新鲜
   度」；**vault 展示集同步**卡（差异数 chip、九态计数 pill——含 HELD、
   NEW/HELD/MISSING/RENAME/DRIFT/UNSTABLE 可展开清单——"差哪些"）；**备份硬盘同步**卡（未登记 / 上次同步
@@ -581,7 +582,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   「生成推送计划」→ POST push-plan → 结果面板（计划 id、`pm apply` 命令、git
   步骤）。③**计划**——表格（类型徽标、id、时间、项/待执行/跳过/待裁决）+ 明细
   （逐项 拷贝/改名/隔离 + 源→目标 + 状态徽标，原始 JSON 可展开），打开即选中
-  最新计划。④**上手**——三步说明 + 安全模型一句话。技术：`<img src>` 带不了
+  最新计划。④**设置**（P4-8，见下）。⑤**上手**——三步说明 + 安全模型一句话。技术：`<img src>` 带不了
   Authorization → fetch→blob；旧 blob URL 每轮 revoke；Tauri CSP
   `connect-src http://127.0.0.1:*`，脚本/样式只 `'self'`；WebView 来源
   `http://tauri.localhost` 在 serve 的 Origin 白名单里。渲染由主线用
@@ -596,8 +597,42 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   Windows 只支持 MSVC；本机默认 gnu 工具链链接 cdylib 会 "export ordinal too
   large"，桌面端 crate-type 只留 rlib）。
 - **P4-6 收口（codex 二十轮）**：六条 minor 的逐条处置属于评审史，已移入
-  [`docs/REVIEW-LOG.md`](REVIEW-LOG.md)（同 §16 把评审记录拆出去的先例；本文件
-  触及 750 行预算）。设计面只保留一句：`newActive`／写域／锁序的当前口径见上。
+  [`docs/REVIEW-LOG.md`](REVIEW-LOG.md)；设计面口径（`newActive`／写域／锁序）见上。
+- **设置页与配置端点（P4-8，用户裁定 2026-08-25："GUI 里可以设置各种目录
+  路径"，范围＝vault / 备份盘 / photos.json / 并发数可改，**主库路径只读**）**：
+  主库是一切身份的锚点（root-id、journal、catalog 都挂在它下面），改它等于换一
+  个库，一台机器设一次，留给终端 `pm init`；`checkPatch` 对任何试图经编辑层动
+  主库的请求**显式报错**而不是静默忽略。三个端点：`GET /api/config`（只读健康
+  视图：每条路径 + 是否存在 + root 三态 + vault 的 I11 是否就绪）、
+  `POST /api/config`、`POST /api/backup-init`（与 CLI `pm backup init` **共用**
+  `backupInitRun`——为此把它拆成"结果 + 渲染"，同 `Pm.Status` 先例）。补丁是
+  **三态线格式**：键缺省＝不动、键为 `null`＝清空、给值＝设值（否则"清空 vault
+  路径"与"不改"会撞成同一个请求）；`main` 这一格**只为拒绝而存在**，出现即拒，
+  不分设值还是 null。CLI 对称命令 `pm config` / `pm config set` 与端点共用
+  `checkPatch` / `configTxn`。`ServeEnv` 的配置改 `IORef`、**每请求读一次**
+  ——否则改完路径要重启 GUI 才生效。并发数只作用于**扫描**；备份盘那边默认
+  单线程防 HDD 寻道抖动，另用 `pm backup --workers N`。
+- **配置文件的写纪律（P4-8b，二十四轮）**：配置在 XDG 目录、**不在任何 root 的
+  `.pm` 下**，因此 `resolveUnder` 那套限域不适用——但**其余三条纪律适用**，而它
+  此前一条都没有（pm 里唯一一个裸 `writeFile` 的状态写入口，只因为它不在 `.pm`
+  里就没继承）。现在与 `Pm.Catalog.saveCatalog` 用同一组原语：①独占建 tmp
+  （`openFreshBinary`：先 unlink 名字再独占创建——裸 `writeFile` 会**穿透**
+  `config.toml.tmp` 名上的 hardlink 写进库外那个共享对象）；②`flushHandleToDisk`
+  落盘；③`withConfigLock`（`config.toml.lock` 上的 `hTryLock`，机制同 I10 的
+  `.pm/lock`）罩住**读→改→写→读回**全程，三条读改写路径（`pm config set`、
+  改配置与登记备份盘两个端点）共用，拿不到锁一律拒（API 409）而非互相覆盖。
+  删旧与改名之间仍有窗口（Windows 没有暴露 no-replace 语义的原子 replace，而 pm
+  不要覆盖原语）：崩在那里只剩内容完整的 `.tmp`，`loadConfig` 认得出并给恢复
+  动作，不当"配置不存在"。
+- **`PM_CONFIG` 覆盖（P4-8）**：配置路径原本是机器全局的（`%APPDATA%\pm\config.toml`）。
+  开发 P4-8 时实测踩到：写端点的一次突变让 POST 通过，测试 fixture 的临时路径
+  **当场覆盖了使用者本机的真实配置**（已复原）。根因不是那条突变，而是"测试写
+  配置必然打到全局路径"——`configFilePath` 因此加 `PM_CONFIG` 覆盖，`Spec.hs`
+  把**整个测试进程**指到临时文件，物理上断掉这条路（不依赖"每个用例记得设"）。
+  它是一个显式信任面：能设环境变量的进程可以让 pm 读另一份配置、指向另一个
+  合法主库——在 §14"不防同机同用户进程"的模型下可接受，且**换不掉身份**
+  （`requireMain` 仍要盘上的 `RoleMain` 与 I11，执行期还校验计划的 root-id）。
+  顺带支持一台机器多个库。
 - **打包与发布（P4-6）**：`cargo tauri build --target x86_64-pc-windows-msvc`
   产出 NSIS 安装包（`installMode: currentUser`，不需要 UAC），`pm.exe` 作为
   Tauri **sidecar**（`externalBin`）随安装包落在 `pm-ui.exe` 同目录——因此 Rust
@@ -684,7 +719,7 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 | file-io 未经上游在 GHC 9.10.3 测试 | P0 冒烟 + FilePath 降级预案（§4） |
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |
 | GUI 工具链 | 2026-08-24 改判 Rust/Tauri：cargo、tauri-cli、WebView2、MSVC 本机均已在，零安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
-| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable`（只有 GUI 拉起时置位）才开四个写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）、记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）、改配置（写 XDG 的 config.toml，主库路径只读）、登记备份盘（在目标盘上建备份 root 标识，守卫链同 CLI）（§11）。同用户的进程若拿到 token 也能打这两个端点——本节威胁模型不防同机同用户恶意进程；它至多让磁盘上多一个**计划文件**或改动一条**本地决定**（可 unhold 撤销），照片零改动，执行仍需人在终端 `pm apply` |
+| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable`（只有 GUI 拉起时置位）才开四个写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）、记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）、改配置（写 XDG 的 config.toml，主库路径只读）、登记备份盘（在目标盘上建备份 root 标识，守卫链同 CLI）（§11）。同用户的进程若拿到 token 也能打这四个端点——本节威胁模型不防同机同用户恶意进程；它至多让磁盘上多一个**计划文件**、改动一条**本地决定**（可 unhold 撤销）、改一条配置路径（主库路径改不动，其余可当场改回）或在某块盘上多一个备份 root 标识，照片零改动，执行仍需人在终端 `pm apply` |
 | 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：**下一次比对**（`pm vault status` / GUI 刷新）复核到字节已变即失效并回到 NEW——不是实时监视；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |

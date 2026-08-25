@@ -7,6 +7,8 @@
 -- 每条用例钉一道闸：删掉对应判定，用例必须转红。
 module ServeTests (serveTests) where
 
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -30,7 +32,7 @@ import Test.Tasty.HUnit
 import Pm.Catalog (saveCatalog)
 import Data.List (isInfixOf)
 import qualified Data.Text.Encoding as TE
-import Pm.Config (Config (..), configFilePath, pmDir, writeRootInfo)
+import Pm.Config (Config (..), configFilePath, loadConfig, pmDir, withConfigLock, writeConfig, writeRootInfo)
 import Pm.Hash (sha256File)
 import Pm.Op (Fingerprint (..), Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, savePlan)
@@ -58,8 +60,19 @@ serveTests =
     , testCase "P4-6 POST /api/vault/push-plan：DRIFT-only（无 NEW）空指派 → 纯裁决计划；照片零改动" caseServePushPlanDrift
     , testCase "P4-7 POST /api/vault/hold：只读 403；标记后 new 移出、held 列出；同名同时标与撤 400；撤销恢复；被 hold 的不能 push" caseServeHold
     , testCase "P4-8 GET /api/config：路径与健康状态；主库恒 editable=false" caseServeConfigGet
-    , testCase "P4-8 POST /api/config：只读 403；改主库/坏路径/坏并发数/空补丁 → 400 且配置不动" caseServeConfigGuards
-    , testCase "P4-8 POST /api/config：合法改动落到 PM_CONFIG 指向的文件，且同一 serve 立刻按新配置回答" caseServeConfigWrite
+    , -- 下面这些用例都动**同一份**配置（PM_CONFIG 是进程级环境变量，见
+      -- Spec.hs）。tasty 缺省并行执行，必须显式串行化，否则互相踩：一个
+      -- 用例占着配置锁的时候，另一个的合法写入会变成 409。
+      dependentTestGroup
+        "P4-8 配置（共用同一份 PM_CONFIG，必须串行）"
+        AllFinish
+        [ testCase "POST /api/config：只读 403；改主库/坏路径/坏并发数/空补丁 → 400 且配置不动" caseServeConfigGuards
+        , testCase "POST /api/config：\"main\": null 也是「动主库」→ 400，同请求里的 workers 一并不落地" caseServeConfigMainNull
+        , testCase "POST /api/config：合法改动落到 PM_CONFIG 指向的文件，且同一 serve 立刻按新配置回答" caseServeConfigWrite
+        , testCase "POST /api/config：配置锁被别的 pm 占着 → 409，配置零改动" caseServeConfigLock
+        , testCase "writeConfig：config.toml.tmp 被 hardlink 占名 → 不穿透写，库外文件零改动" caseConfigTmpHardlink
+        , testCase "loadConfig：正文缺失而残留 .tmp → 指出这是中断的写入并给恢复动作，不当\"配置不存在\"" caseConfigOrphanTmp
+        ]
     ]
 
 tok :: BS.ByteString
@@ -67,6 +80,12 @@ tok = "0123456789abcdef0123456789abcdef"
 
 mkCfg :: FilePath -> Config
 mkCfg root = Config root Nothing Nothing Nothing Nothing Nothing
+
+-- | 把 PM_CONFIG 指向的那份配置**先建起来**。'Pm.ConfigEdit.configTxn' 在锁内
+-- 重新读盘（不拿内存里的旧快照写回），因此配置文件必须已存在——生产里
+-- `pm serve` 必然跑在 `pm init` 之后，这个前提本来就成立；用例要把它摆明。
+seedConfig :: FilePath -> IO ()
+seedConfig root = () <$ writeConfig (mkCfg root)
 
 -- | 缺省只读（与 `pm serve` 不带 --writable 相同）。
 mkEnv :: Config -> IO ServeEnv
@@ -93,6 +112,10 @@ postReq path body =
 mkFileLink :: FilePath -> FilePath -> IO ()
 mkFileLink link target =
   () <$ readCreateProcess (shell ("mklink \"" <> link <> "\" \"" <> target <> "\"")) ""
+
+mkHardLink :: FilePath -> FilePath -> IO ()
+mkHardLink link target =
+  () <$ readCreateProcess (shell ("mklink /H \"" <> link <> "\" \"" <> target <> "\"")) ""
 
 -- | 带 Host + Bearer 的 GET。
 getReq :: BS.ByteString -> [Header] -> BS.ByteString -> Session SResponse
@@ -608,6 +631,7 @@ caseServeConfigWrite = withSystemTempDirectory "pm-serve" $ \dir -> do
   (cfg0, _, _, _) <- fixture root
   cfg <- withVault vdir cfg0
   createDirectoryIfMissing True vdir2
+  seedConfig root
   cfgFile <- configFilePath
   env <- mkEnvW cfg
   flip runSession (serveApp env) $ do
@@ -623,6 +647,87 @@ caseServeConfigWrite = withSystemTempDirectory "pm-serve" $ \dir -> do
   raw <- BS.readFile cfgFile
   let txt = T.unpack (TE.decodeUtf8 raw)
   assertBool ("配置文件应含新 vault 路径: " <> txt) (vdir2 `isInfixOf` txt)
+
+-- | 二十四轮 minor：三态里 @main@ 这一格原本用 aeson 的 @.:?@ 解析，于是
+-- "键缺省"与"键为 null"塌成同一个 'Nothing'——@{"main":null,"workers":3}@
+-- 会**静默忽略 main、照改 workers 并回 200**，正好绕开这个字段唯一的用途。
+-- 把 @fld "main"@ 换回 @.:?@，本例转红。
+caseServeConfigMainNull :: IO ()
+caseServeConfigMainNull = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, _, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  env <- mkEnvW cfg
+  flip runSession (serveApp env) $ do
+    r <- postReq "/api/config" "{\"main\":null,\"workers\":7}"
+    assertStatus 400 r
+    liftIO' (assertBool "应指向 pm init（主库只读）" ("pm init" `BS.isInfixOf` BSL.toStrict (simpleBody r)))
+    -- fail-closed：一条不合法则整体不写，同请求里的 workers 也不能落地
+    r2 <- getReq "/api/config" [] tok
+    liftIO' (field ["workers"] (decodeBody r2) @?= Just Aeson.Null)
+
+-- | 二十四轮 minor：配置的读改写是**跨进程**事务。锁被另一个 pm 占着时必须
+-- 拒绝，而不是各读各的旧配置、后写者把先写者那一项抹掉。去掉
+-- 'withConfigLock' 这一层，写会成功回 200，本例转红。
+caseServeConfigLock :: IO ()
+caseServeConfigLock = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, _, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  env <- mkEnvW cfg
+  seedConfig root
+  fp <- configFilePath
+  before <- BS.readFile fp
+  gotLock <- newEmptyMVar
+  release <- newEmptyMVar
+  void . forkIO . void $ withConfigLock (putMVar gotLock () >> takeMVar release)
+  takeMVar gotLock
+  flip runSession (serveApp env) $ do
+    r <- postReq "/api/config" "{\"workers\":5}"
+    assertStatus 409 r
+  putMVar release ()
+  after' <- BS.readFile fp
+  after' @?= before
+
+-- | 二十四轮 minor：配置曾是 pm 里**唯一**不走「独占建 tmp → flush 到盘 →
+-- no-replace 改名」的状态写入口（只因为它不在任何 root 的 @.pm@ 下，于是没
+-- 继承那套纪律）。裸 'BS.writeFile' 会**穿透** @config.toml.tmp@ 这个名字上
+-- 的 hardlink，把字节写进库外那个共享对象；'Pm.Win.openFreshBinary' 先 unlink
+-- 名字再独占创建，库外文件零改动。把 writeConfig 换回 BS.writeFile，本例转红。
+caseConfigTmpHardlink :: IO ()
+caseConfigTmpHardlink = withSystemTempDirectory "pm-serve" $ \dir -> do
+  seedConfig (dir </> "root")
+  fp <- configFilePath
+  before <- BS.readFile fp
+  let outside = dir </> "outside.txt"
+      tmp = fp <> ".tmp"
+  BS.writeFile outside "OUTSIDE"
+  existsTmp <- doesFileExist tmp
+  when existsTmp (removeFile tmp)
+  mkHardLink tmp outside
+  _ <- writeConfig (mkCfg (dir </> "root2"))
+  BS.readFile outside >>= (@?= "OUTSIDE")
+  _ <- BS.writeFile fp before -- 收尾：把配置放回去，同组后面的用例还要用
+  pure ()
+
+-- | 二十四轮 minor：'writeConfig' 的「删旧 → 改名」之间崩掉，会只剩内容完整的
+-- @<fp>.tmp@。把这种局面一律解释成"配置不存在，去 pm init"会让人重建一份、
+-- 把刚改的设置丢掉。删掉 loadConfig 里的残留探测，本例转红。
+caseConfigOrphanTmp :: IO ()
+caseConfigOrphanTmp = withSystemTempDirectory "pm-serve" $ \dir -> do
+  seedConfig (dir </> "root")
+  fp <- configFilePath
+  raw <- BS.readFile fp
+  removeFile fp
+  BS.writeFile (fp <> ".tmp") raw
+  r <- loadConfig
+  BS.writeFile fp raw -- 先恢复，再断言（断言失败也不留坏配置给后面的用例）
+  removeFile (fp <> ".tmp")
+  case r of
+    Right _ -> assertFailure "正文缺失时不应当读成功"
+    Left m -> assertBool ("应指出残留 .tmp 与恢复动作: " <> m) (".tmp" `isInfixOf` m)
 
 caseServePortRange :: IO ()
 caseServePortRange = do

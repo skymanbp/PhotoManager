@@ -138,10 +138,12 @@ parserInfo =
       <$> triple "vault" "展示集（vault）目录"
       <*> triple "photos-json" "portfolio 的 photos.json（只读引用检查）"
       <*> ( (\mw clear -> if clear then Just Nothing else fmap Just mw)
-              <$> optional (option auto (long "workers" <> metavar "N" <> help "扫描/备份并发数（1..64）"))
+              <$> optional (option auto (long "workers" <> metavar "N" <> help "扫描并发数（1..64）；备份盘不读它，默认单线程防 HDD 寻道抖动，另用 pm backup --workers"))
               <*> switch (long "no-workers" <> help "清空并发数（回到默认=核数）")
           )
-      <*> optional (strOption (long "main" <> metavar "PATH" <> internal))
+      -- 只为**拒绝**而存在（internal，不出现在帮助里）：与 JSON 的
+      -- @"main": null@ 同构——出现即拒，不区分"设值"还是"清空"。
+      <*> (fmap Just <$> optional (strOption (long "main" <> metavar "PATH" <> internal)))
   triple nm desc =
     (\mv clear -> if clear then Just Nothing else fmap Just mv)
       <$> optional (strOption (long nm <> metavar "PATH" <> help ("设置" <> desc)))
@@ -151,7 +153,7 @@ parserInfo =
       ServeOpts
         <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
         <*> switch (long "exit-on-stdin-eof" <> help "stdin 关闭即退出（GUI 拉起时用：父进程一死 serve 随之结束，不留孤儿）")
-        <*> switch (long "writable" <> help "允许两个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）与记录「暂不同步」决定（写主库的 .pm/vault-holds.json）；都不执行、不碰照片；缺省只读")
+        <*> switch (long "writable" <> help "允许四个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）、记录「暂不同步」决定（写主库的 .pm/vault-holds.json）、改配置（写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识）；都不执行、不碰照片；缺省只读")
   initP =
     fmap CmdInit $
       InitOpts

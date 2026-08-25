@@ -627,3 +627,28 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   它**：`configFilePath` 加 `PM_CONFIG` 覆盖，`Spec.hs` 把整个测试进程指到临时
   文件，物理上断掉这条路。收敛性证据：同一条突变重放，真实 config.toml 的
   sha256 前后一致。
+- **P4-8b（pm 0.4.6，219/219，GHC 警告 0）——codex 二十四轮 GO，最小修复集空**：
+  6 条 minor 全部收口，其中 4 条同一个根因——**配置文件不在任何 root 的 `.pm`
+  下，于是一条写纪律都没继承**（pm 里唯一一个裸 `writeFile` 的状态写入口）。
+  按类一次扫干净：①`writeConfig` 改 `openFreshBinary` + `flushHandleToDisk` +
+  no-replace 改名（裸 `writeFile` 会穿透 `config.toml.tmp` 名上的 hardlink，把
+  字节写进库外的共享对象）；②新增 `withConfigLock`（`config.toml.lock` 上
+  `hTryLock`，机制同 I10）罩住读→改→写→读回，三条读改写路径（`pm config set`、
+  `POST /api/config`、登记备份盘）共用，拿不到锁 → 409 / 退出码 2；③`loadConfig`
+  认出"崩在删旧与改名之间"留下的 `.tmp` 并给恢复动作，不当"配置不存在 → 去
+  pm init"；④登记备份盘原先 `_ <- writeConfig` 把失败吞了（盘上标识建好而配置
+  没记上），现在报出去，且建标识在前、登记在后 → 重跑走 `BiReused` 幂等。
+  另两条：`"main": null` 曾被 aeson 的 `.:?` 折成"键缺省"而静默放行
+  （`{"main":null,"workers":3}` 会改 workers 并回 200，正好绕开这个字段唯一的
+  用途）——`main` 改用与另外三项同一个三态解析，出现即拒；GUI 写成功后若刷新
+  失败会把横幅改回"没改成"（提交结果与刷新状态现在分开报），并发数文案也改正
+  （只管扫描；备份盘默认单线程防 HDD 寻道抖动）。评审另指出 `backupInitRun` 的
+  注释称 preflight"含 requireMain"而实际未调用，已更正。
+  四道新闸各自突变转红：`fld "main"` 回 `.:?` / 去配置锁 / `writeConfig` 回裸
+  `writeFile` / 去 `.tmp` 探测——各红且**只红**对应那一条。碰全局配置的用例收进
+  `dependentTestGroup` 串行执行（`PM_CONFIG` 是进程级的，tasty 缺省并行会互踩）。
+  **文档回归（本轮自查发现，不是评审报的）**：上一提交为压 DESIGN 的 750 行
+  预算把 P4-6 收口散文移进本文件时，**连同刚插入的 P4-8 设计段一起删掉了**，
+  而提交信息写着"DESIGN §11 gained the settings-page and PM_CONFIG paragraphs"
+  ——实测 HEAD 版 DESIGN 里"设置页 / PM_CONFIG"零命中，GUI 页数也仍写四页。已补
+  回三段并改正页数。教训：压行数预算的删改要与同一轮的新增分两步做、各自复验。

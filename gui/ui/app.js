@@ -1,8 +1,9 @@
 // pm-ui frontend: vanilla JS, no bundler. Everything comes from `pm serve`
 // over 127.0.0.1 with the session token handed over by the Rust shell.
-// The only write is POST /api/vault/push-plan (generates a plan file; nothing
-// is executed here — apply stays a terminal step until it gets its own
-// reviewed endpoint).
+// Four writes, none of which moves a photo byte: POST /api/vault/push-plan
+// (generates a plan file), /api/vault/hold (records a "not syncing this yet"
+// decision), /api/config and /api/backup-init. Nothing is executed here —
+// apply stays a terminal step until it gets its own reviewed endpoint.
 (async function () {
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -295,15 +296,21 @@
       : "未登记";
   }
   function cfgBanner(ok, text) { const b = $("#config-result"); b.className = "banner " + (ok ? "ok" : "bad"); b.textContent = text; }
+  // 提交结果与**刷新**状态分开报：写入一旦成功，后面重载页面失败也不能把横幅
+  // 改回"没改成"——那会让人以为配置没落盘、再改一遍。
   async function saveConfig(patch) {
+    let r, j;
     try {
-      const r = await post("/api/config", patch);
-      const j = await r.json();
-      if (!r.ok) { cfgBanner(false, "没改成：" + (j.error || r.status) + (j.details ? "\n" + j.details.join("\n") : "")); return; }
-      cfgBanner(true, "✓ 已写入 " + j.configPath + "——已经生效，不用重启。");
+      r = await post("/api/config", patch);
+      j = await r.json();
+    } catch (e) { cfgBanner(false, "请求失败：" + e.message); return; }
+    if (!r.ok) { cfgBanner(false, "没改成：" + (j.error || r.status) + (j.details ? "\n" + j.details.join("\n") : "")); return; }
+    const okMsg = "✓ 已写入 " + j.configPath + "——已经生效，不用重启。";
+    cfgBanner(true, okMsg);
+    try {
       await loadConfig();
       await loadStatus(false).catch(() => {});
-    } catch (e) { cfgBanner(false, "请求失败：" + e.message); }
+    } catch (e) { cfgBanner(true, okMsg + "\n（页面刷新失败：" + e.message + "，按 5 重进设置页即可看到最新值）"); }
   }
   async function registerBackup() {
     const p = $("#cfg-backup-path").value.trim();
@@ -312,8 +319,10 @@
       const r = await post("/api/backup-init", { path: p });
       const j = await r.json();
       if (!r.ok) { cfgBanner(false, "登记失败：" + (j.error || r.status) + (j.details ? "\n" + j.details.join("\n") : "")); return; }
-      cfgBanner(true, (j.reused ? "✓ 该路径已是备份 root，沿用标识 " : "✓ 已在该路径建立备份 root 标识 ") + j.id + "\n下一步：在终端跑 pm backup 做一次同步。");
-      await loadConfig();
+      const okMsg = (j.reused ? "✓ 该路径已是备份 root，沿用标识 " : "✓ 已在该路径建立备份 root 标识 ") + j.id + "\n下一步：在终端跑 pm backup 做一次同步。";
+      cfgBanner(true, okMsg);
+      // 同 saveConfig：登记已经成功，刷新失败不改判。
+      try { await loadConfig(); } catch (e2) { cfgBanner(true, okMsg + "\n（页面刷新失败：" + e2.message + "）"); }
     } catch (e) { cfgBanner(false, "请求失败：" + e.message); }
   }
 

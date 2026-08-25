@@ -66,9 +66,11 @@ data BackupInitOutcome
   deriving (Show, Eq)
 
 -- | 登记备份盘：建立/沿用备份 root 标识并写进配置。**不打印**。
--- 守卫链与拆分前逐条相同：preflight（含 I11 与 requireMain）→ root 三态
--- （损坏不改写、非备份角色拒绝、不可信拒绝）→ 写标识前再 canonicalize 复验
--- → 原子 no-replace 创建。
+-- 守卫链与拆分前逐条相同：preflight（路径规范化 → 与主库嵌套检查 → I11
+-- git 语境守卫；二十四轮更正：这里此前写着"含 requireMain"，但
+-- 'backupInitPreflight' 并不调用它——主库身份由各命令自己的入口保证）→
+-- root 三态（损坏不改写、非备份角色拒绝、不可信拒绝）→ 写标识前再
+-- canonicalize 复验 → 原子 no-replace 创建 → 锁内把登记写进配置。
 backupInitRun :: FilePath -> Config -> IO (Either String BackupInitOutcome)
 backupInitRun path cfg = do
   epre <- backupInitPreflight cfg path
@@ -80,8 +82,8 @@ backupInitRun path cfg = do
       case st of
         RootPresent info
           | riRole info == RoleBackup -> do
-              register abs' (riId info)
-              pure (Right (BiReused abs' (riId info)))
+              er <- register abs' (riId info)
+              pure (er >> Right (BiReused abs' (riId info)))
           | otherwise ->
               pure (Left ("该路径已是 " <> show (riRole info) <> " root，拒绝改作备份"))
         RootCorrupt e ->
@@ -107,13 +109,26 @@ backupInitRun path cfg = do
               case er of
                 Left m -> pure (Left m)
                 Right () -> do
-                  register abs' rid
-                  pure (Right (BiCreated abs' rid fs (not dirExisted)))
+                  ereg <- register abs' rid
+                  pure (ereg >> Right (BiCreated abs' rid fs (not dirExisted)))
  where
+  -- 二十四轮 minor：登记也是配置的**读改写**，进同一把配置锁并在锁内重读
+  -- （原先拿传进来的 cfg 快照直接写回，会抹掉期间 GUI 设置页改的字段），
+  -- 且写失败必须**报出去**——此前 @_ <- writeConfig@ 把它吞了，盘上标识建好
+  -- 而配置没记上，下次 `pm backup` 仍说"未登记"。
+  --
+  -- 建标识在前、登记在后：登记这一步失败时盘上已有备份 root 标识，重跑
+  -- 走 'BiReused' 分支沿用它，因此这条路径是幂等的。
   register abs' rid = do
     let sub = snd (splitDrive abs')
-    _ <- writeConfig cfg {cfgBackupId = Just rid, cfgBackupSubpath = Just sub}
-    pure ()
+    m <- withConfigLock $ do
+      fresh <- loadConfig
+      case fresh of
+        Left e -> pure (Left ("配置无法重新读入: " <> e))
+        Right c0 -> do
+          _ <- writeConfig c0 {cfgBackupId = Just rid, cfgBackupSubpath = Just sub}
+          pure (Right ())
+    pure (fromMaybe (Left "另一个 pm 正在改配置（配置锁被占），备份盘没登记进配置") m)
 
 -- | CLI 渲染层：把 'backupInitRun' 的结果印成人读输出并给退出码。
 runBackupInit :: FilePath -> Config -> IO Int
