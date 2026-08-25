@@ -64,8 +64,8 @@ import System.IO (hFlush, hIsEOF, stdin, stdout)
 
 import Pm.Catalog (loadCatalog)
 import Pm.Commands (loadPlanAnyRoot)
-import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, pmSubPlans, requirePmTrusted, requireWritable, untrustedMsg, writeConfig)
-import Pm.ConfigEdit (applyPatch, checkPatch)
+import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, pmSubPlans, requirePmTrusted, requireWritable, untrustedMsg, withConfigLock)
+import Pm.ConfigEdit (checkPatch, configTxn)
 import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPlan, savePlan)
@@ -420,16 +420,19 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
               if not (null errs)
                 then jsonR status400 [] (object ["error" .= ("配置不合法" :: String), "details" .= errs])
                 else do
-                  ew <- try (writeConfig (applyPatch cfg patch)) :: IO (Either IOException FilePath)
+                  -- 二十四轮 minor：进配置锁，并在锁内**重新读盘**（不再拿
+                  -- 请求作用域那份 cfg 当基准）。两个请求各读旧配置、各写回
+                  -- 自己那项会互相抹掉，还会撞同一个固定 tmp 名。
+                  ew <-
+                    try (withConfigLock (configTxn patch))
+                      :: IO (Either IOException (Maybe (Either String (Config, FilePath))))
                   case ew of
                     Left e -> err status500 ("配置写入失败: " <> show e)
-                    Right fp -> do
-                      fresh <- loadConfig
-                      case fresh of
-                        Left m -> err status500 ("配置写出后无法重新载入（已写到 " <> fp <> "）: " <> m)
-                        Right c2 -> do
-                          writeIORef (seCfgRef env) c2
-                          jsonR status200 [] (object ["ok" .= True, "configPath" .= fp])
+                    Right Nothing -> err status409 "另一个 pm 正在改配置（配置锁被占），本次没改"
+                    Right (Just (Left m)) -> err status500 m
+                    Right (Just (Right (c2, fp))) -> do
+                      writeIORef (seCfgRef env) c2
+                      jsonR status200 [] (object ["ok" .= True, "configPath" .= fp])
   -- P4-8：第四个写端点——登记备份盘。它会在**目标盘**上建立备份 root 标识
   -- （或沿用已有的）并把 UUID + 相对路径写进配置；守卫链与 CLI `pm backup
   -- init` 完全相同（共用 'backupInitRun'，本端点只负责渲染结果）。

@@ -108,7 +108,7 @@
         <div class="cfg">
           <div class="k">并发数</div>
           <div class="row"><input id="cfg-workers" type="number" min="1" max="64" placeholder="默认 = CPU 核数"><button id="btn-cfg-workers" class="btn">保存</button><button id="btn-cfg-workers-clear" class="btn ghost">恢复默认</button></div>
-          <div class="s">扫描与备份的并行度，1..64。</div>
+          <div class="s"><strong>扫描</strong>的并行度，1..64。备份盘不读它——那边默认单线程防 HDD 寻道抖动，要改用终端 <code>pm backup --workers N</code>。</div>
         </div>
 
         <div class="cfg">

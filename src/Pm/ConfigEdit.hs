@@ -14,6 +14,7 @@ module Pm.ConfigEdit
   , emptyPatch
   , checkPatch
   , applyPatch
+  , configTxn
   , runConfigShow
   , runConfigSet
   ) where
@@ -23,16 +24,21 @@ import qualified Data.Aeson.KeyMap as KM
 import System.Directory (doesDirectoryExist, doesFileExist)
 
 import qualified Data.Text as T
-import Pm.Config (Config (..), configFilePath, writeConfig)
+import Pm.Config (Config (..), configFilePath, loadConfig, withConfigLock, writeConfig)
 
 -- | 三态字段：'Nothing' = 本次不动；@Just Nothing@ = 清空；@Just (Just x)@ = 设成 x。
 data ConfigPatch = ConfigPatch
   { cpVault :: Maybe (Maybe FilePath)
   , cpPhotosJson :: Maybe (Maybe FilePath)
   , cpWorkers :: Maybe (Maybe Int)
-  , cpMain :: Maybe FilePath
+  , cpMain :: Maybe (Maybe FilePath)
     -- ^ 只为**拒绝**而存在：任何试图经编辑层改主库路径的请求都要报错，而不是
     -- 被静默忽略——静默忽略会让调用方以为改成功了。
+    --
+    -- 二十四轮 minor：这里原本是 @Maybe FilePath@ 并用 aeson 的 @.:?@ 解析，
+    -- 于是"键缺省"与"键为 null"塌成同一个 'Nothing'——@{"main":null,
+    -- "workers":3}@ 会**静默忽略 main、照改 workers 并回 200**，正是这个字段
+    -- 存在的意义要挡的那件事。改成与另外三项同一个三态，任何**出现**即拒。
   }
   deriving (Show, Eq)
 
@@ -48,7 +54,7 @@ instance Aeson.FromJSON ConfigPatch where
           Nothing -> pure Nothing
           Just Aeson.Null -> pure (Just Nothing)
           Just v -> Just . Just <$> Aeson.parseJSON v
-    ConfigPatch <$> fld "vault" <*> fld "photosJson" <*> fld "workers" <*> o Aeson..:? "main"
+    ConfigPatch <$> fld "vault" <*> fld "photosJson" <*> fld "workers" <*> fld "main"
 
 -- | fail-closed：任一条不合法就整体不写，并一次返回全部错误（GUI 能一次标完）。
 -- 路径存在性是 IO 判定：设一个不存在的 vault 目录只会让后续每条命令报错，不如
@@ -68,6 +74,8 @@ checkPatch p = do
   let ew = case cpWorkers p of
         Just (Just w) | w < 1 || w > 64 -> ["并发数 " <> show w <> " 越界（1..64）"]
         _ -> []
+      -- @Just _@ 同时盖住 @Just (Just v)@（想改成 v）与 @Just Nothing@
+      -- （main: null，想清空）：两者都是"经编辑层动主库"，一律拒。
       em = ["主库路径只读：改它等于换一个库，请在终端 pm init --main <路径>" | Just _ <- [cpMain p]]
       en =
         [ "没有要改的项"
@@ -83,6 +91,24 @@ applyPatch c p =
     , cfgPhotosJson = maybe (cfgPhotosJson c) id (cpPhotosJson p)
     , cfgWorkers = maybe (cfgWorkers c) id (cpWorkers p)
     }
+
+-- | 一次配置**读改写**。**必须在 'withConfigLock' 之内调用**：锁内重新从盘上
+-- 读一遍配置再施加补丁，否则调用方手里那份快照会把别人刚改的字段抹掉
+-- （`pm config set --vault` 与 GUI 的"登记备份盘"并发时正是如此）。
+--
+-- 写完再从**盘上**读回：既把最新配置交回给调用方刷新自己的缓存，也顺带验证
+-- render→parse 往返——渲染得出却读不回来的配置等于把 pm 锁死在起不来的状态。
+configTxn :: ConfigPatch -> IO (Either String (Config, FilePath))
+configTxn p = do
+  fresh <- loadConfig
+  case fresh of
+    Left e -> pure (Left ("配置无法重新读入: " <> e))
+    Right c0 -> do
+      fp <- writeConfig (applyPatch c0 p)
+      back <- loadConfig
+      pure $ case back of
+        Left m -> Left ("配置写出后无法重新载入（已写到 " <> fp <> "）: " <> m)
+        Right c2 -> Right (c2, fp)
 
 -- ─── CLI 对称命令（`pm config` / `pm config set`） ──────────────────────────
 
@@ -112,13 +138,21 @@ runConfigShow c = do
   mark True = ""
   mark False = "  ⚠ 路径不存在"
 
--- | 改配置：与 @POST /api/config@ 共用 'checkPatch' / 'applyPatch'。
+-- | 改配置：与 @POST /api/config@ 共用 'checkPatch' / 'configTxn'。
+--
+-- 第二个参数（调用方 'Pm.Cli.withCfg' 载入的那份配置）**只用来确认配置存在**：
+-- 真正施加补丁的基准在锁内重新读（见 'configTxn'），拿这份可能已过期的快照
+-- 写回会抹掉别人刚改的字段。
 runConfigSet :: ConfigPatch -> Config -> IO Int
-runConfigSet p c = do
+runConfigSet p _stale = do
   errs <- checkPatch p
   if not (null errs)
     then mapM_ (putStrLn . ("  ✗ " <>)) errs >> pure 2
     else do
-      fp <- writeConfig (applyPatch c p)
-      putStrLn ("✓ 已写入 " <> fp)
-      runConfigShow (applyPatch c p)
+      m <- withConfigLock (configTxn p)
+      case m of
+        Nothing -> putStrLn "另一个 pm 正在改配置（配置锁被占），本次没改" >> pure 2
+        Just (Left e) -> putStrLn ("✗ " <> e) >> pure 2
+        Just (Right (c2, fp)) -> do
+          putStrLn ("✓ 已写入 " <> fp)
+          runConfigShow c2

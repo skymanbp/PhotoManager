@@ -18,6 +18,7 @@ module Pm.Config
   , configFilePath
   , loadConfig
   , writeConfig
+  , withConfigLock
   , renderConfig
   , RootIdState (..)
   , readRootState
@@ -44,7 +45,7 @@ module Pm.Config
   , writePmState
   ) where
 
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (IOException, bracket, finally, throwIO, try)
 import Control.Monad (when)
 import Crypto.Random (getRandomBytes)
 import qualified Data.Aeson as Aeson
@@ -63,9 +64,10 @@ import System.Directory
   , removeFile
   )
 import System.Environment (lookupEnv)
-import System.FilePath (takeDirectory, (</>))
+import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hTryLock)
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO (Handle, hClose)
-import System.IO.Error (isDoesNotExistError)
+import System.IO.Error (isAlreadyInUseError, isDoesNotExistError)
 import Text.Printf (printf)
 import qualified TOML
 
@@ -77,6 +79,7 @@ import Pm.Win
   , moveFileNoReplace
   , openFreshBinary
   , openStateAppend
+  , openStateLock
   , openStateRead
   , probeName
   , resolveUnder
@@ -125,7 +128,21 @@ loadConfig = do
   fp <- configFilePath
   exists <- doesFileExist fp
   if not exists
-    then pure (Left ("配置不存在: " <> fp <> " —— 先运行 pm init --main <主库路径>"))
+    then do
+      -- 二十四轮 minor：'writeConfig' 的「删旧 → 改名」之间崩掉，会只剩
+      -- @<fp>.tmp@。那份内容是**完整且已 flush** 的新配置，把这种局面一律
+      -- 解释成"配置不存在，去 pm init"会让人重建一份、把刚改的设置丢掉。
+      -- 这里认出它并给出恢复动作；**不自动改名**——自动提升一个来历不明的
+      -- .tmp 与 'Pm.VaultHold.readHolds' 的 fail-closed 原则相悖。
+      orphan <- doesFileExist (fp <> ".tmp")
+      pure . Left $
+        if orphan
+          then
+            "配置缺失，但发现 " <> fp <> ".tmp —— 上次写入崩在删旧与改名之间。"
+              <> "那份内容是完整的新配置：核对后改名成 "
+              <> takeFileName fp
+              <> " 即可恢复（或重跑 pm init --main <主库路径>）"
+          else "配置不存在: " <> fp <> " —— 先运行 pm init --main <主库路径>"
     else do
       raw <- BS.readFile fp
       case TE.decodeUtf8' raw of
@@ -154,21 +171,59 @@ renderConfig c =
         (\p -> ["", "[portfolio]", "photos-json = '" <> T.pack p <> "'"])
         (cfgPhotosJson c)
 
--- | 写配置。**原子替换**（tmp → no-replace rename）：P4-8 起 GUI 也能改配置，
--- 半写的 config.toml 会让**每一条** pm 命令都起不来；裸 writeFile 在崩溃/断电
--- 时正是这个后果。配置文件在 XDG 目录、不在任何 root 的 .pm 下，因此走的是
--- 普通文件的原子替换，不涉及 .pm 受信取用口。
+-- | 写配置。P4-8 起 GUI 也能改配置，半写的 config.toml 会让**每一条** pm
+-- 命令都起不来。
+--
+-- 二十四轮 minor：这里原本是裸 'BS.writeFile'——pm 里**唯一**一个不走
+-- 「独占建 tmp → flush 到盘 → no-replace 改名」三件套的状态写入口。它之所以
+-- 漏掉，只是因为配置在 XDG 目录、不在任何 root 的 @.pm@ 下，于是没继承那套
+-- 纪律；现在与 'Pm.Catalog.saveCatalog'、'writeRootInfo' 用同一组原语。
+-- （@.pm@ 的**限域**（'resolveUnder'）依然不适用：配置本来就不在 root 里。）
+--
+-- 删旧与改名之间仍有一个**窗口**——Windows 这边没有暴露"no-replace 语义的
+-- 原子 replace"（见 'Pm.Win.moveFileNoReplace'），而 pm 不要覆盖原语。崩在
+-- 那里只会剩下内容完整的 @<fp>.tmp@，'loadConfig' 认得出并指明怎么恢复。
+-- 并发那一侧由 'withConfigLock' 兜（同一个固定 tmp 名也只有一个写者）。
 writeConfig :: Config -> IO FilePath
 writeConfig c = do
   fp <- configFilePath
   -- 目录取自 fp 本身（PM_CONFIG 可以指到任意位置，不能再假定是 XDG 目录）
   createDirectoryIfMissing True (takeDirectory fp)
   let tmp = fp <> ".tmp"
-  BS.writeFile tmp (TE.encodeUtf8 (renderConfig c))
+  bracket (openFreshBinary tmp) hClose $ \h -> do
+    BS.hPut h (TE.encodeUtf8 (renderConfig c))
+    flushHandleToDisk h
   old <- doesFileExist fp
   when old (removeFile fp)
   moveFileNoReplace tmp fp
   pure fp
+
+-- | 配置的**读改写事务锁**（二十四轮 minor）。配置是全机器一份的，而编辑层有
+-- 三条读改写路径（`pm config set`、@POST \/api\/config@、登记备份盘），彼此
+-- 之间、以及与另一个 pm 进程之间原本没有互斥：两边各读一份旧配置、各写回
+-- 自己那一项，后写的把先写的整条抹掉（还会撞同一个固定 tmp 名）。
+--
+-- 机制与 I10 的 @.pm\/lock@ 完全相同（'openStateLock' 在句柄上查 link count
+-- 挡 hardlink DoS，同句柄 'hTryLock'），只是锁文件挂在配置**旁边**——配置不在
+-- 任何 root 下，@.pm@ 那套限域不适用。
+--
+-- 'Nothing' = 另一个 pm 正在改配置。调用方必须当成**失败**报出去，不得当成
+-- "改好了"——静默吞掉正是这条 minor 想堵的那种局面。
+withConfigLock :: IO a -> IO (Maybe a)
+withConfigLock act = do
+  fp <- configFilePath
+  createDirectoryIfMissing True (takeDirectory fp)
+  r <- try (openStateLock (fp <> ".lock"))
+  case r of
+    Left (e :: IOException)
+      | isAlreadyInUseError e -> pure Nothing
+      | otherwise -> throwIO e
+    Right h ->
+      ( do
+          ok <- hTryLock h ExclusiveLock
+          if ok then Just <$> act else pure Nothing
+      )
+        `finally` hClose h
 
 pmDir :: FilePath -> FilePath
 pmDir root = root </> ".pm"

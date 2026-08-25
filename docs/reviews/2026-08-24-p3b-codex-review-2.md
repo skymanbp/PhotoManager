@@ -536,3 +536,74 @@ sha 全为 64 hex、名字全平铺且唯一；`pm vault status` 报 "其中 15 
 `landscape/_DSC9013_2.JPG`，被 photos.json 引用而 BLOCKED，只报告）。相册仍 94
 张、vault 类目仍 79 张、**vault 仓 `git status` 零改动**——照片与展示集仓一个
 字节都没动。撤销随时 `pm vault unhold <文件…>`，或在 GUI 里改成某个类目。
+---
+
+# 二十四轮（P4-8：GUI 设置页 + 配置端点） — GO，最小修复集**空**
+
+模型 gpt-5.6-sol（中转站），只读沙箱，范围 `4cf718a..HEAD`，215 测试。
+整体判定一行：**GO —— 未发现 critical/major；核心闸链成立，剩余为配置并发、
+崩溃恢复、GUI 语义和测试/文档缺口的 minor。**
+
+三条定向结论：
+
+| 问 | 判定 |
+|---|---|
+| 配置写路径 | 具备命名空间级替换，但**不具备** `.pm` 受信取用口的同等耐久与临时文件防护 |
+| `PM_CONFIG` 信任面 | 在 §14"不防同机同用户进程"模型下可接受；能选另一份**合法**配置/主库，但伪造不了 root-id、绕不过计划身份校验 |
+| 建身份端点 | `POST /api/backup-init` 与 CLI 共用 `backupInitRun`；`--writable`、I11、root 三态、canonicalize 复验、no-replace 与 CLI 输出**均未因拆分丢失** |
+
+## 逐条（1–8）
+
+| # | 判定 | 要点 |
+|---|---|---|
+| 1 配置写路径 | ISSUE | 固定 `.tmp` + 裸 `BS.writeFile`，无 `openFreshBinary` / `flushHandleToDisk`；崩在 `removeFile` 之后只剩 `.tmp`，而 `loadConfig` 只看正式路径、报"配置不存在" |
+| 2 `PM_CONFIG` | OK | 显式信任面，属"换库"不属"伪造身份"：`requireMain` 仍要盘上 `RoleMain` + I11，执行期还校验计划 root-id。指出 `setEnv` 是**进程级**、会传给子进程且并发用例共享同一配置文件 |
+| 3 补丁三态 | ISSUE | `main` 用 `.:?` 解析 → `{"main":null,"workers":3}` 静默忽略 main、照改 workers。其余校验 fail-closed（vault 给文件被拒、photos.json 给目录被拒、workers 0/65/负数/非整数被拒；相对路径按 cwd 接受、未 canonicalize） |
+| 4 端点 | OK | 认证/Host/Origin 先于路由，四个写端点都先过 `seWritable`，共用 64 KiB 上限；`GET /api/config` 返回绝对路径与 I11 原因，但同受 Bearer/loopback 保护且本就是页面要展示的内容。**附带指出** `backupInitRun` 注释称 preflight"含 requireMain"而实际未调用 |
+| 5 IORef | ISSUE | 每请求读**完整快照**，单个事务不会看到半新半旧；但配置写无锁——两请求各读旧配置再写，会互相覆盖、撞固定 `.tmp`，`writeIORef` 还可能按完成顺序写回旧代 |
+| 6 GUI | ISSUE | 文本框交后端校验恰当；数字键已排除 `INPUT/TEXTAREA/SELECT`（键 5 不误触发）。但写成功后 `loadConfig()` 失败会把横幅改成"没改成"；且 GUI 称 workers 管"扫描与备份"，实际备份默认固定 1 |
+| 7 测试 | ISSUE | 三例覆盖 GET / 写闸 / IORef 刷新；缺 `pm config set` CLI、backup-init 端点、`main:null`、workers 边界全集、崩溃窗口、并发写。**并从源码推演确认**：删掉 `Spec.hs` 那行 `PM_CONFIG`，`caseServeConfigWrite` 会直接写真实 XDG 配置——正是事故形态 |
+| 8 文档 | ISSUE | DESIGN §11 仍称"两个写端点"；§14 风险行改了"四个"却仍写"这两个端点"且只描述计划/本地决定的影响；README 首页仍 212 例（实为 215）；`app.js:3` 注释仍称"唯一写入是 push-plan" |
+
+## 处置（6 minor 全部收口 → pm 0.4.6，219 测试）
+
+**根因合并**：1、5 与"登记备份盘吞掉写失败"是同一条——配置在 XDG 目录、不在
+任何 root 的 `.pm` 下，于是 `.pm` 那套写纪律**一条都没继承**。按类一次扫：
+
+| 位置 | 处置 |
+|---|---|
+| `Pm.Config.writeConfig` | 改 `openFreshBinary` + `flushHandleToDisk` + no-replace 改名（与 `saveCatalog` 同一组原语）。裸 `writeFile` 会**穿透** `config.toml.tmp` 名上的 hardlink 写进库外共享对象——新用例即钉这一点 |
+| `Pm.Config.withConfigLock`（新） | `config.toml.lock` 上 `hTryLock`，机制同 I10；罩住读→改→写→读回，三条读改写路径共用；拿不到锁 → API **409** / CLI 退出码 2 |
+| `Pm.Config.loadConfig` | 正文缺失而 `.tmp` 在 → 指出这是中断的写入并给恢复动作（**不自动改名**：自动提升来历不明的 `.tmp` 与 `readHolds` 的 fail-closed 原则相悖） |
+| `Pm.ConfigEdit.cpMain` | 改 `Maybe (Maybe FilePath)` + `fld "main"`：出现即拒，不分设值还是 null |
+| `Pm.BackupCmd.register` | 进配置锁并锁内重读；写失败**报出去**（原先 `_ <- writeConfig` 吞了 → 盘上标识建好而配置没记上）。建标识在前、登记在后 → 重跑走 `BiReused`，幂等 |
+| `Pm.BackupCmd` 注释 | 更正"preflight 含 requireMain"（实际链条：canonicalize → 与主库嵌套检查 → I11） |
+| `gui/ui/app.js` | 提交结果与刷新状态分开报；头部注释改成四个写端点 |
+| `gui/ui/index.html`、`app/Main.hs` | 并发数只作用于扫描；备份盘默认单线程防 HDD 寻道抖动，另用 `pm backup --workers` |
+| DESIGN / README | §11"两个"→"四个"、§14 风险行影响面补全、README 212→219、二十三轮→二十四轮 |
+
+四道新闸各自突变转红，且**只红对应那一条**：`fld "main"` 回 `.:?` →
+`main:null` 例红；去 `withConfigLock` → 配置锁例红；`writeConfig` 回裸
+`writeFile` → hardlink 例红；去 `.tmp` 探测 → 残留 `.tmp` 例红。
+
+评审第 2 条点出的"`setEnv` 进程级 + 并发用例共享同一配置文件"是**真实**隐患：
+碰全局配置的用例已收进 `dependentTestGroup` 串行执行（tasty 缺省并行，一个用例
+占着配置锁时另一个的合法写入会变成 409）。
+
+## 本轮自查另发现（评审没报）
+
+上一提交为压 DESIGN 的 750 行预算把 P4-6 收口散文移进 REVIEW-LOG 时，**连同同一
+提交里刚插入的 P4-8 设计段一起删掉了**，而提交信息写着"DESIGN §11 gained the
+settings-page and PM_CONFIG paragraphs"。实测：`git show HEAD:docs/DESIGN.md`
+里"设置页 / PM_CONFIG"零命中，GUI 页数也仍写四页。已补回三段（设置页 / 配置写
+纪律 / `PM_CONFIG`）并改正页数。教训：**压行数预算的删改，要与同一轮的新增分两
+步做、各自复验**——否则删改会静默吃掉刚写的内容，而提交信息照抄计划就成了谎报。
+
+## 未处置（登记为残余）
+
+- 相对路径 / UNC / 尾随反斜杠按 `directory` 包平台语义接受，未 canonicalize
+- `PM_CONFIG` 会传给子进程（当前测试子进程只有 `mklink`，无影响）
+- 删旧→改名的窗口本身仍在（Windows 未暴露 no-replace 语义的原子 replace，而 pm
+  不引入覆盖原语）；已由"认得出 `.tmp`"兜底，未做自动恢复
+- 二十三轮既有残余（aeson 重复键/深嵌套、跨进程 vault-cache 争用、慢 body 等）
+  未重新升级

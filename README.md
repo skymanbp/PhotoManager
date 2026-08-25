@@ -15,8 +15,8 @@ Haskell 写的照片库管理器 + Rust/Tauri 桌面前端：为 `D:\Photography
 >
 > 但"个人项目"不是安全上打折的理由，照片是不可再生数据：pm **没有删除原语**，
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（至今
-> **二十三轮**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉它
-> 就转红"的突变验证用例（212 例，GHC 警告 0）。
+> **二十四轮**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉它
+> 就转红"的突变验证用例（219 例，GHC 警告 0）。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
 对抗评审记录：[docs/reviews/](docs/reviews/)（时间线摘要：[docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)）。
@@ -274,7 +274,7 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
 - P4-4/5 ✅ UX 重做 + 生成计划端点（`ui/` 四页：状态（分层卡 + vault 八态与差异
   清单 + 备份盘卡 + 下一步）/ 分类推送（GUI 侧 `createImageBitmap` 缩放缩略图——
   原图 4–75 MB 全分辨率解码是消失的根因；分段类目按钮 + 进度 + 「生成推送计划」）
-  / 计划（表格 + 逐项明细，自动选中最新）/ 上手；数字键 1–4 切页。serve 加
+  / 计划（表格 + 逐项明细，自动选中最新）/ 上手；数字键切页（P4-8 起五页）。serve 加
   `--writable`（`pm ui` 置位）与唯一写端点 `POST /api/vault/push-plan`（与 CLI
   共用校验/构造，只写 `.pm/plans`，64 KiB 上限）；三处闸突变各自转红；202/202；
   渲染经 DPI-aware 窗口截图自验四页含滚动到底）—— **apply 端点仍未开**
@@ -312,6 +312,18 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   serve 的配置改 `IORef` 每请求读一次（改完立刻生效）、`writeConfig` 改原子替换。
   另加 `PM_CONFIG` 覆盖并把整个测试进程指到临时配置——**开发中实测**：一次突变
   让写端点通过，测试 fixture 的路径当场覆盖了本机真实配置（已复原并补了这道缝）
+- **codex 二十四轮：GO**，最小修复集**空**（无 critical/major）。6 条 minor 全部
+  收口，根因是同一条：配置文件在 XDG 目录、不在任何 root 的 `.pm` 下，于是
+  **一条 `.pm` 写纪律都没继承**——现在补齐独占建 tmp、flush 落盘、跨进程配置锁
+  （拿不到锁 → API 409，不再各写各的把对方抹掉），并让 `loadConfig` 认出"崩在
+  删旧与改名之间"留下的 `.tmp`。另修：`"main": null` 曾被 aeson 的 `.:?` 当成
+  "键缺省"而静默放行（同请求里的 workers 照改并回 200）；GUI 把并发数说成也管
+  备份（备份盘另有默认 1，防 HDD 寻道抖动）；写成功后页面刷新失败会误报"没改
+  成"。219 例，四道新闸各自突变转红
+- **文档回归（本轮自查发现，非评审所报）**：上一提交为压 DESIGN 的 750 行预算
+  把 P4-6 收口散文移进 REVIEW-LOG 时，**连同刚插入的 P4-8 设计段一起删掉了**，
+  提交信息却写着"DESIGN §11 gained the settings-page and PM_CONFIG paragraphs"。
+  已补回（§11 设置页 + 配置写纪律 + `PM_CONFIG` 三段），GUI 页数四→五一并改正
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License
