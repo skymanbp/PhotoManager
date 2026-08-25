@@ -18,11 +18,15 @@ import Data.Word (Word8)
 import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
+  , getModificationTime
   , listDirectory
+  , removeDirectoryRecursive
   , removeFile
+  , setModificationTime
   )
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
+import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -34,18 +38,20 @@ import Pm.Hash (StatSnap (..))
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, planPath)
 import Pm.Sort
-  ( SortPick (..)
+  ( SourceFiles (..)
+  , SortPick (..)
   , Verdict (..)
   , classifyDst
   , eventNameFor
   , holdKin
   , pickFiles
+  , listSource
   , resolveEvent
   , runSortPlan
   , segmentBy
   , snapshotWith
   )
-import Pm.Types (RootRole (..))
+import Pm.Types (FileKind (..), RootRole (..), classifyExt, rawExts)
 import TestUtil (ensureTestRoot, scanQuiet)
 
 sortTests :: TestTree
@@ -69,6 +75,10 @@ sortTests =
     , testCase "E2E：无索引拒绝出计划；目标异容整组待裁决，占位文件零改动" caseSortE2EGates
     , testCase "易变守卫：次序须为 stat→hash→stat；两次 stat 不同则不出 sha" caseVolatileGuard
     , testCase "E2E：索引落后于暂存区盘面 → 拒绝出计划（该闸此前全项目无用例）" caseSortE2EStale
+    , testCase "E2E：索引说「已在目标」但盘上内容不符 → 按实际内容重判，不静默跳过" caseSortE2EStaleSkip
+    , testCase "E2E：源里的 junction 不跟随；认不出的扩展名单列不吞掉" caseSortE2ETraversal
+    , testCase "EXIF：IFD 偏移必须 ≥ 8；声明「没有 IFD」的文件不得返回时间" caseExifIfdOffset
+    , testCase "classifyExt：相机原生 raw 与 classifyExt 必须同一份清单" caseRawExts
     ]
 
 -- ─── pm sort 纯核心 ────────────────────────────────────────────────────────
@@ -126,38 +136,38 @@ casePick = do
         , ("A/_2.ARW", at 2026 8 3 20)
         , ("A/_3.ARW", at 2026 8 9 6) -- 区间外
         ]
-      p = pickFiles (const []) (d 2026 8 1) (d 2026 8 3) xs
+      p = pickFiles [] (d 2026 8 1) (d 2026 8 3) xs
   map fst (spTake p) @?= ["A/_1.ARW", "A/_2.ARW"] -- 含首含尾
   spCollide p @?= []
   spSidecars p @?= []
   -- 同一个 basename 来自两个源子目录 → 整批拒绝（落位后会互相覆盖）。
   -- 大小写不同也算撞名：NTFS 不区分大小写，落位后是同一个目标。
   let ys = [("A/x.ARW", at 2026 8 1 6), ("B/X.arw", at 2026 8 2 6)]
-      q = pickFiles (const []) (d 2026 8 1) (d 2026 8 3) ys
+      q = pickFiles [] (d 2026 8 1) (d 2026 8 3) ys
   spCollide q @?= [("x.arw", ["A/x.ARW", "B/X.arw"])]
 
 -- | 侧车必须跟着主文件进同一批：照片进了暂存区而 .xmp 留在卡上，用户清卡
 -- 之后调色参数就永久没了。
 casePickSidecars :: IO ()
 casePickSidecars = do
-  let cars src = case src of
-        "A/_1.ARW" -> ["A/_1.xmp"]
-        "A/_1.JPG" -> ["A/_1.xmp"] -- RAW+JPEG 双拍认领同一个侧车
-        "A/_9.ARW" -> ["A/_9.xmp"] -- 区间外，不该被带上
-        _ -> []
+  let cars = ["A/_1.xmp", "A/_9.xmp", "A/nobody.xmp"]
       xs =
         [ ("A/_1.ARW", at 2026 8 1 6)
-        , ("A/_1.JPG", at 2026 8 1 6)
-        , ("A/_9.ARW", at 2026 8 9 6)
+        , ("A/_1.JPG", at 2026 8 1 6) -- RAW+JPEG 双拍认领同一个侧车
+        , ("A/_9.ARW", at 2026 8 9 6) -- 区间外
         ]
       p = pickFiles cars (d 2026 8 1) (d 2026 8 3) xs
   -- 去重：同一个侧车被两个主文件认领，只能进一次，否则两条计划项写同一目标
   spSidecars p @?= ["A/_1.xmp"]
   spCollide p @?= []
+  -- 区间外的可定时文件必须留底，否则用户清卡后才发现少了（codex 25 轮 #4）
+  map fst (spOutOfRange p) @?= ["A/_9.ARW"]
+  -- 无人认领的侧车同样留底：_9.xmp 的主文件在区间外，nobody.xmp 根本没主文件。
+  -- 两者都不会被搬走，而它们装的是调色参数（#5）
+  spOrphanCars p @?= ["A/_9.xmp", "A/nobody.xmp"]
   -- 撞名检查要含侧车：主文件撞名时侧车必然也撞名，漏查就只拒了一半
   let ys = [("A/x.ARW", at 2026 8 1 6), ("B/x.JPG", at 2026 8 2 6)]
-      q = pickFiles (\s -> [takeDir s <> "/x.xmp"]) (d 2026 8 1) (d 2026 8 3) ys
-      takeDir = takeWhile (/= '/')
+      q = pickFiles ["A/x.xmp", "B/x.xmp"] (d 2026 8 1) (d 2026 8 3) ys
   map fst (spCollide q) @?= ["x.xmp"]
 
 -- | 判定按**目标位置**做，不是"sha 在库里出现过就算数"。后者会把合法属于
@@ -520,4 +530,98 @@ caseSortE2EStale = withLib $ \src root cfg -> do
   scanQuiet "test-root" root >>= saveCatalog root
   rc2 <- sortPlan src cfg
   rc2 @?= 1
+
+-- | IFD 偏移的下界。TIFF 头占 0..7，@0@ 在 TIFF 里的含义是「没有 IFD」。
+-- 没有这道下界时，声明 @ifd0 = 0@ 的文件会从偏移 0 读条目数——那两个字节
+-- 正是魔数的 "II"（= 18761 条），于是条目 1 落在偏移 14，在那里放一个伪造的
+-- 0x8769 指针就能让「没有 IFD」的文件返回**自信的拍摄时间**。
+-- （codex 二十五轮 #1；修复前本地探针两条容器路径都返回 Just）
+caseExifIfdOffset :: IO ()
+caseExifIfdOffset = do
+  let evil =
+        ascii "II"
+          <> [0x2A, 0x00]
+          <> u32e True 0 -- IFD0 偏移 = 0
+          <> replicate 6 0x00 -- 补齐"条目 0"（占 2..13）
+          <> u16e True 0x8769 -- 14..25：伪造的 ExifIFDPointer
+          <> u16e True 4
+          <> u32e True 1
+          <> u32e True 26
+          <> u16e True 1 -- 26：子 IFD 条目数
+          <> u16e True 0x9003
+          <> u16e True 2
+          <> u32e True 20
+          <> u32e True 44
+          <> u32e True 0
+          <> ascii sample
+          <> [0x00]
+  parseCaptureTime (bs evil) @?= Nothing
+  parseCaptureTime (bs (jpegWrap evil)) @?= Nothing
+  -- 1..7 落在 TIFF 头内部，同样不是合法 IFD 起点
+  forM_ [1 .. 7] $ \o ->
+    parseCaptureTime (bs (ascii "II" <> [0x2A, 0x00] <> u32e True o <> drop 8 evil)) @?= Nothing
+  -- 合法下界 8 仍然照读（这道闸不能把正常文件一起关在门外）
+  show (parseCaptureTime (bs (tiffWith True sample))) @?= want
+
+-- | 相机原生 raw 的清单只能有一份。'Pm.Versions' 曾另抄一份（12 种），而
+-- 'classifyExt' 只认 .arw/.dng——尼康/佳能/富士的卡进 pm sort，每个 raw 都被
+-- 判成 KindMeta 而**静默忽略**，连计数里都不出现（codex 二十五轮 #5）。
+caseRawExts :: IO ()
+caseRawExts = do
+  forM_ rawExts $ \e -> classifyExt e @?= KindPhoto
+  forM_ [".NEF", ".Cr3", ".RAF"] $ \e -> classifyExt e @?= KindPhoto -- 大小写不敏感
+  classifyExt ".psb" @?= KindPhoto -- .psd 的大文件变体，此前漏了
+  classifyExt ".txt" @?= KindMeta
+  classifyExt ".zip" @?= KindMeta
+
+-- | 索引说「已在目标位置」，但盘上那个文件的**内容**其实不同（同尺寸改写后
+-- 把 mtime 改回去，(size,mtime) 新鲜度扫掠看不出来）。跳过是一个「这张不用
+-- 搬了」的决定，凭一份没核对过的 sha 做它就是静默丢文件（codex 25 轮 #2）。
+caseSortE2EStaleSkip :: IO ()
+caseSortE2EStaleSkip = withLib $ \src root cfg -> do
+  let dstDir = root </> "To-Be-Sync'd" </> "Raw" </> "26-08-Atlanta"
+      good = photoAt "2026:08:25 10:00:00" -- 与源 a.ARW 逐字节相同
+  createDirectoryIfMissing True dstDir
+  BS.writeFile (dstDir </> "a.ARW") good
+  scanQuiet "test-root" root >>= saveCatalog root
+  -- 此刻索引是诚实的：a.ARW 已在目标位置 → 不该进计划
+  rc0 <- sortPlan src cfg
+  rc0 @?= 1
+  items0 <- planItemsIn root
+  sort (map (takeFileName . opDstRel . piOp) items0) @?= ["a.xmp", "b.ARW"]
+  -- 现在让索引说谎：同尺寸改写 + 把 mtime 改回去。扫掠看不出变化，
+  -- 但目标的实际内容已经不是 a.ARW 了。
+  st <- getModificationTime (dstDir </> "a.ARW")
+  let evil = BS.map (\w -> if w == 0x00 then 0x01 else w) good
+  BS.length evil @?= BS.length good -- 尺寸不变才构成本用例
+  BS.writeFile (dstDir </> "a.ARW") evil
+  setModificationTime (dstDir </> "a.ARW") st
+  removeDirectoryRecursive (plansDirOf root)
+  rc1 <- sortPlan src cfg
+  rc1 @?= 1
+  items1 <- planItemsIn root
+  let named = [(takeFileName (opDstRel (piOp i)), piStatus i) | i <- items1]
+  -- a.ARW 必须重新出现——要么待拷、要么待裁决，就是不能被静默跳过
+  lookup "a.ARW" named /= Nothing @?= True
+  -- 目标字节未被本命令改动（只出计划，未 --apply）
+  BS.readFile (dstDir </> "a.ARW") >>= (@?= evil)
+
+-- | 遍历纪律：源里的 junction 不跟随（自写递归会无限下降，或把源范围之外的
+-- 照片纳入计划），认不出的扩展名单列而不是吞掉（codex 25 轮 #6/#5）。
+caseSortE2ETraversal :: IO ()
+caseSortE2ETraversal = withSystemTempDirectory "pm-sort-tv" $ \tmp -> do
+  let src = tmp </> "card"
+      outside = tmp </> "outside"
+  createDirectoryIfMissing True (src </> "DCIM")
+  createDirectoryIfMissing True outside
+  BS.writeFile (src </> "DCIM" </> "a.ARW") (photoAt "2026:08:25 10:00:00")
+  BS.writeFile (src </> "DCIM" </> "notes.txt") "not a photo"
+  BS.writeFile (outside </> "secret.ARW") (photoAt "2026:08:25 11:00:00")
+  -- 指向源目录之外的 junction：跟随它就会把 secret.ARW 纳入
+  _ <- readCreateProcess (shell ("mklink /J \"" <> (src </> "link") <> "\" \"" <> outside <> "\"")) ""
+  sf <- listSource src
+  map takeFileName (sfPhotos sf) @?= ["a.ARW"]
+  map takeFileName (sfUnknown sf) @?= ["notes.txt"] -- 认不出但**列出来**
+  -- junction 被跳过并记成一条错误，而不是静默跟随，也不是静默丢弃
+  map (takeFileName . fst) (sfErrors sf) @?= ["link"]
 

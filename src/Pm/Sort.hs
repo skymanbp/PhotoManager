@@ -41,6 +41,8 @@ module Pm.Sort
   , classifyDst
   , holdKin
   , snapshotWith
+  , SourceFiles (..)
+  , listSource
 
     -- * 命令入口
   , runSortSurvey
@@ -75,6 +77,7 @@ import Pm.Import (foldPath, stagingTop)
 import Pm.Names (canonProcessedEvent, canonRawEvent)
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), newPlanId)
+import Pm.Scan (listTree)
 import Pm.Types
 
 -- ─── 纯核心 ─────────────────────────────────────────────────────────────────
@@ -124,6 +127,13 @@ data SortPick = SortPick
     -- ^ 跟随上述照片的侧车（.xmp\/.acr）。它们没有独立拍摄时间，只能跟着
     -- 主文件走；**必须与主文件同一个计划**，否则照片进了暂存区而调色参数
     -- 留在卡上，用户清卡后就永久丢失了。
+  , spOutOfRange :: [(FilePath, LocalTime)]
+    -- ^ 拍摄时间读得出、但落在 @[from, to]@ 之外。**必须报告**：用户给的
+    -- 区间可能就是漏了，而他看到的计划不会提这些文件一个字，清卡之后才发现
+    -- 少了（codex 二十五轮 #4）。
+  , spOrphanCars :: [FilePath]
+    -- ^ 侧车，但同目录同 stem 没有**区间内**的主文件。同样必须报告：它同样
+    -- 不会被搬走，而它承载的是调色参数（#5）。
   , spCollide :: [(FilePath, [FilePath])]
     -- ^ 同一个 basename 来自多个源路径——**整批拒绝**，不替用户挑
   }
@@ -133,15 +143,27 @@ data SortPick = SortPick
 -- 与用户在提议里看到的日期一致；不引入时刻，免得"到 08-03"要不要含当天晚上
 -- 这种歧义）。
 --
--- @sidecarsOf@ 给出一个源照片的侧车（由 IO 层的索引提供，纯核心不碰磁盘）。
-pickFiles :: (FilePath -> [FilePath]) -> Day -> Day -> [(FilePath, LocalTime)] -> SortPick
-pickFiles sidecarsOf from to dated =
-  SortPick {spTake = inRange, spSidecars = cars, spCollide = collides}
+-- @allCars@ 是源里**全部**侧车。传全量而不是一个查询回调，是为了能算出
+-- 「没有区间内主文件的侧车」——回调形式只能回答"这张照片有哪些侧车"，答不了
+-- "哪些侧车没人认领"，而后者正是会被静默丢掉的那一类。
+pickFiles :: [FilePath] -> Day -> Day -> [(FilePath, LocalTime)] -> SortPick
+pickFiles allCars from to dated =
+  SortPick
+    { spTake = inRange
+    , spSidecars = cars
+    , spOutOfRange = outOfRange
+    , spOrphanCars = orphans
+    , spCollide = collides
+    }
  where
   inRange = sortOn snd [x | x@(_, t) <- dated, let d = localDay t, d >= from, d <= to]
+  outOfRange = sortOn snd [x | x@(_, t) <- dated, let d = localDay t, d < from || d > to]
+  ix = sidecarIndex allCars
   -- 同目录同 stem 的 RAW+JPEG 双拍会各自认领同一个 .xmp——去重，否则同一个
   -- 侧车会生成两条写向同一目标的计划项。
-  cars = dedupe (concatMap (sidecarsOf . fst) inRange)
+  cars = dedupe (concatMap (lookupSidecars ix . fst) inRange)
+  claimed = Set.fromList (map foldPath cars)
+  orphans = [c | c <- allCars, not (Set.member (foldPath c) claimed)]
   -- 键走 'Pm.Import.foldPath'（normalise + case-fold）：NTFS 大小写不敏感，
   -- 只差大小写的两个源文件落位后是**同一个目标**。import 在评审 mj-2 就按
   -- 这个口径统一过目标唯一性，sort 不能另立一套。冲突要连侧车一起查——
@@ -202,30 +224,43 @@ holdKin xs = [(dst, bump dst v) | (dst, v) <- xs]
 
 -- ─── 扫描（IO） ─────────────────────────────────────────────────────────────
 
--- | 递归列出源目录下的**全部**文件（绝对路径），按 'classifyExt' 分成照片与
--- 侧车两摞。侧车不参与分段（它们没有独立的拍摄时间），但必须跟着主文件进计划。
-listSource :: FilePath -> IO ([FilePath], [FilePath])
+-- | 源目录里的东西，按 'classifyExt' 分成三摞，外加遍历本身的错误。
+--
+-- 「认不出」不是一个可以扔掉的类：它必须被**报告**（见 'Accounting'）。
+data SourceFiles = SourceFiles
+  { sfPhotos :: [FilePath]
+  , sfSidecars :: [FilePath]
+  , sfUnknown :: [FilePath]
+    -- ^ 扩展名不认识。不归位，但一定列出来——用户得知道卡上还剩什么。
+  , sfErrors :: [(FilePath, String)]
+    -- ^ 遍历时就出问题的（reparse point、路径过长、读不到）。
+  }
+
+-- | 列出源目录下的全部文件（绝对路径）。
+--
+-- 遍历**复用 'Pm.Scan.listTree'**，不再自己写递归。自写的那版直接对任何目录
+-- 递归下降，三件本项目早已认定必须做的事一件都没做：**跳过 symlink\/reparse
+-- point**（源里一个指回自身的 junction 会让递归无限下降；指向外部的 junction
+-- 更会把源范围之外的照片纳入计划）、**过长路径报错而不是静默丢弃**、点开头的
+-- 目录跳过。这些纪律在 'listTree' 里已经有一份正确实现，再写第二份就是第二套
+-- 纪律，迟早分叉——正如 'classifyExt' 与 rawExts 分叉过一次那样。
+-- （codex 二十五轮 #6）
+listSource :: FilePath -> IO SourceFiles
 listSource dir = do
   isDir <- doesDirectoryExist dir
   if not isDir
-    then pure ([], [])
+    then pure (SourceFiles [] [] [] [])
     else do
-      es <- listDirectory dir
-      rs <- forM (sort es) $ \e -> do
-        let p = dir </> e
-        d <- doesDirectoryExist p
-        if d
-          then listSource p
-          else do
-            f <- doesFileExist p
-            pure $
-              if not f
-                then ([], [])
-                else case classifyExt (takeExtension p) of
-                  KindPhoto -> ([p], [])
-                  KindSidecar -> ([], [p])
-                  KindMeta -> ([], [])
-      pure (concatMap fst rs, concatMap snd rs)
+      (rels, errs) <- listTree dir
+      let abs' = map (dir </>) (sort rels)
+          pick k = [p | p <- abs', classifyExt (takeExtension p) == k]
+      pure
+        SourceFiles
+          { sfPhotos = pick KindPhoto
+          , sfSidecars = pick KindSidecar
+          , sfUnknown = pick KindMeta
+          , sfErrors = [(dir </> r, e) | (r, e) <- errs]
+          }
 
 -- | (源目录, 折叠后的 stem) → 该 stem 的侧车。按目录分键：不同目录下同名的
 -- 两组照片各有各的侧车，全局按 stem 索引会把它们串在一起。
@@ -276,27 +311,68 @@ snapshotWith stat hash p = do
         else Left "hash 期间被修改（源仍在写入）"
   pure (either (\(e :: SomeException) -> Left (show e)) id r)
 
--- | 两种形态共用的源目录入口：解析成绝对路径、确认存在、列出照片与侧车。
-withSource :: FilePath -> (FilePath -> [FilePath] -> [FilePath] -> IO Int) -> IO Int
+-- | 两种形态共用的源目录入口：解析成绝对路径、确认存在、分三摞列出。
+withSource :: FilePath -> (FilePath -> SourceFiles -> IO Int) -> IO Int
 withSource src k = do
   absSrc <- makeAbsolute src
   ok <- doesDirectoryExist absSrc
   if not ok
     then putStrLn ("源目录不存在: " <> absSrc) >> pure 2
-    else do
-      (photos, cars) <- listSource absSrc
-      k absSrc photos cars
+    else listSource absSrc >>= k absSrc
 
--- | 读不到拍摄时间的文件必须**每次都列出来**，两种形态都列。
+-- | @pm sort@ **不进计划**的每一类，逐类留底。
 --
--- 只在提议里列、生成计划时不列，等于让用户以为整个源都归位了——那正是
--- 「静默丢文件」：用户清卡之后才发现少了几张，而那时已无从追回。
-reportUndated :: [FilePath] -> IO ()
-reportUndated undated = unless (null undated) $ do
-  printf "\n读不到拍摄时间 %d 个（**不归位**，不猜——请自行放置或先补 EXIF）：\n" (length undated)
-  forM_ (take 20 undated) $ \p -> putStrLn ("      " <> p)
-  unless (length undated <= 20) $
-    printf "      …另有 %d 个\n" (length undated - 20)
+-- 这不是"顺手多打几行"：静默缺席与静默覆盖同罪。用户按一份看上去正常的计划
+-- 清了卡，少掉的那些再也追不回来——所以命令对它**看到的每一个文件**都要有
+-- 交代，两种形态都要（只在提议里列、生成计划时不列，等于让用户以为整个源都
+-- 归位了）。codex 二十五轮 #4\/#5 各是这条纪律漏掉的一格。
+data Accounting = Accounting
+  { acUndated :: [FilePath]
+  , acOutOfRange :: [(FilePath, LocalTime)]
+  , acOrphanCars :: [FilePath]
+  , acUnknown :: [FilePath]
+  , acErrors :: [(FilePath, String)]
+  }
+
+-- | 逐类打印，返回被留下的文件总数（0 = 源里每个文件都进了计划）。
+reportAccounting :: Accounting -> IO Int
+reportAccounting ac = do
+  bucket
+    "读不到拍摄时间"
+    "不猜——请自行放置或先补 EXIF"
+    (acUndated ac)
+  bucket
+    "可定时但在 --from/--to 之外"
+    "本次不归位；要一起搬就放宽区间"
+    [p <> "  (" <> show t <> ")" | (p, t) <- acOutOfRange ac]
+  bucket
+    "侧车但无区间内主文件"
+    "调色参数在这里面，主文件没进本批它就跟不过去"
+    (acOrphanCars ac)
+  bucket
+    "扩展名不认识"
+    "pm 不搬它不认识的东西；需要就先补进 classifyExt"
+    (acUnknown ac)
+  bucket
+    "遍历时出错"
+    "reparse point / 路径过长 / 读不到"
+    [p <> "  — " <> e | (p, e) <- acErrors ac]
+  pure total
+ where
+  total =
+    length (acUndated ac)
+      + length (acOutOfRange ac)
+      + length (acOrphanCars ac)
+      + length (acUnknown ac)
+      + length (acErrors ac)
+  -- 显式签名：OverloadedStrings 下这三个字面量的类型无从推断（printf 的
+  -- 可变参数不约束它们）。
+  bucket :: String -> String -> [String] -> IO ()
+  bucket title why xs = unless (null xs) $ do
+    printf "\n%s %d 个（%s）：\n" title (length xs) why
+    forM_ (take 20 xs) $ \p -> putStrLn ("      " <> p)
+    unless (length xs <= 20) $
+      printf "      …另有 %d 个\n" (length xs - 20)
 
 -- ─── 形态一：只读提议 ───────────────────────────────────────────────────────
 
@@ -307,22 +383,34 @@ runSortSurvey src gapHours cfg = do
   er <- requireRole RoleMain root
   case er of
     Left msg -> putStrLn msg >> pure 2
-    Right _ -> withSource src $ \absSrc photos cars -> do
-      (dated, undated) <- readTimes photos
+    Right _ -> withSource src $ \absSrc sf -> do
+      (dated, undated) <- readTimes (sfPhotos sf)
       existing <- existingEvents root
       let segs = segmentBy (realToFrac (gapHours * 3600)) dated
       printf
-        "pm sort · 源 %s → 暂存区 %s\\Raw\\\n  照片 %d 个：可定时 %d · 读不到拍摄时间 %d · 候选分段 %d（间隔 > %.0f 小时切一刀）\n  侧车 %d 个（跟随各自主文件，不单独分段）\n"
+        "pm sort · 源 %s → 暂存区 %s\\Raw\\\n  照片 %d 个：可定时 %d · 读不到拍摄时间 %d · 候选分段 %d（间隔 > %.0f 小时切一刀）\n  侧车 %d 个（跟随各自主文件，不单独分段）· 不认识的 %d 个 · 遍历错误 %d 个\n"
         absSrc
         stagingTop
-        (length photos)
+        (length (sfPhotos sf))
         (length dated)
         (length undated)
         (length segs)
         gapHours
-        (length cars)
+        (length (sfSidecars sf))
+        (length (sfUnknown sf))
+        (length (sfErrors sf))
       forM_ (zip [1 :: Int ..] segs) (printSegment absSrc existing)
-      reportUndated undated
+      -- 提议阶段还没有区间，所以「区间外」与「无主侧车」这两格此刻为空——
+      -- 它们由形态二在拿到 --from/--to 之后才算得出来。
+      _ <-
+        reportAccounting
+          Accounting
+            { acUndated = undated
+            , acOutOfRange = []
+            , acOrphanCars = []
+            , acUnknown = sfUnknown sf
+            , acErrors = sfErrors sf
+            }
       putStrLn "\n（分段只是提议：时间切不开首尾相接的两趟旅程，边界以你给的 --from/--to 为准）"
       pure 0
 
@@ -380,10 +468,21 @@ runSortPlan go src placeOrEvent from to cfg = do
   er <- requireRole RoleMain root
   case er of
     Left msg -> putStrLn msg >> pure 2
-    Right info -> withSource src $ \_ photos cars -> do
-      (dated, undated) <- readTimes photos
-      let pick = pickFiles (lookupSidecars (sidecarIndex cars)) from to dated
-      reportUndated undated
+    Right info -> withSource src $ \_ sf -> do
+      (dated, undated) <- readTimes (sfPhotos sf)
+      let pick = pickFiles (sfSidecars sf) from to dated
+      -- 交代先于计划：留下的每一类都在用户看到"待拷 N 张"之前就列出来。
+      left <-
+        reportAccounting
+          Accounting
+            { acUndated = undated
+            , acOutOfRange = spOutOfRange pick
+            , acOrphanCars = spOrphanCars pick
+            , acUnknown = sfUnknown sf
+            , acErrors = sfErrors sf
+            }
+      unless (left == 0) $
+        printf "\n（以上 %d 个文件**不在**本次计划里；清卡前请自行确认）\n" left
       case (spCollide pick, spTake pick) of
         (cs@(_ : _), _) -> do
           putStrLn "✗ 同名文件来自多个源路径，整批拒绝（不替你挑哪一个）："
@@ -426,16 +525,33 @@ buildPlan go root info ev picked cat = do
       putStrLn "✗ 源文件读取失败，整批不出计划："
       forM_ failed $ \(p, why) -> putStrLn ("    " <> p <> " — " <> why)
       pure 2
-    [] -> emit go root info (judge cat ev [(p, sha, st) | (p, Right (sha, st)) <- snaps])
+    [] -> do
+      let judged0 = judge cat ev [(p, sha, st) | (p, Right (sha, st)) <- snaps]
+      judged <- verifySkips root judged0
+      let changed = length [() | (a, b) <- zip judged0 judged, jVerdict a /= jVerdict b]
+      unless (changed == 0) $
+        printf "⚠ 索引已过期：%d 项按目标位置的**实际内容**重新判定\n" changed
+      emit go root info judged
 
--- | 一个源文件的完整判定行：源路径、暂存目标、sha、源 stat、裁决。
-type Judged = (FilePath, FilePath, Text, StatSnap, Verdict)
+-- | 一个源文件的完整判定行。
+data Judged = Judged
+  { jSrc :: FilePath
+  , jDst :: FilePath
+    -- ^ 暂存目标，相对 root
+  , jArch :: FilePath
+    -- ^ @pm import@ 之后它的归档目标，相对 root
+  , jSha :: Text
+  , jStat :: StatSnap
+  , jVerdict :: Verdict
+  }
 
 -- | 纯判定：按**目标位置**给每个文件定性，再做 stem 组悬置。
 judge :: Catalog -> String -> [(FilePath, Text, StatSnap)] -> [Judged]
 judge cat ev rows =
   zipWith
-    (\(p, sha, st) (dst, v) -> (p, dst, sha, st, v))
+    ( \(p, sha, st) (_, v) ->
+        Judged {jSrc = p, jDst = dstOf p, jArch = archiveOf p, jSha = sha, jStat = st, jVerdict = v}
+    )
     rows
     (holdKin [(dstOf p, classifyDst (shaAt (dstOf p)) (shaAt (archiveOf p)) sha) | (p, sha, _) <- rows])
  where
@@ -449,6 +565,44 @@ judge cat ev rows =
     Just (yr, canon) -> "Raw" </> yr </> canon </> takeFileName p
     Nothing -> dstOf p
 
+-- | 判定说「跳过」之前，**真的去看一眼那个目标文件**。
+--
+-- catalog 里的 sha 是靠 (size, mtime) 维持新鲜的，而这一对证明不了内容没变：
+-- 把目标文件改成同样大小、再把 mtime 改回去，catalog 就在说谎，而
+-- 'classifyDst' 会据此判 'VAtDest'\/'VArchived'——也就是「这张不用搬了」。
+-- 凭一份没核对过的 sha 做这个决定，等于静默丢文件（codex 二十五轮 #2）。
+--
+-- 只对**将要被跳过**的那些重 hash：待拷的本来就要读源，被跳过的才是"不看就
+-- 当它对"的那一类，所以这道复核的代价与它挡住的风险成正比。
+--
+-- 两个方向的降级不同，因为两处目标的语义不同：
+--
+--  * **暂存目标**内容不符 → 'VConflict'。那正是本命令要写入的位置，I5 适用。
+--  * **归档目标**内容不符 → 'VCopy'。归档层的同名异容是 @pm import@ 的返修
+--    裁决（@irRework@）管的事，sort 把文件送进暂存区即可，抢在它前面裁决会让
+--    同一件事有两套判据。
+--  * 目标压根不存在（索引说有）→ 'VCopy'，照搬。
+verifySkips :: FilePath -> [Judged] -> IO [Judged]
+verifySkips root = mapM check
+ where
+  check j = case jVerdict j of
+    VAtDest -> recheck j (jDst j) True
+    VArchived -> recheck j (jArch j) False
+    _ -> pure j
+  recheck j rel isStaging = do
+    let abs' = root </> rel
+    ex <- doesFileExist abs'
+    if not ex
+      then pure j {jVerdict = VCopy}
+      else do
+        r <- try (sha256File abs') :: IO (Either SomeException Text)
+        pure $ case r of
+          Left e -> j {jVerdict = VConflict (T.pack ("目标无法核对: " <> show e))}
+          Right actual
+            | actual == jSha j -> j
+            | isStaging -> j {jVerdict = VConflict "暂存目标实际内容与索引不符"}
+            | otherwise -> j {jVerdict = VCopy}
+
 emit :: GoOpts -> FilePath -> RootInfo -> [Judged] -> IO Int
 emit go root info judged = do
   printf
@@ -457,10 +611,10 @@ emit go root info judged = do
     (tally (== VAtDest))
     (tally (== VArchived))
     (tally isConflict)
-  forM_ [(p, why) | (p, _, _, _, VConflict why) <- judged] $ \(p, why) ->
-    putStrLn ("  ⚠ " <> takeFileName p <> ": " <> T.unpack why)
-  forM_ (take 10 [p | (p, _, _, _, VArchived) <- judged]) $ \p ->
-    putStrLn ("  · 已归档，不重复搬: " <> takeFileName p)
+  forM_ [j | j <- judged, isConflict (jVerdict j)] $ \j ->
+    putStrLn ("  ⚠ " <> takeFileName (jSrc j) <> ": " <> conflictWhy (jVerdict j))
+  forM_ (take 10 [j | j <- judged, jVerdict j == VArchived]) $ \j ->
+    putStrLn ("  · 已归档，不重复搬: " <> takeFileName (jSrc j))
   if null items
     then putStrLn "✓ 没有需要归位的新照片" >> pure 0
     else do
@@ -477,15 +631,19 @@ emit go root info judged = do
           , plItems = items
           }
  where
-  tally f = length [() | (_, _, _, _, v) <- judged, f v]
+  tally f = length [() | j <- judged, f (jVerdict j)]
   items =
-    [ PlanItem ix (OpCopy p dst sha (ssSize st) (ssMtimeNs st)) (statusOf v) Nothing
-    | (ix, (p, dst, sha, st, v)) <- zip [0 ..] [j | j@(_, _, _, _, v) <- judged, plannable v]
+    [ PlanItem ix (OpCopy (jSrc j) (jDst j) (jSha j) (ssSize (jStat j)) (ssMtimeNs (jStat j))) (statusOf (jVerdict j)) Nothing
+    | (ix, j) <- zip [0 ..] [j | j <- judged, plannable (jVerdict j)]
     ]
 
 isConflict :: Verdict -> Bool
 isConflict (VConflict _) = True
 isConflict _ = False
+
+conflictWhy :: Verdict -> String
+conflictWhy (VConflict w) = T.unpack w
+conflictWhy _ = ""
 
 -- | 进计划的只有两类：正常拷贝，与待裁决（后者进计划但**不执行**，等
 -- @pm resolve@）。已在目标位置\/已归档的不进——它们不是要做的事。
