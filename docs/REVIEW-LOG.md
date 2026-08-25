@@ -610,3 +610,20 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   残余照旧登记（正常覆盖写窗口的读竞态、跨进程锁只用同进程线程代表、API 409
   与旧 meta 解码无用例、名字规范化硬化）。**真实写入**：用户裁定的 15 张
   `pm vault hold` 已执行，名单 15 条、照片与 vault 仓零改动（212 测试，pm 0.4.4）。
+- **P4-8（pm 0.4.5，215/215，GHC 警告 0）——GUI 设置页 + 配置端点**：用户裁定
+  "GUI 里可以设置各种目录路径"，范围＝vault / 备份盘 / photos.json / 并发数可改，
+  **主库路径只读**（身份锚点，改它等于换一个库）。三端点 `GET /api/config`
+  （健康视图）、`POST /api/config`（三态补丁）、`POST /api/backup-init`（与 CLI
+  共用 `backupInitRun`——为此把它拆成"结果 + 渲染"，同 `Pm.Status` 先例）；CLI
+  对称 `pm config` / `pm config set` 共用 `checkPatch`/`applyPatch`。serve 的
+  配置改 `IORef` 每请求读一次；`writeConfig` 改原子替换。突变四道各自转红：
+  去 `--writable` 闸、去"主库只读"判定、去 vault 目录存在性判定、去写后刷新
+  `IORef`。
+  **事故与根因（要记住）**：跑第三道突变时写端点被放行，测试 fixture 的临时
+  路径**当场覆盖了使用者本机的真实 `config.toml`**（主库被写成临时目录）。已按
+  实测输出复原（主库/vault 路径确定；photos.json 由此前 `BLOCKED(photos.json:208)`
+  与该文件第 208 行的 URL 精确对上；`workers` 原值无从考证，现为未设＝默认核数）。
+  根因不是那条突变，而是**配置路径是机器全局的，测试里任何一次写成功都会打到
+  它**：`configFilePath` 加 `PM_CONFIG` 覆盖，`Spec.hs` 把整个测试进程指到临时
+  文件，物理上断掉这条路。收敛性证据：同一条突变重放，真实 config.toml 的
+  sha256 前后一致。

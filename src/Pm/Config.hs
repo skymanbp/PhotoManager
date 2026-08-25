@@ -62,7 +62,8 @@ import System.Directory
   , listDirectory
   , removeFile
   )
-import System.FilePath ((</>))
+import System.Environment (lookupEnv)
+import System.FilePath (takeDirectory, (</>))
 import System.IO (Handle, hClose)
 import System.IO.Error (isDoesNotExistError)
 import Text.Printf (printf)
@@ -103,10 +104,21 @@ instance TOML.DecodeTOML Config where
       <*> TOML.getFieldsOpt ["backup", "id"]
       <*> TOML.getFieldsOpt ["backup", "subpath"]
 
+-- | 配置文件位置。**`PM_CONFIG` 覆盖**优先于 XDG 目录，理由两条：
+--
+-- ① 测试必须能把配置写进临时目录。配置路径是**机器全局**的，写端点的用例
+--    一旦真的写成功，覆盖的就是使用者本机那份 config.toml——P4-8 开发时实测
+--    踩到：一次突变让 POST 通过，真实配置当场被 fixture 的临时路径覆盖。
+--    整个测试进程在 `Spec.hs` 里把 `PM_CONFIG` 指到临时文件，这条路就断了。
+-- ② 顺带支持一台机器上多个库：不同 `PM_CONFIG` 指不同配置。
 configFilePath :: IO FilePath
 configFilePath = do
-  dir <- getXdgDirectory XdgConfig "pm"
-  pure (dir </> "config.toml")
+  mo <- lookupEnv "PM_CONFIG"
+  case mo of
+    Just p | not (null p) -> pure p
+    _ -> do
+      dir <- getXdgDirectory XdgConfig "pm"
+      pure (dir </> "config.toml")
 
 loadConfig :: IO (Either String Config)
 loadConfig = do
@@ -142,12 +154,20 @@ renderConfig c =
         (\p -> ["", "[portfolio]", "photos-json = '" <> T.pack p <> "'"])
         (cfgPhotosJson c)
 
+-- | 写配置。**原子替换**（tmp → no-replace rename）：P4-8 起 GUI 也能改配置，
+-- 半写的 config.toml 会让**每一条** pm 命令都起不来；裸 writeFile 在崩溃/断电
+-- 时正是这个后果。配置文件在 XDG 目录、不在任何 root 的 .pm 下，因此走的是
+-- 普通文件的原子替换，不涉及 .pm 受信取用口。
 writeConfig :: Config -> IO FilePath
 writeConfig c = do
   fp <- configFilePath
-  dir <- getXdgDirectory XdgConfig "pm"
-  createDirectoryIfMissing True dir
-  BS.writeFile fp (TE.encodeUtf8 (renderConfig c))
+  -- 目录取自 fp 本身（PM_CONFIG 可以指到任意位置，不能再假定是 XDG 目录）
+  createDirectoryIfMissing True (takeDirectory fp)
+  let tmp = fp <> ".tmp"
+  BS.writeFile tmp (TE.encodeUtf8 (renderConfig c))
+  old <- doesFileExist fp
+  when old (removeFile fp)
+  moveFileNoReplace tmp fp
   pure fp
 
 pmDir :: FilePath -> FilePath

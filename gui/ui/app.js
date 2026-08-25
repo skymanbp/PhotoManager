@@ -276,8 +276,49 @@
     const det = el("details"); det.appendChild(el("summary", "muted small", "原始 JSON")); det.appendChild(el("pre", "raw", JSON.stringify(plan, null, 2))); box.appendChild(det);
   }
 
+  // ── 设置 ──
+  const cfgTxt = (id, v) => { $(id).value = v == null ? "" : String(v); };
+  async function loadConfig() {
+    const c = await getJson("/api/config");
+    $("#config-path").textContent = "配置文件：" + c.configPath;
+    const rootWord = { present: "身份就位", absent: "还没有 root 标识", corrupt: "root 标识损坏——人工核查", untrusted: "路径不可信——人工核查" };
+    $("#cfg-main").textContent = c.main.path + "（" + (rootWord[c.main.root] || c.main.root) + (c.main.exists ? "" : " · 目录不存在") + "）";
+    cfgTxt("#cfg-vault", c.vault && c.vault.path);
+    const vn = $("#cfg-vault-note");
+    if (!c.vault) vn.textContent = "未设：不设也能用，只是 vault 相关命令会提示补配置。";
+    else if (!c.vault.exists) vn.textContent = "⚠ 目录不存在";
+    else vn.textContent = "✓ 目录在" + (c.vault.i11 ? " · I11 就绪（.gitignore 已含 .pm/）" : " · ⚠ I11 未就绪：" + (c.vault.i11why || "在这个 git 工作树里建 root 会被拒"));
+    cfgTxt("#cfg-photos", c.photosJson && c.photosJson.path);
+    cfgTxt("#cfg-workers", c.workers);
+    $("#cfg-backup").textContent = c.backup && c.backup.id
+      ? "已登记：UUID " + c.backup.id + " · 盘内路径 " + c.backup.subpath + "（按 UUID 认盘，与盘符无关）"
+      : "未登记";
+  }
+  function cfgBanner(ok, text) { const b = $("#config-result"); b.className = "banner " + (ok ? "ok" : "bad"); b.textContent = text; }
+  async function saveConfig(patch) {
+    try {
+      const r = await post("/api/config", patch);
+      const j = await r.json();
+      if (!r.ok) { cfgBanner(false, "没改成：" + (j.error || r.status) + (j.details ? "\n" + j.details.join("\n") : "")); return; }
+      cfgBanner(true, "✓ 已写入 " + j.configPath + "——已经生效，不用重启。");
+      await loadConfig();
+      await loadStatus(false).catch(() => {});
+    } catch (e) { cfgBanner(false, "请求失败：" + e.message); }
+  }
+  async function registerBackup() {
+    const p = $("#cfg-backup-path").value.trim();
+    if (!p) { cfgBanner(false, "先填盘上的镜像路径，如 E:\\Photography"); return; }
+    try {
+      const r = await post("/api/backup-init", { path: p });
+      const j = await r.json();
+      if (!r.ok) { cfgBanner(false, "登记失败：" + (j.error || r.status) + (j.details ? "\n" + j.details.join("\n") : "")); return; }
+      cfgBanner(true, (j.reused ? "✓ 该路径已是备份 root，沿用标识 " : "✓ 已在该路径建立备份 root 标识 ") + j.id + "\n下一步：在终端跑 pm backup 做一次同步。");
+      await loadConfig();
+    } catch (e) { cfgBanner(false, "请求失败：" + e.message); }
+  }
+
   // ── tabs / buttons ──
-  const loaders = { status: () => loadStatus(false), plans: loadPlans, vault: loadVault, help: async () => {} };
+  const loaders = { status: () => loadStatus(false), plans: loadPlans, vault: loadVault, config: loadConfig, help: async () => {} };
   async function showTab(name) {
     for (const x of document.querySelectorAll("nav button")) x.classList.toggle("active", x.dataset.tab === name);
     for (const x of document.querySelectorAll(".tab")) x.classList.toggle("active", x.id === "tab-" + name);
@@ -287,7 +328,7 @@
   }
   for (const b of document.querySelectorAll("nav button")) b.onclick = () => { if (submitting) return; showTab(b.dataset.tab); };
   // 数字键 1–4 切页（键盘党；也是自动化截图验证用的入口）
-  const keys = { "1": "status", "2": "vault", "3": "plans", "4": "help" };
+  const keys = { "1": "status", "2": "vault", "3": "plans", "4": "config", "5": "help" };
   document.addEventListener("keydown", (ev) => {
     if (submitting) return; // 提交期间不切页：loadVault 会清空刚推进的 baseline
     if (ev.repeat || ev.ctrlKey || ev.altKey || ev.metaKey) return; // 长按连发 → 并发重载
@@ -299,6 +340,15 @@
   $("#btn-reload").onclick = () => loadStatus(false).catch(fail);
   $("#btn-plans-reload").onclick = () => loadPlans().catch(fail);
   $("#btn-plan").onclick = () => makePlan();
+  $("#btn-config-reload").onclick = () => loadConfig().catch(fail);
+  const val = (id) => $(id).value.trim();
+  $("#btn-cfg-vault").onclick = () => saveConfig({ vault: val("#cfg-vault") });
+  $("#btn-cfg-vault-clear").onclick = () => saveConfig({ vault: null });
+  $("#btn-cfg-photos").onclick = () => saveConfig({ photosJson: val("#cfg-photos") });
+  $("#btn-cfg-photos-clear").onclick = () => saveConfig({ photosJson: null });
+  $("#btn-cfg-workers").onclick = () => saveConfig({ workers: Number(val("#cfg-workers")) });
+  $("#btn-cfg-workers-clear").onclick = () => saveConfig({ workers: null });
+  $("#btn-cfg-backup").onclick = () => registerBackup();
 
   try { await connect(); await loadStatus(false); } catch (e) { fail(e); $("#status-banner").className = "banner bad"; $("#status-banner").textContent = "无法连接 pm serve：" + e.message; }
 })();

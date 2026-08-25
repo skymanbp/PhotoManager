@@ -28,7 +28,9 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (saveCatalog)
-import Pm.Config (Config (..), pmDir, writeRootInfo)
+import Data.List (isInfixOf)
+import qualified Data.Text.Encoding as TE
+import Pm.Config (Config (..), configFilePath, pmDir, writeRootInfo)
 import Pm.Hash (sha256File)
 import Pm.Op (Fingerprint (..), Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, savePlan)
@@ -55,6 +57,9 @@ serveTests =
     , testCase "P4-5 POST /api/vault/push-plan：合法指派 → 计划落到 <vault>/.pm/plans，可经 loadPlan 装回，项与指派一致" caseServePushPlanOk
     , testCase "P4-6 POST /api/vault/push-plan：DRIFT-only（无 NEW）空指派 → 纯裁决计划；照片零改动" caseServePushPlanDrift
     , testCase "P4-7 POST /api/vault/hold：只读 403；标记后 new 移出、held 列出；同名同时标与撤 400；撤销恢复；被 hold 的不能 push" caseServeHold
+    , testCase "P4-8 GET /api/config：路径与健康状态；主库恒 editable=false" caseServeConfigGet
+    , testCase "P4-8 POST /api/config：只读 403；改主库/坏路径/坏并发数/空补丁 → 400 且配置不动" caseServeConfigGuards
+    , testCase "P4-8 POST /api/config：合法改动落到 PM_CONFIG 指向的文件，且同一 serve 立刻按新配置回答" caseServeConfigWrite
     ]
 
 tok :: BS.ByteString
@@ -536,6 +541,88 @@ caseServeHold = withSystemTempDirectory "pm-serve" $ \dir -> do
   -- 照片与 vault 类目目录零改动
   BS.readFile (root </> "相册" </> "a.jpg") >>= (@?= jpgBytes)
   doesFileExist (vdir </> "portrait" </> "a.jpg") >>= (@?= False)
+
+-- | P4-8 设置页的只读视图：路径 + 每条路径的健康状态；主库这一项恒
+-- @editable:false@（它是身份锚点，改它等于换一个库）。
+caseServeConfigGet :: IO ()
+caseServeConfigGet = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, _, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
+    r <- getReq "/api/config" [] tok
+    assertStatus 200 r
+    let v = decodeBody r
+    liftIO' $ do
+      field ["main", "path"] v @?= Just (Aeson.String (T.pack root))
+      field ["main", "editable"] v @?= Just (Aeson.Bool False)
+      field ["main", "root"] v @?= Just (Aeson.String "present")
+      field ["vault", "path"] v @?= Just (Aeson.String (T.pack vdir))
+      field ["vault", "exists"] v @?= Just (Aeson.Bool True)
+      -- 未设的项是 null，不是漏键
+      field ["photosJson"] v @?= Just Aeson.Null
+
+-- | P4-8 写端点的闸：只读 serve 拒绝；主库路径只读；不存在的 vault 目录、
+-- 越界并发数、空补丁一律拒——且**配置文件在任何一条拒绝后都不能被改写**。
+caseServeConfigGuards :: IO ()
+caseServeConfigGuards = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, _, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  envR <- mkEnv cfg
+  flip runSession (serveApp envR) $ do
+    r <- postReq "/api/config" "{\"workers\":4}"
+    assertStatus 403 r
+  envW <- mkEnvW cfg
+  flip runSession (serveApp envW) $ do
+    r1 <- postReq "/api/config" "{\"main\":\"D:\\\\elsewhere\"}"
+    assertStatus 400 r1
+    -- 断言用 ASCII 子串：中文字面量经 OverloadedStrings 变 ByteString 会按 8 位截断
+    liftIO' (assertBool "应指向 pm init（主库只读）" ("pm init" `BS.isInfixOf` BSL.toStrict (simpleBody r1)))
+    r2 <- postReq "/api/config" "{\"vault\":\"D:\\\\no-such-dir-for-pm-test\"}"
+    assertStatus 400 r2
+    r3 <- postReq "/api/config" "{\"workers\":0}"
+    assertStatus 400 r3
+    r4 <- postReq "/api/config" "{\"workers\":999}"
+    assertStatus 400 r4
+    r5 <- postReq "/api/config" "{}"
+    assertStatus 400 r5
+    r6 <- postReq "/api/config" "{not json"
+    assertStatus 400 r6
+    -- 拒绝之后 GET 仍是原来的 vault 路径（配置没被动过）
+    r7 <- getReq "/api/config" [] tok
+    liftIO' (field ["vault", "path"] (decodeBody r7) @?= Just (Aeson.String (T.pack vdir)))
+
+-- | P4-8 合法路径：改动写进 **PM_CONFIG 指向的**文件（Spec.hs 把整个测试进程
+-- 指到临时文件——配置路径是机器全局的，没有这道缝，一次写成功就会覆盖使用者
+-- 本机的 config.toml），且同一个 serve 进程立刻按新配置回答（cfg 是 IORef，
+-- 每次请求读一次）。把 IORef 改回启动时快照，本例的第二次 GET 会转红。
+caseServeConfigWrite :: IO ()
+caseServeConfigWrite = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+      vdir2 = dir </> "vault2"
+  (cfg0, _, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  createDirectoryIfMissing True vdir2
+  cfgFile <- configFilePath
+  env <- mkEnvW cfg
+  flip runSession (serveApp env) $ do
+    r1 <- postReq "/api/config" (BSL.fromStrict (TE.encodeUtf8 (T.pack ("{\"vault\":" <> show vdir2 <> ",\"workers\":3}"))))
+    assertStatus 200 r1
+    -- 同一个 serve，立刻按新配置回答
+    r2 <- getReq "/api/config" [] tok
+    liftIO' $ do
+      field ["vault", "path"] (decodeBody r2) @?= Just (Aeson.String (T.pack vdir2))
+      field ["workers"] (decodeBody r2) @?= Just (Aeson.Number 3)
+  -- 落到 PM_CONFIG 指向的文件里（而不是使用者本机的配置）
+  -- 按 UTF-8 读：配置文件头是中文注释，locale 解码器（本机 CP936）会炸
+  raw <- BS.readFile cfgFile
+  let txt = T.unpack (TE.decodeUtf8 raw)
+  assertBool ("配置文件应含新 vault 路径: " <> txt) (vdir2 `isInfixOf` txt)
 
 caseServePortRange :: IO ()
 caseServePortRange = do

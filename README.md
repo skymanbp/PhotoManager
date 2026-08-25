@@ -47,10 +47,12 @@ pm                               # = pm status，总览仪表盘
 pm ui                            # 桌面 GUI（状态可视化 / 分类推送 / 计划）
 ```
 
-GUI 四页：**状态**（Raw·成片·相册·暂存四层卡 + vault 同步差异清单 + 备份盘滞后
+GUI 五页：**状态**（Raw·成片·相册·暂存四层卡 + vault 同步差异清单 + 备份盘滞后
 + "下一步"）、**分类推送**（相册里 vault 还没有的照片，缩略图选类目，或选
 第四个按钮「暂不同步」→ 保存决定 / 生成推送计划）、**计划**（逐项明细）、
-**上手**。GUI 只生成计划与记录决定，执行永远在终端。
+**设置**（路径与并发：vault / photos.json / 并发数可改、备份盘可登记；主库路径
+只读——它是身份锚点，改它等于换一个库，留给 `pm init`）、**上手**。GUI 只生成
+计划、记录决定与改配置，执行永远在终端。
 
 ## 命令
 
@@ -72,6 +74,8 @@ pm apply <planId>                # 执行计划（--dry 全量预览 / --only 1,
 pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先隔离）
 pm doctor                        # 崩溃恢复对账 + 完整性体检（默认只读）
 pm undo <planId>                 # 整体回滚已执行的计划
+pm config                        # 打印配置与每条路径的健康状态（只读）
+pm config set --vault <目录>     # 改 vault / --photos-json / --workers（主库路径只读，用 pm init）
 pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读，见 --writable）
 ```
 
@@ -91,9 +95,10 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
   symlink / hardlink 换名一类的库外写入。
 - **GUI 永不直接碰照片**：Rust 壳层只做 spawn / 交 token / kill 三件事，一切经
   `pm serve`；serve 只绑 127.0.0.1 + 随机端口 + Bearer token，**缺省只读**。
-  `--writable`（只有 GUI 拉起时置位）只开两个写端点：生成推送计划（写 vault 的
-  `.pm/plans`）与记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）——
-  两者都不碰照片字节，执行仍在终端。
+  `--writable`（只有 GUI 拉起时置位）只开四个写端点：生成推送计划（写 vault 的
+  `.pm/plans`）、记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）、改配置
+  （写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识，守卫链
+  与 CLI 相同）——**没有一个碰照片字节**，执行仍在终端。
 - **pm 不执行 git**（I9）：涉及 vault 仓的提交步骤只打印给你自己执行。
 
 ## 从源码构建
@@ -299,6 +304,14 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   名单 15 条；`pm vault status` 报"其中 15 张已决定暂不同步，不计入待办"，
   相册仍 94 张、vault 类目仍 79 张、vault 仓 `git status` 零改动。随时
   `pm vault unhold` 或在 GUI 里改成某个类目
+- P4-8 ✅ GUI 设置页 + 配置端点（用户裁定：vault / 备份盘 / photos.json / 并发数
+  可在 GUI 改，**主库路径只读**）：`GET /api/config`（含每条路径的存在性、root
+  三态、vault 的 I11 是否就绪）、`POST /api/config`（三态补丁：缺省=不动、
+  null=清空、给值=设值）、`POST /api/backup-init`（与 CLI 共用 `backupInitRun`，
+  为此把它拆成"结果 + 渲染"）；CLI 对称命令 `pm config` / `pm config set`。
+  serve 的配置改 `IORef` 每请求读一次（改完立刻生效）、`writeConfig` 改原子替换。
+  另加 `PM_CONFIG` 覆盖并把整个测试进程指到临时配置——**开发中实测**：一次突变
+  让写端点通过，测试 fixture 的路径当场覆盖了本机真实配置（已复原并补了这道缝）
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License

@@ -6,6 +6,9 @@
 -- ServeTests (P4-1 loopback JSON API).
 module Main (main) where
 
+import System.Environment (setEnv)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 
 import GuardTests (guardTests)
@@ -21,5 +24,11 @@ import VaultTests (vaultTests)
 main :: IO ()
 main = do
   setupConsole
-  defaultMain
-    (testGroup "pm" [kernelTests, plannerTests, vaultTests, namesTests, guardTests, pathGuardTests, stateGuardTests, serveTests])
+  -- 配置文件位置是**机器全局**的（XDG / %APPDATA%）：任何一条真的写成功的
+  -- 用例都会覆盖使用者本机的 config.toml。P4-8 开发时实测踩到过（一次突变让
+  -- 写端点通过，真实配置当场被 fixture 路径覆盖）。整个测试进程指到临时文件，
+  -- 这条路就物理上断了——不依赖"每个用例记得设环境变量"。
+  withSystemTempDirectory "pm-test-cfg" $ \d -> do
+    setEnv "PM_CONFIG" (d </> "config.toml")
+    defaultMain
+      (testGroup "pm" [kernelTests, plannerTests, vaultTests, namesTests, guardTests, pathGuardTests, stateGuardTests, serveTests])
