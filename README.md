@@ -359,7 +359,19 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   东西收成一处：执行期钩子表 `preExecFor`（`pm apply` 与 `--apply` 共用）、
   「至少一份副本还活着」的循环 `anyCopyAlive`（clean 的三副本屏障与本屏障共用）。
   九道新闸各自突变转红。
-- P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
+- P5-D ✅ 关掉「解析路径 → 按名字打开」之间的 TOCTOU 窗口：改成「打开 → 用
+  **句柄**反查它绑定的路径」，`resolveUnder` 降级为预筛。竞态做成了确定性用例
+  （解析成功后再把中途一层换成 junction），并同时断言裸 open 在这一步会读到
+  库外文件。剩下的窗口（`MoveFileEx`/`RemoveDirectory` 这类只吃名字的 API）
+  写进了威胁模型，不再用一句"属安全软件范畴"带过
+- P5-E ✅ GUI 第六页「整理新照片」+ `GET /api/sort/survey` / `POST /api/sort/plan`
+  （都不执行）；`pm serve --exit-on-stdin-eof` 打完 announce 后静音 stdout
+  （GUI 只读一行就丢掉 BufReader，此后无人排空那根管道）
+- P5-F ✅ 档案侧对接：`sync_photos.py` **退役但保留**（它是 I8 的字段兼容基线，
+  删了那条验收就没参照），检测口改指 `pm vault status`；两个 skill、vault
+  `CLAUDE.md`、`record-structure-version.md`、`KB-维护速查.md` 指针一并改写。
+  `photo-place` skill：看图给每段建议地点，只出建议、由用户确认，走同一条计划
+  路径（pm 内核里没有任何 AI 判断）
 
 ## License
 

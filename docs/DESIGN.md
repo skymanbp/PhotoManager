@@ -219,7 +219,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm clean staging [--apply]` | **隔离区入口**：仅对「Raw/成片 已有同 sha 副本 **且** 备份 root catalog 也有同 sha 副本」（三副本确认）的 staging 文件生成 Quarantine 计划；不满足的标 `HELD(缺哪份)`；备份盘未挂载 → 不生成任何项，报「无法确认第三副本」。**`待修改\` 永不入清理计划（P2 落锤，与 §7 import 不碰同源）**；catalog 声称的两侧副本在计划期再过一次活体 stat 核对，变了降级 HELD | apply 时 |
 | `pm vault status` | 相册↔vault 六态差异（§10.1 兼容 schema） | 否 |
 | `pm vault push [--apply]` | NEW→定类别后拷入 vault（类别来自 GUI 勾选或 `--category`/计划文件，**CLI 无法看图，不装作能分类**）；DRIFT→确认后 supersede 复合；RENAME→只报告/BLOCKED（§10.2）；结束打印显式 git 步骤 | apply 时 |
-| `pm vault ingest <files> --category <c>` | skill 调用的非交互批量入口：拷 相册/ + 拷 vault 类目 + 冲突检测 + journal 登记 inbox-origin；`--finalize` 单独一步移 `_inbox→_done`（供 skill 在 photos.json 校验通过后调，§10.3） | 是（同协议） |
+| `pm vault ingest`（**计划中，尚未实现**） | skill 调用的非交互批量入口：拷 相册/ + 拷 vault 类目 + 冲突检测 + journal 登记 inbox-origin。`--finalize` 移 `_inbox→_done` 那一步**不会**由 pm 做——`_inbox` 不在任何 pm root 内，给 pm 一条「搬第三处目录里的文件」的能力等于在模型外开口子（同 I9 的处理：打印显式步骤，由 skill 自己做）。落实情况见 DESIGN-COMMANDS §10.3 | — |
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、别名登记、同批目标唯一性校验） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
 | `pm dedupe [--apply]` | **精确重复的逐份裁决计划**（§8.1）：来源就是 `pm versions` 的非设计内精确重复组，每一份出一个 Quarantine 条目、**全部** `NEEDS-DECISION`——留哪一份 pm 判不出就不猜（I1），用 `pm resolve --item N --unskip` 逐份批准。**不**绑复合组（复合组语义是不可拆，而这里要求逐份裁决）；组的完整性由执行期屏障保证：某个 sha 在归档层的最后一份**活**副本不会被隔离掉 | apply 时 |

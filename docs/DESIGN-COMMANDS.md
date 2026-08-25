@@ -349,5 +349,31 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
    `record-structure-version.md` Change Log 补记。
 5. `sync_photos.py` 去留按用户决定落实。
 
+**落实情况（P5-F，2026-08-25，档案 vault commit `3859e1c`）**：
+
+| 项 | 状态 |
+|---|---|
+| 1 `/photo-inbox` 改走 `pm vault ingest` | ⏸ **未做**，见下方说明 |
+| 2 ingest 的 journal 来源登记喂 I7 | ⏸ 随 1 一并 |
+| 3 vault `.gitignore` 追加 `.pm/` | ✅ 已在展示集仓（P3b 时经用户批准，commit `2d81d36`） |
+| 4 `KB-维护速查.md` §📸 / 档案 `CLAUDE.md` / `record-structure-version.md` | ✅ 指针改写 + Change Log 补记 |
+| 5 `sync_photos.py` 去留 | ✅ **退役但保留**：加横幅 + 运行时 stderr 指针，代码冻结 |
+
+第 5 项之所以是"退役但保留"而不是删除：这个脚本同时是 **I8 的字段兼容基线**
+（`docs/specs/sync-photos-legacy-spec.md` 逐条列出 pm 有意偏离它的地方）。
+删掉它，那条验收就失去参照。
+
+**第 1/2 项为什么没做**：`pm vault ingest --finalize` 要把 `_inbox` 里的原图移到
+`_inbox/_done/`，而 `_inbox` 在**档案 vault** 里——不在 pm 的任何 root 之内。
+pm 的整个模型建立在「操作发生在某个有身份的 root 内」之上（root-id、journal、
+隔离区、undo 全挂在 root 上），给它一条"搬第三处目录里的文件"的能力，等于在
+模型外开一个口子。与 I9（pm 不执行 git，只打印显式步骤）同一处理：这一步应当
+**由 skill 自己做**，pm 只负责它 root 内的那两次拷贝。
+把 ingest 拆成「pm 拷贝 + skill 移 inbox」是可行的，但那是一条**新的写路径**，
+按项目规矩要先过 codex 门禁再请用户裁定 —— 留作下一件事，不在本轮伪装成已完成。
+
+DESIGN §5 的命令表曾把 `pm vault ingest` 列成既有命令，这是**记述超前于实现**，
+已改回"计划中"。
+
 ---
 
