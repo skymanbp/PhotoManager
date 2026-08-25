@@ -16,7 +16,7 @@ Haskell 写的照片库管理器 + Rust/Tauri 桌面前端：为 `D:\Photography
 > 但"个人项目"不是安全上打折的理由，照片是不可再生数据：pm **没有删除原语**，
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（至今
 > **二十四轮**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉它
-> 就转红"的突变验证用例（220 例，GHC 警告 0）。
+> 就转红"的突变验证用例（228 例，GHC 警告 0）。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
 对抗评审记录：[docs/reviews/](docs/reviews/)（时间线摘要：[docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)）。
@@ -57,6 +57,8 @@ GUI 五页：**状态**（Raw·成片·相册·暂存四层卡 + vault 同步差
 ## 命令
 
 ```
+pm sort <源目录>                  # 整理新照片：按 EXIF 拍摄时间分段（不带参数=只读提议）
+pm sort <源> --place 亚特兰大 --from 2026-08-01 --to 2026-08-03   # 生成拷贝计划
 pm import                        # 暂存区 → Raw\年\事件-Raw + 成片\事件 归档计划
 pm backup init E:\Photography    # 一次性：登记备份盘（按 UUID 认盘，不认盘符）
 pm backup                        # 主库 → 备份盘单向增量（EXTRA 只报告永不动）
@@ -327,6 +329,22 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   把 P4-6 收口散文移进 REVIEW-LOG 时，**连同刚插入的 P4-8 设计段一起删掉了**，
   提交信息却写着"DESIGN §11 gained the settings-page and PM_CONFIG paragraphs"。
   已补回（§11 设置页 + 配置写纪律 + `PM_CONFIG` 三段），GUI 页数四→五一并改正
+- P5-A ✅ `pm sort`（237 例，GHC 警告 0）：散落新照片（相机卡/下载目录）
+  按 EXIF 拍摄时间分段 → 暂存区
+  事件夹。补的是 `pm import` 明确不做的那一段（import 要求事件夹已存在且名字
+  正确，「不猜」）。两种形态：不带参数=只读提议（列候选分段 + 打印每段该敲的
+  命令），给齐 `--place`/`--event` 与 `--from/--to` 才生成拷贝计划。**分段只是
+  提议**——真实库证明时间切不开事件（纽约与亚特兰大首尾相接，7 张连号 ARW 因此
+  落进两个事件夹），边界由用户定；地点也只能用户给（实测相机零 GPS）。EXIF 读取
+  是第一方最小解析器（只取一个标签、统一边界检查、读不到即交人判断），不引未审
+  依赖——这条路径决定照片被移到哪。落位是**拷贝不是移动**，源卡零改动。
+  六道原有的闸各自突变转红。
+  **一轮对抗审查（4 视角 + 逐条独立反驳）改掉 10 条真缺陷**，按根因归六类一次
+  改全：EXIF 的 fail-closed 契约（最重一条是子 IFD 走不通时回退到**文件修改
+  时间**——返回错时间会把照片默默归错事件）；判定改按**目标位置**而不是
+  "sha 在库里出现过"（后者会把合法属于第二个事件的照片静默丢掉）；侧车跟随
+  主文件（否则清卡后调色参数永久丢失）；源 hash 前后双 stat + 逐文件 try，
+  读取失败整批拒绝。十三道闸各自突变转红（纯核心 8 + IO 层 5）。经过见 REVIEW-LOG。
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License

@@ -9,6 +9,7 @@ module Main (main) where
 import System.Environment (setEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
+import SortTests (sortTests)
 import Test.Tasty
 
 import GuardTests (guardTests)
@@ -31,4 +32,4 @@ main = do
   withSystemTempDirectory "pm-test-cfg" $ \d -> do
     setEnv "PM_CONFIG" (d </> "config.toml")
     defaultMain
-      (testGroup "pm" [kernelTests, plannerTests, vaultTests, namesTests, guardTests, pathGuardTests, stateGuardTests, serveTests])
+      (testGroup "pm" [kernelTests, plannerTests, vaultTests, namesTests, guardTests, pathGuardTests, stateGuardTests, serveTests, sortTests])

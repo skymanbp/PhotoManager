@@ -607,49 +607,40 @@ runImport go cfg = do
   er <- requireRole RoleMain root
   case er of
     Left msg -> putStrLn msg >> pure 2
-    Right info -> do
-      (mcat, warns) <- loadCatalog root
-      mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
-      case mcat of
-        Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
-        Just cat -> do
-          fr <- stagingFresh root cat
-          case fr of
-            Left msg -> putStrLn msg >> pure 2
-            Right () -> do
-              let rep = planImport cat
-                  items = importPlanItems root rep
-                  copyBytes = sum [enSize e | (e, _) <- irCopy rep]
-              printf
-                "归档: 拷贝 %d 文件 (%.1f GiB) · 已归档冗余 %d · 返修待裁决 %d · 待修改不碰 %d\n"
-                (length (irCopy rep))
-                (fromIntegral copyBytes / (1024 * 1024 * 1024 :: Double))
-                (length (irAlready rep))
-                (length (irRework rep))
-                (length (irPendingEdit rep))
-              forM_ (irRework rep) $ \(e, dst) ->
-                putStrLn ("  ⚠ 返修: " <> enPath e <> " → " <> dst <> "（目标已存在且内容不同）")
-              forM_ (irUnrecognized rep) $ \p ->
-                putStrLn ("  ⚠ 无法识别的暂存布局（不猜，不入计划）: " <> p)
-              forM_ (irDupTarget rep) $ \(s, d) ->
-                putStrLn ("  ✗ 目标重复（连同侧车整组拒绝）: " <> s <> " → " <> d)
-              if null items
-                then do
-                  putStrLn "✓ 暂存区无需归档"
-                  pure (if null (irUnrecognized rep) && null (irDupTarget rep) then 0 else 1)
-                else do
-                  pid <- newPlanId
-                  now <- getCurrentTime
-                  savePlanAndMaybeRun
-                    go
-                    Plan
-                      { plId = pid
-                      , plKind = "import"
-                      , plRootPath = root
-                      , plRootId = Just (riId info)
-                      , plCreated = now
-                      , plItems = items
-                      }
+    Right info -> withFreshStagingCatalog root $ \cat -> do
+      let rep = planImport cat
+          items = importPlanItems root rep
+          copyBytes = sum [enSize e | (e, _) <- irCopy rep]
+      printf
+        "归档: 拷贝 %d 文件 (%.1f GiB) · 已归档冗余 %d · 返修待裁决 %d · 待修改不碰 %d\n"
+        (length (irCopy rep))
+        (fromIntegral copyBytes / (1024 * 1024 * 1024 :: Double))
+        (length (irAlready rep))
+        (length (irRework rep))
+        (length (irPendingEdit rep))
+      forM_ (irRework rep) $ \(e, dst) ->
+        putStrLn ("  ⚠ 返修: " <> enPath e <> " → " <> dst <> "（目标已存在且内容不同）")
+      forM_ (irUnrecognized rep) $ \p ->
+        putStrLn ("  ⚠ 无法识别的暂存布局（不猜，不入计划）: " <> p)
+      forM_ (irDupTarget rep) $ \(s, d) ->
+        putStrLn ("  ✗ 目标重复（连同侧车整组拒绝）: " <> s <> " → " <> d)
+      if null items
+        then do
+          putStrLn "✓ 暂存区无需归档"
+          pure (if null (irUnrecognized rep) && null (irDupTarget rep) then 0 else 1)
+        else do
+          pid <- newPlanId
+          now <- getCurrentTime
+          savePlanAndMaybeRun
+            go
+            Plan
+              { plId = pid
+              , plKind = "import"
+              , plRootPath = root
+              , plRootId = Just (riId info)
+              , plCreated = now
+              , plItems = items
+              }
 
 -- ─── backup：见 Pm.BackupCmd（P3b-6 拆分） ──────────────────────────────────
 
@@ -666,50 +657,42 @@ runClean go cfg = do
   erole <- requireRole RoleMain root
   case erole of
     Left msg -> putStrLn msg >> pure 2
-    Right info -> do
-      (mcat, _) <- loadCatalog root
-      case mcat of
-        Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
-        Just cat -> do
-          fr <- stagingFresh root cat
-          case fr of
-            Left msg -> putStrLn msg >> pure 2
-            Right () -> do
-              er <- discoverBackupRoot cfg
-              case er of
-                Left msg -> putStrLn ("无法确认第三副本，不生成任何清理项: " <> msg) >> pure 1
-                Right broot -> do
-                  (mbak, _) <- loadCatalog broot
-                  case mbak of
-                    Nothing -> putStrLn "备份盘尚无索引 → 先 pm backup" >> pure 2
-                    Just bakCat -> do
-                      let rep = planClean cat bakCat
-                      (verified, demoted) <- verifyCandidates root broot (clEligible rep)
-                      let held = clHeld rep <> demoted
-                      printf
-                        "清理: 三副本已确认(真实重hash) %d · HELD %d · 待修改不碰 %d\n"
-                        (length verified)
-                        (length held)
-                        (length (clPendingEdit rep))
-                      forM_ held $ \(p, why) -> putStrLn ("  " <> why <> " " <> p)
-                      let items = cleanPlanItems verified
-                      if null items
-                        then do
-                          putStrLn "无可清理项"
-                          pure (if null held then 0 else 1)
-                        else do
-                          pid <- newPlanId
-                          now <- getCurrentTime
-                          -- P2.2（复审 cx-3 旁路封堵）：--apply 即时路径同样在
-                          -- 确认后、执行前重验三副本，与 pm apply 无差别。
-                          savePlanAndMaybeRunWith
-                            (recheckCleanPlan cfg)
-                            go
-                            Plan
-                              { plId = pid
-                              , plKind = "clean-staging"
-                              , plRootPath = root
-                              , plRootId = Just (riId info)
-                              , plCreated = now
-                              , plItems = items
-                              }
+    Right info -> withFreshStagingCatalog root $ \cat -> do
+      er <- discoverBackupRoot cfg
+      case er of
+        Left msg -> putStrLn ("无法确认第三副本，不生成任何清理项: " <> msg) >> pure 1
+        Right broot -> do
+          (mbak, _) <- loadCatalog broot
+          case mbak of
+            Nothing -> putStrLn "备份盘尚无索引 → 先 pm backup" >> pure 2
+            Just bakCat -> do
+              let rep = planClean cat bakCat
+              (verified, demoted) <- verifyCandidates root broot (clEligible rep)
+              let held = clHeld rep <> demoted
+              printf
+                "清理: 三副本已确认(真实重hash) %d · HELD %d · 待修改不碰 %d\n"
+                (length verified)
+                (length held)
+                (length (clPendingEdit rep))
+              forM_ held $ \(p, why) -> putStrLn ("  " <> why <> " " <> p)
+              let items = cleanPlanItems verified
+              if null items
+                then do
+                  putStrLn "无可清理项"
+                  pure (if null held then 0 else 1)
+                else do
+                  pid <- newPlanId
+                  now <- getCurrentTime
+                  -- P2.2（复审 cx-3 旁路封堵）：--apply 即时路径同样在
+                  -- 确认后、执行前重验三副本，与 pm apply 无差别。
+                  savePlanAndMaybeRunWith
+                    (recheckCleanPlan cfg)
+                    go
+                    Plan
+                      { plId = pid
+                      , plKind = "clean-staging"
+                      , plRootPath = root
+                      , plRootId = Just (riId info)
+                      , plCreated = now
+                      , plItems = items
+                      }

@@ -1,0 +1,499 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+-- | @pm sort@（DESIGN §7）：把一堆**散落的新照片**（相机卡、下载目录……）
+-- 按拍摄时间分段，归位到暂存区的事件夹 @To-Be-Sync'd\\Raw\\\<事件\>@，
+-- 之后照常走 @pm import@ 进归档层。
+--
+-- 它补的是 @pm import@ 明确不做的那一段：import 要求事件夹**已经存在且名字正确**
+-- （它「不猜」，I1），而"这批照片属于哪个事件"此前只能靠人在资源管理器里分。
+--
+-- **两种形态，这是本命令的全部设计**：
+--
+--  1. @pm sort \<源\>@ —— **只读**。读 EXIF 拍摄时间，按间隔给出候选分段，
+--     并把每段该敲的下一条命令**原样打印出来**。不写任何文件。
+--  2. @pm sort \<源\> --place \<地点\> --from \<日\> --to \<日\>@ —— 生成计划。
+--
+-- 为什么不做成"交互式逐段问"或"生成一份待填清单文件"：地点是**计划形成之前**
+-- 就必须有的输入（目标路径里就含它），而 pm 已有的 'StNeedsDecision' \/
+-- @pm resolve@ 是计划形成**之后**的冲突裁决，承载不了它。与其为此发明一套新的
+-- 清单文件格式，不如让 pm 只做它能做的（分段、算日期、查重名、查已归档），
+-- 把它做不到的那一格（地点）留成一个命令行参数——可重跑、可回看、不怕中断，
+-- 而 GUI 与将来的 AI 识别都只是**替用户填这一格**，走同一条计划路径。
+--
+-- 分段只是**提议**：真实库已经证明时间切不开事件（纽约 2024-12-25→2025-01-02
+-- 与亚特兰大 2025-01-02→01-05 首尾相接，那 7 张连号 ARW 因此同时落进两个
+-- 事件夹）。所以边界一律由用户在 @--from\/--to@ 里确认。
+--
+-- **本模块不自立纪律**：可信索引这道闸走 'withFreshStagingCatalog'、目标唯一性
+-- 走 'Pm.Import.foldPath'、事件名走 'Pm.Names' 的两个 canon、目标已存在的裁决
+-- 走 'StNeedsDecision'、源一致性走 'Pm.Hash.statSnap' 的前后双 stat。sort 只是
+-- 把文件**送进** import 的入口，它对同一件事的口径必须与 import 逐字一致，
+-- 否则两条路会对同一批文件给出不同判断。
+module Pm.Sort
+  ( -- * 纯核心
+    segmentBy
+  , eventNameFor
+  , SortPick (..)
+  , pickFiles
+  , resolveEvent
+  , Verdict (..)
+  , classifyDst
+  , holdKin
+  , snapshotWith
+
+    -- * 命令入口
+  , runSortSurvey
+  , runSortPlan
+  ) where
+
+import Control.Exception (SomeException, try)
+import Control.Monad (forM, forM_, unless)
+import Data.List (sort, sortOn)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
+import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Time
+  ( Day
+  , LocalTime (..)
+  , NominalDiffTime
+  , diffLocalTime
+  , getCurrentTime
+  , toGregorian
+  )
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute)
+import System.FilePath (takeBaseName, takeDirectory, takeExtension, takeFileName, (</>))
+import Text.Printf (printf)
+
+import Pm.Cli (GoOpts (..), savePlanAndMaybeRun, withFreshStagingCatalog)
+import Pm.Config (Config (..), requireRole)
+import Pm.Exif (readCaptureTime)
+import Pm.Hash (StatSnap (..), sha256File, statSnap)
+import Pm.Import (foldPath, stagingTop)
+import Pm.Names (canonProcessedEvent, canonRawEvent)
+import Pm.Op (Op (..))
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), newPlanId)
+import Pm.Types
+
+-- ─── 纯核心 ─────────────────────────────────────────────────────────────────
+
+-- | 按相邻拍摄时间的间隔切段。输入不必有序（这里自己排）。
+--
+-- 阈值是**提议用**的，不是判定：给大了会把两趟旅程并成一段，给小了会把一趟
+-- 拆碎——两种错都由用户在 @--from\/--to@ 里纠正，所以这里不追求"聪明"。
+segmentBy :: NominalDiffTime -> [(a, LocalTime)] -> [[(a, LocalTime)]]
+segmentBy gap xs = go (sortOn snd xs)
+ where
+  go [] = []
+  go (y : ys) = let (seg, rest) = grow [y] ys in reverse seg : go rest
+  grow acc@((_, prev) : _) (z@(_, t) : zs)
+    | diffLocalTime t prev <= gap = grow (z : acc) zs
+  grow acc rest = (acc, rest)
+
+-- | 会让目标路径逃出事件夹的字符。@--place@ 与 @--event@ **两条路都要过**：
+-- 'canonRawEvent' 只约束前 6 个字符（@dd-dd-@）并要求其后非空，地点部分它
+-- 不设字符限制，所以只在 @--place@ 上设闸等于给 @--event@ 留了一个绕行口。
+badChar :: Char -> Bool
+badChar c = c `elem` ("\\/:*?\"<>|" :: String)
+
+-- | 事件夹名 @YY-MM-地点@。年月取自该段**起始日**；地点只能由用户给
+-- （实测相机档零 GPS，本库 94 张相册抽测 0 张有 GPS）。
+--
+-- 地点做最小合法性约束：非空、不含路径分隔符与 Windows 保留字符。真正的
+-- 权威校验是 'canonRawEvent'——调用方拿到名字后必须再过它一次。
+eventNameFor :: Day -> String -> Maybe String
+eventNameFor d place
+  | null place = Nothing
+  | any badChar place = Nothing
+  -- Scheme A 的年份只有两位，而 'Pm.Names.yearFolder' 无条件补 "20"——
+  -- 2000-2099 之外的拍摄年份会被**静默**折到错误世纪（1999 → 2099，
+  -- 2101 → 2001）。这里拒了它，让用户用 --event 显式指定，而不是默默归错年。
+  | y < 2000 || y > 2099 = Nothing
+  | otherwise = Just (pad2 (fromIntegral (y `mod` 100)) <> "-" <> pad2 m <> "-" <> place)
+ where
+  (y, m, _) = toGregorian d
+  pad2 n = let s = show (n :: Int) in if length s < 2 then '0' : s else s
+
+-- | 一次归位挑选的结果（纯）。
+data SortPick = SortPick
+  { spTake :: [(FilePath, LocalTime)]
+    -- ^ 落在 [from, to] 里、且拍摄时间可定的照片
+  , spSidecars :: [FilePath]
+    -- ^ 跟随上述照片的侧车（.xmp\/.acr）。它们没有独立拍摄时间，只能跟着
+    -- 主文件走；**必须与主文件同一个计划**，否则照片进了暂存区而调色参数
+    -- 留在卡上，用户清卡后就永久丢失了。
+  , spCollide :: [(FilePath, [FilePath])]
+    -- ^ 同一个 basename 来自多个源路径——**整批拒绝**，不替用户挑
+  }
+  deriving (Show, Eq)
+
+-- | 按日期区间挑文件，并查同名冲突。区间**含首含尾**（按日历日比较，
+-- 与用户在提议里看到的日期一致；不引入时刻，免得"到 08-03"要不要含当天晚上
+-- 这种歧义）。
+--
+-- @sidecarsOf@ 给出一个源照片的侧车（由 IO 层的索引提供，纯核心不碰磁盘）。
+pickFiles :: (FilePath -> [FilePath]) -> Day -> Day -> [(FilePath, LocalTime)] -> SortPick
+pickFiles sidecarsOf from to dated =
+  SortPick {spTake = inRange, spSidecars = cars, spCollide = collides}
+ where
+  inRange = sortOn snd [x | x@(_, t) <- dated, let d = localDay t, d >= from, d <= to]
+  -- 同目录同 stem 的 RAW+JPEG 双拍会各自认领同一个 .xmp——去重，否则同一个
+  -- 侧车会生成两条写向同一目标的计划项。
+  cars = dedupe (concatMap (sidecarsOf . fst) inRange)
+  -- 键走 'Pm.Import.foldPath'（normalise + case-fold）：NTFS 大小写不敏感，
+  -- 只差大小写的两个源文件落位后是**同一个目标**。import 在评审 mj-2 就按
+  -- 这个口径统一过目标唯一性，sort 不能另立一套。冲突要连侧车一起查——
+  -- 照片撞名时它们的侧车必然也撞名，漏查就会让"整组拒绝"漏掉一半。
+  byName = Map.fromListWith (<>) [(foldPath (takeFileName p), [p]) | p <- map fst inRange <> cars]
+  collides = [(n, sort ps) | (n, ps) <- Map.toList byName, length ps > 1]
+
+dedupe :: [FilePath] -> [FilePath]
+dedupe = go Set.empty
+ where
+  go _ [] = []
+  go seen (p : ps)
+    | Set.member (foldPath p) seen = go seen ps
+    | otherwise = p : go (Set.insert (foldPath p) seen) ps
+
+-- | 一个源文件相对**目标位置**的判定。
+--
+-- 此前这里是「sha 在库里任何地方出现过就算已归档、直接丢掉」——那是错的：
+-- 同一张照片合法地属于第二个事件时会被**静默丢弃**，而用户以为归位了。判定
+-- 必须按目标位置做，与 'Pm.Import.planImport' 同一口径。
+data Verdict
+  = -- | 目标不存在 → 正常拷贝
+    VCopy
+  | -- | 暂存目标已有同 sha → 本就归位过，跳过（重跑幂等）
+    VAtDest
+  | -- | 归档层的最终目标已有同 sha → import 迟早判它冗余，不必再搬一遍
+    VArchived
+  | -- | 目标存在且内容不同 → 交人裁决，绝不静默覆盖（I5）
+    VConflict Text
+  deriving (Show, Eq)
+
+-- | @classifyDst atStaging atArchive sha@：前两个参数是两处目标位置在索引里的
+-- sha（'Nothing' = 该位置无文件）。
+--
+-- 归档目标同名不同容时**不**在这里拦：那正是 @pm import@ 的返修裁决所管的事
+-- （'Pm.Import.ImportReport' 的 @irRework@），sort 把文件送到暂存区即可。抢在
+-- import 前面裁决只会让同一件事有两套判据。
+classifyDst :: Maybe Text -> Maybe Text -> Text -> Verdict
+classifyDst atStaging atArchive sha = case atStaging of
+  Just s
+    | s == sha -> VAtDest
+    | otherwise -> VConflict "暂存目标已存在且内容不同"
+  Nothing -> case atArchive of
+    Just a | a == sha -> VArchived
+    _ -> VCopy
+
+-- | 同目录同 stem 的组内一荣俱荣：组里只要有一个成员待裁决，其余待拷成员一并
+-- 悬置。这是 import 复审 mj-3 的同一条纪律——先把侧车拷过去会产生孤立侧车，
+-- 裁决 @--keep both@ 改名时更会指错主文件。键是**目标**路径，不是源路径。
+holdKin :: [(FilePath, Verdict)] -> [(FilePath, Verdict)]
+holdKin xs = [(dst, bump dst v) | (dst, v) <- xs]
+ where
+  stemKey dst = (foldPath (takeDirectory dst), foldPath (takeBaseName dst))
+  held = Set.fromList [stemKey dst | (dst, VConflict _) <- xs]
+  bump dst VCopy
+    | Set.member (stemKey dst) held = VConflict "同 stem 主文件待裁决，本组悬置"
+  bump _ v = v
+
+-- ─── 扫描（IO） ─────────────────────────────────────────────────────────────
+
+-- | 递归列出源目录下的**全部**文件（绝对路径），按 'classifyExt' 分成照片与
+-- 侧车两摞。侧车不参与分段（它们没有独立的拍摄时间），但必须跟着主文件进计划。
+listSource :: FilePath -> IO ([FilePath], [FilePath])
+listSource dir = do
+  isDir <- doesDirectoryExist dir
+  if not isDir
+    then pure ([], [])
+    else do
+      es <- listDirectory dir
+      rs <- forM (sort es) $ \e -> do
+        let p = dir </> e
+        d <- doesDirectoryExist p
+        if d
+          then listSource p
+          else do
+            f <- doesFileExist p
+            pure $
+              if not f
+                then ([], [])
+                else case classifyExt (takeExtension p) of
+                  KindPhoto -> ([p], [])
+                  KindSidecar -> ([], [p])
+                  KindMeta -> ([], [])
+      pure (concatMap fst rs, concatMap snd rs)
+
+-- | (源目录, 折叠后的 stem) → 该 stem 的侧车。按目录分键：不同目录下同名的
+-- 两组照片各有各的侧车，全局按 stem 索引会把它们串在一起。
+sidecarIndex :: [FilePath] -> Map.Map (FilePath, FilePath) [FilePath]
+sidecarIndex ps =
+  Map.fromListWith
+    (<>)
+    [((foldPath (takeDirectory p), foldPath (takeBaseName p)), [p]) | p <- ps]
+
+lookupSidecars :: Map.Map (FilePath, FilePath) [FilePath] -> FilePath -> [FilePath]
+lookupSidecars ix p =
+  Map.findWithDefault [] (foldPath (takeDirectory p), foldPath (takeBaseName p)) ix
+
+-- | 读一批文件的拍摄时间，分成「可定时」与「读不到」。'readCaptureTime' 自身
+-- 已 fail-closed（读不到即 'Nothing'，不猜、不回退到文件修改时间）。
+readTimes :: [FilePath] -> IO ([(FilePath, LocalTime)], [FilePath])
+readTimes ps = do
+  rs <- forM ps $ \p -> (,) p <$> readCaptureTime p
+  pure ([(p, t) | (p, Just t) <- rs], [p | (p, Nothing) <- rs])
+
+-- | 源文件的 sha + stat 快照。**hash 前后各 stat 一次**：源常常是相机卡或一个
+-- 还在被写入的下载目录，写入过程中算出的 sha 是撕裂的，拿它进计划会让执行期
+-- 的前置条件核对通过、内容却是错的（'Pm.Scan' 对库内文件用的是同一条纪律，
+-- DESIGN §6.7）。
+--
+-- 逐文件 'try'：一个读不了的文件（卡被拔、权限不足）不该让整条命令抛异常，
+-- 那样连"是哪个文件出的问题"都报不出来。
+snapshotSrc :: FilePath -> IO (Either String (Text, StatSnap))
+snapshotSrc = snapshotWith statSnap sha256File
+
+-- | 上面那道守卫的**内容是次序**（stat → hash → stat），而次序用真实文件测
+-- 只能靠制造竞态，必然是片状用例——'Pm.Scan' 的同一道守卫至今没有用例，正是
+-- 卡在这里。把 stat 与 hash 注入进来，"hash 期间被改动"就成了确定性事件，
+-- 次序本身也能被断言（见 SortTests 的 caseVolatileGuard）。
+snapshotWith
+  :: (FilePath -> IO StatSnap)
+  -> (FilePath -> IO Text)
+  -> FilePath
+  -> IO (Either String (Text, StatSnap))
+snapshotWith stat hash p = do
+  r <- try $ do
+    pre <- stat p
+    sha <- hash p
+    post <- stat p
+    pure $
+      if pre == post
+        then Right (sha, post)
+        else Left "hash 期间被修改（源仍在写入）"
+  pure (either (\(e :: SomeException) -> Left (show e)) id r)
+
+-- | 两种形态共用的源目录入口：解析成绝对路径、确认存在、列出照片与侧车。
+withSource :: FilePath -> (FilePath -> [FilePath] -> [FilePath] -> IO Int) -> IO Int
+withSource src k = do
+  absSrc <- makeAbsolute src
+  ok <- doesDirectoryExist absSrc
+  if not ok
+    then putStrLn ("源目录不存在: " <> absSrc) >> pure 2
+    else do
+      (photos, cars) <- listSource absSrc
+      k absSrc photos cars
+
+-- | 读不到拍摄时间的文件必须**每次都列出来**，两种形态都列。
+--
+-- 只在提议里列、生成计划时不列，等于让用户以为整个源都归位了——那正是
+-- 「静默丢文件」：用户清卡之后才发现少了几张，而那时已无从追回。
+reportUndated :: [FilePath] -> IO ()
+reportUndated undated = unless (null undated) $ do
+  printf "\n读不到拍摄时间 %d 个（**不归位**，不猜——请自行放置或先补 EXIF）：\n" (length undated)
+  forM_ (take 20 undated) $ \p -> putStrLn ("      " <> p)
+  unless (length undated <= 20) $
+    printf "      …另有 %d 个\n" (length undated - 20)
+
+-- ─── 形态一：只读提议 ───────────────────────────────────────────────────────
+
+-- | @pm sort \<源\>@：扫描 + 分段 + 打印每段该敲的命令。**不写任何文件。**
+runSortSurvey :: FilePath -> Double -> Config -> IO Int
+runSortSurvey src gapHours cfg = do
+  let root = cfgMainPath cfg
+  er <- requireRole RoleMain root
+  case er of
+    Left msg -> putStrLn msg >> pure 2
+    Right _ -> withSource src $ \absSrc photos cars -> do
+      (dated, undated) <- readTimes photos
+      existing <- existingEvents root
+      let segs = segmentBy (realToFrac (gapHours * 3600)) dated
+      printf
+        "pm sort · 源 %s → 暂存区 %s\\Raw\\\n  照片 %d 个：可定时 %d · 读不到拍摄时间 %d · 候选分段 %d（间隔 > %.0f 小时切一刀）\n  侧车 %d 个（跟随各自主文件，不单独分段）\n"
+        absSrc
+        stagingTop
+        (length photos)
+        (length dated)
+        (length undated)
+        (length segs)
+        gapHours
+        (length cars)
+      forM_ (zip [1 :: Int ..] segs) (printSegment absSrc existing)
+      reportUndated undated
+      putStrLn "\n（分段只是提议：时间切不开首尾相接的两趟旅程，边界以你给的 --from/--to 为准）"
+      pure 0
+
+printSegment :: FilePath -> [String] -> (Int, [(FilePath, LocalTime)]) -> IO ()
+printSegment _ _ (_, []) = pure ()
+printSegment absSrc existing (i, seg@((p0, t0) : _)) = do
+  -- 段尾用 reverse 后模式匹配取，不用部分函数 last/head：段虽已知非空，但那是
+  -- 人看出来的，编译器看不出来——留 head 就是留一个将来重构时会炸的口子。
+  let (pN, tN) = case reverse seg of ((a, b) : _) -> (a, b); [] -> (p0, t0)
+      d0 = localDay t0
+  printf "\n段 %d  %s → %s · %d 张\n" i (show t0) (show tN) (length seg)
+  printf "      首 %s   尾 %s\n" (takeFileName p0) (takeFileName pN)
+  forM_ (sameMonth existing d0) $ \ev ->
+    putStrLn ("      ↺ 已有同年月事件 " <> ev <> " —— 要并入就把下面的 --place 换成 --event " <> ev)
+  printf
+    "      → pm sort \"%s\" --place <地点> --from %s --to %s\n"
+    absSrc
+    (show d0)
+    (show (localDay tN))
+
+-- | 暂存区与归档层里已有的事件夹名（用来提议复用，避免又造出跨夹重复）。
+existingEvents :: FilePath -> IO [String]
+existingEvents root = do
+  a <- lsDir (root </> stagingTop </> "Raw")
+  b <- concat <$> (mapM (lsDir . ((root </> "Raw") </>)) =<< lsDir (root </> "Raw"))
+  pure (sort (Set.toList (Set.fromList (a <> map stripRawSuffix b))))
+ where
+  lsDir d = do
+    ok <- doesDirectoryExist d
+    if ok then sort <$> listDirectory d else pure []
+  -- 反向映射复用 'Pm.Names.canonProcessedEvent'（它就是"剥掉 -Raw 后缀，返回
+  -- YY-MM-地点"），而不是本地再写一个大小写敏感的 strip——两个方向用同一份
+  -- 定义，归档层的 @26-04-X-raw@ 才折得到暂存区的 @26-04-X@ 上。
+  stripRawSuffix n = fromMaybe n (canonProcessedEvent n)
+
+-- | 同年月（@YY-MM-@ 前缀相同）的已有事件。
+sameMonth :: [String] -> Day -> [String]
+sameMonth evs d =
+  let (y, m, _) = toGregorian d
+      pfx = pad2 (fromIntegral y `mod` 100) <> "-" <> pad2 m <> "-"
+   in [e | e <- evs, take (length pfx) e == pfx]
+ where
+  pad2 n = let s = show (n :: Int) in if length s < 2 then '0' : s else s
+
+-- ─── 形态二：生成计划 ───────────────────────────────────────────────────────
+
+-- | @pm sort \<源\> --place\/--event --from --to@：把选中的文件**拷贝**到
+-- @To-Be-Sync'd\\Raw\\\<事件\>@。
+--
+-- 是拷贝不是移动：源可能是相机卡，pm 不删任何东西（I2）。清卡由用户自己做。
+runSortPlan :: GoOpts -> FilePath -> Either String String -> Day -> Day -> Config -> IO Int
+runSortPlan go src placeOrEvent from to cfg = do
+  let root = cfgMainPath cfg
+  -- 与 runImport 同一次序：身份校验先于任何读取与判定。
+  er <- requireRole RoleMain root
+  case er of
+    Left msg -> putStrLn msg >> pure 2
+    Right info -> withSource src $ \_ photos cars -> do
+      (dated, undated) <- readTimes photos
+      let pick = pickFiles (lookupSidecars (sidecarIndex cars)) from to dated
+      reportUndated undated
+      case (spCollide pick, spTake pick) of
+        (cs@(_ : _), _) -> do
+          putStrLn "✗ 同名文件来自多个源路径，整批拒绝（不替你挑哪一个）："
+          forM_ cs $ \(n, srcs) -> do
+            putStrLn ("    " <> n <> ":")
+            forM_ srcs $ \s -> putStrLn ("        " <> s)
+          pure 2
+        (_, []) -> putStrLn "该区间内没有可定时的照片" >> pure 1
+        (_, taken@((_, t1) : _)) -> case resolveEvent (localDay t1) placeOrEvent of
+          Left why -> putStrLn ("✗ " <> why) >> pure 2
+          Right ev ->
+            withFreshStagingCatalog root $
+              buildPlan go root info ev (map fst taken <> spSidecars pick)
+
+-- | 决定事件夹名：@--place@ 自动补 @YY-MM@（取该段起始日），@--event@ 直接用。
+-- 两条最后都要过 'canonRawEvent'——那是 import 认这个目录的同一把尺子，
+-- 现在过不了的名字，等到 import 时才报就晚了。
+resolveEvent :: Day -> Either String String -> Either String String
+resolveEvent d poe = do
+  name <- case poe of
+    Right ev
+      | any badChar ev -> Left ("事件名含非法字符（\\/:*?\"<>|）: " <> ev)
+      | otherwise -> Right ev
+    Left place ->
+      maybe
+        (Left ("地点不合法（空、含 \\/:*?\"<>| 、或拍摄年份不在 2000-2099）: " <> place))
+        Right
+        (eventNameFor d place)
+  case canonRawEvent name of
+    Nothing -> Left ("事件夹名不符合 Scheme A（YY-MM-地点）: " <> name)
+    Just _ -> Right name
+
+buildPlan :: GoOpts -> FilePath -> RootInfo -> String -> [FilePath] -> Catalog -> IO Int
+buildPlan go root info ev picked cat = do
+  snaps <- forM picked $ \p -> (,) p <$> snapshotSrc p
+  case [(p, why) | (p, Left why) <- snaps] of
+    -- 少搬一个文件比搬错更难发现：能读的那些照样出计划，等于把"这批没全到"
+    -- 藏进一份看上去正常的计划里。整批拒绝，把问题留在用户眼前。
+    failed@(_ : _) -> do
+      putStrLn "✗ 源文件读取失败，整批不出计划："
+      forM_ failed $ \(p, why) -> putStrLn ("    " <> p <> " — " <> why)
+      pure 2
+    [] -> emit go root info (judge cat ev [(p, sha, st) | (p, Right (sha, st)) <- snaps])
+
+-- | 一个源文件的完整判定行：源路径、暂存目标、sha、源 stat、裁决。
+type Judged = (FilePath, FilePath, Text, StatSnap, Verdict)
+
+-- | 纯判定：按**目标位置**给每个文件定性，再做 stem 组悬置。
+judge :: Catalog -> String -> [(FilePath, Text, StatSnap)] -> [Judged]
+judge cat ev rows =
+  zipWith
+    (\(p, sha, st) (dst, v) -> (p, dst, sha, st, v))
+    rows
+    (holdKin [(dstOf p, classifyDst (shaAt (dstOf p)) (shaAt (archiveOf p)) sha) | (p, sha, _) <- rows])
+ where
+  byFold = Map.fromList [(foldPath (enPath e), enSha e) | e <- Map.elems (catEntries cat)]
+  shaAt dst = Map.lookup (foldPath dst) byFold
+  dstOf p = stagingTop </> "Raw" </> ev </> takeFileName p
+  -- import 会把 @To-Be-Sync'd\\Raw\\<ev>@ 里的文件路由到 @Raw\\20YY\\<ev>-Raw@。
+  -- 事件名此刻已过 'canonRawEvent'（'resolveEvent' 保证），所以 Nothing 分支
+  -- 取不到；保留它只是为了不在这里引入部分函数。
+  archiveOf p = case canonRawEvent ev of
+    Just (yr, canon) -> "Raw" </> yr </> canon </> takeFileName p
+    Nothing -> dstOf p
+
+emit :: GoOpts -> FilePath -> RootInfo -> [Judged] -> IO Int
+emit go root info judged = do
+  printf
+    "归位：待拷 %d · 已在目标位置 %d · 已归档 %d · 待裁决 %d\n"
+    (tally (== VCopy))
+    (tally (== VAtDest))
+    (tally (== VArchived))
+    (tally isConflict)
+  forM_ [(p, why) | (p, _, _, _, VConflict why) <- judged] $ \(p, why) ->
+    putStrLn ("  ⚠ " <> takeFileName p <> ": " <> T.unpack why)
+  forM_ (take 10 [p | (p, _, _, _, VArchived) <- judged]) $ \p ->
+    putStrLn ("  · 已归档，不重复搬: " <> takeFileName p)
+  if null items
+    then putStrLn "✓ 没有需要归位的新照片" >> pure 0
+    else do
+      pid <- newPlanId
+      now <- getCurrentTime
+      savePlanAndMaybeRun
+        go
+        Plan
+          { plId = pid
+          , plKind = "sort"
+          , plRootPath = root
+          , plRootId = Just (riId info)
+          , plCreated = now
+          , plItems = items
+          }
+ where
+  tally f = length [() | (_, _, _, _, v) <- judged, f v]
+  items =
+    [ PlanItem ix (OpCopy p dst sha (ssSize st) (ssMtimeNs st)) (statusOf v) Nothing
+    | (ix, (p, dst, sha, st, v)) <- zip [0 ..] [j | j@(_, _, _, _, v) <- judged, plannable v]
+    ]
+
+isConflict :: Verdict -> Bool
+isConflict (VConflict _) = True
+isConflict _ = False
+
+-- | 进计划的只有两类：正常拷贝，与待裁决（后者进计划但**不执行**，等
+-- @pm resolve@）。已在目标位置\/已归档的不进——它们不是要做的事。
+plannable :: Verdict -> Bool
+plannable VCopy = True
+plannable (VConflict _) = True
+plannable _ = False
+
+statusOf :: Verdict -> ItemStatus
+statusOf (VConflict why) = StNeedsDecision (why <> " → pm resolve --keep src|dst|both")
+statusOf _ = StPending
