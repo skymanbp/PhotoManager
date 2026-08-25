@@ -4,7 +4,7 @@
 module NamesTests (namesTests) where
 
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, sort)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist)
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -32,6 +32,7 @@ namesTests =
     , testCase "P3b-5 B1/B3：主库路径是 backup root → 拒绝出计划；目标被文件占位 → 降裁决" caseNamesGuards
     , testCase "normalizeStem：§1.1 后缀清单 + 迭代不动点" caseStem
     , testCase "versionsReport：设计内成片↔相册对排除；同目录版本组；真重复上报" caseVersions
+    , testCase "designedGroup：Raw 原片就是 JPG / 相册撞名避让 算设计内；有 RAW 兄弟、没撞名、同层两份 仍上报" caseDesignedGroups
     ]
 
 caseParseB :: IO ()
@@ -170,6 +171,41 @@ caseVersions = do
       sha @?= "s4"
       files @?= ["成片" </> "23-04-EU" </> "C.jpg", "成片" </> "23-05-X" </> "D.jpg"]
     d -> assertFailure ("应恰一组真重复，得到 " <> show d)
+
+-- | 「设计内冗余」的三条判据各配正反例（2026-08-25 更正：此前只认判据①，
+-- 把归档三层拓扑里另外两种必然的同字节关系报成了缺陷）。
+--
+--  ③ Raw↔成片 同名：**没有**同 stem 原始档 → 原片就是 JPG（相机直出／手机／
+--     RAW 遗失），设计内；**有**原始档 → 那个 JPG 是导出件，误放进 Raw，要报。
+--  ② 成片↔相册 异名：成片那个名字在相册**已被别的文件占住** → 平铺避让，
+--     设计内；**没被占** → 真的命名分歧，要报。
+--  同层两份一律要报（由 caseVersions 里那对同 sha 的成片文件钉住）。
+caseDesignedGroups :: IO ()
+caseDesignedGroups = do
+  let cat =
+        mkCat
+          [ -- ③ 正：该 Raw 事件夹零原始档 → P.jpg 就是原片
+            mkE ("Raw" </> "2023" </> "23-04-EU-Raw" </> "P.jpg") "s10"
+          , mkE ("成片" </> "23-04-EU" </> "P.jpg") "s10"
+          , -- ③ 反：同 stem 有 ARW（且 Q~2 要经 normalizeStem 才对得上 Q）
+            mkE ("Raw" </> "2025" </> "25-08-T-Raw" </> "Q~2.jpg") "s11"
+          , mkE ("成片" </> "25-08-T" </> "Q~2.jpg") "s11"
+          , mkE ("Raw" </> "2025" </> "25-08-T-Raw" </> "Q.ARW") "s99"
+          , -- ② 正：成片叫 R.jpg，但相册里 R.jpg 已被**别的**文件占住 → 避让
+            mkE ("成片" </> "25-11-Alaska" </> "R.jpg") "s12"
+          , mkE ("相册" </> "R2.jpg") "s12"
+          , mkE ("相册" </> "R.jpg") "s13"
+          , -- ② 反：相册里没有 S.jpg 撞名，异名就是命名分歧
+            mkE ("成片" </> "25-08-T" </> "S.jpg") "s14"
+          , mkE ("相册" </> "S9.jpg") "s14"
+          , -- 同层两份：两个事件夹各一份 / 根与子目录各一份 → 一律要报
+            mkE ("Raw" </> "2024" </> "24-12-NY-Raw" </> "T.ARW") "s15"
+          , mkE ("Raw" </> "2025" </> "25-01-AT-Raw" </> "T.ARW") "s15"
+          , mkE ("Raw" </> "2023" </> "23-04-EU-Raw" </> "U.jpg") "s16"
+          , mkE ("Raw" </> "2023" </> "23-04-EU-Raw" </> "sub" </> "U.jpg") "s16"
+          ]
+      rep' = versionsReport cat
+  sort (map fst (vgExactDups rep')) @?= ["s11", "s14", "s15", "s16"]
 
 -- ─── helpers ────────────────────────────────────────────────────────────────
 

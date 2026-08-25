@@ -5,8 +5,11 @@
 -- 略贪也不漏报。剥离迭代至不动点（幂等，有测试钉住）。
 --
 -- 范围：归档层 Raw\/成片\/相册。暂存区 To-Be-Sync'd 天然含设计内冗余
--- （已归档待清理），由 status\/clean 报告，不进本报告；成片↔相册 的同名
--- 精确对是设计拓扑（相册 ⊂ 成片，I7），也不作为「重复」报告。
+-- （已归档待清理），由 status\/clean 报告，不进本报告。
+--
+-- **设计内冗余**（'designedGroup'）不作为「重复」报告。它有三条判据，不止
+-- 一条——这是 2026-08-25 的更正：此前只认「成片↔相册 且同名」，把归档三层
+-- 拓扑里另外两种必然的同字节关系全报成了缺陷（实测 15 组里误报 7 组）。
 module Pm.Versions
   ( normalizeStem
   , VersionsReport (..)
@@ -17,9 +20,10 @@ module Pm.Versions
 import Data.Char (isDigit, toLower)
 import Data.List (sort, sortOn)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.FilePath (splitDirectories, takeBaseName, takeDirectory)
+import System.FilePath (joinPath, splitDirectories, takeBaseName, takeDirectory, takeExtension)
 import Text.Printf (printf)
 
 import Pm.Catalog (loadCatalog)
@@ -88,12 +92,24 @@ data VersionsReport = VersionsReport
   { vgGroups :: [((FilePath, String), [FilePath])]
     -- ^ (目录, 规范化 stem case-fold) → 同组文件（>1 个才收）
   , vgExactDups :: [(Text, [FilePath])]
-    -- ^ sha → 路径（>1；排除设计内 成片↔相册 同名对）
+    -- ^ sha → 路径（>1；排除 'designedGroup' 认定的设计内冗余）
   }
   deriving (Show, Eq)
 
 archiveLayers :: [String]
 archiveLayers = ["Raw", "成片", "相册"]
+
+-- | 相机**原始档**扩展名（case-fold）。判据③问的是"这一帧有没有 RAW 工作流"：
+-- 有 → 同名 JPG 是导出件，放进 Raw 层是误放，要报；没有 → 那个 JPG 本身就是
+-- 原片（相机直出 JPG／手机拍的／RAW 已遗失后用能找到的 JPG 顶替——用户
+-- 2026-08-25 指出的三种情况，共同特征正是"没有对应的 RAW"）。
+--
+-- 列表以本库实测为准（Raw 层 arw 3794 · dng 71）并补齐常见机型格式。
+-- @psd@\/@psb@\/@tif@ 是**编辑**格式不是原始档，不计入——它们的存在不能说明
+-- 这一帧有 RAW。
+rawExts :: [String]
+rawExts =
+  [".arw", ".dng", ".nef", ".cr2", ".cr3", ".raf", ".orf", ".rw2", ".pef", ".srw", ".sr2", ".x3f"]
 
 versionsReport :: Catalog -> VersionsReport
 versionsReport cat =
@@ -123,15 +139,72 @@ versionsReport cat =
       [ (sha, sort ps)
       | (sha, ps) <- Map.toList bySha
       , length ps > 1
-      , not (designedPair ps)
+      , not (designedGroup ps)
       ]
-  -- 设计内精确对：恰好两份、同 case-fold 文件名、分属 成片 与 相册
-  designedPair [p1, p2] =
-    let base p = map toLower (last' (splitDirectories p))
-        last' xs = case reverse xs of (x : _) -> x; [] -> ""
-        tops = sort [topOf p1, topOf p2]
-     in base p1 == base p2 && tops == sort ["成片", "相册"]
-  designedPair _ = False
+
+  baseOf p = map toLower (last' (splitDirectories p))
+  last' xs = case reverse xs of (x : _) -> x; [] -> ""
+  stemOf p = map toLower (normalizeStem (takeBaseName p))
+
+  -- Raw 事件夹 = @Raw\<年>\<事件>@ 前三段。定位不到（层级不足）就返回
+  -- Nothing，判据③随之拒绝认定设计内——宁可多报一行噪音。
+  rawEventOf p = case splitDirectories p of
+    (a : b : c : _) -> Just (joinPath [a, b, c])
+    _ -> Nothing
+
+  -- 各 Raw 事件夹里**出现过 RAW 原始档**的帧：(事件夹, 规范化 stem)。
+  -- 用 'normalizeStem' 而不是裸 stem——@_DSC2227~2.JPG@ 要能对上
+  -- @_DSC2227.ARW@，否则版本后缀会让导出件伪装成原片。
+  rawOriginals =
+    Set.fromList
+      [ (ev, stemOf p)
+      | e <- photos
+      , let p = enPath e
+      , topOf p == "Raw"
+      , map toLower (takeExtension p) `elem` rawExts
+      , Just ev <- [rawEventOf p]
+      ]
+
+  -- 相册是**平铺**的：它已占用的文件名（case-fold），判据②要用。
+  albumNames =
+    Set.fromList [baseOf (enPath e) | e <- photos, topOf (enPath e) == "相册"]
+
+  -- | 设计内冗余：同一张照片在归档三层里各留一份是**拓扑**，不是重复。
+  --
+  --  ① 成片↔相册 同名 —— 相册 ⊂ 成片（I7），原判据。
+  --  ② 成片↔相册 不同名，但成片那个名字在相册里已被**别的**文件占住 ——
+  --     相册平铺，跨事件撞帧号时只能避让；这是刻意改名，不是命名分歧。
+  --     （反面：名字没被占却仍不同名 → 真的命名分歧，仍要报。）
+  --  ③ Raw↔成片 同名，且该 Raw 事件夹里没有同 stem 的原始档 —— 原片本来
+  --     就是 JPG。有原始档则那个 JPG 是导出件，误放进 Raw，仍要报。
+  --
+  -- **同一层出现两份**（两个事件夹各一份、根与子目录各一份）一律不是设计内。
+  -- 成片是链条中枢：Raw↔相册 直连属于跳层，也不认。
+  designedGroup ps =
+    let atLayer l = [p | p <- ps, topOf p == l]
+        raw = atLayer "Raw"
+        fin = atLayer "成片"
+        alb = atLayer "相册"
+     in length raw <= 1
+          && length fin <= 1
+          && length alb <= 1
+          && length raw + length fin + length alb == length ps
+          && not (null fin)
+          && rawFinOk raw fin
+          && finAlbOk fin alb
+
+  rawFinOk [] _ = True
+  rawFinOk [r] [f] =
+    baseOf r == baseOf f && case rawEventOf r of
+      Nothing -> False
+      Just ev -> not (Set.member (ev, stemOf r) rawOriginals)
+  rawFinOk _ _ = False
+
+  finAlbOk _ [] = True
+  finAlbOk [f] [a]
+    | baseOf f == baseOf a = True
+    | otherwise = Set.member (baseOf f) albumNames
+  finAlbOk _ _ = False
 
 -- ─── 命令入口（只读） ───────────────────────────────────────────────────────
 
