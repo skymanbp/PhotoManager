@@ -7,6 +7,8 @@ module Pm.BackupCmd
   ( BackupCmd (..)
   , backupInitPreflight
   , runBackupInit
+  , backupInitRun
+  , BackupInitOutcome (..)
   , runBackupRun
   ) where
 
@@ -14,6 +16,7 @@ import Control.Monad (forM_, unless, when)
 import Data.Char (toLower)
 import Data.List (isPrefixOf)
 import Data.Maybe (fromMaybe)
+import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (canonicalizePath, doesDirectoryExist, makeAbsolute)
@@ -53,29 +56,41 @@ backupInitPreflight cfg path = do
       g <- pmIgnoreGuard RoleBackup abs'
       pure (either Left (const (Right abs')) g)
 
-runBackupInit :: FilePath -> Config -> IO Int
-runBackupInit path cfg = do
+-- | `pm backup init` 的**结果**（P4-8 拆分：`POST /api/backup-init` 要的是
+-- 结果，不能去捕 stdout；所有守卫留在这里，CLI 只负责渲染）。
+data BackupInitOutcome
+  = BiReused FilePath Text
+    -- ^ 该路径已是备份 root：沿用标识，只重登记配置
+  | BiCreated FilePath Text (Maybe Text) Bool
+    -- ^ 新建了备份 root 标识（路径、UUID、文件系统类型、目录是否本来不存在）
+  deriving (Show, Eq)
+
+-- | 登记备份盘：建立/沿用备份 root 标识并写进配置。**不打印**。
+-- 守卫链与拆分前逐条相同：preflight（含 I11 与 requireMain）→ root 三态
+-- （损坏不改写、非备份角色拒绝、不可信拒绝）→ 写标识前再 canonicalize 复验
+-- → 原子 no-replace 创建。
+backupInitRun :: FilePath -> Config -> IO (Either String BackupInitOutcome)
+backupInitRun path cfg = do
   epre <- backupInitPreflight cfg path
   case epre of
-    Left msg -> putStrLn msg >> pure 2
+    Left msg -> pure (Left msg)
     Right abs' -> do
       -- P3b-7 复审 major：损坏的标识不当缺席（不改写）；首次创建原子 no-replace。
       st <- readRootState abs'
       case st of
         RootPresent info
           | riRole info == RoleBackup -> do
-              putStrLn ("✓ 该路径已是备份 root（沿用标识 " <> T.unpack (riId info) <> "）")
               register abs' (riId info)
+              pure (Right (BiReused abs' (riId info)))
           | otherwise ->
-              putStrLn ("该路径已是 " <> show (riRole info) <> " root，拒绝改作备份") >> pure 2
+              pure (Left ("该路径已是 " <> show (riRole info) <> " root，拒绝改作备份"))
         RootCorrupt e ->
-          putStrLn (abs' <> " 的 .pm/root-id.json 存在但无法解析（" <> e <> "），拒绝改写——人工核查") >> pure 2
+          pure (Left (abs' <> " 的 .pm/root-id.json 存在但无法解析（" <> e <> "），拒绝改写——人工核查"))
         -- P3b-12（九轮复审 major）：同 pm init / vault push，建身份的入口也必须
         -- 先确认 .pm 家族是真目录，否则标识会落到库外。
-        RootUntrusted m -> putStrLn ("✗ " <> m) >> pure 2
+        RootUntrusted m -> pure (Left ("✗ " <> m))
         RootAbsent -> do
-          ex <- doesDirectoryExist abs'
-          unless ex $ putStrLn ("· 目录不存在，将创建: " <> abs')
+          dirExisted <- doesDirectoryExist abs'
           rid <- freshRootId
           now <- getCurrentTime
           fs <- case abs' of
@@ -86,21 +101,38 @@ runBackupInit path cfg = do
           -- 近零（单机模型下的剩余风险已在评审归档记录）。
           abs2 <- canonicalizePath abs'
           if map toLower (normalise abs2) /= map toLower (normalise abs')
-            then putStrLn ("路径在检查后发生变化（" <> abs' <> " → " <> abs2 <> "），拒绝") >> pure 2
+            then pure (Left ("路径在检查后发生变化（" <> abs' <> " → " <> abs2 <> "），拒绝"))
             else do
               er <- createRootInfo abs' (RootInfo rid RoleBackup now fs)
               case er of
-                Left m -> putStrLn m >> pure 2
+                Left m -> pure (Left m)
                 Right () -> do
-                  putStrLn ("✓ 备份 root 标识已创建: " <> T.unpack rid <> maybe "" (\t -> "（" <> T.unpack t <> "）") fs)
                   register abs' rid
+                  pure (Right (BiCreated abs' rid fs (not dirExisted)))
  where
   register abs' rid = do
     let sub = snd (splitDrive abs')
     _ <- writeConfig cfg {cfgBackupId = Just rid, cfgBackupSubpath = Just sub}
-    putStrLn ("✓ 已登记到配置（盘符无关，按 UUID + 相对路径 " <> sub <> " 认盘）")
-    putStrLn "下一步: pm backup"
-    pure 0
+    pure ()
+
+-- | CLI 渲染层：把 'backupInitRun' 的结果印成人读输出并给退出码。
+runBackupInit :: FilePath -> Config -> IO Int
+runBackupInit path cfg = do
+  r <- backupInitRun path cfg
+  case r of
+    Left msg -> putStrLn msg >> pure 2
+    Right o -> do
+      case o of
+        BiReused _ rid -> putStrLn ("✓ 该路径已是备份 root（沿用标识 " <> T.unpack rid <> "）")
+        BiCreated p rid fs created -> do
+          when created $ putStrLn ("· 目录不存在，已创建: " <> p)
+          putStrLn ("✓ 备份 root 标识已创建: " <> T.unpack rid <> maybe "" (\t -> "（" <> T.unpack t <> "）") fs)
+      putStrLn ("✓ 已登记到配置（盘符无关，按 UUID + 相对路径 " <> snd (splitDrive (outPath o)) <> " 认盘）")
+      putStrLn "下一步: pm backup"
+      pure 0
+ where
+  outPath (BiReused p _) = p
+  outPath (BiCreated p _ _ _) = p
 
 runBackupRun :: GoOpts -> Maybe Int -> Config -> IO Int
 runBackupRun go mworkers cfg = do

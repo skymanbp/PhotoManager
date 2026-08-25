@@ -12,6 +12,7 @@
       <button data-tab="status" class="active"><span class="ic">◉</span>状态</button>
       <button data-tab="vault"><span class="ic">◈</span>分类推送</button>
       <button data-tab="plans"><span class="ic">▤</span>计划</button>
+      <button data-tab="config"><span class="ic">⚙</span>设置</button>
       <button data-tab="help"><span class="ic">?</span>上手</button>
     </nav>
     <div class="side-foot">
@@ -73,6 +74,49 @@
       <div class="split">
         <table id="plan-table" class="table"><thead><tr><th>类型</th><th>计划 id</th><th>生成时间</th><th>项</th><th>待执行</th><th>跳过</th><th>待裁决</th></tr></thead><tbody></tbody></table>
         <div id="plan-detail" class="detail"><div class="muted">选一个计划查看明细</div></div>
+      </div>
+    </section>
+
+    <!-- ── 设置 ── -->
+    <section id="tab-config" class="tab">
+      <header class="page-head">
+        <h1>设置 <span class="muted small">路径与并发；改完立刻生效，不用重启</span></h1>
+        <div class="actions"><button id="btn-config-reload" class="btn ghost">刷新</button></div>
+      </header>
+      <div id="config-result" class="banner hidden"></div>
+      <div id="config-path" class="muted small"></div>
+
+      <div class="card-row">
+        <div class="cfg">
+          <div class="k">主库（只读）</div>
+          <div id="cfg-main" class="v mono"></div>
+          <div class="s">主库是所有身份的锚点（root 标识、日志、索引都挂在它下面）。改它等于换一个库，一台机器设一次——在终端 <code>pm init --main &lt;路径&gt;</code>。</div>
+        </div>
+
+        <div class="cfg">
+          <div class="k">vault 展示集目录</div>
+          <div class="row"><input id="cfg-vault" type="text" spellcheck="false" placeholder="粘贴目录路径，如 D:\\…\\摄影作品"><button id="btn-cfg-vault" class="btn">保存</button><button id="btn-cfg-vault-clear" class="btn ghost">清空</button></div>
+          <div id="cfg-vault-note" class="s"></div>
+        </div>
+
+        <div class="cfg">
+          <div class="k">photos.json（可选）</div>
+          <div class="row"><input id="cfg-photos" type="text" spellcheck="false" placeholder="portfolio 的 photos.json 路径"><button id="btn-cfg-photos" class="btn">保存</button><button id="btn-cfg-photos-clear" class="btn ghost">清空</button></div>
+          <div class="s">只用于 RENAME 的<strong>只读</strong>引用检查：被它引用的文件名不会被改名（会打断已上线的图片链接）。</div>
+        </div>
+
+        <div class="cfg">
+          <div class="k">并发数</div>
+          <div class="row"><input id="cfg-workers" type="number" min="1" max="64" placeholder="默认 = CPU 核数"><button id="btn-cfg-workers" class="btn">保存</button><button id="btn-cfg-workers-clear" class="btn ghost">恢复默认</button></div>
+          <div class="s">扫描与备份的并行度，1..64。</div>
+        </div>
+
+        <div class="cfg">
+          <div class="k">备份硬盘</div>
+          <div id="cfg-backup" class="v"></div>
+          <div class="row"><input id="cfg-backup-path" type="text" spellcheck="false" placeholder="盘上的镜像路径，如 E:\\Photography"><button id="btn-cfg-backup" class="btn">登记这块盘</button></div>
+          <div class="s">登记会在<strong>那块盘上</strong>建立备份 root 标识（已经是备份 root 就沿用），并按 UUID + 盘内相对路径记住它——以后换盘符也认得出。照片不动。</div>
+        </div>
       </div>
     </section>
 

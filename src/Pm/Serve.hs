@@ -38,6 +38,7 @@ module Pm.Serve
 
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Control.Exception (IOException, bracket, try)
 import Crypto.Random (getRandomBytes)
 import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
@@ -57,13 +58,16 @@ import Network.HTTP.Types
 import Network.Socket
 import Network.Wai
 import Network.Wai.Handler.Warp (defaultSettings, runSettingsSocket)
-import System.Directory (doesDirectoryExist, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (dropExtension, takeExtension, (</>))
 import System.IO (hFlush, hIsEOF, stdin, stdout)
 
 import Pm.Catalog (loadCatalog)
 import Pm.Commands (loadPlanAnyRoot)
-import Pm.Config (Config (..), pmSubPlans, requirePmTrusted, requireWritable, untrustedMsg)
+import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, pmSubPlans, requirePmTrusted, requireWritable, untrustedMsg, writeConfig)
+import Pm.ConfigEdit (applyPatch, checkPatch)
+import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
+import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPlan, savePlan)
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
@@ -87,14 +91,18 @@ data ServeOpts = ServeOpts
 
 -- | 一次 serve 会话的状态：配置、token、可写开关、vault 缓存刷新的进程内互斥。
 data ServeEnv = ServeEnv
-  { seCfg :: Config
+  { seCfgRef :: IORef Config
+    -- ^ 配置**每次请求**读一次：`POST /api/config` 改完之后同一个 serve 进程
+    -- 必须立刻按新配置回答，否则用户改完路径还要重启 GUI（P4-8）。
   , seToken :: BS.ByteString
   , seWritable :: Bool
   , seVaultLock :: MVar ()
   }
 
 newServeEnv :: Config -> BS.ByteString -> Bool -> IO ServeEnv
-newServeEnv cfg tok writable = ServeEnv cfg tok writable <$> newMVar ()
+newServeEnv cfg tok writable = do
+  ref <- newIORef cfg
+  ServeEnv ref tok writable <$> newMVar ()
 
 -- | POST 请求体上限（十八轮：warp 默认无总 body 上限，写端点须自设）。一次
 -- 分类指派最多几十条 name/category，64 KiB 绰绰有余。
@@ -213,7 +221,14 @@ authorized tok hdrs = case lookup hAuthorization hdrs of
 type Reply = Status -> ResponseHeaders -> Value -> IO ResponseReceived
 
 route :: ServeEnv -> Request -> Reply -> (Status -> String -> IO ResponseReceived) -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req) of
+route env req jsonR err corsHdrs respond = do
+  -- 配置每次请求读一次：`POST /api/config` 改完后同一个 serve 必须立刻按新
+  -- 配置回答，否则用户改完路径还得重启 GUI（P4-8）。
+  cfg <- readIORef (seCfgRef env)
+  routeWith cfg env req jsonR err corsHdrs respond
+
+routeWith :: Config -> ServeEnv -> Request -> Reply -> (Status -> String -> IO ResponseReceived) -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req) of
   ("GET", ["api", "ping"]) ->
     jsonR status200 [] (object ["ok" .= True, "main" .= cfgMainPath cfg, "vault" .= cfgVaultPath cfg])
   ("GET", ["api", "status"]) -> do
@@ -350,6 +365,102 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
                 Left (msg, _) -> err status500 msg
                 Right kept ->
                   jsonR status200 [] (object ["held" .= map vhName kept, "count" .= length kept])
+  -- P4-8：设置页的只读视图——路径 + 每条路径的健康状态。主库这一项恒
+  -- `editable:false`：它是身份锚点，改它等于换一个库，留给终端 `pm init`。
+  ("GET", ["api", "config"]) -> do
+    cfgPath <- configFilePath
+    mainSt <- readRootState (cfgMainPath cfg)
+    mainEx <- doesDirectoryExist (cfgMainPath cfg)
+    vaultJ <- case cfgVaultPath cfg of
+      Nothing -> pure Aeson.Null
+      Just v -> do
+        ex <- doesDirectoryExist v
+        st <- readRootState v
+        g <- vaultIgnoreGuard v
+        pure
+          ( object
+              [ "path" .= v
+              , "exists" .= ex
+              , "root" .= rootTag st
+              , "i11" .= either (const False) (const True) g
+              , "i11why" .= either id (const "") g
+              ]
+          )
+    photosJ <- case cfgPhotosJson cfg of
+      Nothing -> pure Aeson.Null
+      Just j -> do
+        ex <- doesFileExist j
+        pure (object ["path" .= j, "exists" .= ex])
+    jsonR
+      status200
+      []
+      ( object
+          [ "configPath" .= cfgPath
+          , "main" .= object ["path" .= cfgMainPath cfg, "exists" .= mainEx, "root" .= rootTag mainSt, "editable" .= False]
+          , "vault" .= vaultJ
+          , "photosJson" .= photosJ
+          , "workers" .= cfgWorkers cfg
+          , "backup" .= object ["id" .= cfgBackupId cfg, "subpath" .= cfgBackupSubpath cfg]
+          ]
+      )
+  -- P4-8：第三个写端点——改配置（vault / photos.json / 并发数）。主库路径
+  -- 只读（'checkPatch' 直接拒）。配置文件在 XDG 目录、不在任何 root 的 .pm
+  -- 下，因此过的是 'writeConfig' 的原子替换而非 .pm 受信取用口。写完把
+  -- 进程内 IORef 从**盘上**重读一遍，保证 serve 立刻按新配置回答。
+  ("POST", ["api", "config"])
+    | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝改配置"
+    | otherwise -> do
+        body <- readBodyCapped req
+        case body of
+          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
+          Just raw -> case Aeson.eitherDecodeStrict' raw of
+            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
+            Right patch -> do
+              errs <- checkPatch patch
+              if not (null errs)
+                then jsonR status400 [] (object ["error" .= ("配置不合法" :: String), "details" .= errs])
+                else do
+                  ew <- try (writeConfig (applyPatch cfg patch)) :: IO (Either IOException FilePath)
+                  case ew of
+                    Left e -> err status500 ("配置写入失败: " <> show e)
+                    Right fp -> do
+                      fresh <- loadConfig
+                      case fresh of
+                        Left m -> err status500 ("配置写出后无法重新载入（已写到 " <> fp <> "）: " <> m)
+                        Right c2 -> do
+                          writeIORef (seCfgRef env) c2
+                          jsonR status200 [] (object ["ok" .= True, "configPath" .= fp])
+  -- P4-8：第四个写端点——登记备份盘。它会在**目标盘**上建立备份 root 标识
+  -- （或沿用已有的）并把 UUID + 相对路径写进配置；守卫链与 CLI `pm backup
+  -- init` 完全相同（共用 'backupInitRun'，本端点只负责渲染结果）。
+  ("POST", ["api", "backup-init"])
+    | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝登记备份盘"
+    | otherwise -> do
+        body <- readBodyCapped req
+        case body of
+          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
+          Just raw -> case Aeson.eitherDecodeStrict' raw of
+            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
+            Right (BackupInitReq p) -> do
+              r <- backupInitRun p cfg
+              case r of
+                Left m -> jsonR status400 [] (object ["error" .= ("登记失败" :: String), "details" .= [m]])
+                Right o -> do
+                  fresh <- loadConfig
+                  case fresh of
+                    Left m -> err status500 ("登记后配置无法重新载入: " <> m)
+                    Right c2 -> do
+                      writeIORef (seCfgRef env) c2
+                      jsonR
+                        status200
+                        []
+                        ( object
+                            [ "ok" .= True
+                            , "reused" .= case o of BiReused {} -> True; BiCreated {} -> False
+                            , "path" .= case o of BiReused p' _ -> p'; BiCreated p' _ _ _ -> p'
+                            , "id" .= case o of BiReused _ i -> i; BiCreated _ i _ _ -> i
+                            ]
+                        )
   ("GET", ["api", "plans"]) -> do
     (ps, errs) <- listPlans (cfgMainPath cfg)
     (vps, verrs) <- maybe (pure ([], [])) listPlans (cfgVaultPath cfg)
@@ -380,7 +491,6 @@ route env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req
                     respond (responseLBS status200 (("Content-Type", "image/jpeg") : ("Cache-Control", "private, max-age=3600") : corsHdrs) (BSL.fromStrict bytes))
   _ -> err status404 "无此端点"
  where
-  cfg = seCfg env
   -- vault 缓存刷新串行化（十八轮 minor）：两个并发 GET 会争用固定 tmp 名。
   vaultReport = withMVar (seVaultLock env) (const (computeVault True cfg))
 
@@ -406,6 +516,20 @@ instance Aeson.FromJSON PushPlanReq where
 
 instance Aeson.FromJSON PushAssign where
   parseJSON = Aeson.withObject "assignment" $ \o -> PushAssign <$> o Aeson..: "name" <*> o Aeson..: "category"
+
+-- | root 标识三态 → 页面用的短标签（P4-8 设置页）。
+rootTag :: RootIdState -> String
+rootTag st = case st of
+  RootPresent _ -> "present"
+  RootAbsent -> "absent"
+  RootCorrupt _ -> "corrupt"
+  RootUntrusted _ -> "untrusted"
+
+-- | @{"path":"E:\\Photography"}@
+newtype BackupInitReq = BackupInitReq FilePath
+
+instance Aeson.FromJSON BackupInitReq where
+  parseJSON = Aeson.withObject "backup-init" $ \o -> BackupInitReq <$> o Aeson..: "path"
 
 -- | @{"hold":["a.jpg"],"unhold":["b.jpg"]}@（两个键都可缺省为空）
 data HoldReq = HoldReq [FilePath] [FilePath]

@@ -514,7 +514,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P4-7c / pm 0.4.4 / 212 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
+  当前实现对应 **P4-8 / pm 0.4.5 / 215 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -595,33 +595,9 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   500 ms 内监听消失、零残留。Rust 工具链用 `x86_64-pc-windows-msvc`（Tauri 在
   Windows 只支持 MSVC；本机默认 gnu 工具链链接 cdylib 会 "export ordinal too
   large"，桌面端 crate-type 只留 rlib）。
-- **P4-6 收口（codex 二十轮 GO，合并前最小修复集空；六条 minor 逐条处置）**：
-  ①同一 name 被指派两次（跨类目或同类目）过去逐条都合法、却会出两个 Copy →
-  `checkAssignments` 加按 name 分组的 fail-closed 判定，CLI 与 API 共用同一处；
-  ②vault 只有 DRIFT、没有 NEW 时页面按钮永远灰着 → 空 `assignments` 在**有
-  DRIFT 时**放行（纯裁决计划），`/api/vault/new` 一并返回 DRIFT 清单；③缩略图
-  缩放失败过去回退挂原图——那正是刚被修掉的"全分辨率位图撑爆 WebView"路径 →
-  改挂占位符，`bitmap.close()` 移进 `finally`；④连按数字键 2 会并发起多轮加载、
-  旧轮在新轮 revoke 之后继续建 blob URL → single-flight 代号作废旧轮，快捷键
-  忽略 `ev.repeat` 并排除可编辑元素；⑤首次建 root 时两个并发 POST 都看到
-  `RootAbsent`、其中一次 no-replace 创建必失败 → compute→校验→ensureRoot→落盘
-  改为**一次持锁**（与 GET 刷新缓存同一把 `seVaultLock`）；⑥JSON 重复键按首值、
-  无嵌套深度上限（aeson 默认，64 KiB 是唯一硬界）→ loopback + token 模型下不
-  阻断，**登记残余**。测试 +1（DRIFT-only 纯裁决计划），并把重复指派 / 大小写
-  类目 / 带路径 name / 拒绝后 vault `.pm` 仍不存在补进闸用例；两处新判定各自
-  突变转红（203/203）。另修一条与评审无关的存量警告：`Data.ByteString.hGetLine`
-  自 bytestring-0.12 起废弃，改 `Data.ByteString.Char8.hGetLine`，GHC 警告归零。
-- **第二个写端点（P4-7）**：`POST /api/vault/hold`，体
-  `{"hold":[名…],"unhold":[名…]}`（两键均可省），同样在 `--writable` 之后、
-  同样 64 KiB 上限、同样在 `seVaultLock` 里 compute→校验→写一次持锁完成。
-  写域是**主库**的 `.pm/vault-holds.json`（不是 vault 仓），整段读改写在主库
-  root lock 里完成（事务壳 `withHoldsTxn`，CLI 与 API 共用；锁被占 → 409）；
-  校验器 `holdRequest` 与 CLI `pm vault hold|unhold` 共用：标记的必须当前是 NEW 且
-  本轮读取稳定（要记 sha），撤销的必须在名单里，同一名字不能同时标记与撤销，
-  fail-closed 且一次返回全部错误。`GET /api/vault/new` 相应带上 `held` /
-  `heldStale`，页面把决定回显成第四个按钮（选中态是灰色而非强调色——它不是
-  一个"去处"）。提交顺序：先落 hold/unhold，再生成推送计划（服务端拒收 held
-  的 push，撤销必须先生效）。
+- **P4-6 收口（codex 二十轮）**：六条 minor 的逐条处置属于评审史，已移入
+  [`docs/REVIEW-LOG.md`](REVIEW-LOG.md)（同 §16 把评审记录拆出去的先例；本文件
+  触及 750 行预算）。设计面只保留一句：`newActive`／写域／锁序的当前口径见上。
 - **打包与发布（P4-6）**：`cargo tauri build --target x86_64-pc-windows-msvc`
   产出 NSIS 安装包（`installMode: currentUser`，不需要 UAC），`pm.exe` 作为
   Tauri **sidecar**（`externalBin`）随安装包落在 `pm-ui.exe` 同目录——因此 Rust
@@ -708,7 +684,7 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 | file-io 未经上游在 GHC 9.10.3 测试 | P0 冒烟 + FilePath 降级预案（§4） |
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |
 | GUI 工具链 | 2026-08-24 改判 Rust/Tauri：cargo、tauri-cli、WebView2、MSVC 本机均已在，零安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
-| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable`（只有 GUI 拉起时置位）才开两个写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）与记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）（§11）。同用户的进程若拿到 token 也能打这两个端点——本节威胁模型不防同机同用户恶意进程；它至多让磁盘上多一个**计划文件**或改动一条**本地决定**（可 unhold 撤销），照片零改动，执行仍需人在终端 `pm apply` |
+| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable`（只有 GUI 拉起时置位）才开四个写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）、记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）、改配置（写 XDG 的 config.toml，主库路径只读）、登记备份盘（在目标盘上建备份 root 标识，守卫链同 CLI）（§11）。同用户的进程若拿到 token 也能打这两个端点——本节威胁模型不防同机同用户恶意进程；它至多让磁盘上多一个**计划文件**或改动一条**本地决定**（可 unhold 撤销），照片零改动，执行仍需人在终端 `pm apply` |
 | 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：**下一次比对**（`pm vault status` / GUI 刷新）复核到字节已变即失效并回到 NEW——不是实时监视；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |

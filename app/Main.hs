@@ -14,6 +14,7 @@ import Pm.Names (runNames)
 import Pm.Serve (ServeOpts (..), runServe)
 import Pm.Status (StatusOpts (..), runStatus)
 import Pm.Ui (runUi)
+import Pm.ConfigEdit (ConfigPatch (..), runConfigSet, runConfigShow)
 import Pm.Vault (runVaultPush, runVaultStatus)
 import Pm.VaultCmd (runVaultHold)
 import Pm.Versions (runVersions)
@@ -34,6 +35,8 @@ data Cmd
   | CmdVaultStatus Bool -- --json（sync_photos.py 兼容输出）
   | CmdVaultPush GoOpts (Maybe String) [FilePath] -- --category + FILES
   | CmdVaultHold Bool [FilePath] -- 暂不同步（True）/ 恢复（False）；只写主库 .pm
+  | CmdConfigShow -- 打印配置与路径健康（只读）
+  | CmdConfigSet ConfigPatch -- 改 vault / photos.json / 并发数（主库路径只读）
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
   | CmdVersions -- 版本组/精确重复报告（只读）
   | CmdServe ServeOpts -- 127.0.0.1 JSON API（缺省只读；--writable 才开生成计划端点）
@@ -81,6 +84,8 @@ run (CmdClean go) = withCfg (runClean go)
 run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
 run (CmdVaultPush go mcat fs) = withCfg (runVaultPush (savePlanAndMaybeRun go) mcat fs)
 run (CmdVaultHold hold fs) = withCfg (runVaultHold hold fs)
+run CmdConfigShow = withCfg runConfigShow
+run (CmdConfigSet p) = withCfg (runConfigSet p)
 run (CmdNames go) = withCfg (runNames (savePlanAndMaybeRun go))
 run CmdVersions = withCfg runVersions
 run (CmdServe o) = withCfg (\cfg -> runServe cfg o)
@@ -94,7 +99,7 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    infoOption "pm 0.4.4 (P4-7)" (long "version" <> help "打印版本")
+    infoOption "pm 0.4.5 (P4-8)" (long "version" <> help "打印版本")
   backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
   vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =
@@ -114,8 +119,33 @@ parserInfo =
           <> command "apply" (info applyP (progDesc "执行已存的计划（root 按 UUID 重新绑定；--only 按组闭包）"))
           <> command "resolve" (info resolveP (progDesc "裁决计划某项：跳过/恢复/--keep src|dst|both（组为单元）"))
           <> command "serve" (info serveP (progDesc "127.0.0.1 JSON API（供 GUI/skill；随机端口 + 会话 token，启动时打印一行 JSON；缺省只读，见 --writable）"))
+          <> command
+            "config"
+            ( info
+                ( hsubparser
+                    ( command "show" (info (pure CmdConfigShow) (progDesc "打印配置与每条路径的健康状态（只读）"))
+                        <> command "set" (info (CmdConfigSet <$> patchP) (progDesc "改 vault / photos.json / 并发数（主库路径只读，用 pm init）"))
+                    )
+                    <|> pure CmdConfigShow
+                )
+                (progDesc "查看/修改配置（GUI 设置页与此同源）")
+            )
           <> command "ui" (info (pure CmdUi) (progDesc "拉起桌面 GUI（pm-ui.exe：PM_UI_EXE 或 pm.exe 同目录；GUI 自己启动并管理 pm serve）"))
       )
+  -- 三态：不给 = 不动；--no-X = 清空；给值 = 设值。与 API 的 JSON 三态同构。
+  patchP =
+    ConfigPatch
+      <$> triple "vault" "展示集（vault）目录"
+      <*> triple "photos-json" "portfolio 的 photos.json（只读引用检查）"
+      <*> ( (\mw clear -> if clear then Just Nothing else fmap Just mw)
+              <$> optional (option auto (long "workers" <> metavar "N" <> help "扫描/备份并发数（1..64）"))
+              <*> switch (long "no-workers" <> help "清空并发数（回到默认=核数）")
+          )
+      <*> optional (strOption (long "main" <> metavar "PATH" <> internal))
+  triple nm desc =
+    (\mv clear -> if clear then Just Nothing else fmap Just mv)
+      <$> optional (strOption (long nm <> metavar "PATH" <> help ("设置" <> desc)))
+      <*> switch (long ("no-" <> nm) <> help ("清空" <> desc))
   serveP =
     fmap CmdServe $
       ServeOpts
