@@ -56,6 +56,7 @@ import Pm.Diff
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Hash (ContentProbe (..), probeConfined, sha256File)
 import Pm.Import
+import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
 import Pm.Scan
@@ -296,7 +297,24 @@ runTrash' cfg tc root = do
           forM_ (tvUnregistered tv) $ \f ->
             putStrLn ("  UNREGISTERED " <> f <> "  （无 manifest 记录，先跑 pm doctor）")
       pure 0
+    -- 二十九轮 critical 的同根第二处（rule 09 统一修复）：屏障判据与 unlink
+    -- 必须是**一个跨进程事务**。这是 pm 全程唯一 unlink 用户数据的路径，此前
+    -- 全程不取锁——purgeBarriers 读盘判「归档层还留着一份」与 removeFile 之间，
+    -- 另一个 pm 进程完全可以把那一份也隔离掉。--yes 是命令行开关而非交互提问，
+    -- 锁内不会停下来等人，所以整段（含 trashView 之后的判定与列表打印）都在
+    -- 锁里跑。取不到锁 = 另一个 pm 正在动这个 root，直接退出而不是硬来。
     TrashEmpty yes -> do
+      ml <- withRootLock root (trashEmptyLocked cfg root tv yes)
+      case ml of
+        Nothing -> do
+          putStrLn "另一个 pm 实例正持有该 root 的锁（I10），未清除任何条目，稍后重试"
+          pure 2
+        Just code -> pure code
+
+-- | @pm trash empty@ 的锁内主体：屏障复验 → 限域判定 → 列表 → unlink。
+-- 拆出来只是为了让整段显式地位于 'withRootLock' 之内（见调用点注释）。
+trashEmptyLocked :: Config -> FilePath -> TrashView -> Bool -> IO Int
+trashEmptyLocked cfg root tv yes = do
       let present = [(r, trashDir root </> trTrashRel r) | (r, True) <- tvRegistered tv]
       -- 隔离记录按 reason 前缀分流到各自的**永久删除前屏障**（评审 cx-3 终极
       -- 屏障的一般化）。前缀由写入方定（'Pm.Clean.cleanPlanItems' /
@@ -460,8 +478,9 @@ loadPlanAnyRoot cfg pid = do
 -- 抽出来是因为 CLI 与 @POST \/api\/apply@ 必须对「这个计划该怎么执行」给出
 -- **同一个**答案。两处各写一遍 load\/bind\/only，就会有一处忘了按 UUID 绑
 -- root、或忘了把组闭包补齐——前者会改错库，后者会把 supersede 拆成半个。
--- 执行期复验（'preExecFor'）故意留在**调用方**：@--dry@ 只看不执行，不该触发
--- 任何复验副作用。
+-- 执行期屏障不在这里：它随 Config 装进 ExecEnv，由内核在锁内跑
+-- （'Pm.Cli.executePlanNowWith' → 'Pm.Exec.execBarrier'）。@--dry@ 因此天然
+-- 不触发任何复验副作用——它根本不进 'Pm.Exec.execPlan'。
 prepareApply :: Config -> T.Text -> Maybe String -> IO (Either String (Plan, [Int]))
 prepareApply cfg pid only = do
   ep <- loadPlanAnyRoot cfg pid
@@ -485,11 +504,11 @@ runApply o cfg = do
       if aoDry o
         then pure 0
         else do
-          -- 执行期复验钩子按种类取自唯一一张表（'preExecFor'）；各命令 --apply
-          -- 的即时路径经 savePlanAndMaybeRun 取同一张；API 的 apply 端点亦然。
-          plan3 <- preExecFor cfg (plKind plan2) plan2
-          code <- executePlanNow plan3
-          afterApply cfg plan3 code
+          -- 执行期屏障由内核在 withRootLock 内跑（二十九轮 critical）；三条
+          -- 执行路径共用 'Pm.Cli.executePlanNowWith' 这一个装配点，没有哪一处
+          -- 还需要（也没有哪一处还能够）自己决定挂不挂屏障。
+          code <- executePlanNow cfg plan2
+          afterApply cfg plan2 code
           pure code
 
 -- | apply 之后的缓存/提示收尾（可测）。P3b-7 复审 B1：备份缓存写进

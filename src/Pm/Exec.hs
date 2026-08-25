@@ -16,6 +16,8 @@ module Pm.Exec
   , Checkpoint (..)
   , ItemOutcome (..)
   , execPlan
+  , execBarrier
+  , barrierDrift
   , tmpDirFor
   , tmpNameFor
   , slotOccupied
@@ -88,11 +90,26 @@ data ExecEnv = ExecEnv
     -- ^ 评审 cx-1：拿到锁之后、动盘之前复验 root-id.json 的 UUID。盘符会
     -- 漂移（备份盘 E: → F:），路径不是身份；不符即整批拒绝执行。
     -- Nothing = 跳过（测试用临时 root 无标识）。
+  , eeBarrier :: Maybe (Plan -> IO Plan)
+    -- ^ 执行期**组屏障**（二十九轮 critical）。逐项的 sha 复核由内核自己做；
+    -- 这个钩子做的是**跨条目**的判断——「该内容在归档层还留得下一份活副本
+    -- 吗」——它需要 catalog 与备份盘发现，属于命令层的知识，内核不该知道。
+    --
+    -- 但「要不要有屏障」是内核的知识：'Pm.Plan.kindNeedsBarrier' 说要而这里
+    -- 是 Nothing，'execPlan' 整批拒绝（见 'execBarrier'）。P3b-5/A3 的教训是
+    -- 「承重闸不能只挂在可覆盖的 ExecEnv 钩子上」——这里遵守的方式不是把闸
+    -- 搬进内核（内核算不出来），而是让**缺席本身**成为内核侧的硬失败：
+    -- 用 'defaultExecEnv' 执行一个 dedupe 计划会被拒绝，而不是静默跳过屏障。
   }
 
 defaultExecEnv :: ExecEnv
 defaultExecEnv =
-  ExecEnv {eeCheckpoint = \_ -> pure (), eeDoneSync = Buffered, eeExpectRootId = Nothing}
+  ExecEnv
+    { eeCheckpoint = \_ -> pure ()
+    , eeDoneSync = Buffered
+    , eeExpectRootId = Nothing
+    , eeBarrier = Nothing
+    }
 
 data ItemOutcome
   = ODone {oSha :: Maybe Text, oDstStat :: Maybe StatSnap, oTrashRel :: Maybe FilePath}
@@ -201,15 +218,24 @@ execPlan' env plan = do
         pf <- either (pure . Left) (const (requirePmTrusted root)) pf0
         case pf of
           Left e -> pure (Left (e <> "（执行期重检，整批拒绝）"))
-          Right () -> withJournal root $ \j -> do
-            (outs, restoredIxs) <- execItems env root j (plId plan) (plItems plan)
-            now <- getCurrentTime
-            jAppend j Barrier (JCleanShutdown now)
-            let final =
-                  [ if piIx it `elem` restoredIxs then (it, restoredMark) else (it, out)
-                  | (it, out) <- zip (plItems plan) outs
-                  ]
-            pure (Right final)
+          Right () -> do
+            -- 二十九轮 critical（对抗复核未能驳倒）：执行期组屏障此前跑在锁
+            -- **外**，锁内只复核 victim 自己的 sha。两个 pm 各跑同一计划的
+            -- --only 1 / --only 2，双方各自看见对方那份还活着 → 双双放行。
+            -- 判据与动盘必须是同一个跨进程事务，所以屏障落在这里：锁内、
+            -- 身份/I11/.pm 可信性复检之后、journal 与任何写入之前。
+            eb <- execBarrier env plan
+            case eb of
+              Left e -> pure (Left e)
+              Right planB -> withJournal root $ \j -> do
+                (outs, restoredIxs) <- execItems env root j (plId planB) (plItems planB)
+                now <- getCurrentTime
+                jAppend j Barrier (JCleanShutdown now)
+                let final =
+                      [ if piIx it `elem` restoredIxs then (it, restoredMark) else (it, out)
+                      | (it, out) <- zip (plItems planB) outs
+                      ]
+                pure (Right final)
   pure $ case r of
     Nothing -> Left "另一个 pm 实例正持有该 root 的锁（I10），稍后重试"
     Just x -> x
@@ -217,6 +243,52 @@ execPlan' env plan = do
   -- 复位成功后该 Quarantine 视同未生效：不能报 ODone，否则 catalog 回写
   -- 会删掉一个实际已回到原位的条目。
   restoredMark = OFailed "已隔离但组内后续项失败 → victim 已自动复位（组未生效）"
+
+-- | 锁内重算执行期组屏障。三种结局：
+--
+--   * 该种类不需要屏障 → 原样放行；
+--   * 需要而调用方没给 → **整批拒绝**（fail-closed，内核级）；
+--   * 需要且给了 → 跑它，并核对它只做了降级。
+--
+-- 为什么要核对返回值：屏障是命令层传进来的函数，内核对它一贯不信任
+-- （同 execPlan\' 锁内复检 root 身份的理由）。屏障若把某项**升级**回
+-- StPending，等于绕过用户的 skip 决定去动盘；若改写 Op，等于换了一批
+-- 要执行的动作。两者都不是「复验」，一律整批拒绝。
+execBarrier :: ExecEnv -> Plan -> IO (Either String Plan)
+execBarrier env plan
+  | not (kindNeedsBarrier (plKind plan)) = pure (Right plan)
+  | otherwise = case eeBarrier env of
+      Nothing ->
+        pure
+          ( Left
+              ( "计划种类 " <> T.unpack (plKind plan)
+                  <> " 需要执行期屏障，但调用方未提供（ExecEnv.eeBarrier = Nothing），整批拒绝"
+                  <> "——这道闸决定某内容是否还留得下最后一份活副本，内核不接受悄悄跳过"
+              )
+          )
+      Just f -> do
+        planB <- f plan
+        pure $ case barrierDrift plan planB of
+          Just why ->
+            Left
+              ( "执行期屏障返回的计划与原计划不符（" <> why
+                  <> "），整批拒绝——屏障只许把 pending 降级，不许改写计划"
+              )
+          Nothing -> Right planB
+
+-- | 屏障允许改的只有 'piStatus'，且只能从 'StPending' 往下降。
+barrierDrift :: Plan -> Plan -> Maybe String
+barrierDrift a b
+  | length ia /= length ib = Just "条目数变了"
+  | map piIx ia /= map piIx ib = Just "序号变了"
+  | map piGroup ia /= map piGroup ib = Just "组变了"
+  | map piOp ia /= map piOp ib = Just "Op 变了"
+  | or [piStatus y == StPending && piStatus x /= StPending | (x, y) <- zip ia ib] =
+      Just "有条目被升级回 pending"
+  | otherwise = Nothing
+ where
+  ia = plItems a
+  ib = plItems b
 
 -- | Walk items in order with group awareness. Returns per-item outcomes plus
 -- the ixs of quarantine items that were auto-restored.

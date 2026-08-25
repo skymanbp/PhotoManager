@@ -20,8 +20,14 @@ import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.List (isInfixOf)
+import Data.Maybe (fromJust, isJust)
+
 import Pm.Catalog (saveCatalog)
 import Pm.Cli (preExecFor)
+import Pm.Exec (ExecEnv (..), defaultExecEnv, execPlan)
+import Pm.Lock (withRootLock)
 import Pm.Commands (TrashCmd (..), runTrash)
 import Pm.Config (Config (..), writeRootInfo)
 import Pm.Dedupe
@@ -48,6 +54,10 @@ dedupeTests =
     , testCase "暂存区的同 sha 副本不算归档层幸存者" caseStagingIsNotSurvivor
     , testCase "preExecFor 表里有 dedupe 这一行（apply 与 --apply 共用同一张表）" casePreExecRow
     , testCase "trash empty：dedupe 记录归档层无活副本 → HELD 不删；有 → 清除" caseTrashEmptyBarrier
+    , testCase "屏障在 root 锁**内**跑（屏障里再取同一把锁必须失败）" caseBarrierRunsInsideLock
+    , testCase "内核 fail-closed：dedupe 计划没装屏障 → 整批拒绝，不是静默跳过" caseKernelRefusesMissingBarrier
+    , testCase "内核不信屏障：把条目升级回 pending → 整批拒绝" caseBarrierMayNotPromote
+    , testCase "trash empty 也在 I10 锁内：锁被占 → 退出，一个文件不删" caseTrashEmptyTakesLock
     ]
 
 -- ─── 纯核心 ────────────────────────────────────────────────────────────────
@@ -158,22 +168,26 @@ caseStagingIsNotSurvivor = withDup $ \root sha a _ -> do
 
 -- ─── 接线（两条路径共用一张表 / trash empty 的分流） ──────────────────────
 
--- | 'Pm.Cli.preExecFor' 是「哪种计划要执行期复验」的唯一一张表；@pm apply@
--- 与各命令 @--apply@ 的即时路径都从它取。这条用例钉住 @dedupe@ 那一行确实
--- 在表里——少了它，屏障写得再对也不会被调用。对照组 @sort@ 必须不受影响。
+-- | 屏障表有**两半**：'Pm.Plan.kindNeedsBarrier' 说哪些种类要屏障（内核据此
+-- fail-closed），'Pm.Cli.preExecFor' 说是哪一个。两半必须逐 kind 一致——
+-- 一边有一边没有，就是「内核以为有人管，其实没人管」或「内核整批拒绝一个
+-- 本来能跑的计划」。这条用例把两半钉在一起，并验 dedupe 那个屏障真的降级。
 casePreExecRow :: IO ()
 casePreExecRow = withDup $ \root sha a b -> do
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
   let cfg = Config root Nothing Nothing Nothing Nothing Nothing
-  -- 两份都批准 → dedupe 这一行生效，全部降级
+      kinds = ["dedupe", "clean-staging", "sort", "backup", "import", "names", "undo", "vault-push"]
+  -- 两半一致：kindNeedsBarrier k  ⟺  preExecFor 给得出屏障
+  [(k, kindNeedsBarrier k) | k <- kinds]
+    @?= [(k, isJust (preExecFor cfg k)) | k <- kinds]
+  -- 两份都批准 → dedupe 那个屏障生效，全部降级
   pd <- planOf [(a, sha), (b, sha)]
-  p1 <- preExecFor cfg "dedupe" pd {plRootPath = root}
+  p1 <- fromJust (preExecFor cfg "dedupe") pd {plRootPath = root}
   map statusTag (plItems p1) @?= ["DECIDE", "DECIDE"]
-  -- 同样的条目挂在别的种类上不该被这条屏障碰
-  p2 <- preExecFor cfg "sort" pd {plRootPath = root}
-  map statusTag (plItems p2) @?= ["PENDING", "PENDING"]
+  -- 对照：sort 在表外，两半都说"不需要"
+  isJust (preExecFor cfg "sort") @?= False
 
 -- | @pm trash empty@ 的永久删除前分流：reason 带 dedupe 前缀的记录要走
 -- 「归档层还留着一份活副本吗」这道屏障。归档层没有 → HELD，文件仍在；
@@ -200,6 +214,84 @@ caseTrashEmptyBarrier = withDup $ \root sha a b -> do
   c2 <- runTrash cfg (TrashEmpty True) root
   c2 @?= 0
   doesFileExist (trashDir root </> rel) >>= (@?= False)
+
+-- ─── 二十九轮 critical：判据与动盘必须是同一个跨进程事务 ───────────────────
+
+-- | 这条是修法的**直接**断言，不是间接证据：屏障函数运行期间再取一次同一个
+-- root 的锁必须失败（'withRootLock' 不可重入）。取得到 = 屏障跑在锁外，
+-- 也就回到了两个 pm 进程各自放行同一内容不同副本的那个窗口。
+caseBarrierRunsInsideLock :: IO ()
+caseBarrierRunsInsideLock = withDup $ \root sha a b -> do
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
+  saveCatalog root (dupCat sha a b)
+  plan <- (\p -> p {plRootPath = root}) <$> planOf [(a, sha)]
+  seen <- newIORef Nothing
+  let probe p = do
+        held <- withRootLock root (pure ())
+        writeIORef seen (Just held)
+        -- 全部降级，免得这条用例真去动盘
+        pure p {plItems = [it {piStatus = StNeedsDecision "test"} | it <- plItems p]}
+  _ <- execPlan defaultExecEnv {eeBarrier = Just probe} plan
+  m <- readIORef seen
+  -- Just Nothing = 屏障被调用了（外层 Just），且锁已被持有（内层 Nothing）
+  m @?= Just Nothing
+
+-- | 用 'defaultExecEnv' 执行一个 dedupe 计划——即库层调用者忘了装屏障。
+-- 内核必须整批拒绝：'Pm.Plan.kindNeedsBarrier' 说这种计划要屏障，缺席本身
+-- 就是硬失败。P3b-5/A3 的教训（承重闸不能只挂在可覆盖的钩子上）在这里的
+-- 落法不是把闸搬进内核（内核算不出「归档层还剩几份」），而是让缺席可见。
+caseKernelRefusesMissingBarrier :: IO ()
+caseKernelRefusesMissingBarrier = withDup $ \root sha a b -> do
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
+  saveCatalog root (dupCat sha a b)
+  plan <- (\p -> p {plRootPath = root}) <$> planOf [(a, sha)]
+  r <- execPlan defaultExecEnv plan
+  case r of
+    Right _ -> assertFailure "内核放行了一个没有装屏障的 dedupe 计划"
+    Left m -> assertBool ("应因缺屏障被拒，实为: " <> m) ("需要执行期屏障" `isInfixOf` m)
+  -- 一个字节都不该动
+  doesFileExist (root </> a) >>= (@?= True)
+  doesFileExist (root </> b) >>= (@?= True)
+
+-- | 屏障是命令层传进来的函数，内核对它一贯不信任。把用户已经 skip 的条目
+-- **升级**回 pending 等于绕过用户的决定去动盘——整批拒绝，不是只忽略那一项。
+caseBarrierMayNotPromote :: IO ()
+caseBarrierMayNotPromote = withDup $ \root sha a b -> do
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
+  saveCatalog root (dupCat sha a b)
+  p0 <- planOf [(a, sha)]
+  let plan =
+        p0
+          { plRootPath = root
+          , plItems = [it {piStatus = StSkippedByUser} | it <- plItems p0]
+          }
+      evil p = pure p {plItems = [it {piStatus = StPending} | it <- plItems p]}
+  r <- execPlan defaultExecEnv {eeBarrier = Just evil} plan
+  case r of
+    Right _ -> assertFailure "内核接受了一个把条目升级回 pending 的屏障"
+    Left m -> assertBool ("应因屏障改写计划被拒，实为: " <> m) ("升级回 pending" `isInfixOf` m)
+  doesFileExist (root </> a) >>= (@?= True)
+
+-- | 同根第二处：@pm trash empty@ 是 pm 全程唯一 unlink 用户数据的路径，
+-- 它的屏障判据与 removeFile 之间此前同样没有跨进程保护。锁被占时整条命令
+-- 退出（码 2），一个文件都不删——而不是"反正判定过了"照删。
+caseTrashEmptyTakesLock :: IO ()
+caseTrashEmptyTakesLock = withDup $ \root sha a b -> do
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+      rel = "p" </> "dup.arw"
+  createDirectoryIfMissing True (trashDir root </> "p")
+  writeFile (trashDir root </> rel) dupBody
+  appendManifest root (TrashRecord b rel (T.pack sha) "dedupe:同 sha 2 份之一" "p" now)
+  saveCatalog root (dupCat sha a b)
+  -- a 还在盘上，无锁时这一批本来会被永久删除（见 caseTrashEmptyBarrier 的后半段）
+  mc <- withRootLock root (runTrash cfg (TrashEmpty True) root)
+  mc @?= Just 2
+  doesFileExist (trashDir root </> rel) >>= (@?= True)
 
 -- ─── fixtures ──────────────────────────────────────────────────────────────
 

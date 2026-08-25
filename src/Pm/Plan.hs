@@ -15,6 +15,7 @@ module Pm.Plan
   , loadPlan
   , renderPlan
   , groupClosure
+  , kindNeedsBarrier
   ) where
 
 import Crypto.Random (getRandomBytes)
@@ -229,3 +230,21 @@ groupClosure p sel =
   let gs = Set.fromList [g | it <- plItems p, piIx it `elem` sel, Just g <- [piGroup it]]
       extra = [piIx it | it <- plItems p, Just g <- [piGroup it], g `Set.member` gs]
    in sort (nub (sel <> extra))
+
+-- | 哪些计划**种类**必须在执行期重算一道组屏障（而不只是逐项复核 sha）。
+--
+-- 这是该问题的**唯一一张表**，内核（'Pm.Exec.execPlan'）与命令层
+-- （'Pm.Cli.preExecFor'）读的是同一份：
+--
+--   * 命令层照它决定挂哪个屏障函数；
+--   * 内核照它决定「没挂屏障就整批拒绝」。
+--
+-- 二十九轮 critical（对抗复核未能驳倒）：屏障此前跑在 'Pm.Lock.withRootLock'
+-- **之外**，锁内只复核 victim 自己的 sha，从不重算「该 sha 在归档层还留一份」。
+-- 于是两个 pm 进程各跑 @pm apply <同一计划> --only 1@ 与 @--only 2@ ——
+-- 屏障的 victims 只取 StPending，而 --only 把未选中项改写成 StSkippedByUser，
+-- 双方各自看见对方那份还活着，双双放行，同一内容的**所有**副本一起进隔离区。
+-- 判据与动盘必须是同一个跨进程事务（与二十一轮 vault-holds 名单同一裁定：
+-- 「读 → 校验 → 写」整段进 I10 锁）。
+kindNeedsBarrier :: Text -> Bool
+kindNeedsBarrier k = k `elem` ["clean-staging", "dedupe"]

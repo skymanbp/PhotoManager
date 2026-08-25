@@ -12,6 +12,7 @@ module TestUtil
   , injectAt
   , runCrash
   , execOk
+  , execOkWith
   , doctorRows
   , journalEntries
   , isIntent
@@ -130,8 +131,14 @@ runCrash env plan = do
     Right _ -> assertFailure "expected injected crash to escape execPlan"
 
 execOk :: Plan -> IO [(PlanItem, ItemOutcome)]
-execOk plan = do
-  r <- execPlan defaultExecEnv plan
+execOk = execOkWith defaultExecEnv
+
+-- | 同上，但由调用方给 'ExecEnv'。需要它的是**要屏障的计划种类**
+-- （'Pm.Plan.kindNeedsBarrier'）：内核对缺席的屏障整批拒绝，所以考 Op 机制
+-- 而非考屏障的用例必须显式挂一个放行屏障 @Just pure@，写出来而不是默认得到。
+execOkWith :: ExecEnv -> Plan -> IO [(PlanItem, ItemOutcome)]
+execOkWith env plan = do
+  r <- execPlan env plan
   case r of
     Left e -> assertFailure ("lock busy unexpectedly: " <> e) >> pure []
     Right rs -> pure rs
