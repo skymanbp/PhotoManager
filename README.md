@@ -71,6 +71,7 @@ pm vault hold A.jpg …            # 决定「暂不同步」：只写主库 .pm
 pm vault unhold A.jpg …          # 撤销，文件回到 NEW
 pm names                         # Raw 事件夹统一 Scheme A 计划（B 类月份从成片还原；歧义不猜）
 pm versions                      # 版本组 / 非设计内精确重复报告（只读）
+pm dedupe                        # 精确重复 → 逐份可裁决的隔离计划（全部待裁决；留哪份不替你选）
 
 pm apply <planId>                # 执行计划（--dry 全量预览 / --only 1,3-5 部分执行）
 pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先隔离）
@@ -345,6 +346,18 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   "sha 在库里出现过"（后者会把合法属于第二个事件的照片静默丢掉）；侧车跟随
   主文件（否则清卡后调色参数永久丢失）；源 hash 前后双 stat + 逐文件 try，
   读取失败整批拒绝。此后连过两轮 codex 门禁：第 25 轮 6 条、第 26 轮 7 条，逐条第一方核实（第 26 轮有一条部分证伪），按根因各改一处。第 26 轮最重的一条不是新缺陷而是**跨模块的类**——校验性读取未限域，同样写法早已在 `pm clean staging` 的永久删除屏障里出厂，已收成一个 helper 两处共用。连过三轮 codex 门禁（25 轮 6 条、26 轮 7 条、27 轮 5 条），逐条第一方核实，其中两条部分证伪、三条是我方结论或期望有误并已公开更正。三十二道闸各自突变转红（纯核心 8 + IO 层 5 + 25 轮 7 + 26 轮 7 + 27 轮 5）。经过见 REVIEW-LOG。
+- P5-B ✅ `pm dedupe`（262 例，GHC 警告 0）：把 `pm versions` 报出来的非设计内
+  精确重复变成**逐份可裁决**的隔离计划。候选组直接取自 `versionsReport`——不另
+  写一套判据，否则「看到的报告」与「能操作的计划」迟早对不上。每一份都是
+  `NEEDS-DECISION`：留哪一份取决于事件夹归属、命名偏好、是否被外部引用，pm 判
+  不出就不猜（I1）；用 `pm resolve --item N --unskip` 逐份批准。**不**绑复合组
+  （那是「不可拆分」的意思，与逐份裁决相反），组的完整性改由**执行期屏障**保证：
+  每次执行前确认该内容在归档层至少还留一份**活**副本，否则整批降级回待裁决。
+  幸存者名单 case-fold 比对，读不出来（占用／ACL／hardlink）一律不算「还在」。
+  同一道屏障在 `pm trash empty` 永久删除前再走一次。顺带把两处一直各写一遍的
+  东西收成一处：执行期钩子表 `preExecFor`（`pm apply` 与 `--apply` 共用）、
+  「至少一份副本还活着」的循环 `anyCopyAlive`（clean 的三副本屏障与本屏障共用）。
+  九道新闸各自突变转红。
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License

@@ -25,7 +25,7 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import System.FilePath (splitDirectories)
 
-import Pm.Hash (ContentProbe (..), probeConfined)
+import Pm.Hash (anyCopyAlive)
 import Pm.Import (stagingTop)
 import Pm.Op
 import Pm.Plan (ItemStatus (..), PlanItem (..))
@@ -106,23 +106,15 @@ verifyCandidates mainRoot backupRoot = foldM step ([], [])
       (False, _) -> (ok, held <> [(enPath (ccStaging c), "HELD(归档副本内容核对不过 → 先 pm scan)")])
       (_, False) -> (ok, held <> [(enPath (ccStaging c), "HELD(备份副本内容核对不过 → 先 pm backup)")])
 
--- | 至少一个见证条目在盘上重读出期望 sha 才算副本仍然存在。
+-- | 至少一个见证**条目**在盘上重读出期望 sha 才算副本仍然存在。
 --
--- 读取走 'probeConfined'——**逐级限域后再打开**，而不是 @root' \</\> enPath e@
--- 直接开。这条判定的下游是**永久删除**（@pm trash empty@ 的最终屏障
--- 'threeCopiesStillExist' 用的就是它）：库内任何一层是 junction 时，被"验证"
--- 的其实是**库外**的文件，于是"副本还在"这个结论成立、隔离件被真删。本项目
--- 已经为这条反模式开过三轮评审，这里是最后一处遗漏（codex 二十六轮 #1，与
--- 'Pm.Sort.verifySkips' 同一根因，共用同一个 helper）。
+-- 本函数只负责「从 catalog 条目取相对路径」；判定本体在 'anyCopyAlive'
+-- （逐级限域 → 只打开一次 → 句柄上查 link count → 同句柄读完）。它的下游是
+-- **永久删除**（@pm trash empty@ 的最终屏障 'threeCopiesStillExist'），而
+-- @pm dedupe@ 的「至少留一份」屏障问的是同一件事——两处共用同一个实现，免得
+-- 再分叉出一个忘了限域的副本（codex 二十六轮 #1 / 二十七轮 #1 都是这条）。
 anyWitnessAlive :: FilePath -> Text -> [Entry] -> IO Bool
-anyWitnessAlive root' sha = go
- where
-  go [] = pure False
-  go (e : rest) = do
-    p <- probeConfined root' (enPath e)
-    case p of
-      CpSha actual | actual == sha -> pure True
-      _ -> go rest
+anyWitnessAlive root' sha = anyCopyAlive root' sha . map enPath
 
 -- | @pm trash empty@ 对 clean-staging 隔离记录的最终屏障（评审 cx-3）：
 -- 永久删除前按**当前** catalog + 真实重 hash 重新确认「归档层 + 备份盘」

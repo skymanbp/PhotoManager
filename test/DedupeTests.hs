@@ -1,0 +1,231 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+-- | @pm dedupe@（P5-B）：来源与 @pm versions@ 同一份报告、每条都待裁决、
+-- 以及**执行期屏障**——批准隔离的条目不得把某个内容在归档层的最后一份活副本
+-- 也隔离掉。
+--
+-- 屏障的用例都用**真实文件**：它问的不是"catalog 里还有没有另一条记录"，而是
+-- "盘上还读不读得出那些字节"。断言 'PlanItem' 的字段等于换个说法把 catalog
+-- 又信了一遍，钉不住这件事。
+module DedupeTests (dedupeTests) where
+
+import Control.Monad (forM_)
+import qualified Data.Set as Set
+import qualified Data.Text as T
+import Data.Time (getCurrentTime)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
+import System.Process (readCreateProcess, shell)
+import Test.Tasty
+import Test.Tasty.HUnit
+
+import Pm.Catalog (saveCatalog)
+import Pm.Cli (preExecFor)
+import Pm.Commands (TrashCmd (..), runTrash)
+import Pm.Config (Config (..), writeRootInfo)
+import Pm.Dedupe
+import Pm.Hash (sha256File)
+import Pm.Op
+import Pm.Plan
+import Pm.Trash (TrashRecord (..), appendManifest, trashDir)
+import Pm.Types
+
+import TestUtil (mkCat, t0)
+
+dedupeTests :: TestTree
+dedupeTests =
+  testGroup
+    "P5-B pm dedupe（来源同 versions · 全待裁决 · 执行期「至少留一份」屏障）"
+    [ testCase "设计内冗余不进 dedupe，同层两份进" caseGroupsSource
+    , testCase "每一份都是独立可裁决条目：全 NEEDS-DECISION、不绑复合组" caseAllNeedsDecision
+    , testCase "隔离 reason 带 dedupe 前缀（trash empty 据此分流到本类屏障）" caseReasonPrefix
+    , testCase "批准 N-1 份 → 放行；批准全部 N 份 → 全部降级待裁决" caseBarrierKeepsOne
+    , testCase "幸存者 catalog 有、盘上没有 → 降级（catalog 是快照不是证据）" caseBarrierSurvivorMissing
+    , testCase "幸存者是 hardlink（同一对象两个名字）→ 降级，不算独立副本" caseBarrierSurvivorHardlink
+    , testCase "受害者名单 case-fold：只差大小写仍算同一份，屏障照样拦" caseBarrierCaseFold
+    , testCase "暂存区的同 sha 副本不算归档层幸存者" caseStagingIsNotSurvivor
+    , testCase "preExecFor 表里有 dedupe 这一行（apply 与 --apply 共用同一张表）" casePreExecRow
+    , testCase "trash empty：dedupe 记录归档层无活副本 → HELD 不删；有 → 清除" caseTrashEmptyBarrier
+    ]
+
+-- ─── 纯核心 ────────────────────────────────────────────────────────────────
+
+-- | 来源就是 'Pm.Versions.versionsReport'：成片↔相册同名是**设计内**拓扑，
+-- 不进 dedupe；同一层里的两份才是真重复。这条用例保证 dedupe 不会另起一套
+-- 判据——两处判据分叉，用户看到的报告与能操作的计划就对不上了。
+caseGroupsSource :: IO ()
+caseGroupsSource = do
+  let designed = mkCat [ent ("成片" </> "a.jpg") "s1", ent ("相册" </> "a.jpg") "s1"]
+      real2 =
+        mkCat
+          [ ent ("Raw" </> "2025" </> "25-01-X-Raw" </> "a.arw") "s2"
+          , ent ("Raw" </> "2025" </> "25-02-Y-Raw" </> "a.arw") "s2"
+          ]
+  map dgSha (dedupeGroups designed) @?= []
+  map dgSha (dedupeGroups real2) @?= ["s2"]
+  map (length . dgPaths) (dedupeGroups real2) @?= [2]
+
+caseAllNeedsDecision :: IO ()
+caseAllNeedsDecision = do
+  let gs = [DupGroup "s" ["Raw" </> "a", "成片" </> "b", "相册" </> "c"]]
+      items = dedupePlanItems gs
+  length items @?= 3
+  map piIx items @?= [0, 1, 2]
+  -- 不绑复合组：复合组会让 resolve 的选择扩到全组，而这里要求逐份裁决。
+  map piGroup items @?= [Nothing, Nothing, Nothing]
+  assertBool "全部应为 NEEDS-DECISION" (all (isDecide . piStatus) items)
+ where
+  isDecide (StNeedsDecision _) = True
+  isDecide _ = False
+
+caseReasonPrefix :: IO ()
+caseReasonPrefix = do
+  let items = dedupePlanItems [DupGroup "s" ["Raw" </> "a", "成片" </> "b"]]
+  forM_ items $ \it -> case piOp it of
+    OpQuarantine _ _ r ->
+      assertBool
+        ("reason 必须以 " <> T.unpack dedupeReasonPrefix <> " 开头，实为 " <> T.unpack r)
+        (dedupeReasonPrefix `T.isPrefixOf` r)
+    other -> assertFailure ("dedupe 只出 quarantine，实为 " <> describeOp other)
+
+-- ─── 执行期屏障（真实文件） ────────────────────────────────────────────────
+
+-- | 两份同字节：批准其中一份 → 那一份保持 PENDING；两份都批准 → 两份都降级。
+caseBarrierKeepsOne :: IO ()
+caseBarrierKeepsOne = withDup $ \root sha a b -> do
+  p1 <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha)]
+  map statusTag (plItems p1) @?= ["PENDING"]
+  p2 <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha), (b, sha)]
+  map statusTag (plItems p2) @?= ["DECIDE", "DECIDE"]
+
+-- | catalog 声称第二份还在，盘上已经没有 → 不能放行。这正是"生成计划与执行
+-- 之间的世界会变"：另一份可能已被别的计划移走。
+caseBarrierSurvivorMissing :: IO ()
+caseBarrierSurvivorMissing = withDup $ \root sha a b -> do
+  removeFile (root </> b)
+  p <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha)]
+  map statusTag (plItems p) @?= ["DECIDE"]
+
+-- | 幸存者是 hardlink：'Pm.Win.openStateRead' 在句柄上查 link count 后拒绝，
+-- 于是"读不到" → 屏障拦下。方向是对的——同一个对象出现在两个名字下不是两份
+-- 独立副本，把它当第二份就等于批准删掉唯一的那份。
+caseBarrierSurvivorHardlink :: IO ()
+caseBarrierSurvivorHardlink = withDup $ \root sha a b -> do
+  removeFile (root </> b)
+  _ <- readCreateProcess (shell ("mklink /H \"" <> (root </> b) <> "\" \"" <> (root </> a) <> "\"")) ""
+  p <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha)]
+  map statusTag (plItems p) @?= ["DECIDE"]
+
+-- | 受害者名单只差大小写：仍要算成同一份，否则 b 会被当成"另一份幸存者"，
+-- 屏障放行，两份一起进 trash。
+caseBarrierCaseFold :: IO ()
+caseBarrierCaseFold = withDup $ \root sha a b -> do
+  let bUp = map upper b
+      upper c = if c >= 'a' && c <= 'z' then toEnum (fromEnum c - 32) else c
+  p <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha), (bUp, sha)]
+  map statusTag (plItems p) @?= ["DECIDE", "DECIDE"]
+
+-- | 暂存区不是归档层：To-Be-Sync'd 里的同 sha 副本不能充当"还留着一份"。
+caseStagingIsNotSurvivor :: IO ()
+caseStagingIsNotSurvivor = withDup $ \root sha a _ -> do
+  let stg = "To-Be-Sync'd" </> "Raw" </> "26-01-Z" </> "dup.arw"
+  createDirectoryIfMissing True (root </> "To-Be-Sync'd" </> "Raw" </> "26-01-Z")
+  writeFile (root </> stg) dupBody
+  let cat = mkCat [ent a sha, ent stg sha]
+  archiveLayerRel stg @?= False
+  survivingArchiveCopies cat Set.empty (T.pack sha) @?= [a]
+  p <- recheckDedupeItems root cat =<< planOf [(a, sha)]
+  map statusTag (plItems p) @?= ["DECIDE"]
+
+-- ─── 接线（两条路径共用一张表 / trash empty 的分流） ──────────────────────
+
+-- | 'Pm.Cli.preExecFor' 是「哪种计划要执行期复验」的唯一一张表；@pm apply@
+-- 与各命令 @--apply@ 的即时路径都从它取。这条用例钉住 @dedupe@ 那一行确实
+-- 在表里——少了它，屏障写得再对也不会被调用。对照组 @sort@ 必须不受影响。
+casePreExecRow :: IO ()
+casePreExecRow = withDup $ \root sha a b -> do
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  saveCatalog root (dupCat sha a b)
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+  -- 两份都批准 → dedupe 这一行生效，全部降级
+  pd <- planOf [(a, sha), (b, sha)]
+  p1 <- preExecFor cfg "dedupe" pd {plRootPath = root}
+  map statusTag (plItems p1) @?= ["DECIDE", "DECIDE"]
+  -- 同样的条目挂在别的种类上不该被这条屏障碰
+  p2 <- preExecFor cfg "sort" pd {plRootPath = root}
+  map statusTag (plItems p2) @?= ["PENDING", "PENDING"]
+
+-- | @pm trash empty@ 的永久删除前分流：reason 带 dedupe 前缀的记录要走
+-- 「归档层还留着一份活副本吗」这道屏障。归档层没有 → HELD，文件仍在；
+-- 有 → 才允许永久删除。
+caseTrashEmptyBarrier :: IO ()
+caseTrashEmptyBarrier = withDup $ \root sha a b -> do
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+      rel = "p" </> "dup.arw"
+  createDirectoryIfMissing True (trashDir root </> "p")
+  writeFile (trashDir root </> rel) dupBody
+  appendManifest root (TrashRecord b rel (T.pack sha) "dedupe:同 sha 2 份之一" "p" now)
+  -- b 已被隔离（不在原位），a 也不在了 → 归档层无活副本 → HELD。
+  -- catalog 仍然**声称**两条都在：屏障必须真去读盘，不能信快照。
+  removeFile (root </> a)
+  removeFile (root </> b)
+  saveCatalog root (dupCat sha a b)
+  c1 <- runTrash cfg (TrashEmpty True) root
+  c1 @?= 1
+  doesFileExist (trashDir root </> rel) >>= (@?= True)
+  -- a 回来 → 屏障放行，永久删除
+  writeFile (root </> a) dupBody
+  c2 <- runTrash cfg (TrashEmpty True) root
+  c2 @?= 0
+  doesFileExist (trashDir root </> rel) >>= (@?= False)
+
+-- ─── fixtures ──────────────────────────────────────────────────────────────
+
+dupBody :: String
+dupBody = "same-bytes-in-two-places"
+
+-- | 真实 root：@Raw\/2025\/25-01-X-Raw\/dup.arw@ 与 @成片\/2025\/dup.jpg@
+-- 同字节。回调收到 (root, sha, relA, relB)。
+withDup :: (FilePath -> String -> FilePath -> FilePath -> IO ()) -> IO ()
+withDup k = withSystemTempDirectory "pm-dedupe" $ \root -> do
+  let a = "Raw" </> "2025" </> "25-01-X-Raw" </> "dup.arw"
+      b = "成片" </> "2025" </> "dup.jpg"
+  forM_ [a, b] $ \rel -> do
+    createDirectoryIfMissing True (root </> takeDir rel)
+    writeFile (root </> rel) dupBody
+  sha <- T.unpack <$> sha256File (root </> a)
+  k root sha a b
+ where
+  takeDir = reverse . drop 1 . dropWhile (/= '\\') . reverse
+
+dupCat :: String -> FilePath -> FilePath -> Catalog
+dupCat sha a b = mkCat [ent a sha, ent b sha]
+
+ent :: FilePath -> String -> Entry
+ent p sha = Entry p (fromIntegral (length dupBody)) 0 (T.pack sha) KindPhoto Nothing
+
+-- | 只含 quarantine 的待执行计划（模拟用户已 @resolve --unskip@ 批准的那些）。
+planOf :: [(FilePath, String)] -> IO Plan
+planOf vs =
+  pure
+    Plan
+      { plId = "20260101-000000-abcdef"
+      , plKind = "dedupe"
+      , plRootPath = "."
+      , plRootId = Just "r"
+      , plCreated = t0
+      , plItems =
+          [ PlanItem ix (OpQuarantine v (T.pack sha) "dedupe:test") StPending Nothing
+          | (ix, (v, sha)) <- zip [0 ..] vs
+          ]
+      }
+
+statusTag :: PlanItem -> String
+statusTag it = case piStatus it of
+  StPending -> "PENDING"
+  StSkippedByUser -> "SKIPPED"
+  StNeedsDecision _ -> "DECIDE"

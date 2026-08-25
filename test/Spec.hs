@@ -12,6 +12,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import SortTests (sortTests)
 import Test.Tasty
 
+import DedupeTests (dedupeTests)
 import GuardTests (guardTests)
 import KernelTests (kernelTests)
 import NamesTests (namesTests)
@@ -32,4 +33,4 @@ main = do
   withSystemTempDirectory "pm-test-cfg" $ \d -> do
     setEnv "PM_CONFIG" (d </> "config.toml")
     defaultMain
-      (testGroup "pm" [kernelTests, plannerTests, vaultTests, namesTests, guardTests, pathGuardTests, stateGuardTests, serveTests, sortTests])
+      (testGroup "pm" [kernelTests, plannerTests, vaultTests, namesTests, guardTests, pathGuardTests, stateGuardTests, serveTests, sortTests, dedupeTests])

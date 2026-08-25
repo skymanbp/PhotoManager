@@ -151,6 +151,30 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   `normalizeStem` 比对，否则 `_DSC2227~2.JPG` 会从 `_DSC2227.ARW` 溜过去；**同层两份
   不算设计内**。更正后真实库 → 112 版本组 + **8** 组真重复（7 连号跨夹 + 1 根↔子目录）。
 
+### 8.1 `pm dedupe` — 精确重复的逐份裁决（P5-B）
+
+- **来源不另起一套**：候选组就是 `pm versions` 的 `vgExactDups`（同一个
+  `versionsReport`）。设计内三判据已在那里排除，dedupe 不重抄——同一份知识
+  出现两处就迟早分叉，用户看到的报告与能操作的计划就会对不上。
+- **每一份一个条目，全部 `NEEDS-DECISION`**。留哪一份取决于事件夹归属、命名
+  偏好、是否被外部引用——pm 判不出，就不替用户选（I1）。批准方式与既有裁决
+  路径一致：`pm resolve <id> --item N --unskip`，`pm apply` 只执行被批准的。
+- **不绑复合组**。`piGroup` 的语义是「不可拆分」（supersede 的 Quarantine+Copy
+  配对），而这里恰恰要求逐份裁决：三份留一份 = 只批准其中两条。
+- **组的完整性改由执行期屏障保证**：`recheckDedupeItems` 在**每次**执行前确认
+  该 sha 至少还留一份归档层副本**活在盘上**；不成立就把这些条目降级回
+  `NEEDS-DECISION`。理由与 clean-staging 的三副本复验（评审 cx-3）相同——
+  **catalog 是快照，不是证据**，生成与执行之间的世界会变。
+  - 幸存者名单按 case-fold 比对：只差大小写的两条路径在 Windows 上是同一个
+    文件。方向刻意——算错成"受害者"只多拒一次，算错成"幸存者"会放行最后一份。
+  - 读不出来（占用／ACL／介质错误／**hardlink**）一律不算"还在"。hardlink 被
+    `openStateRead` 的 link count 判定拒掉，这是对的：同一个对象出现在两个
+    名字下不是两份独立副本。
+- **两条执行路径共用一张表**。`pm apply` 与各命令 `--apply` 的即时路径都从
+  `Pm.Cli.preExecFor` 取执行期钩子；此前"clean 计划要重验三副本"写在两处，
+  P2.2 封堵的正是其中一条漏掉复验的旁路。
+- `pm trash empty` 的永久删除前屏障同步一般化：见 DESIGN §5 该行。
+
 ## 9. 备份同步（`pm backup`）
 
 - 备份 root 识别：`getLogicalDrives` 枚举 + `SetErrorMode(SEM_FAILCRITICALERRORS)`

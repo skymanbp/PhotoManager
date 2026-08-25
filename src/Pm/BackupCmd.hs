@@ -205,6 +205,7 @@ runBackupRun' go mworkers cfg = do
               now <- getCurrentTime
               code <-
                 savePlanAndMaybeRun
+                  cfg
                   go
                   Plan
                     { plId = pid

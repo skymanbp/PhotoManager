@@ -14,6 +14,7 @@ module Pm.Hash
   , statHitStable
   , ContentProbe (..)
   , probeConfined
+  , anyCopyAlive
   ) where
 
 import Control.Exception (IOException, bracket, try)
@@ -84,6 +85,26 @@ probeConfined root rel = do
         Left e
           | isDoesNotExistError e -> CpMissing
           | otherwise -> CpUnreadable (show e)
+
+-- | 「这批库内相对路径里，至少有一条现在真的读得出期望的 sha」。
+--
+-- 判定本身很短，却是 pm 里**两处永久性决定**的共同依据：@pm clean staging@
+-- 的三副本屏障（下游是 @pm trash empty@ 的唯一 unlink）与 @pm dedupe@ 的
+-- 「至少留一份」屏障。两处各写一遍循环，就会有一处忘了走 'probeConfined'——
+-- 本项目已经为这条反模式开过三轮评审（二十六轮 #1、二十七轮 #1），所以连
+-- **循环**也收在这里，而不是只共用 'probeConfined'。
+--
+-- fail-closed：只有 'CpSha' 且**等于**期望值才算数。缺席、逃出 root、读不到
+-- （占用\/ACL\/介质错误）一律不算——"读不到"绝不能被当成"还在"。
+anyCopyAlive :: FilePath -> Text -> [FilePath] -> IO Bool
+anyCopyAlive root sha = go
+ where
+  go [] = pure False
+  go (rel : rest) = do
+    p <- probeConfined root rel
+    case p of
+      CpSha actual | actual == sha -> pure True
+      _ -> go rest
 
 sha256File :: FilePath -> IO Text
 sha256File fp = withBinaryFile fp ReadMode sha256Handle

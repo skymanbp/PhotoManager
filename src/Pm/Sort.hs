@@ -563,7 +563,7 @@ runSortPlan go src placeOrEvent from to cfg = do
             Left why -> putStrLn ("✗ " <> why) >> reportChosen pick >> pure 2
             Right ev ->
               withFreshStagingCatalog root $
-                buildPlan go root info ev (map fst taken <> spSidecars pick)
+                buildPlan cfg go info ev (map fst taken <> spSidecars pick)
 
 -- | 决定事件夹名：@--place@ 自动补 @YY-MM@（取该段起始日），@--event@ 直接用。
 -- 两条最后都要过 'canonRawEvent'——那是 import 认这个目录的同一把尺子，
@@ -583,8 +583,11 @@ resolveEvent d poe = do
     Nothing -> Left ("事件夹名不符合 Scheme A（YY-MM-地点）: " <> name)
     Just _ -> Right name
 
-buildPlan :: GoOpts -> FilePath -> RootInfo -> String -> [FilePath] -> Catalog -> IO Int
-buildPlan go root info ev picked cat = do
+-- root 不再单独传：它恒等于 @cfgMainPath cfg@，两个参数表达同一件事时，
+-- 迟早会有一处传错。计划的执行期复验钩子也要 Config（'Pm.Cli.preExecFor'）。
+buildPlan :: Config -> GoOpts -> RootInfo -> String -> [FilePath] -> Catalog -> IO Int
+buildPlan cfg go info ev picked cat = do
+  let root = cfgMainPath cfg
   snaps <- forM picked $ \p -> (,) p <$> snapshotSrc p
   case [(p, why) | (p, Left why) <- snaps] of
     -- 少搬一个文件比搬错更难发现：能读的那些照样出计划，等于把"这批没全到"
@@ -599,7 +602,7 @@ buildPlan go root info ev picked cat = do
       let changed = length [() | (a, b) <- zip judged0 judged, jVerdict a /= jVerdict b]
       unless (changed == 0) $
         printf "⚠ 索引已过期：%d 项按目标位置的**实际内容**重新判定\n" changed
-      emit go root info judged
+      emit cfg go info judged
 
 -- | 一个源文件的完整判定行。
 data Judged = Judged
@@ -676,8 +679,9 @@ verifySkips root = mapM check
         -- 归档层同名异容是 import 的返修裁决管的事，照常拷进暂存区。
         | otherwise -> j {jVerdict = VCopy}
 
-emit :: GoOpts -> FilePath -> RootInfo -> [Judged] -> IO Int
-emit go root info judged = do
+emit :: Config -> GoOpts -> RootInfo -> [Judged] -> IO Int
+emit cfg go info judged = do
+  let root = cfgMainPath cfg
   printf
     "归位：待拷 %d · 已在目标位置 %d · 已归档 %d · 待裁决 %d\n"
     (tally (== VCopy))
@@ -694,6 +698,7 @@ emit go root info judged = do
       pid <- newPlanId
       now <- getCurrentTime
       savePlanAndMaybeRun
+        cfg
         go
         Plan
           { plId = pid

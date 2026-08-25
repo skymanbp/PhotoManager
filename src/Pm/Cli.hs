@@ -12,8 +12,10 @@ module Pm.Cli
   , savePlanAndMaybeRun
   , savePlanAndMaybeRunWith
   , bindExecRoot
+  , preExecFor
   , recheckCleanPlan
   , recheckCleanItems
+  , recheckDedupePlan
   , applyOnlyToPlan
   , parseOnly
   , stagingFresh
@@ -39,6 +41,7 @@ import Pm.Backup
 import Pm.Catalog (loadCatalog, saveCatalog)
 import Pm.Clean (threeCopiesStillExist)
 import Pm.Config (Config (..), readRootInfo, requireMain, requireWritable)
+import Pm.Dedupe (recheckDedupeItems)
 import Pm.Diff (BackupDiff (..))
 import Pm.Exec (ExecEnv (..), ItemOutcome (..), defaultExecEnv, execPlan, outcomeLabel, updateCatalog)
 import Pm.Import (stagingTop)
@@ -116,8 +119,24 @@ executePlanNow' plan = do
   isBad (OFailed _) = True
   isBad _ = False
 
-savePlanAndMaybeRun :: GoOpts -> Plan -> IO Int
-savePlanAndMaybeRun = savePlanAndMaybeRunWith pure
+-- | 计划种类 → **执行期复验钩子**的唯一一张表。
+--
+-- 此前「clean 计划要重验三副本」这件事写在两处：'Pm.Commands.runApply' 里按
+-- @plKind@ 分支一次，@runClean@ 把 'recheckCleanPlan' 传给
+-- 'savePlanAndMaybeRunWith' 又一次。P2.2 封堵的正是其中一条路径漏掉复验的
+-- 旁路——两处写同一件事，迟早会有一处忘记跟上。现在加一种需要执行期屏障的
+-- 计划 = 在这张表里加一行，两条路径同时生效。
+preExecFor :: Config -> T.Text -> (Plan -> IO Plan)
+preExecFor cfg kind
+  | kind == "clean-staging" = recheckCleanPlan cfg
+  | kind == "dedupe" = recheckDedupePlan cfg
+  | otherwise = pure
+
+-- | 存盘 → 展示 → 确认 → （按种类复验）→ 执行。'preExecFor' 在这里自动生效，
+-- 调用方不必也不能选择跳过它。
+savePlanAndMaybeRun :: Config -> GoOpts -> Plan -> IO Int
+savePlanAndMaybeRun cfg go plan =
+  savePlanAndMaybeRunWith (preExecFor cfg (plKind plan)) go plan
 
 -- | 同上，但确认后、执行前先过 @preExec@ 钩子（P2.2：`pm clean staging
 -- --apply` 的即时路径也要走执行期三副本重验，复审 cx-3 旁路封堵）。
@@ -195,14 +214,14 @@ recheckCleanPlan cfg plan = do
   (mMain, _) <- loadCatalog mroot
   er <- discoverBackupRoot cfg
   case (emain, mMain, er) of
-    (Left m, _, _) -> demoteAllClean plan ("主库身份不符: " <> m)
+    (Left m, _, _) -> demoteAllPending "复验三副本" plan ("主库身份不符: " <> m)
     (_, Just mainCat, Right broot) -> do
       (mBak, _) <- loadCatalog broot
       case mBak of
-        Nothing -> demoteAllClean plan "备份盘无索引 → 先 pm backup"
+        Nothing -> demoteAllPending "复验三副本" plan "备份盘无索引 → 先 pm backup"
         Just bakCat -> recheckCleanItems mroot mainCat broot bakCat plan
-    (_, Nothing, _) -> demoteAllClean plan "主库无索引"
-    (_, _, Left msg) -> demoteAllClean plan ("备份盘不在线: " <> msg)
+    (_, Nothing, _) -> demoteAllPending "复验三副本" plan "主库无索引"
+    (_, _, Left msg) -> demoteAllPending "复验三副本" plan ("备份盘不在线: " <> msg)
 
 -- | 可测核心：给定已解析的两侧 root+catalog，逐项重验并降级。
 recheckCleanItems :: FilePath -> Catalog -> FilePath -> Catalog -> Plan -> IO Plan
@@ -218,18 +237,38 @@ recheckCleanItems mroot mainCat broot bakCat plan = do
     _ -> pure it
   pure plan {plItems = items'}
 
-demoteAllClean :: Plan -> String -> IO Plan
-demoteAllClean plan why = do
-  putStrLn ("⚠ 无法复验三副本（" <> why <> "），全部待执行项暂停")
+-- | 复验**条件本身**不可得（主库身份不符、无索引、备份盘不在线…）时，把全部
+-- 待执行项降级 NEEDS-DECISION。fail-closed：拿不到证据就不执行，而不是按生成
+-- 时的判断继续。clean 与 dedupe 共用——两者对"证据取不到"的处置必须一致。
+demoteAllPending :: String -> Plan -> String -> IO Plan
+demoteAllPending what plan why = do
+  putStrLn ("⚠ 无法" <> what <> "（" <> why <> "），全部待执行项暂停")
   pure
     plan
       { plItems =
           [ if piStatus it == StPending
-              then it {piStatus = StNeedsDecision (T.pack ("执行期无法复验三副本: " <> why))}
+              then it {piStatus = StNeedsDecision (T.pack ("执行期无法" <> what <> ": " <> why))}
               else it
           | it <- plItems plan
           ]
       }
+
+-- | @dedupe@ 计划的执行期屏障（'Pm.Dedupe.recheckDedupeItems'）：批准隔离的
+-- 条目不得把某个 sha 在归档层的**最后一份活副本**也隔离掉。
+--
+-- 主库身份先验、**再**读 catalog（P3b-8 复审 B1 的次序纪律：任何主库侧读取
+-- 都在身份闸之后）。与 clean 不同，这里不需要备份盘——dedupe 的保证是"归档层
+-- 还留着一份"，与第三副本无关，所以一块没插的盘不该拖住它。
+recheckDedupePlan :: Config -> Plan -> IO Plan
+recheckDedupePlan cfg plan = do
+  emain <- requireMain cfg
+  case emain of
+    Left m -> demoteAllPending "复验归档层余量" plan ("主库身份不符: " <> m)
+    Right _ -> do
+      (mcat, _) <- loadCatalog (cfgMainPath cfg)
+      case mcat of
+        Nothing -> demoteAllPending "复验归档层余量" plan "主库无索引"
+        Just cat -> recheckDedupeItems (cfgMainPath cfg) cat plan
 
 -- | --only 选择展开为复合组闭包（评审 cx-2：supersede 配对不可拆）。
 -- Left = 语法错误；Right (plan', 因组闭包追加的序号)。
