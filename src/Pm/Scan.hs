@@ -8,6 +8,8 @@ module Pm.Scan
   , StatEntry (..)
   , scanRoot
   , listTree
+  , listTreeWith
+  , DotDirs (..)
   , freshnessSweep
   , maxPathLen
   ) where
@@ -15,6 +17,7 @@ module Pm.Scan
 import Control.Concurrent.Async (replicateConcurrently_)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM)
+import Data.Char (toLower)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -51,37 +54,79 @@ data ScanResult = ScanResult
   , srErrors :: [(FilePath, String)]
   }
 
--- | Relative paths of all regular files under root. Dot-directories (.pm,
--- .obsidian, .git …) and symlinks/reparse points are skipped; over-long paths
--- are reported as errors, not silently dropped.
+-- | 遍历时对**点开头的目录**的策略。
+--
+-- 这不是一个可以有默认值的细节，两种用法要的语义相反：
+--
+--  * 'SkipDotDirs' —— 库根。@.pm@ @.git@ @.obsidian@ 是元数据，不是照片，跳过
+--    是对的，而且**不必报告**（每次扫描都报一遍纯属噪音）。
+--  * 'WalkDotDirs' —— @pm sort@ 的源。那是**用户随手指的一个目录**（相机卡、
+--    下载文件夹），里面点开头的目录只是普通文件夹，完全可能装着照片。
+--
+-- 把库根的策略原样搬到源目录上，结果是 @card\\.hidden\\a.ARW@ 连一条记录都不
+-- 留地消失——既不进计划，也不进任何一格「交代」（codex 二十六轮 #3）。
+data DotDirs = SkipDotDirs | WalkDotDirs
+  deriving (Show, Eq)
+
+-- | Relative paths of all regular files under root, with the library-root
+-- policy ('SkipDotDirs'). Symlinks/reparse points are skipped and over-long
+-- paths are reported as errors, not silently dropped.
 listTree :: FilePath -> IO ([FilePath], [(FilePath, String)])
-listTree root = go ""
+listTree = listTreeWith SkipDotDirs
+
+listTreeWith :: DotDirs -> FilePath -> IO ([FilePath], [(FilePath, String)])
+listTreeWith dots root = go ""
  where
   go rel = do
     let dirAbs = if null rel then root else root </> rel
-    names <- listDirectory dirAbs
-    results <- forM names $ \name -> do
-      let relPath = if null rel then name else rel </> name
-          abs' = root </> relPath
-      if length abs' >= maxPathLen
-        then pure ([], [(relPath, "path too long (>=240 chars)")])
-        else do
-          symRes <- try (pathIsSymbolicLink abs') :: IO (Either SomeException Bool)
-          -- A failed symlink probe (ACL-denied etc.) is treated as
-          -- "not a symlink" so the entry still gets stat'ed below and the
-          -- real error surfaces there instead of being swallowed here.
-          let isSym = either (const False) id symRes
-          if isSym
-            then pure ([], [(relPath, "symlink/reparse point skipped")])
+        here = if null rel then "." else rel
+    -- 列举失败（介质被拔、ACL、目录在遍历途中消失）必须变成一条**带路径的
+    -- 错误**，而不是让异常穿出整条命令。源是可移动介质时这是常态而非异常：
+    -- 异常逃出去，用户只看到一条堆栈，既不知道哪个目录出的问题，也拿不到
+    -- 已经扫到的部分（codex 二十六轮 #4）。
+    --
+    -- 这里**不需要**额外强制列表：@listDirectory@ 的异常发生在
+    -- @getDirectoryContents@ 执行期（IO 内部），不是消费列表时，@try@ 兜得住。
+    -- 本轮一度加过一个 @length ns \`seq\`@ 并声称"惰性值逃出 try"——那个结论
+    -- 来自一次读到**旧库**的探针（当时 pm.exe 在跑，@copy/register@ 失败，
+    -- 探针跑的是加 try 之前的代码）。重新构建后有无该 seq 结果完全相同
+    -- （@files=[] errs=["."]@），突变也证明它不承重，已删除：**没有依据的
+    -- 防御性代码加上一条假注释，比不加更糟**。
+    er <- try (listDirectory dirAbs) :: IO (Either SomeException [FilePath])
+    case er of
+      Left e -> pure ([], [(here, "目录列举失败: " <> show e)])
+      Right names -> do
+        results <- forM names $ \name -> do
+          let relPath = if null rel then name else rel </> name
+              abs' = root </> relPath
+          if length abs' >= maxPathLen
+            then pure ([], [(relPath, "path too long (>=240 chars)")])
             else do
-              isDir <- doesDirectoryExist abs'
-              if isDir
-                then
-                  if take 1 (takeFileName name) == "."
-                    then pure ([], [])
-                    else go relPath
-                else pure ([relPath], [])
-    pure (concatMap fst results, concatMap snd results)
+              symRes <- try (pathIsSymbolicLink abs') :: IO (Either SomeException Bool)
+              -- A failed symlink probe (ACL-denied etc.) is treated as
+              -- "not a symlink" so the entry still gets stat'ed below and the
+              -- real error surfaces there instead of being swallowed here.
+              let isSym = either (const False) id symRes
+              if isSym
+                then pure ([], [(relPath, "symlink/reparse point skipped")])
+                else do
+                  isDir <- doesDirectoryExist abs'
+                  if isDir
+                    then case dots of
+                      -- 'WalkDotDirs' 的唯一例外：pm 自己的状态目录。源恰好是
+                      -- 一个 pm 库根时，@.pm\\tmp@ 里是**半写入**的临时文件、
+                      -- @.pm\\trash@ 里是已隔离的文件——它们头部有合法 EXIF，
+                      -- 会被当成待归位的照片拷走（codex 二十七轮 #3）。跳过，
+                      -- 但**记一条**，不静默。
+                      WalkDotDirs
+                        | map toLower (takeFileName name) == ".pm" ->
+                            pure ([], [(relPath, "pm 状态目录（tmp/trash/plans），源遍历不进入")])
+                        | otherwise -> go relPath
+                      SkipDotDirs
+                        | take 1 (takeFileName name) == "." -> pure ([], [])
+                        | otherwise -> go relPath
+                    else pure ([relPath], [])
+        pure (concatMap fst results, concatMap snd results)
 
 -- | Stat-only freshness comparison of a directory tree against a catalog
 -- slice keyed by root-relative paths. @relPrefix@ narrows the walk to one

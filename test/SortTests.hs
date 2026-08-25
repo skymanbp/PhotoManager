@@ -8,6 +8,7 @@
 -- 与 Windows 的「拍摄日期」逐条吻合，记在 REVIEW-LOG）。
 module SortTests (sortTests) where
 
+import Control.Exception (SomeException, bracket, finally, try)
 import Control.Monad (forM_)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import qualified Data.ByteString as BS
@@ -18,15 +19,34 @@ import Data.Word (Word8)
 import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
+  , getModificationTime
   , listDirectory
+  , removeDirectoryRecursive
   , removeFile
+  , setModificationTime
   )
 import System.FilePath (takeDirectory, takeFileName, (</>))
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
+import System.IO
+  ( Handle
+  , IOMode (ReadMode, ReadWriteMode, WriteMode)
+  , hClose
+  , hFlush
+  , hGetContents
+  , hSetEncoding
+  , openBinaryFile
+  , openFile
+  , stdout
+  , utf8
+  )
 import System.IO.Temp (withSystemTempDirectory)
+import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (catalogPath, saveCatalog)
+import Pm.Hash (ContentProbe (..), probeConfined)
+import Pm.Scan (DotDirs (..), listTreeWith)
 import Pm.Cli (GoOpts (..))
 import Pm.Config (Config (..))
 import Pm.Exif (parseCaptureTime, parseExifDateTime)
@@ -34,18 +54,20 @@ import Pm.Hash (StatSnap (..))
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, planPath)
 import Pm.Sort
-  ( SortPick (..)
+  ( SourceFiles (..)
+  , SortPick (..)
   , Verdict (..)
   , classifyDst
   , eventNameFor
   , holdKin
   , pickFiles
+  , listSource
   , resolveEvent
   , runSortPlan
   , segmentBy
   , snapshotWith
   )
-import Pm.Types (RootRole (..))
+import Pm.Types (FileKind (..), RootRole (..), classifyExt, rawExts)
 import TestUtil (ensureTestRoot, scanQuiet)
 
 sortTests :: TestTree
@@ -69,6 +91,21 @@ sortTests =
     , testCase "E2E：无索引拒绝出计划；目标异容整组待裁决，占位文件零改动" caseSortE2EGates
     , testCase "易变守卫：次序须为 stat→hash→stat；两次 stat 不同则不出 sha" caseVolatileGuard
     , testCase "E2E：索引落后于暂存区盘面 → 拒绝出计划（该闸此前全项目无用例）" caseSortE2EStale
+    , testCase "E2E：索引说「已在目标」但盘上内容不符 → 按实际内容重判，不静默跳过" caseSortE2EStaleSkip
+    , testCase "E2E：源里的 junction 不跟随；认不出的扩展名单列不吞掉" caseSortE2ETraversal
+    , testCase "EXIF：IFD 偏移必须 ≥ 8；声明「没有 IFD」的文件不得返回时间" caseExifIfdOffset
+    , testCase "classifyExt：相机原生 raw 与 classifyExt 必须同一份清单" caseRawExts
+    , testCase "EXIF：IFD 声明的条目数必须自洽，谎报 count 整个 IFD 作废" caseExifIfdCount
+    , testCase "遍历：源里的点目录必须走进去，不能像库根那样静默跳过" caseSourceDotDirs
+    , testCase "限域：目标路径中途是 junction → CpEscaped，不据此跳过" caseProbeConfined
+    , testCase "遍历：源根自身是 junction → 明确告知实际整理的是哪个目录" caseSourceRootLink
+    , testCase "EXIF：count 未超上限但声明的 IFD 装不下 → 仍整体作废" caseExifIfdFits
+    , testCase "限域：目标存在却读不出（末段是目录）→ CpUnreadable，不当缺席" caseProbeUnreadable
+    , testCase "遍历：目录列举失败变成一条带路径的错误，异常不得逃逸" caseListDirFails
+    , testCase "遍历：源是 pm 库根时不进入 .pm（tmp/trash 不是待归位照片）" caseSourceSkipsPmDir
+    , testCase "限域：hardlink 到库外的目标不得被当成可信副本" caseProbeHardlink
+    , testCase "限域：目标被独占占用 → CpUnreadable，不得判成 CpMissing" caseProbeLocked
+    , testCase "撞名整批拒绝时，被选中的照片与侧车必须逐条出现在输出里" caseCollisionReportsAll
     ]
 
 -- ─── pm sort 纯核心 ────────────────────────────────────────────────────────
@@ -126,38 +163,38 @@ casePick = do
         , ("A/_2.ARW", at 2026 8 3 20)
         , ("A/_3.ARW", at 2026 8 9 6) -- 区间外
         ]
-      p = pickFiles (const []) (d 2026 8 1) (d 2026 8 3) xs
+      p = pickFiles [] (d 2026 8 1) (d 2026 8 3) xs
   map fst (spTake p) @?= ["A/_1.ARW", "A/_2.ARW"] -- 含首含尾
   spCollide p @?= []
   spSidecars p @?= []
   -- 同一个 basename 来自两个源子目录 → 整批拒绝（落位后会互相覆盖）。
   -- 大小写不同也算撞名：NTFS 不区分大小写，落位后是同一个目标。
   let ys = [("A/x.ARW", at 2026 8 1 6), ("B/X.arw", at 2026 8 2 6)]
-      q = pickFiles (const []) (d 2026 8 1) (d 2026 8 3) ys
+      q = pickFiles [] (d 2026 8 1) (d 2026 8 3) ys
   spCollide q @?= [("x.arw", ["A/x.ARW", "B/X.arw"])]
 
 -- | 侧车必须跟着主文件进同一批：照片进了暂存区而 .xmp 留在卡上，用户清卡
 -- 之后调色参数就永久没了。
 casePickSidecars :: IO ()
 casePickSidecars = do
-  let cars src = case src of
-        "A/_1.ARW" -> ["A/_1.xmp"]
-        "A/_1.JPG" -> ["A/_1.xmp"] -- RAW+JPEG 双拍认领同一个侧车
-        "A/_9.ARW" -> ["A/_9.xmp"] -- 区间外，不该被带上
-        _ -> []
+  let cars = ["A/_1.xmp", "A/_9.xmp", "A/nobody.xmp"]
       xs =
         [ ("A/_1.ARW", at 2026 8 1 6)
-        , ("A/_1.JPG", at 2026 8 1 6)
-        , ("A/_9.ARW", at 2026 8 9 6)
+        , ("A/_1.JPG", at 2026 8 1 6) -- RAW+JPEG 双拍认领同一个侧车
+        , ("A/_9.ARW", at 2026 8 9 6) -- 区间外
         ]
       p = pickFiles cars (d 2026 8 1) (d 2026 8 3) xs
   -- 去重：同一个侧车被两个主文件认领，只能进一次，否则两条计划项写同一目标
   spSidecars p @?= ["A/_1.xmp"]
   spCollide p @?= []
+  -- 区间外的可定时文件必须留底，否则用户清卡后才发现少了（codex 25 轮 #4）
+  map fst (spOutOfRange p) @?= ["A/_9.ARW"]
+  -- 无人认领的侧车同样留底：_9.xmp 的主文件在区间外，nobody.xmp 根本没主文件。
+  -- 两者都不会被搬走，而它们装的是调色参数（#5）
+  spOrphanCars p @?= ["A/_9.xmp", "A/nobody.xmp"]
   -- 撞名检查要含侧车：主文件撞名时侧车必然也撞名，漏查就只拒了一半
   let ys = [("A/x.ARW", at 2026 8 1 6), ("B/x.JPG", at 2026 8 2 6)]
-      q = pickFiles (\s -> [takeDir s <> "/x.xmp"]) (d 2026 8 1) (d 2026 8 3) ys
-      takeDir = takeWhile (/= '/')
+      q = pickFiles ["A/x.xmp", "B/x.xmp"] (d 2026 8 1) (d 2026 8 3) ys
   map fst (spCollide q) @?= ["x.xmp"]
 
 -- | 判定按**目标位置**做，不是"sha 在库里出现过就算数"。后者会把合法属于
@@ -520,4 +557,376 @@ caseSortE2EStale = withLib $ \src root cfg -> do
   scanQuiet "test-root" root >>= saveCatalog root
   rc2 <- sortPlan src cfg
   rc2 @?= 1
+
+-- | IFD 偏移的下界。TIFF 头占 0..7，@0@ 在 TIFF 里的含义是「没有 IFD」。
+-- 没有这道下界时，声明 @ifd0 = 0@ 的文件会从偏移 0 读条目数——那两个字节
+-- 正是魔数的 "II"（= 18761 条），于是条目 1 落在偏移 14，在那里放一个伪造的
+-- 0x8769 指针就能让「没有 IFD」的文件返回**自信的拍摄时间**。
+-- （codex 二十五轮 #1；修复前本地探针两条容器路径都返回 Just）
+caseExifIfdOffset :: IO ()
+caseExifIfdOffset = do
+  let evil =
+        ascii "II"
+          <> [0x2A, 0x00]
+          <> u32e True 0 -- IFD0 偏移 = 0
+          <> replicate 6 0x00 -- 补齐"条目 0"（占 2..13）
+          <> u16e True 0x8769 -- 14..25：伪造的 ExifIFDPointer
+          <> u16e True 4
+          <> u32e True 1
+          <> u32e True 26
+          <> u16e True 1 -- 26：子 IFD 条目数
+          <> u16e True 0x9003
+          <> u16e True 2
+          <> u32e True 20
+          <> u32e True 44
+          <> u32e True 0
+          <> ascii sample
+          <> [0x00]
+  parseCaptureTime (bs evil) @?= Nothing
+  parseCaptureTime (bs (jpegWrap evil)) @?= Nothing
+  -- 1..7 落在 TIFF 头内部，同样不是合法 IFD 起点
+  forM_ [1 .. 7] $ \o ->
+    parseCaptureTime (bs (ascii "II" <> [0x2A, 0x00] <> u32e True o <> drop 8 evil)) @?= Nothing
+  -- 合法下界 8 仍然照读（这道闸不能把正常文件一起关在门外）
+  show (parseCaptureTime (bs (tiffWith True sample))) @?= want
+
+-- | 相机原生 raw 的清单只能有一份。'Pm.Versions' 曾另抄一份（12 种），而
+-- 'classifyExt' 只认 .arw/.dng——尼康/佳能/富士的卡进 pm sort，每个 raw 都被
+-- 判成 KindMeta 而**静默忽略**，连计数里都不出现（codex 二十五轮 #5）。
+caseRawExts :: IO ()
+caseRawExts = do
+  forM_ rawExts $ \e -> classifyExt e @?= KindPhoto
+  forM_ [".NEF", ".Cr3", ".RAF"] $ \e -> classifyExt e @?= KindPhoto -- 大小写不敏感
+  classifyExt ".psb" @?= KindPhoto -- .psd 的大文件变体，此前漏了
+  classifyExt ".txt" @?= KindMeta
+  classifyExt ".zip" @?= KindMeta
+
+-- | 索引说「已在目标位置」，但盘上那个文件的**内容**其实不同（同尺寸改写后
+-- 把 mtime 改回去，(size,mtime) 新鲜度扫掠看不出来）。跳过是一个「这张不用
+-- 搬了」的决定，凭一份没核对过的 sha 做它就是静默丢文件（codex 25 轮 #2）。
+caseSortE2EStaleSkip :: IO ()
+caseSortE2EStaleSkip = withLib $ \src root cfg -> do
+  let dstDir = root </> "To-Be-Sync'd" </> "Raw" </> "26-08-Atlanta"
+      good = photoAt "2026:08:25 10:00:00" -- 与源 a.ARW 逐字节相同
+  createDirectoryIfMissing True dstDir
+  BS.writeFile (dstDir </> "a.ARW") good
+  scanQuiet "test-root" root >>= saveCatalog root
+  -- 此刻索引是诚实的：a.ARW 已在目标位置 → 不该进计划
+  rc0 <- sortPlan src cfg
+  rc0 @?= 1
+  items0 <- planItemsIn root
+  sort (map (takeFileName . opDstRel . piOp) items0) @?= ["a.xmp", "b.ARW"]
+  -- 现在让索引说谎：同尺寸改写 + 把 mtime 改回去。扫掠看不出变化，
+  -- 但目标的实际内容已经不是 a.ARW 了。
+  st <- getModificationTime (dstDir </> "a.ARW")
+  let evil = BS.map (\w -> if w == 0x00 then 0x01 else w) good
+  BS.length evil @?= BS.length good -- 尺寸不变才构成本用例
+  BS.writeFile (dstDir </> "a.ARW") evil
+  setModificationTime (dstDir </> "a.ARW") st
+  removeDirectoryRecursive (plansDirOf root)
+  rc1 <- sortPlan src cfg
+  rc1 @?= 1
+  items1 <- planItemsIn root
+  let named = [(takeFileName (opDstRel (piOp i)), piStatus i) | i <- items1]
+  -- a.ARW 必须重新出现——要么待拷、要么待裁决，就是不能被静默跳过
+  lookup "a.ARW" named /= Nothing @?= True
+  -- 目标字节未被本命令改动（只出计划，未 --apply）
+  BS.readFile (dstDir </> "a.ARW") >>= (@?= evil)
+
+-- | 遍历纪律：源里的 junction 不跟随（自写递归会无限下降，或把源范围之外的
+-- 照片纳入计划），认不出的扩展名单列而不是吞掉（codex 25 轮 #6/#5）。
+caseSortE2ETraversal :: IO ()
+caseSortE2ETraversal = withSystemTempDirectory "pm-sort-tv" $ \tmp -> do
+  let src = tmp </> "card"
+      outside = tmp </> "outside"
+  createDirectoryIfMissing True (src </> "DCIM")
+  createDirectoryIfMissing True outside
+  BS.writeFile (src </> "DCIM" </> "a.ARW") (photoAt "2026:08:25 10:00:00")
+  BS.writeFile (src </> "DCIM" </> "notes.txt") "not a photo"
+  BS.writeFile (outside </> "secret.ARW") (photoAt "2026:08:25 11:00:00")
+  -- 指向源目录之外的 junction：跟随它就会把 secret.ARW 纳入
+  _ <- readCreateProcess (shell ("mklink /J \"" <> (src </> "link") <> "\" \"" <> outside <> "\"")) ""
+  sf <- listSource src
+  map takeFileName (sfPhotos sf) @?= ["a.ARW"]
+  map takeFileName (sfUnknown sf) @?= ["notes.txt"] -- 认不出但**列出来**
+  -- junction 被跳过并记成一条错误，而不是静默跟随，也不是静默丢弃
+  map (takeFileName . fst) (sfErrors sf) @?= ["link"]
+
+-- | IFD 声明的条目数必须自洽。此前是**截断**（取前 4096 条，越界条目由
+-- sliceAt 悄悄丢掉），于是一个谎报 count=65535、实际只有 1 条的文件照样
+-- 返回时间。截断等于接受一个前缀，而损坏文件的正解是 fail-closed。
+-- （codex 二十六轮 #6；修复前本地探针四种 count 全部返回 Just）
+caseExifIfdCount :: IO ()
+caseExifIfdCount = do
+  -- 偏移由程序算，不手写：本轮两次手算偏移都错了，错的夹具会让用例假绿。
+  let subAt = 200
+      litAt = subAt + 18
+      mk cnt =
+        let head8 = ascii "II" <> [0x2A, 0x00] <> u32e True 8
+            ifd0 = u16e True cnt <> u16e True 0x8769 <> u16e True 4 <> u32e True 1 <> u32e True subAt
+            pad = replicate (subAt - (length head8 + length ifd0)) 0x00
+            sub =
+              u16e True 1
+                <> u16e True 0x9003
+                <> u16e True 2
+                <> u32e True 20
+                <> u32e True litAt
+                <> u32e True 0
+         in head8 <> ifd0 <> pad <> sub <> ascii sample <> [0x00]
+  -- 诚实声明：照读（这道闸不能把正常文件一起关在门外）
+  show (parseCaptureTime (bs (mk 1))) @?= want
+  -- count=3 **不是**这道闸能抓的谎：3 条条目的字节确实都在缓冲区里（多出的
+  -- 两条读到填充零），声明与盘面自洽。"声明数超过有意义的条目数"原理上不可
+  -- 判定——尾部的零条目与填充无从区分。所以这里断言它照读，把这道闸的边界
+  -- 写清楚，而不是假装它管得更宽。
+  show (parseCaptureTime (bs (mk 3))) @?= want
+  -- 真正的谎报：声明的 IFD 整个装不下（2 + n*12 越出缓冲区）→ 作废
+  parseCaptureTime (bs (mk 5000)) @?= Nothing -- 60002 字节，缓冲区只有 238
+  parseCaptureTime (bs (mk 65535)) @?= Nothing -- 786422 字节
+  -- 上限本身也是一道独立的闸：即使缓冲区足够大，超过 maxIfdEntries 也作废
+  parseCaptureTime (bs (mk 5000 <> replicate 100000 0x00)) @?= Nothing
+
+-- | 库根的遍历策略（跳过 .pm/.git 且不报告）不能原样用在**源目录**上：
+-- 那里点开头的目录只是普通文件夹，里面完全可能有照片。
+-- （codex 二十六轮 #3：修复前 card\.hidden\a.ARW 连一条记录都不留地消失）
+caseSourceDotDirs :: IO ()
+caseSourceDotDirs = withSystemTempDirectory "pm-sort-dot" $ \tmp -> do
+  let src = tmp </> "card"
+  createDirectoryIfMissing True (src </> ".hidden")
+  createDirectoryIfMissing True (src </> "DCIM")
+  BS.writeFile (src </> "DCIM" </> "a.ARW") (photoAt "2026:08:25 10:00:00")
+  BS.writeFile (src </> ".hidden" </> "b.ARW") (photoAt "2026:08:26 10:00:00")
+  sf <- listSource src
+  sort (map takeFileName (sfPhotos sf)) @?= ["a.ARW", "b.ARW"]
+
+-- | 校验性读取必须**逐级限域**后再打开。库内某层是 junction 时，被"验证"的
+-- 其实是库外的文件——这个结论下游是「已归档，不用搬」与（clean 那侧）
+-- 「副本还在，可以永久删」。（codex 二十六轮 #1）
+caseProbeConfined :: IO ()
+caseProbeConfined = withSystemTempDirectory "pm-probe" $ \tmp -> do
+  let root = tmp </> "lib"
+      outside = tmp </> "outside"
+  createDirectoryIfMissing True (root </> "Raw")
+  createDirectoryIfMissing True outside
+  BS.writeFile (root </> "Raw" </> "real.ARW") "inside"
+  BS.writeFile (outside </> "bait.ARW") "outside-bait"
+  -- 正常路径：读得到内容
+  p1 <- probeConfined root ("Raw" </> "real.ARW")
+  case p1 of
+    CpSha _ -> pure ()
+    v -> assertFailure ("库内普通文件应读到 sha，得到 " <> show v)
+  -- 不存在：缺席，与"读不到"必须区分开
+  probeConfined root ("Raw" </> "nope.ARW") >>= (@?= CpMissing)
+  -- 中途一层是 junction → 拒绝，不返回库外文件的 sha
+  _ <- readCreateProcess (shell ("mklink /J " <> q (root </> "Raw" </> "link") <> " " <> q outside)) ""
+  probeConfined root ("Raw" </> "link" </> "bait.ARW") >>= (@?= CpEscaped)
+ where
+  q p = [dq] <> p <> [dq]
+  dq = toEnum 34
+
+-- | 源根**自身**是 junction：listTree 只探子项、不探根。根由用户显式指定，
+-- 与「库根放在 junction 上」一样是合法用法，所以不拒绝——但必须告诉用户他
+-- 实际在整理哪个目录。（codex 二十六轮 #5，判定为告知而非拒绝）
+caseSourceRootLink :: IO ()
+caseSourceRootLink = withSystemTempDirectory "pm-sort-root" $ \tmp -> do
+  let real = tmp </> "real"
+      link = tmp </> "card"
+  createDirectoryIfMissing True real
+  BS.writeFile (real </> "a.ARW") (photoAt "2026:08:25 10:00:00")
+  _ <- readCreateProcess (shell ("mklink /J " <> q link <> " " <> q real)) ""
+  sf <- listSource link
+  map takeFileName (sfPhotos sf) @?= ["a.ARW"]
+  -- 照片照常列出，源根是链接这件事出现在**诊断**里而不是错误里：
+  -- 它是一条说明，不是"一个没归位的文件"，混进 sfErrors 会让「未入计划 N 个」
+  -- 多算 1（codex 二十七轮 #5）
+  any (elemSub "源根本身是 symlink/junction") (sfNotes sf) @?= True
+  sfErrors sf @?= []
+ where
+  q p = [dq] <> p <> [dq]
+  dq = toEnum 34
+
+-- | 'wholeIfdFits' 必须能**单独**转红。上一版用例的 count=5000/65535 同时也被
+-- 'maxIfdEntries' 拦下，于是拆掉 wholeIfdFits 时无一用例转红（突变 Q1 全绿）。
+-- 这里取 count=100：远低于 4096 上限，但 2 + 100*12 = 1202 字节装不进这个
+-- 238 字节的缓冲区——只有 wholeIfdFits 能拦它。
+caseExifIfdFits :: IO ()
+caseExifIfdFits = do
+  let subAt = 200
+      litAt = subAt + 18
+      mk cnt =
+        let head8 = ascii "II" <> [0x2A, 0x00] <> u32e True 8
+            ifd0 = u16e True cnt <> u16e True 0x8769 <> u16e True 4 <> u32e True 1 <> u32e True subAt
+            pad = replicate (subAt - (length head8 + length ifd0)) 0x00
+            sub =
+              u16e True 1
+                <> u16e True 0x9003
+                <> u16e True 2
+                <> u32e True 20
+                <> u32e True litAt
+                <> u32e True 0
+         in head8 <> ifd0 <> pad <> sub <> ascii sample <> [0x00]
+  length (mk 100) @?= 238 -- 钉住前提：缓冲区确实只有 238 字节
+  parseCaptureTime (bs (mk 100)) @?= Nothing
+  -- 同一个 count，把缓冲区补大到装得下 → 恢复照读，证明拦它的确实是"装不下"
+  -- 而不是"100 这个数字"
+  show (parseCaptureTime (bs (mk 100 <> replicate 1200 0x00))) @?= want
+
+-- | 「存在但读不出」必须与「缺席」分开：两者的安全方向相反（缺席 → 照搬，
+-- 读不出 → 保守拒绝）。末段是**目录**是本机可移植地造出这一态的办法
+-- （实测 getFileSize 对目录返回 0，随后按文件打开报 permission denied）。
+-- 突变 Q5（把 CpUnreadable 塌缩成 CpMissing）此前无一用例转红。
+caseProbeUnreadable :: IO ()
+caseProbeUnreadable = withSystemTempDirectory "pm-probe2" $ \tmp -> do
+  let root = tmp </> "lib"
+  createDirectoryIfMissing True (root </> "Raw" </> "adir")
+  p <- probeConfined root ("Raw" </> "adir")
+  case p of
+    CpUnreadable _ -> pure ()
+    v -> assertFailure ("存在但读不出应为 CpUnreadable，得到 " <> show v)
+  -- 与真正的缺席分开
+  probeConfined root ("Raw" </> "nope") >>= (@?= CpMissing)
+
+-- | 目录列举失败必须变成一条**带路径的错误**，异常不得逃出去。
+--
+-- 这条用例暴露过一个真缺陷：'listDirectory' 是
+-- @filter f \<$\> getDirectoryContents@，返回**惰性**列表，@try@ 只求值到
+-- WHNF，异常会在消费列表时才炸——正好在 try 之外。所以光包 try 不够，必须
+-- 在 try 内部强制列表脊。（突变 Q7 全绿暴露）
+caseListDirFails :: IO ()
+caseListDirFails = withSystemTempDirectory "pm-lsfail" $ \tmp -> do
+  let f = tmp </> "notadir.txt"
+  BS.writeFile f "x"
+  r <- listTreeWith WalkDotDirs f
+  fst r @?= []
+  map fst (snd r) @?= ["."]
+  any (elemSub "目录列举失败" . snd) (snd r) @?= True
+
+-- | 源恰好是一个 pm 库根时，@.pm@ 必须**不进入**：@.pm/tmp@ 里是半写入的临时
+-- 文件、@.pm/trash@ 里是已隔离的文件，它们头部有合法 EXIF，会被当成待归位的
+-- 照片拷走（codex 二十七轮 #3）。跳过但记一条，不静默。
+caseSourceSkipsPmDir :: IO ()
+caseSourceSkipsPmDir = withSystemTempDirectory "pm-src-root" $ \tmp -> do
+  let src = tmp </> "library"
+  createDirectoryIfMissing True (src </> ".pm" </> "tmp" </> "p")
+  createDirectoryIfMissing True (src </> ".pm" </> "trash" </> "17")
+  createDirectoryIfMissing True (src </> ".hidden")
+  createDirectoryIfMissing True (src </> "DCIM")
+  BS.writeFile (src </> "DCIM" </> "real.ARW") (photoAt "2026:08:25 10:00:00")
+  -- 这两个头部有合法 EXIF，但它们是 pm 的内部状态，不是用户的待归位照片
+  BS.writeFile (src </> ".pm" </> "tmp" </> "p" </> "half.ARW") (photoAt "2026:08:25 11:00:00")
+  BS.writeFile (src </> ".pm" </> "trash" </> "17" </> "quar.ARW") (photoAt "2026:08:25 12:00:00")
+  -- 普通点目录仍然要走进去（第 26 轮 #3 的行为不能被这次收紧顺手撤销）
+  BS.writeFile (src </> ".hidden" </> "hidden.ARW") (photoAt "2026:08:26 10:00:00")
+  sf <- listSource src
+  sort (map takeFileName (sfPhotos sf)) @?= ["hidden.ARW", "real.ARW"]
+  -- 跳过 .pm 这件事必须留一条记录
+  any (elemSub "pm 状态目录" . snd) (sfErrors sf) @?= True
+
+-- | 'resolveUnder' 原理上看不见 hardlink，而 probeConfined 的下游一边是
+-- 「三副本齐了，可以永久删」——三份必须是三个**独立对象**。句柄上的
+-- link count 判定是这一半的唯一防线（codex 二十七轮 #1）。
+caseProbeHardlink :: IO ()
+caseProbeHardlink = withSystemTempDirectory "pm-hl" $ \tmp -> do
+  let root = tmp </> "lib"
+      outside = tmp </> "outside.ARW"
+  createDirectoryIfMissing True (root </> "Raw")
+  BS.writeFile outside "shared-object"
+  _ <- readCreateProcess (shell ("mklink /H " <> q (root </> "Raw" </> "hl.ARW") <> " " <> q outside)) ""
+  p <- probeConfined root ("Raw" </> "hl.ARW")
+  case p of
+    CpUnreadable _ -> pure ()
+    v -> assertFailure ("hardlink 到库外的目标不应被当成可信副本，得到 " <> show v)
+  -- 对照：同目录下的普通文件照常读得到，证明拦它的是 link count 而非路径
+  BS.writeFile (root </> "Raw" </> "plain.ARW") "plain"
+  pp <- probeConfined root ("Raw" </> "plain.ARW")
+  case pp of
+    CpSha _ -> pure ()
+    v -> assertFailure ("普通文件应读到 sha，得到 " <> show v)
+ where
+  q p = [dq] <> p <> [dq]
+  dq = toEnum 34
+
+-- | 目标存在但被独占打开（Windows @ERROR_SHARING_VIOLATION@）必须是
+-- 'CpUnreadable' 而不是 'CpMissing'——后者会让 verifySkips 判 VCopy，
+-- 等于"目标不存在，照搬"，而真相是"无法确认"（codex 二十七轮 #2）。
+caseProbeLocked :: IO ()
+caseProbeLocked = withSystemTempDirectory "pm-lock" $ \tmp -> do
+  let root = tmp </> "lib"
+      rel = "Raw" </> "busy.ARW"
+  createDirectoryIfMissing True (root </> "Raw")
+  BS.writeFile (root </> rel) "busy"
+  -- 占住它：GHC 的句柄锁不允许「已开写」的文件再被开读，抛的是
+  -- ResourceBusy——一个**非** isDoesNotExistError 的 IOException，正好是这条
+  -- 用例要的形态（openExclusiveBinary 是 CREATE_NEW 语义，对已存在的文件不
+  -- 适用）。ReadWriteMode 不截断，文件内容不受影响。
+  r <- try (openBinaryFile (root </> rel) ReadWriteMode) :: IO (Either SomeException Handle)
+  case r of
+    Left e -> assertFailure ("占用失败，用例前提不成立: " <> show e)
+    Right h -> do
+      p <- probeConfined root rel
+      hClose h
+      case p of
+        CpUnreadable _ -> pure ()
+        v -> assertFailure ("被占用的目标应为 CpUnreadable，得到 " <> show v)
+
+-- | 捕获 stdout。用 base 的 hDuplicate/hDuplicateTo，不引新依赖。
+-- | 子串判定。多条用例共用，不各写一份。
+elemSub :: String -> String -> Bool
+elemSub needle hay = any (\i -> take (length needle) (drop i hay) == needle) [0 .. length hay]
+
+-- | 捕获 stdout。用 base 的 hDuplicate/hDuplicateTo，不引新依赖。
+--
+-- **两端都必须显式 UTF-8**：本机 locale 是 GBK，而 pm 的输出里有 U+26A0(⚠)
+-- 与 U+2717(✗)，临时文件句柄按 locale 编码会直接抛 commitBuffer。而且 tasty
+-- 缺省并行，重定向的是**进程级** stdout——并行跑的别的用例也写进这个句柄，
+-- 它们的 ⚠ 同样得编得出来，否则**它们**会炸（实测三条用例一起红）。断言只
+-- 匹配本用例独有的子串，别的用例的输出混进来不影响判定。
+captureStdout :: IO a -> IO (String, a)
+captureStdout act = withSystemTempDirectory "pm-cap" $ \dir -> do
+  let fp = dir </> "out.txt"
+  h <- openFile fp WriteMode
+  hSetEncoding h utf8
+  old <- hDuplicate stdout
+  hDuplicateTo h stdout
+  -- hDuplicate/hDuplicateTo 造出的句柄用的是 **locale** 编码，会把
+  -- setupConsole 设好的 utf8 抹掉——替换后和还原后都要显式钉回去，
+  -- 否则 pm 输出里的 ✗/⚠ 在这里、以及**后续用例**里都会炸。
+  hSetEncoding stdout utf8
+  a <- act `finally` (hFlush stdout >> hDuplicateTo old stdout >> hSetEncoding stdout utf8 >> hClose old)
+  hClose h -- 必须先关：GHC 句柄锁不许「已开写」的文件同时被开读
+  txt <- bracket (openFile fp ReadMode) hClose $ \rh -> do
+    hSetEncoding rh utf8
+    t <- hGetContents rh
+    length t `seq` pure t
+  pure (txt, a)
+
+-- | 撞名 → 整批拒绝。此时被选中的**其余**照片、以及跟着它们的侧车同样一个
+-- 都没搬走，却既不在 spCollide（只有撞名的那个 basename）也不在
+-- spOrphanCars（侧车已被主文件认领，不算无主）——不逐条列出来，它们就是这条
+-- 路径上的静默缺席（codex 二十七轮 #4）。
+caseCollisionReportsAll :: IO ()
+caseCollisionReportsAll = withSystemTempDirectory "pm-coll" $ \tmp -> do
+  let src = tmp </> "card"
+      root = tmp </> "lib"
+  createDirectoryIfMissing True (src </> "A")
+  createDirectoryIfMissing True (src </> "B")
+  -- 两个同名主文件 → 撞名；A/x.xmp 是 A/x.ARW 的侧车，会被认领
+  BS.writeFile (src </> "A" </> "x.ARW") (photoAt "2026:08:25 10:00:00")
+  BS.writeFile (src </> "B" </> "x.ARW") (photoAt "2026:08:25 11:00:00")
+  BS.writeFile (src </> "A" </> "x.xmp") "sidecar"
+  createDirectoryIfMissing True root
+  _ <- ensureTestRoot RoleMain root
+  scanQuiet "test-root" root >>= saveCatalog root
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+  (out, rc) <-
+    captureStdout
+      (runSortPlan (GoOpts False False) src (Left "Atlanta") (d 2026 8 25) (d 2026 8 26) cfg)
+  rc @?= 2 -- 整批拒绝
+  -- 撞名的两个主文件本来就会被打印
+  elemSub "x.ARW" out @?= True
+  -- **侧车也必须出现**：它同样没被搬走，而此前它一个字都不出现
+  elemSub "x.xmp" out @?= True
+  -- 并且说清楚一个都没进计划
+  elemSub "没有任何文件" out @?= True
+  doesDirectoryExist (plansDirOf root) >>= (@?= False)
 

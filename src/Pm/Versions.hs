@@ -107,10 +107,6 @@ archiveLayers = ["Raw", "成片", "相册"]
 -- 列表以本库实测为准（Raw 层 arw 3794 · dng 71）并补齐常见机型格式。
 -- @psd@\/@psb@\/@tif@ 是**编辑**格式不是原始档，不计入——它们的存在不能说明
 -- 这一帧有 RAW。
-rawExts :: [String]
-rawExts =
-  [".arw", ".dng", ".nef", ".cr2", ".cr3", ".raf", ".orf", ".rw2", ".pef", ".srw", ".sr2", ".x3f"]
-
 versionsReport :: Catalog -> VersionsReport
 versionsReport cat =
   VersionsReport {vgGroups = groups, vgExactDups = dups}

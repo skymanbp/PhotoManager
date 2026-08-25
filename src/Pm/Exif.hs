@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | 只读一个 EXIF 标签：**拍摄时间**（DESIGN §13 `pm sort`）。
+-- | 只读一个 EXIF 标签：**拍摄时间**（DESIGN-COMMANDS §7 `pm sort`）。
 --
 -- 为什么自己写而不是引 EXIF 库：这条路径决定「一张照片被归到哪个事件」，
 -- 是会落到计划里、最终移动文件的判断依据。本项目所有碰字节的代码都是第一方
@@ -12,8 +12,10 @@
 --  * JPEG：@FFD8@ 开头，逐段找 @APP1(FFE1)@ 且载荷以 @Exif\\0\\0@ 起，其后是 TIFF；
 --  * TIFF 系（@.ARW@ @.DNG@ @.NEF@ …）：文件开头就是 TIFF 头。
 --
--- 标签优先级：@DateTimeOriginal(0x9003)@ → @DateTimeDigitized(0x9004)@ →
--- IFD0 的 @DateTime(0x0132)@。前两个在 Exif 子 IFD（IFD0 的 @0x8769@）里。
+-- 标签优先级：@DateTimeOriginal(0x9003)@ → @DateTimeDigitized(0x9004)@，
+-- 两个都在 Exif 子 IFD（IFD0 的 @0x8769@）里。**只认这两个**——IFD0 的
+-- @DateTime(0x0132)@ 是**文件修改时间**，不是拍摄时间，曾作为回退存在过，
+-- 已删除（理由见 'parseCaptureTime' 内的注释）。
 --
 -- **一切偏移都经 'sliceAt' 做边界检查**，越界一律 'Nothing'；只读文件头
 -- 'headBytes' 字节，EXIF 不在其中就当读不到——不为一个时间戳把整个 RAW
@@ -28,6 +30,7 @@ module Pm.Exif
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import Data.Char (isDigit)
+import Data.Maybe (isJust)
 import Data.Time (LocalTime (..), fromGregorianValid, makeTimeOfDayValid)
 import Data.Word (Word16, Word32)
 import System.IO (IOMode (ReadMode), hClose, openBinaryFile)
@@ -66,7 +69,7 @@ parseCaptureTime bs = do
   (tiff, off) <- locateTiff bs
   end <- endianAt tiff off
   ifd0 <- u32 end tiff (off + 4)
-  let entries0 = ifdEntries end tiff (off + fromIntegral ifd0)
+  let entries0 = ifdEntries end tiff off ifd0
       -- Exif 子 IFD：拍摄时间的正主住在这里。
       -- 类型放宽到 4(LONG) 与 13(IFD)——DNG/TIFF Technical Note 1 允许后者，
       -- 只认 4 会把合法文件挡在外面；同时**钉住 eCount == 1**：count > 1 时
@@ -75,7 +78,9 @@ parseCaptureTime bs = do
         Just e
           | eType e == 4 || eType e == 13
           , eCount e == 1 ->
-              ifdEntries end tiff (off + fromIntegral (eVal e))
+              -- 子 IFD 偏移与 IFD0 过同一道下界（在 'ifdEntries' 里）：
+              -- 伪造的指针指回 TIFF 头内部同样不成立。
+              ifdEntries end tiff off (eVal e)
         _ -> []
       -- 只认真正的**拍摄**时间：DateTimeOriginal → DateTimeDigitized。
       --
@@ -142,19 +147,46 @@ endianAt bs off = case sliceAt bs off 4 of
   Just "MM\x00\x2A" -> Just False
   _ -> Nothing
 
+-- | 单个 IFD 的条目数上限。正常 IFD 只有几十条。
+maxIfdEntries :: Int
+maxIfdEntries = 4096
+
 data IfdEntry = IfdEntry {eTag :: Word16, eType :: Word16, eCount :: Word32, eVal :: Word32}
 
--- | 读一个 IFD 的全部条目。条目数上限 4096——正常 IFD 只有几十条，
--- 这道闸挡住损坏文件里的天文数字导致的长循环。
-ifdEntries :: Bool -> BS.ByteString -> Int -> [IfdEntry]
-ifdEntries end bs at = case u16 end bs at of
-  Nothing -> []
-  Just n ->
-    [ e
-    | i <- [0 .. min 4095 (fromIntegral n - 1)]
-    , Just e <- [entryAt (at + 2 + i * 12)]
-    ]
+-- | 读一个 IFD 的全部条目。@base@ 是 TIFF 头在缓冲里的位置，@rel@ 是 IFD
+-- **相对 TIFF 头**的偏移——分开传是为了让下界检查有地方落。
+--
+-- **下界 8**：TIFF 头本身占 0..7（魔数 4 字节 + IFD0 偏移 4 字节），任何 IFD
+-- 都不可能从它内部开始；而 @0@ 在 TIFF 里的含义恰恰是「没有 IFD」。此前没有
+-- 这道下界，一个声明 @ifd0 = 0@ 的文件会从偏移 0 读条目数——那两个字节正是
+-- 魔数的 @"II"@（= 18761 条），于是条目 1 落在偏移 14，构造者在那里放一个
+-- 伪造的 @0x8769@ 指针就能让「没有 IFD」的文件返回一个**自信的拍摄时间**
+-- （codex 二十五轮 #1；本地探针复现：直 TIFF 与 JPEG APP1 两条路都返回
+-- @Just 2026-08-25 13:45:07@）。
+--
+-- 条目数上限 'maxIfdEntries'——正常 IFD 只有几十条，这道闸挡住损坏文件里的
+-- 天文数字导致的长循环。
+ifdEntries :: Bool -> BS.ByteString -> Int -> Word32 -> [IfdEntry]
+ifdEntries end bs base rel
+  | rel < 8 = []
+  | rel > fromIntegral (BS.length bs) = []
+  | otherwise = case u16 end bs at of
+      Nothing -> []
+      Just n
+        -- **声明的结构必须自洽，否则整个 IFD 作废**。此前是"截断"：取前 4096
+        -- 条、越界的条目由 sliceAt 悄悄丢掉——于是一个谎报 @count = 65535@
+        -- 而实际只有 1 条的文件照样返回时间（codex 二十六轮 #6，本地探针复现
+        -- 为 @Just 2026-08-25 13:45:07@）。截断等于**接受一个前缀**，而损坏
+        -- 文件的正解是 fail-closed：读不到就读不到，交人判断。
+        | fromIntegral n > maxIfdEntries -> []
+        | not (wholeIfdFits (fromIntegral n)) -> []
+        | otherwise ->
+            [e | i <- [0 .. fromIntegral n - 1], Just e <- [entryAt (at + 2 + i * 12)]]
  where
+  at = base + fromIntegral rel
+  -- 2 字节计数 + n×12 字节条目必须整个落在缓冲区内。n 至多 65535（Word16），
+  -- 2 + 65535*12 = 786422，Int 装得下，不会绕回。
+  wholeIfdFits n = isJust (sliceAt bs at (2 + n * 12))
   entryAt p =
     IfdEntry
       <$> u16 end bs p
@@ -174,8 +206,13 @@ asciiTag _ bs base t es = do
     then Nothing
     else -- BS.copy：切片与父缓冲共享 ForeignPtr，不复制的话这 20 字节会把整个
     -- 256 KiB 头一起钉在堆上——与 readCaptureTime 的 evaluate 是同一泄漏的两半。
-      BC.unpack . BS.copy . BS.takeWhile (/= 0)
-        <$> sliceAt bs (base + fromIntegral (eVal e)) (fromIntegral (eCount e))
+    -- eVal 是 Word32，转 Int 前先按 Integer 比一次上界：64 位下这一步是恒真，
+    -- 但"恒真"依赖平台字长，写出来就不必再依赖它（codex 二十六轮 #6 后半）。
+      if toInteger (eVal e) > toInteger (BS.length bs)
+        then Nothing
+        else
+          BC.unpack . BS.copy . BS.takeWhile (/= 0)
+            <$> sliceAt bs (base + fromIntegral (eVal e)) (fromIntegral (eCount e))
 
 -- ─── 时间字面量 ─────────────────────────────────────────────────────────────
 

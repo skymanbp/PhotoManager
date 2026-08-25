@@ -8,6 +8,7 @@ module Pm.Types
   , Entry (..)
   , Catalog (..)
   , classifyExt
+  , rawExts
   , entryMap
   ) where
 
@@ -69,22 +70,38 @@ instance FromJSON FileKind where
     "meta" -> pure KindMeta
     _ -> fail ("unknown file kind: " <> show t)
 
+-- | 相机原生 raw 的扩展名。**全项目唯一一份定义**。
+--
+-- 'Pm.Versions' 曾另抄一份（12 种），而这里只认 @.arw@\/@.dng@ 两种——两份
+-- 各自演进、谁也不通知谁，正是 codex 二十五轮 #5 的根因：尼康\/佳能\/富士\/
+-- 奥林巴斯的卡插进 @pm sort@，每一个 raw 都被判成 'KindMeta' 而**静默忽略**，
+-- 连"照片 N 个"的计数里都不出现，用户看到的是"照片 0 个"。
+--
+-- 同一份知识出现两处就迟早会分叉，所以这里不是"补几个扩展名"，而是把定义
+-- 收成一处、让 'Pm.Versions' 引用它。
+rawExts :: [String]
+rawExts =
+  [".arw", ".dng", ".nef", ".cr2", ".cr3", ".raf", ".orf", ".rw2", ".pef", ".srw", ".sr2", ".x3f"]
+
+-- | 已渲染\/已编辑的位图。@.psb@ 是 @.psd@ 的大文件变体（同一个 Photoshop
+-- 家族），此前只认 @.psd@ 是同一处遗漏。
+renderExts :: [String]
+renderExts = [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".psd", ".psb", ".heic"]
+
+-- | 调色参数等随主文件走的附属文件。
+sidecarExts :: [String]
+sidecarExts = [".xmp", ".acr"]
+
 -- | Extension classification is case-folded everywhere: the real library mixes
 -- @.jpg@/@.JPG@ about half and half (DESIGN.md §1.1).
 classifyExt :: FilePath -> FileKind
-classifyExt ext = case map toLower ext of
-  ".arw" -> KindPhoto
-  ".jpg" -> KindPhoto
-  ".jpeg" -> KindPhoto
-  ".png" -> KindPhoto
-  ".dng" -> KindPhoto
-  ".tif" -> KindPhoto
-  ".tiff" -> KindPhoto
-  ".psd" -> KindPhoto
-  ".heic" -> KindPhoto
-  ".xmp" -> KindSidecar
-  ".acr" -> KindSidecar
-  _ -> KindMeta
+classifyExt ext
+  | e `elem` rawExts = KindPhoto
+  | e `elem` renderExts = KindPhoto
+  | e `elem` sidecarExts = KindSidecar
+  | otherwise = KindMeta
+ where
+  e = map toLower ext
 
 -- | One indexed file. @enPath@ is relative to its root, native separators.
 -- @enMtimeNs@ is whatever this root's own stat returned — it is a cache
