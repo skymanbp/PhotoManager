@@ -4,7 +4,9 @@
 -- in Pm.Commands / Pm.Cli (库层，P4 的 serve/GUI 复用同一路径).
 module Main (main) where
 
+import Data.Version (showVersion)
 import Options.Applicative
+import Paths_photo_manager (version)
 import System.Exit (exitSuccess, exitWith, ExitCode (..))
 
 import Pm.Cli (GoOpts (..), savePlanAndMaybeRun)
@@ -99,7 +101,10 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    infoOption "pm 0.4.5 (P4-8)" (long "version" <> help "打印版本")
+    -- 版本号取自 package.yaml（cabal 生成的 Paths 模块），不再手抄一份：
+    -- 二十四轮实测，这个字面量是第六处版本号，改版本时漏掉它 → 0.4.6 的
+    -- 二进制自称 0.4.5。单一真源之后它不可能再漂。
+    infoOption ("pm " <> showVersion version) (long "version" <> help "打印版本")
   backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
   vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =
