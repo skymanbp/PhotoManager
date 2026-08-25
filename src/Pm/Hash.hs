@@ -29,7 +29,7 @@ import System.Directory (getFileSize, getModificationTime)
 import System.IO.Error (isDoesNotExistError)
 import System.IO
 
-import Pm.Win (FileId, flushHandleToDisk, handleFileId, openFreshBinary, resolveUnder)
+import Pm.Win (FileId, flushHandleToDisk, handleFileId, openBoundTo, openFreshBinary, resolveUnder)
 
 chunkSize :: Int
 chunkSize = 1024 * 1024
@@ -83,7 +83,7 @@ probeConfined root rel = do
     Just fp -> do
       r <-
         try
-          ( bracket (openBinaryFile fp ReadMode) hClose $ \h -> do
+          ( bracket (openBoundTo ReadMode fp) hClose $ \h -> do
               -- 身份先取：'sha256Handle' 会把句柄读到 EOF。两者同一句柄。
               mfid <- handleFileId h
               sha <- sha256Handle h

@@ -558,12 +558,25 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 
 ## 14. 风险与对策
 
-**威胁模型（P2.3 明文化）**：pm 防**崩溃/掉电/介质错误/并发良性进程**
-（Lightroom、资源管理器等），不防同一台机器上恶意进程的毫秒级 check-use
-竞争（TOCTOU 攻击）——后者需要句柄级 FILE_ID 校验与全程句柄持有，属安全
-软件范畴。设计保证：即使此类窗口被击中，字节也只会进 trash 而非消失，且
-`pm trash empty` 在永久删除前重验三副本（终极屏障）。逐项分析见
-`docs/reviews/2026-08-23-p2-codex-review.md` 三轮章节。
+**威胁模型（P2.3 明文化，P5-D 收窄）**：pm 防**崩溃/掉电/介质错误/并发良性
+进程**（Lightroom、资源管理器等）。同机恶意进程的毫秒级 check-use 竞争
+（TOCTOU）此前整类留白，**P5-D 起读写取用口这一半已经关上**：
+
+- **取用口（读、追加、加锁、内容探测）** 走 `Pm.Win.openBoundTo`——先打开，
+  再用 `GetFinalPathNameByHandleW` 在**句柄**上确认它绑定的正是那条路径。
+  因果方向变了：答案取自要读写的那个对象。开完之后再怎么换目录都改不了句柄
+  指向谁；开之前换过，则实际路径与期望不符、当场拒绝。`resolveUnder` 因此
+  **不再是安全边界**，只是预筛。用例把竞态做成确定性事件（解析成功之后再把
+  中途一层换成 junction），并同时断言**裸 open 在这一步会读到库外文件**——
+  否则只证明新写法拒绝了，不证明它拒绝的是真实存在的危险。
+- **剩下的窗口**：`MoveFileEx` / `RemoveDirectory` 这类只吃**名字**、没有句柄
+  形态的 API（落位 rename、`pm trash empty` 的唯一 unlink）。它们仍由
+  `resolveUnder` + `pathAtOrUnder` 那一层守，窗口照旧存在。设计保证不变：
+  即使被击中，字节也只会进 trash 而非消失，且 `pm trash empty` 在永久删除前
+  重验三副本（终极屏障）。
+
+逐项分析见 `docs/reviews/2026-08-23-p2-codex-review.md` 三轮章节与
+REVIEW-LOG 第 28 轮。
 
 | 风险 | 对策 |
 |---|---|

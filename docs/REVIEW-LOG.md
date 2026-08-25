@@ -966,15 +966,27 @@ finding 讲的就是**印了什么**，只能真去捕获 stdout；断言 `SortP
 
 #### 逐条处置
 
-- **#1（critical，登记残余）**：`resolveUnder` 遇到尚不存在的分量后直接拼接
-  剩余路径、且全程不持有目录句柄，与随后的 `openStateRead` 之间有 TOCTOU 窗口。
-  **代码事实成立**（`Pm.Win.resolveUnder` 的 `NameMissing -> pure (Just (foldl …))`
-  一行即是）。但利用它需要一个**与 pm 同权限、并发操作**的攻击者，而 DESIGN §14
-  的威胁模型是"单机、同用户"——那样的攻击者直接移动照片即可，不必绕道 pm。
-  真正的修法是句柄相对遍历（`NtCreateFile` + `ObjectAttributes.RootDirectory`），
-  需要新的 NT 层 FFI，落在**安全内核最关键的那条路径**上。收益（关掉一个模型外
-  的窗口）与风险（在安全内核里引入一批新失败模式）不对称，**本轮不做，登记为
-  残余**，等用户裁定。
+- **#1（critical，成立 → P5-D 已修）**：`resolveUnder` 遇到尚不存在的分量后
+  直接拼接剩余路径、且全程不持有目录句柄，与随后的 `openStateRead` 之间有
+  TOCTOU 窗口。**代码事实成立**。
+
+  用户裁定「做最正确、彻底、优雅的方法，一切以质量为最优先」。最初的设想是
+  句柄相对遍历（`NtCreateFile` + `ObjectAttributes.RootDirectory`），要新写一
+  套 NT 层 FFI；**实际采用的更小也更彻底**：把因果方向调过来——先打开，再用
+  `GetFinalPathNameByHandleW` 在**句柄**上问"你绑定的是哪条路径"。答案取自要
+  读写的那个对象本身，于是"解析"与"使用"合成了一次。`resolveUnder` 降级为预筛。
+
+  这条修法的前提（那个 Win32 调用在五种别名形态下究竟返回什么）没有当成"应该"
+  处理，而是写成了**常驻用例**：中途 junction / 末级 symlink 判否；普通文件、
+  **库内 hardlink**、root 经 junction 判是。hardlink 判是是对的——那条路径上确实
+  有一个能读到这些字节的对象，它算不算"另一份独立副本"由 `FileId` 回答（#2）。
+
+  竞态本身也做成了确定性用例：先让 `resolveUnder` 成功，**然后**把中途一层换成
+  指向库外的 junction，再打开。同一条用例还断言**裸 `openBinaryFile` 在这一步
+  会读到库外的诱饵**——否则它只证明新写法拒绝了，不证明拒绝的是真实存在的危险。
+
+  剩下的窗口写进了 DESIGN §14：`MoveFileEx` / `RemoveDirectory` 这类只吃名字、
+  没有句柄形态的 API。那是另一件事，不再混在一句"属安全软件范畴"里带过。
 - **#2（major，成立）→ 判据从 link count 换成文件身份**。见 DESIGN-COMMANDS §8.2。
   这一条值得记住的是它的形状：`nlink == 1` **充分而不必要**，于是它给出的是
   **假阴性**（永远 HELD），方向安全但功能坏死。安全方向的错误也是错误。

@@ -180,8 +180,8 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 七条 finding 逐条第一方核实：**五条成立**、一条（`--apply` 之前不得写盘）
 第一方证伪——那是评审把 DESIGN 的"写盘"读成了"任何字节"，计划文件本来就要在
 没有 `--apply` 时落盘，否则两段式的第二段无从谈起（DESIGN §5 已补明）。
-另一条（`resolveUnder` 与 `openStateRead` 之间的 TOCTOU 窗口）成立但**不在
-本项目的威胁模型内**，作为登记残余，见 REVIEW-LOG。
+另一条（`resolveUnder` 与 `openStateRead` 之间的 TOCTOU 窗口）成立，
+**已在 P5-D 修掉**：取用口改为「打开 → 在句柄上确认绑定路径」，见 DESIGN §14。
 
 - **副本独立性改按文件身份判**，不再用 link count。`nlink == 1` 是**充分而不
   必要**的：一份合法归档照片被去重工具另建一个名字就被一律拒读，
