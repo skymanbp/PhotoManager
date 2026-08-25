@@ -559,7 +559,8 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   分类"。设计要点：它**不能**是 vault 的第四个类目（vault 类目 = 展示集 git 仓
   的目录，建目录等于把照片发出去），因此是主库 `.pm/vault-holds.json` 里的
   本地决定；`new` 键不动（对外契约），`newActive` 扣掉 HELD 并据此算退出码；
-  记录存决定当时的 sha，字节一变即失效回到 NEW（复核**强制重算** sha，不吃
+  记录存决定当时的 sha，**下一次比对**复核到字节已变即失效回到 NEW（复核
+  **强制重算** sha，不吃
   `(size,mtime)` 缓存快路——二十一轮指出走快路时等长替换 + 还原 mtime 会让旧
   决定继续生效）；`checkAssignments` 拒收 held 文件。新模块 `Pm.VaultHold`（状态 + 纯分类器 `splitHeld`）与 `Pm.VaultCmd`
   （命令层——`Pm.Vault` 触及 750 行预算，同 `Pm.BackupCmd` 先例），`Pm.Config`
@@ -599,3 +600,13 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   delete→rename 窗口里"正文与 tmp 都缺失"再读一次正文消歧；提交期间导航与
   数字键不得重入 `loadVault`、`vaultDrift` 进快照；文档六处过度声明（含我在
   二十一轮归档里自己写过头的两格）。212 测试，三处突变各自转红。
+- **二十三轮：GO（最小修复集空，codex 审二十二轮的收口，6cfd990..4cf718a）**：
+  两条必修均确认闭合——创建与复核共用 `freshSrcSha` 的真实 SHA；`requireMain`
+  只走读路径且在取锁前，匿名库不会先落下 `.pm/lock`。它从源码推演确认了
+  `caseHoldCreateFreshSha` 的构造（`lastVerified` = mtime + 1h 满足
+  `statHitStable` 的 2 s 余量）在旧实现下必转红。3 minor 已修：`freshShaAt` 外层
+  捕 `IOException`（扫描后文件被删/被占不再让 CLI 崩、API 500）；README/DESIGN
+  的轮次与例数过期；GUI 计划页与安装包描述仍称"写盘一律两段式"未区分 hold。
+  残余照旧登记（正常覆盖写窗口的读竞态、跨进程锁只用同进程线程代表、API 409
+  与旧 meta 解码无用例、名字规范化硬化）。**真实写入**：用户裁定的 15 张
+  `pm vault hold` 已执行，名单 15 条、照片与 vault 仓零改动（212 测试，pm 0.4.4）。

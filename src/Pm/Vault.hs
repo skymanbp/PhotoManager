@@ -34,6 +34,7 @@ module Pm.Vault
   , mkVaultPushPlan
   ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson
 import qualified Data.Aeson.Encoding as AE
@@ -323,8 +324,13 @@ data VaultReport = VaultReport
 -- 记下旧 sha，下一轮复核立刻把它判成失效，决定根本落不住。
 freshShaAt :: FilePath -> FilePath -> IO (Maybe Text)
 freshShaAt srcDir n = do
-  (sha, me) <- shaViaCache Map.empty ("相册" </> n) (srcDir </> n)
-  pure (sha <$ me)
+  -- 本轮扫描之后、这次重读之前文件可能已被删/被独占（二十三轮 minor）：
+  -- 按"本轮不稳定"处理即可——决定不会写下、既有决定按失效回到 NEW，
+  -- 而不是让 CLI 抛异常退出、API 变 500。
+  r <- try (shaViaCache Map.empty ("相册" </> n) (srcDir </> n)) :: IO (Either IOException (Text, Maybe Entry))
+  pure $ case r of
+    Left _ -> Nothing
+    Right (sha, me) -> sha <$ me
 
 -- | 'freshShaAt' 的报告层包装（源目录取自报告）。
 freshSrcSha :: VaultReport -> FilePath -> IO (Maybe Text)

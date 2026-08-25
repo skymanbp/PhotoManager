@@ -514,7 +514,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P4-7 / pm 0.4.4 / 206 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
+  当前实现对应 **P4-7c / pm 0.4.4 / 212 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -709,7 +709,7 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |
 | GUI 工具链 | 2026-08-24 改判 Rust/Tauri：cargo、tauri-cli、WebView2、MSVC 本机均已在，零安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
 | 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable`（只有 GUI 拉起时置位）才开两个写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）与记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）（§11）。同用户的进程若拿到 token 也能打这两个端点——本节威胁模型不防同机同用户恶意进程；它至多让磁盘上多一个**计划文件**或改动一条**本地决定**（可 unhold 撤销），照片零改动，执行仍需人在终端 `pm apply` |
-| 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：字节一变即失效并回到 NEW；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
+| 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：**下一次比对**（`pm vault status` / GUI 刷新）复核到字节已变即失效并回到 NEW——不是实时监视；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |
 | 相册↔成片 1 个例外文件 | doctor 报告单列，结合 inbox-origin 判定（I7），用户裁决 |

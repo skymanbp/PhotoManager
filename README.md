@@ -15,8 +15,8 @@ Haskell 写的照片库管理器 + Rust/Tauri 桌面前端：为 `D:\Photography
 >
 > 但"个人项目"不是安全上打折的理由，照片是不可再生数据：pm **没有删除原语**，
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（至今
-> **二十轮**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉它
-> 就转红"的突变验证用例（203 例，GHC 警告 0）。
+> **二十三轮**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉它
+> 就转红"的突变验证用例（212 例，GHC 警告 0）。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
 对抗评审记录：[docs/reviews/](docs/reviews/)（时间线摘要：[docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)）。
@@ -289,7 +289,16 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   不变、`newActive` 扣掉它、退出码不再报"有事可做"，push 拒收 held 文件，记录里
   存决定当时的 sha 以便照片一换就失效回到 NEW。CLI `pm vault hold|unhold` 与第二个
   写端点 `POST /api/vault/hold` 共用校验器；GUI 分类卡加第四个按钮、状态页加 HELD
-  pill 与清单（206 测试；四道新闸各自突变转红）—— 评审待跑
+  pill 与清单）。**codex 二十一、二十二轮连判 NO-GO**，两轮共四条 major 全部
+  收口：决定的 sha 在**创建与复核**两处都改成本轮真实重算（吃 `(size,mtime)`
+  缓存快路时，等长替换 + 还原 mtime 会让旧决定继续生效、或让新决定当场失效）；
+  名单的读改写关进主库 root lock（I10，两个 pm 进程会丢更新）；取锁前补零写入
+  身份预检（否则非法库会先落下 `.pm/lock`）；覆盖写崩溃留下的 `.tmp` 不再被
+  读成空名单。**二十三轮 GO**，最小修复集空（212 测试；七道闸各自突变转红）
+- **真实写入 ✅（用户裁定"这 15 张暂时先不同步"）**：`pm vault hold` 15 张，
+  名单 15 条；`pm vault status` 报"其中 15 张已决定暂不同步，不计入待办"，
+  相册仍 94 张、vault 类目仍 79 张、vault 仓 `git status` 零改动。随时
+  `pm vault unhold` 或在 GUI 里改成某个类目
 - P5 档案侧 skill/文档对接（含 sync_photos.py 退役指针改写）
 
 ## License
