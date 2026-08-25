@@ -132,6 +132,18 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   「已归档，冗余」；清理走 `pm clean staging`（内建三副本前置条件，§5）。
 - `待修改\` 散文件无事件结构：import 不碰，单列「待修改清单」报告。
 
+### 7.1 只读提议拆成「结果 + 渲染」（P5-E）
+
+`pm sort <源>` 的提议形态拆成 `surveySort`（判定与取数）+ `renderSortSurvey`
+（打印，CLI 输出逐字不变），与 `Pm.Status.statusReport` /
+`Pm.BackupCmd.backupInitRun` 同一形态。GUI 第六页要的是**结果**不是那段文字，
+而两者必须同源——否则页面上看到的分段与终端建议的命令会各说各话。
+
+顺带把 `withSource` 泛化并分成两层：`withSourceQ` 只列举（提议形态要把诊断当
+数据交回），`withSource` 在它之上打印 `sfNotes`（计划形态）。拆 `surveySort`
+时我一度把 `makeAbsolute`/`doesDirectoryExist`/`listSource` 抄了第二遍——正是
+本项目一路在收拾的那种分叉，当场收回一处。
+
 ## 8. 命名治理（`pm names`）
 
 - 事件夹统一到 canonical scheme = **Scheme A `YY-MM-地点-Raw`（用户裁定

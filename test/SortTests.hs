@@ -6,7 +6,9 @@
 -- 照片库——真实文件只能证明"能读"，证明不了越界、损坏、时间无效这些分支，
 -- 而那些分支才是安全性所在。真实库的正确性另由主线手工比对（四张 ARW/JPG
 -- 与 Windows 的「拍摄日期」逐条吻合，记在 REVIEW-LOG）。
-module SortTests (sortTests) where
+-- photoAt 一并导出：ServeTests 的 sort 端点用例要造同样的 EXIF 样本，
+-- 抄第二份就是第二套 fixture，迟早与被测的解析器分叉。
+module SortTests (sortTests, photoAt) where
 
 import Control.Exception (SomeException, bracket, finally, try)
 import Control.Monad (forM_)
@@ -448,7 +450,7 @@ withLib k = withSystemTempDirectory "pm-sort" $ \tmp -> do
   k src root (Config root Nothing Nothing Nothing Nothing Nothing)
 
 sortPlan :: FilePath -> Config -> IO Int
-sortPlan src = runSortPlan (GoOpts False False) src (Left "Atlanta") (d 2026 8 25) (d 2026 8 26)
+sortPlan src cfg = fst <$> runSortPlan (GoOpts False False) src (Left "Atlanta") (d 2026 8 25) (d 2026 8 26) cfg
 
 -- | Pm.Plan 不导出 plansDir，从 planPath 反推——好过在测试里第二次写死
 -- ".pm\plans"，那样目录一改测试还会绿。
@@ -940,7 +942,7 @@ caseCollisionReportsAll = withSystemTempDirectory "pm-coll" $ \tmp -> do
   let cfg = Config root Nothing Nothing Nothing Nothing Nothing
   (out, rc) <-
     captureStdout
-      (runSortPlan (GoOpts False False) src (Left "Atlanta") (d 2026 8 25) (d 2026 8 26) cfg)
+      (fst <$> runSortPlan (GoOpts False False) src (Left "Atlanta") (d 2026 8 25) (d 2026 8 26) cfg)
   rc @?= 2 -- 整批拒绝
   -- 撞名的两个主文件本来就会被打印
   elemSub "x.ARW" out @?= True

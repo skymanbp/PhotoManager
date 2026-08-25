@@ -48,9 +48,10 @@ module Pm.Serve
   ) where
 
 import Control.Concurrent.Async (race)
+import Control.Monad (when)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (IOException, SomeException, bracket, catch, try)
 import Crypto.Random (getRandomBytes)
 import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
 import qualified Data.Aeson as Aeson
@@ -64,17 +65,21 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Time (UTCTime)
+import Data.Time (Day, UTCTime)
+import Text.Read (readMaybe)
+import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Encoding.Error as TEE
 import Network.HTTP.Types
 import Network.Socket
 import Network.Wai
 import Network.Wai.Handler.Warp (defaultSettings, runSettingsSocket)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (dropExtension, takeExtension, (</>))
-import System.IO (hFlush, hIsEOF, stdin, stdout)
+import GHC.IO.Handle (hDuplicateTo)
+import System.IO (IOMode (WriteMode), hClose, hFlush, hIsEOF, openFile, stdin, stdout)
 
 import Pm.Catalog (loadCatalog)
-import Pm.Cli (executePlanNowWith, preExecFor)
+import Pm.Cli (GoOpts (..), executePlanNowWith, preExecFor)
 import Pm.Commands (afterApply, loadPlanAnyRoot, prepareApply)
 import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, pmSubPlans, requirePmTrusted, requireWritable, untrustedMsg, withConfigLock)
 import Pm.ConfigEdit (checkPatch, configTxn)
@@ -82,6 +87,7 @@ import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
 import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPlan, savePlan)
+import Pm.Sort (SortSegment (..), SortSurvey (..), runSortPlan, surveySort)
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
 import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newActive, planCategories, renderVaultJson, vaultPushItems)
@@ -148,6 +154,21 @@ newToken = do
 portOk :: Int -> Bool
 portOk p = p >= 0 && p <= 65535
 
+-- | 把进程的 stdout 换成空设备。失败即忽略：这是防管道堵塞的加固，
+-- 换不成最坏也只是回到"可能堵"的旧状态，不该因此让 serve 起不来。
+muteStdout :: IO ()
+muteStdout =
+  ( do
+      h <- openFile nulDevice WriteMode
+      hDuplicateTo h stdout
+      hClose h
+  )
+    `catch` \(_ :: SomeException) -> pure ()
+ where
+  -- 设备命名空间：裸 "NUL" 走 GHC 的普通路径打开会 does not exist（实测）
+  nulDevice = [bsl, bsl, '.', bsl] <> "NUL"
+  bsl = toEnum 92
+
 -- | 只听 127.0.0.1；端口 0 = 随机，绑定后再从 socket 读回真实端口。
 runServe :: Config -> ServeOpts -> IO Int
 runServe cfg o = case soPort o of
@@ -162,6 +183,14 @@ runServe cfg o = case soPort o of
       BSL.putStr (encode (Announce (fromIntegral port) (T.pack (BC.unpack tok))))
       putStrLn ""
       hFlush stdout
+      -- announce 之后把 stdout 引到空设备——**只在 GUI 拉起时**。
+      --
+      -- `pm ui` 只从这根管道读一行 announce 就丢掉 BufReader，此后无人排空。
+      -- 库层任何一行 putStrLn（计划渲染、诊断、将来新增的端点）都会往里灌，
+      -- 填满 64 KiB 缓冲之后 serve 卡在写上，或拿到 broken pipe。逐个端点记得
+      -- 传 sink 是治不住的：漏一个就复发。手工跑 `pm serve` 时不动 stdout，
+      -- 诊断照旧可见。
+      when (soExitOnStdinEof o) muteStdout
       let server = runSettingsSocket defaultSettings sock (serveApp env)
       if soExitOnStdinEof o
         then do
@@ -464,6 +493,39 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
   --
   -- 逐项结果与提示**走 JSON 响应体**，不走 stdout：`pm ui` 只读一行 announce
   -- 就丢掉 BufReader，serve 的 stdout 此后无人排空，照着打会填满管道缓冲。
+  -- P5-E：GUI 第六页（整理新照片）。只读提议——与 CLI 的 `pm sort <源>` 同一个
+  -- 'surveySort'，所以页面上的分段与终端建议的命令不可能各说各话。
+  ("GET", ["api", "sort", "survey"]) -> do
+    let qs = queryString req
+        srcQ = lookup "src" qs
+        gapQ = lookup "gap" qs
+    case srcQ of
+      Just (Just raw) | not (BS.null raw) -> do
+        let src = T.unpack (TE.decodeUtf8With TEE.lenientDecode raw)
+            gap = fromMaybe 72 (gapQ >>= id >>= readMaybe . BC.unpack)
+        r <- surveySort src gap cfg
+        case r of
+          Left m -> err status409 m
+          Right sv -> jsonR status200 [] (surveyJson sv)
+      _ -> err status400 "缺 src 参数（要整理的源目录）"
+  -- P5-E 写端点：生成 sort 计划。只写 <主库>/.pm/plans，不执行、不碰照片
+  -- （与 push-plan 同一级授权；执行仍需 --allow-apply 的 /api/apply）。
+  ("POST", ["api", "sort", "plan"])
+    | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝生成计划"
+    | otherwise -> do
+        body <- readBodyCapped req
+        case body of
+          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
+          Just raw -> case Aeson.eitherDecodeStrict' raw of
+            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
+            Right (SortPlanReq src mplace mevent from to) ->
+              case (mplace, mevent) of
+                (Nothing, Nothing) -> err status400 "place 与 event 必须给一个"
+                (Just _, Just _) -> err status400 "place 与 event 只能给一个"
+                _ -> do
+                  let poe = maybe (Right (fromMaybe "" mevent)) Left mplace
+                  (code, mpid) <- runSortPlan (GoOpts False False) src poe from to cfg
+                  jsonR status200 [] (object ["code" .= code, "planId" .= mpid])
   ("POST", ["api", "apply"])
     | not (seAllowApply env) ->
         err status403 "serve 未以 --allow-apply 启动，拒绝执行计划（--writable 只允许生成计划，不执行）"
@@ -574,6 +636,51 @@ readBodyCapped req = go [] 0
          in if n' > maxBodyBytes then pure Nothing else go (chunk : acc) n'
 
 -- | @{"assignments":[{"name":"a.jpg","category":"landscape"},…]}@
+-- | @{"src","place"|"event","from","to"}@ —— 与 CLI 的 @pm sort … --place …
+-- --from … --to …@ 同一组参数，交给**同一个** 'runSortPlan'。
+data SortPlanReq = SortPlanReq FilePath (Maybe String) (Maybe String) Day Day
+
+instance Aeson.FromJSON SortPlanReq where
+  parseJSON = Aeson.withObject "sort-plan" $ \o ->
+    SortPlanReq
+      <$> o Aeson..: "src"
+      <*> o Aeson..:? "place"
+      <*> o Aeson..:? "event"
+      <*> o Aeson..: "from"
+      <*> o Aeson..: "to"
+
+-- | 'SortSurvey' 的线上形状。写在这里而不是给 Pm.Sort 加 ToJSON 实例：
+-- 内核层不该为了一个页面去认识 aeson，而线上形状是 API 的事，改它要能一眼
+-- 看见影响面。
+surveyJson :: SortSurvey -> Value
+surveyJson sv =
+  object
+    [ "src" .= ssSrcAbs sv
+    , "gapHours" .= ssGapHours sv
+    , "photos" .= ssPhotoCount sv
+    , "dated" .= ssDatedCount sv
+    , "sidecars" .= ssSidecarCount sv
+    , "undated" .= ssUndated sv
+    , "homelessSidecars" .= ssHomelessCars sv
+    , "unknown" .= ssUnknown sv
+    , "errors" .= [object ["path" .= p, "why" .= w] | (p, w) <- ssErrors sv]
+    , "notes" .= ssNotes sv
+    , "segments"
+        .= [ object
+              [ "index" .= sgIndex g
+              , "from" .= sgFrom g
+              , "to" .= sgTo g
+              , "firstAt" .= show (sgFirstAt g)
+              , "lastAt" .= show (sgLastAt g)
+              , "count" .= sgCount g
+              , "firstFile" .= sgFirstFile g
+              , "lastFile" .= sgLastFile g
+              , "sameMonthEvents" .= sgSameMonthEvents g
+              ]
+           | g <- ssSegments sv
+           ]
+    ]
+
 -- | @{"planId": "...", "only": "1,3-5"}@。@only@ 缺省 = 全量；语法与 CLI 的
 -- @--only@ 逐字相同（同一个 'Pm.Cli.applyOnlyToPlan' 解析）。
 data ApplyReq = ApplyReq Text (Maybe String)

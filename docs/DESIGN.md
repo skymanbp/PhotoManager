@@ -431,8 +431,21 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   守卫）——二十轮纠正了此前"只写 plans"的措辞；**不执行、不碰照片**。响应带计划、
   文件路径、`pm apply <id>` 提示与 git 步骤。**apply 端点尚未开**：执行仍在终端；
   届时先过 codex 评审再请用户裁定。
+- **整理新照片（P5-E，GUI 第六页）**：两个端点，都不执行。
+  `GET /api/sort/survey?src=…&gap=…` 是只读提议，走 CLI 同一个
+  `Pm.Sort.surveySort`——页面上的分段与终端建议的命令因此不可能各说各话；
+  `POST /api/sort/plan {src, place|event, from, to}` 走同一个 `runSortPlan`，
+  只写主库的 `.pm/plans`（`--writable` 级，与 push-plan 同级）。页面把每段的
+  起止日期预填进去、地点留空要用户填（相机零 GPS，pm 不猜——I1），同年月已有
+  事件夹一键并入（切成 `--event` 语义）。计划 id 由 `runSortPlan` 直接交回，
+  不从 `.pm/plans` 里挑"最新的那个"——并发生成时那是猜。
+- **GUI 拉起时静音 stdout（P5-E）**：`pm serve --exit-on-stdin-eof` 打完
+  announce 那一行之后把进程 stdout 引到空设备。`pm ui` 只读那一行就丢掉
+  BufReader，此后管道无人排空；库层任何一行 `putStrLn` 都会往里灌，填满
+  64 KiB 缓冲后 serve 卡在写上。逐个端点记得传 sink 治不住——漏一个就复发。
+  手工跑 `pm serve` 时不动 stdout，诊断照旧可见。
 - **GUI（P4-4 UX 重做，用户反馈"清晰优雅、快速上手、直观可视化"+ 三项状态
-  可视化）**：左侧导航五页（数字键 1–5 切换）。①**状态**——照片库四张分层卡
+  可视化）**：左侧导航**六页**（数字键 1–6 切换）。①**状态**——照片库四张分层卡
   （Raw / 成片 / 相册 / 暂存：文件数、体积、容量占比条）+ 索引时间与「核对新鲜
   度」；**vault 展示集同步**卡（差异数 chip、九态计数 pill——含 HELD、
   NEW/HELD/MISSING/RENAME/DRIFT/UNSTABLE 可展开清单——"差哪些"）；**备份硬盘同步**卡（未登记 / 上次同步

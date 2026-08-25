@@ -105,8 +105,10 @@ run (CmdSort o) = withCfg $ \cfg ->
     (Nothing, Nothing, Nothing, Nothing) -> runSortSurvey (soSrc o) (soGapHours o) cfg
     (mp, me, Just f, Just t) -> case (mp, me) of
       (Just _, Just _) -> putStrLn "--place 与 --event 只能给一个" >> pure 2
-      (Just p, Nothing) -> runSortPlan (soGo o) (soSrc o) (Left p) f t cfg
-      (Nothing, Just e) -> runSortPlan (soGo o) (soSrc o) (Right e) f t cfg
+      -- 计划 id 只有 GUI 那条路要（第六页生成后要显示/跳转）；CLI 已经
+      -- 在计划渲染里打印过它，这里只取退出码。
+      (Just p, Nothing) -> fst <$> runSortPlan (soGo o) (soSrc o) (Left p) f t cfg
+      (Nothing, Just e) -> fst <$> runSortPlan (soGo o) (soSrc o) (Right e) f t cfg
       (Nothing, Nothing) -> putStrLn "给了 --from/--to 就必须给 --place 或 --event" >> pure 2
     _ -> putStrLn "生成计划需要同时给 --from 与 --to（先不带参数跑一次看分段提议）" >> pure 2
 run (CmdBackup (BackupInit p)) = withCfg (runBackupInit p)
