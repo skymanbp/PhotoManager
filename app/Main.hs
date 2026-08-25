@@ -47,6 +47,7 @@ data Cmd
   | CmdConfigSet ConfigPatch -- 改 vault / photos.json / 并发数（主库路径只读）
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
   | CmdVersions -- 版本组/精确重复报告（只读）
+  | CmdDedupe GoOpts -- 精确重复 → 逐份可裁决的隔离计划（全部 NEEDS-DECISION）
   | CmdServe ServeOpts -- 127.0.0.1 JSON API（缺省只读；--writable 才开生成计划端点）
   | CmdUi -- 拉起 Tauri 桌面 GUI（P4-3；GUI 自己跑 serve）
 
@@ -112,12 +113,14 @@ run (CmdBackup (BackupInit p)) = withCfg (runBackupInit p)
 run (CmdBackup (BackupRun go mworkers)) = withCfg (runBackupRun go mworkers)
 run (CmdClean go) = withCfg (runClean go)
 run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
-run (CmdVaultPush go mcat fs) = withCfg (runVaultPush (savePlanAndMaybeRun go) mcat fs)
+run (CmdVaultPush go mcat fs) =
+  withCfg (\cfg -> runVaultPush (savePlanAndMaybeRun cfg go) mcat fs cfg)
 run (CmdVaultHold hold fs) = withCfg (runVaultHold hold fs)
 run CmdConfigShow = withCfg runConfigShow
 run (CmdConfigSet p) = withCfg (runConfigSet p)
-run (CmdNames go) = withCfg (runNames (savePlanAndMaybeRun go))
+run (CmdNames go) = withCfg (\cfg -> runNames (savePlanAndMaybeRun cfg go) cfg)
 run CmdVersions = withCfg runVersions
+run (CmdDedupe go) = withCfg (runDedupe go)
 run (CmdServe o) = withCfg (\cfg -> runServe cfg o)
 -- 先过 withCfg：配置缺失时在这里报清楚，而不是让 GUI 里的 serve 静默失败
 run CmdUi = withCfg (const runUi)
@@ -147,6 +150,7 @@ parserInfo =
           <> command "vault" (info vaultP (progDesc "相册 ↔ vault 展示集（status 兼容 sync_photos.py）"))
           <> command "names" (info (CmdNames <$> goOpts) (progDesc "Raw 事件夹统一 Scheme A（YY-MM-地点-Raw；目录改名走 §6.2 协议，undo 可回滚）"))
           <> command "versions" (info (pure CmdVersions) (progDesc "版本组/精确重复报告（只读；版本后缀不强制统一）"))
+          <> command "dedupe" (info (CmdDedupe <$> goOpts) (progDesc "归档层精确重复 → 逐份可裁决的隔离计划（全部待裁决；留哪份 pm 不替你选，用 pm resolve --unskip 逐份批准）"))
           <> command "doctor" (info doctorP (progDesc "崩溃恢复对账 + 完整性体检（默认只读）"))
           <> command "trash" (info trashP (progDesc "隔离区：list / empty（唯一最终清除入口）"))
           <> command "undo" (info undoP (progDesc "由主库 journal 生成反向计划（经 pm apply 执行）"))
@@ -188,6 +192,7 @@ parserInfo =
         <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
         <*> switch (long "exit-on-stdin-eof" <> help "stdin 关闭即退出（GUI 拉起时用：父进程一死 serve 随之结束，不留孤儿）")
         <*> switch (long "writable" <> help "允许四个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）、记录「暂不同步」决定（写主库的 .pm/vault-holds.json）、改配置（写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识）；都不执行、不碰照片；缺省只读")
+        <*> switch (long "allow-apply" <> help "另外允许 POST /api/apply 执行已存的计划——这是唯一会动照片字节的端点，因此单独一个开关，不并进 --writable（蕴含 --writable）。装载/绑 root/--only/执行期复验全部与 CLI 的 pm apply 同源")
   initP =
     fmap CmdInit $
       InitOpts

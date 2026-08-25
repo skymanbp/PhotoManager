@@ -184,9 +184,17 @@ ifdEntries end bs base rel
             [e | i <- [0 .. fromIntegral n - 1], Just e <- [entryAt (at + 2 + i * 12)]]
  where
   at = base + fromIntegral rel
-  -- 2 字节计数 + n×12 字节条目必须整个落在缓冲区内。n 至多 65535（Word16），
-  -- 2 + 65535*12 = 786422，Int 装得下，不会绕回。
-  wholeIfdFits n = isJust (sliceAt bs at (2 + n * 12))
+  -- 2 字节计数 + n×12 字节条目 + **4 字节 next-IFD offset** 必须整个落在
+  -- 缓冲区内。那 4 字节是 TIFF 规定的 IFD 结尾（无后继时为 0），少算它等于
+  -- 接受一个结构不完整的 IFD：本机探针实证，一个 64 字节的 TIFF（子 IFD 的
+  -- 条目数组正好在缓冲区末尾结束、没有 next offset）照样返回
+  -- @Just 2026-08-25 13:45:07@（codex 二十八轮 #6）。
+  --
+  -- 代价：文件恰好在 256 KiB 头的最后 4 字节内结束 IFD 时会判成读不到。那是
+  -- fail-closed 的一侧——本模块的契约就是"读不到就交人判断"，返回一个来自
+  -- 残缺结构的时间才是危险的那一侧。
+  -- n 至多 65535（Word16），2 + 65535*12 + 4 = 786426，Int 装得下，不会绕回。
+  wholeIfdFits n = isJust (sliceAt bs at (2 + n * 12 + 4))
   entryAt p =
     IfdEntry
       <$> u16 end bs p

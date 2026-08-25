@@ -200,6 +200,12 @@ Haskell 侧无图像解码依赖。
 
 所有命令**默认只读**（打印报告/计划），写盘要么 `--apply`（展示计划后交互
 y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <planId>`。
+
+这里的「写盘」指的是**照片字节**。计划文件本身是 pm 自己的状态：不给 `--apply`
+时它照样落在 `<root>/.pm/plans/<id>.json`——两段式的第二段 `pm apply <planId>`
+读的就是它，命令末尾也明明白白打印「计划已存 …／执行: pm apply …」。把这句话
+读成"没有 `--apply` 就一个字节都不许写"会得出计划器违反不变量的结论（codex
+二十八轮 #5 即如此，已第一方证伪）。
 零参数 `pm` = `pm status`。全部支持 `--json`。
 
 | 命令 | 语义 | 写盘? |
@@ -216,10 +222,11 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm vault ingest <files> --category <c>` | skill 调用的非交互批量入口：拷 相册/ + 拷 vault 类目 + 冲突检测 + journal 登记 inbox-origin；`--finalize` 单独一步移 `_inbox→_done`（供 skill 在 photos.json 校验通过后调，§10.3） | 是（同协议） |
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、别名登记、同批目标唯一性校验） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
+| `pm dedupe [--apply]` | **精确重复的逐份裁决计划**（§8.1）：来源就是 `pm versions` 的非设计内精确重复组，每一份出一个 Quarantine 条目、**全部** `NEEDS-DECISION`——留哪一份 pm 判不出就不猜（I1），用 `pm resolve --item N --unskip` 逐份批准。**不**绑复合组（复合组语义是不可拆，而这里要求逐份裁决）；组的完整性由执行期屏障保证：某个 sha 在归档层的最后一份**活**副本不会被隔离掉 | apply 时 |
 | `pm doctor [--deep]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash；每次体检轮转复验 1/N 全库（--deep 全量） | 否 |
 | `pm apply <planId> [--only 3,7-9]` | 执行（或部分执行）已存的计划；conflict 项只停该项、批次继续、末尾汇总。**P2.1/P2.2**：执行 root 按计划 `rootId` 重新发现绑定（Exec 拿锁后再验一次；无 rootId 的计划 CLI 层 fail-closed 拒绝，含 --apply 即时路径）；`--only` 自动扩到复合组闭包；clean 计划**每次执行前**逐项重验三副本（真实重 hash），不过的降级暂停——`pm apply` 与 `clean --apply` 即时路径无差别，无豁免 | 是 |
 | `pm resolve <planId> --item N --keep src\|dst\|both` | 裁决计划中标 `NEEDS-DECISION` 的冲突项（both = 新名并存）。**P2.1**：`--keep` 只接受独立的 NEEDS-DECISION Copy（复合组成员不可单独裁决）；skip/unskip 扩到全组；`--keep src` 追加的 supersede 对共享组 id | 改计划 |
-| `pm trash list / empty` | 隔离区查看（manifest ∪ journal ∪ 实际目录并集，孤儿标 UNREGISTERED）/ **唯一的最终清除入口**：逐项列出、二次确认，只 unlink 确认清单里逐项可见的条目，禁止整删目录树。**P2.1（评审 cx-3 终极屏障）**：reason 为 `clean-staging` 的条目在永久删除前按当前 catalog + 真实重 hash 再确认「Raw/成片 + 备份盘」各存一份同 sha 副本，确认不了 HELD 不删 | empty 时 |
+| `pm trash list / empty` | 隔离区查看（manifest ∪ journal ∪ 实际目录并集，孤儿标 UNREGISTERED）/ **唯一的最终清除入口**：逐项列出、二次确认，只 unlink 确认清单里逐项可见的条目，禁止整删目录树。**P2.1（评审 cx-3 终极屏障）**：reason 为 `clean-staging` 的条目在永久删除前按当前 catalog + 真实重 hash 再确认「Raw/成片 + 备份盘」各存一份同 sha 副本，确认不了 HELD 不删。**P5-B 起这道屏障一般化成一张表**（`barrierOf`）：`dedupe` 记录另走「归档三层还留着一份活副本吗」，与备份盘无关——一块没插的盘不该拖住与它无关的记录；无前缀的记录不受屏障管，仍需逐项确认 | empty 时 |
 | `pm undo --last [n]` | 由 journal 生成反向计划：**仅对有 Done 的 op**；执行前逐项校验现盘内容 == journal 指纹，不符即拒绝并报告；supersede 的反向 = 从 trash 还原 victim 回原位（新副本转 quarantine） | apply 时 |
 | `pm serve` | 起本地 JSON API（127.0.0.1 随机端口 + session token），供 GUI/skill 消费 | 经同一 Plan/Exec |
 | `pm ui` | 启动 serve 并拉起 GUI 桌面程序（P4 交付） | 同上 |
@@ -399,8 +406,20 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `GET /api/thumb/<sha>`（只提供 catalog 里 JPEG 条目的原字节，读取前逐级
   `resolveUnder`——扫描后被换成库外链接的条目不跟随；缩放由 GUI 做）。vault
   两个端点会刷新 `.pm/vault-cache`，进程内互斥串行化（并发争用固定 tmp 名）。
+- **三级授权（P5-C）**：`serve` 的授权分三级、缺省最弱——①无开关＝只读；
+  ②`--writable`＝POST 端点可**生成计划**（只写 `.pm/plans` 与少量 pm 自身状态，
+  **不执行、不碰照片**）；③`--allow-apply`＝才允许 `POST /api/apply` **执行**已存
+  的计划（唯一会动照片字节的端点，蕴含 ②）。第 ③ 级单独一个开关而不是并进
+  `--writable`：后者的契约「不执行、不碰照片」写在帮助文本、本节、README 与
+  GUI 四处，悄悄放宽它等于让所有按 ② 理解去用它的地方（含 `pm ui` 自己的拉起
+  参数）无声地获得动照片的能力。端点不新增任何执行能力：装载／按 UUID 绑 root／
+  `--only` 组闭包走 CLI 同一个 `prepareApply`，执行期复验走同一张 `preExecFor`
+  表，执行与 catalog 回写走同一个 `executePlanNowWith`。逐项结果与提示**走 JSON
+  响应体**，不走 stdout——`pm ui` 只读一行 announce 就丢掉 BufReader，serve 的
+  stdout 此后无人排空，照着打会填满管道缓冲。
 - **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
-  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。目前共**四个**写端点——
+  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。目前共**四个**生成计划类
+  写端点——
   `POST /api/vault/push-plan`（P4-5，本条）、`POST /api/vault/hold`（P4-7）、
   `POST /api/config` 与 `POST /api/backup-init`（P4-8，均见下）；
   **apply 端点仍未开**。第一个是 `POST /api/vault/push-plan`，

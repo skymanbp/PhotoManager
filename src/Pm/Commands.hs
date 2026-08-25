@@ -20,6 +20,7 @@ module Pm.Commands
   , runTrash
   , runUndoCmd
   , runApply
+  , prepareApply
   , afterApply
   , loadPlanAnyRoot
   , runResolve
@@ -29,6 +30,7 @@ module Pm.Commands
   , backupInitPreflight
   , runBackupRun
   , runClean
+  , runDedupe
   ) where
 
 import Control.Monad (forM, forM_, unless, when)
@@ -48,10 +50,11 @@ import Pm.BackupCmd (BackupCmd (..), backupInitPreflight, runBackupInit, runBack
 import Pm.Catalog (loadCatalog, saveCatalog)
 import Pm.Clean
 import Pm.Cli
+import Pm.Dedupe
 import Pm.Config
 import Pm.Diff
 import Pm.GitGuard (pmIgnoreGuard)
-import Pm.Hash (sha256File)
+import Pm.Hash (ContentProbe (..), probeConfined, sha256File)
 import Pm.Import
 import Pm.Op
 import Pm.Plan
@@ -295,45 +298,25 @@ runTrash' cfg tc root = do
       pure 0
     TrashEmpty yes -> do
       let present = [(r, trashDir root </> trTrashRel r) | (r, True) <- tvRegistered tv]
-      -- 评审 cx-3 终极屏障：clean-staging 隔离条目是「三副本确认」清出来的
-      -- 暂存副本——永久删除前按当前 catalog + 真实重 hash 再确认归档层与
-      -- 备份盘各存一份；确认不了就 HELD，绝不删可能是最后一份的字节。
-      let (cleanRecs, plainRecs) = span' (\(r, _) -> "clean-staging" `T.isPrefixOf` trReason r) present
-      (purgeableClean, heldClean) <-
-        if null cleanRecs
-          then pure ([], [])
-          else do
-            -- P3b-7 复审 B1：主库见证须来自 RoleMain root（同 recheckCleanPlan）。
-            -- P3b-8 复审 B1：校验先于任何主库侧读取（catalog、备份发现）。此处
-            -- root 是 pickRoot 已按槽位验过身份的作用 root，trashView 只读它的
-            -- manifest；主库见证另走 cfgMainPath，所以守卫在这里而非 trashView 前。
-            emain <- requireMain cfg
-            case emain of
-              Left m -> pure ([], [(r, "主库身份不符: " <> m) | (r, _) <- cleanRecs])
-              Right _ -> do
-                mMain <- fst <$> loadCatalog (cfgMainPath cfg)
-                er <- discoverBackupRoot cfg
-                case (mMain, er) of
-                  (Just mainCat, Right broot) -> do
-                    mBak <- fst <$> loadCatalog broot
-                    case mBak of
-                      Nothing -> pure ([], [(r, "备份盘无索引") | (r, _) <- cleanRecs])
-                      Just bakCat -> do
-                        judged <- forM cleanRecs $ \rec@(r, _) -> do
-                          ok <- threeCopiesStillExist (cfgMainPath cfg) mainCat broot bakCat (trSha r)
-                          pure (rec, ok)
-                        pure
-                          ( [rec | (rec, True) <- judged]
-                          , [(r, "三副本复验不过") | ((r, _), False) <- judged]
-                          )
-                  (Nothing, _) -> pure ([], [(r, "主库无索引") | (r, _) <- cleanRecs])
-                  (_, Left msg) -> pure ([], [(r, "备份盘不在线: " <> msg) | (r, _) <- cleanRecs])
-      forM_ heldClean $ \(r, why) ->
+      -- 隔离记录按 reason 前缀分流到各自的**永久删除前屏障**（评审 cx-3 终极
+      -- 屏障的一般化）。前缀由写入方定（'Pm.Clean.cleanPlanItems' /
+      -- 'Pm.Dedupe.dedupePlanItems'），这里是唯一消费点：加一类受屏障保护的
+      -- 隔离 = 在 barrierOf 里加一行，而不是再抄一段 span'。无屏障的记录
+      -- （supersede 的旧字节、返修裁决…）由生成它的计划负责交代，永久删除
+      -- 仍需用户逐项确认。
+      let barrierOf r
+            | "clean-staging" `T.isPrefixOf` trReason r = Just BThreeCopies
+            | dedupeReasonPrefix `T.isPrefixOf` trReason r = Just BArchiveCopyLeft
+            | otherwise = Nothing
+          guarded = [(b, x) | x@(r, _) <- present, Just b <- [barrierOf r]]
+          plainRecs = [x | x@(r, _) <- present, barrierOf r == Nothing]
+      (purgeableGuarded, heldGuarded) <- purgeBarriers cfg guarded
+      forM_ heldGuarded $ \(r, why) ->
         putStrLn ("  HELD(不删) " <> trTrashRel r <> " —— " <> why)
       -- P2.2（复审新发现）：同计划复位后重跑会为同一 trashRel 追加第二条
       -- manifest 记录（append-only 历史）——按 trashRel 去重，一个文件只
       -- unlink 一次，避免第二次 removeFile 因文件已不存在而炸掉整个批次。
-      let candidates = nubBy ((==) `on` (trTrashRel . fst)) (plainRecs <> purgeableClean)
+      let candidates = nubBy ((==) `on` (trTrashRel . fst)) (plainRecs <> purgeableGuarded)
       -- P3b-10（七轮复审 major，junction 实测）：这是 pm 全程唯一 unlink 用户
       -- 数据的位置，词法校验（readManifest 的 relPathOk）挡不住别名——
       -- .pm/trash/link 若是指向库外的 junction，"link\v.jpg" 是完全合法的相对
@@ -350,7 +333,7 @@ runTrash' cfg tc root = do
           escaped = [r | (r, Nothing) <- judged]
       forM_ escaped $ \r ->
         putStrLn ("  HELD(不删) " <> trTrashRel r <> " —— 解析后不在 .pm/trash 之内（链接/别名？先跑 pm doctor 人工核查）")
-      let heldN = length heldClean + length escaped
+      let heldN = length heldGuarded + length escaped
       if null purgeable
         then putStrLn "隔离区没有可清除的已登记条目" >> pure (if heldN == 0 then 0 else 1)
         else do
@@ -367,8 +350,68 @@ runTrash' cfg tc root = do
               forM_ purgeable $ \(_, abs') -> removeFile abs'
               putStrLn ("✓ 已清除 " <> show (length purgeable) <> " 项（manifest 记录保留为历史）")
               pure (if heldN == 0 then 0 else 1)
- where
-  span' p xs = (filter p xs, filter (not . p) xs)
+
+-- | 受屏障保护的隔离类别。
+data PurgeBarrier
+  = -- | @clean-staging@：归档层 + **备份盘**各一份仍在（评审 cx-3）
+    BThreeCopies
+  | -- | @dedupe@：归档层还留着一份即可——被隔离的本来就是"多余的那一份"
+    BArchiveCopyLeft
+  deriving (Show, Eq)
+
+-- | 永久删除前按**当前** catalog + 真实重 hash 再确认该内容还有别的活副本。
+--
+-- 两类屏障问的不是同一件事，所以要的证据也不同：'BThreeCopies' 要备份盘那一
+-- 份，'BArchiveCopyLeft' 与备份盘无关。因此**只在真有 'BThreeCopies' 记录时**
+-- 才去发现备份盘——否则一块没插的盘会把与它无关的 dedupe 记录一起拖成 HELD。
+--
+-- 证据一律先验主库身份再读（P3b-8 复审 B1：校验先于任何主库侧读取）。
+purgeBarriers ::
+  Config ->
+  [(PurgeBarrier, (TrashRecord, FilePath))] ->
+  IO ([(TrashRecord, FilePath)], [(TrashRecord, String)])
+purgeBarriers cfg guarded
+  | null guarded = pure ([], [])
+  | otherwise = do
+      emain <- requireMain cfg
+      case emain of
+        Left m -> pure ([], [(r, "主库身份不符: " <> m) | (_, (r, _)) <- guarded])
+        Right _ -> do
+          mMain <- fst <$> loadCatalog (cfgMainPath cfg)
+          case mMain of
+            Nothing -> pure ([], [(r, "主库无索引") | (_, (r, _)) <- guarded])
+            Just mainCat -> do
+              bak <-
+                if any ((== BThreeCopies) . fst) guarded
+                  then do
+                    er <- discoverBackupRoot cfg
+                    case er of
+                      Left msg -> pure (Left ("备份盘不在线: " <> msg))
+                      Right broot -> do
+                        mb <- fst <$> loadCatalog broot
+                        pure (maybe (Left "备份盘无索引") (Right . (,) broot) mb)
+                  else pure (Left "本批无 clean-staging 记录")
+              judged <- forM guarded $ \(b, rec@(r, _)) -> do
+                -- 即将被永久删除的那个对象 = 隔离区里的载荷。见证与它**同身份**
+                -- 就不是另一份副本——同一个对象出现在两个名字下不算两份
+                -- （codex 二十八轮 #2；此前这一条由 link count 代劳，代价是把
+                -- 合法 hardlink 的归档见证也一并拒了，长期 HELD）。
+                pp <- probeConfined (cfgMainPath cfg) (".pm" </> pmSubTrash </> trTrashRel r)
+                let excl = case pp of CpSha _ fid -> [fid]; _ -> []
+                v <- case b of
+                  BThreeCopies -> case bak of
+                    Left msg -> pure (Left msg)
+                    Right (broot, bakCat) -> do
+                      ok <- threeCopiesStillExist (cfgMainPath cfg) mainCat broot bakCat excl (trSha r)
+                      pure (if ok then Right () else Left "三副本复验不过")
+                  BArchiveCopyLeft -> do
+                    ok <- anyArchiveCopyAlive (cfgMainPath cfg) mainCat excl (trSha r)
+                    pure (if ok then Right () else Left "归档层已无此内容的活副本（这可能是最后一份）")
+                pure (rec, v)
+              pure
+                ( [rec | (rec, Right ()) <- judged]
+                , [(r, m) | ((r, _), Left m) <- judged]
+                )
 
 -- ─── undo / apply / resolve ─────────────────────────────────────────────────
 
@@ -410,35 +453,44 @@ loadPlanAnyRoot cfg pid = do
                 Right p -> Right p
                 Left _ -> Left (mainErr <> "（vault/备份 root 也没有）")
 
-runApply :: ApplyOpts -> Config -> IO Int
-runApply o cfg = do
-  ep <- loadPlanAnyRoot cfg (aoId o)
+-- | @pm apply@ 的**决定**部分：装载 → 按 UUID 重新绑定 root（评审 cx-1）→
+-- @--only@ 展开到复合组闭包（评审 cx-2）。返回可执行的计划，以及因组闭包被
+-- 追加进来的序号。
+--
+-- 抽出来是因为 CLI 与 @POST \/api\/apply@ 必须对「这个计划该怎么执行」给出
+-- **同一个**答案。两处各写一遍 load\/bind\/only，就会有一处忘了按 UUID 绑
+-- root、或忘了把组闭包补齐——前者会改错库，后者会把 supersede 拆成半个。
+-- 执行期复验（'preExecFor'）故意留在**调用方**：@--dry@ 只看不执行，不该触发
+-- 任何复验副作用。
+prepareApply :: Config -> T.Text -> Maybe String -> IO (Either String (Plan, [Int]))
+prepareApply cfg pid only = do
+  ep <- loadPlanAnyRoot cfg pid
   case ep of
-    Left e -> putStrLn e >> pure 2
+    Left e -> pure (Left e)
     Right plan0 -> case plRootId plan0 of
-      Nothing -> do
-        putStrLn "计划缺 root 标识（P2.1 之前的旧格式）→ 重新生成计划后再执行（评审 cx-1）"
-        pure 2
+      Nothing -> pure (Left "计划缺 root 标识（P2.1 之前的旧格式）→ 重新生成计划后再执行（评审 cx-1）")
       Just rid -> do
         ebound <- bindExecRoot cfg plan0 rid
-        case ebound of
-          Left e -> putStrLn e >> pure 2
-          Right plan1 -> case applyOnlyToPlan (aoOnly o) plan1 of
-            Left e -> putStrLn e >> pure 2
-            Right (plan2, added) -> do
-              unless (null added) $
-                putStrLn ("· --only 已扩到复合组（不可拆），追加条目: " <> show added)
-              mapM_ putStrLn (renderPlan plan2)
-              if aoDry o
-                then pure 0
-                else do
-                  plan3 <-
-                    if plKind plan2 == "clean-staging"
-                      then recheckCleanPlan cfg plan2
-                      else pure plan2
-                  code <- executePlanNow plan3
-                  afterApply cfg plan3 code
-                  pure code
+        pure (ebound >>= applyOnlyToPlan only)
+
+runApply :: ApplyOpts -> Config -> IO Int
+runApply o cfg = do
+  r <- prepareApply cfg (aoId o) (aoOnly o)
+  case r of
+    Left e -> putStrLn e >> pure 2
+    Right (plan2, added) -> do
+      unless (null added) $
+        putStrLn ("· --only 已扩到复合组（不可拆），追加条目: " <> show added)
+      mapM_ putStrLn (renderPlan plan2)
+      if aoDry o
+        then pure 0
+        else do
+          -- 执行期复验钩子按种类取自唯一一张表（'preExecFor'）；各命令 --apply
+          -- 的即时路径经 savePlanAndMaybeRun 取同一张；API 的 apply 端点亦然。
+          plan3 <- preExecFor cfg (plKind plan2) plan2
+          code <- executePlanNow plan3
+          afterApply cfg plan3 code
+          pure code
 
 -- | apply 之后的缓存/提示收尾（可测）。P3b-7 复审 B1：备份缓存写进
 -- @\<cfgMainPath\>\/.pm\/backup-cache@，主路径必须是 RoleMain root——
@@ -632,6 +684,7 @@ runImport go cfg = do
           pid <- newPlanId
           now <- getCurrentTime
           savePlanAndMaybeRun
+            cfg
             go
             Plan
               { plId = pid
@@ -641,6 +694,52 @@ runImport go cfg = do
               , plCreated = now
               , plItems = items
               }
+
+-- | @pm dedupe@：归档层精确重复 → **逐份可裁决**的隔离计划。
+--
+-- 报告口径与 @pm versions@ 完全一致（同一个 'Pm.Versions.versionsReport'），
+-- 所以"看到的"与"能操作的"不可能对不上。每一条都是 NEEDS-DECISION：留哪一份
+-- 是用户的判断，pm 判不出就不猜（I1）。执行期还有一道屏障兜底——见
+-- 'Pm.Dedupe.recheckDedupeItems'。
+runDedupe :: GoOpts -> Config -> IO Int
+runDedupe go cfg = do
+  let root = cfgMainPath cfg
+  -- 与 runClean 同一道闸：见证与受害者都取自主库 catalog，root 必须真是 RoleMain。
+  erole <- requireRole RoleMain root
+  case erole of
+    Left msg -> putStrLn msg >> pure 2
+    Right info -> do
+      (mcat, warns) <- loadCatalog root
+      mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
+      case mcat of
+        Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
+        Just cat -> do
+          let gs = dedupeGroups cat
+              items = dedupePlanItems gs
+          if null gs
+            then putStrLn "✓ 归档层无非设计内精确重复" >> pure 0
+            else do
+              printf "精确重复 %d 组 · 共 %d 份文件\n" (length gs) (length items)
+              forM_ (zip (scanl (+) 0 (map (length . dgPaths) gs)) gs) $ \(off, g) -> do
+                putStrLn ("  = sha " <> T.unpack (T.take 16 (dgSha g)) <> ":")
+                forM_ (zip [off ..] (dgPaths g)) $ \(ix, p) ->
+                  printf "      #%-3d %s\n" (ix :: Int) p
+              putStrLn "每一份都是待裁决条目——留哪一份 pm 不替你选（I1）。"
+              putStrLn "批准隔离某一份: pm resolve <计划 id> --item <#序号> --unskip"
+              putStrLn "执行期屏障：某个内容在归档层的最后一份活副本不会被隔离掉（自动降级待裁决）"
+              pid <- newPlanId
+              now <- getCurrentTime
+              savePlanAndMaybeRun
+                cfg
+                go
+                Plan
+                  { plId = pid
+                  , plKind = "dedupe"
+                  , plRootPath = root
+                  , plRootId = Just (riId info)
+                  , plCreated = now
+                  , plItems = items
+                  }
 
 -- ─── backup：见 Pm.BackupCmd（P3b-6 拆分） ──────────────────────────────────
 
@@ -684,9 +783,10 @@ runClean go cfg = do
                   pid <- newPlanId
                   now <- getCurrentTime
                   -- P2.2（复审 cx-3 旁路封堵）：--apply 即时路径同样在
-                  -- 确认后、执行前重验三副本，与 pm apply 无差别。
-                  savePlanAndMaybeRunWith
-                    (recheckCleanPlan cfg)
+                  -- 确认后、执行前重验三副本，与 pm apply 无差别——两者现在
+                  -- 共用 'preExecFor'，不再各自记得传钩子。
+                  savePlanAndMaybeRun
+                    cfg
                     go
                     Plan
                       { plId = pid

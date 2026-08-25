@@ -11,7 +11,9 @@ import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import SortTests (sortTests)
 import Test.Tasty
+import Test.Tasty.Runners (NumThreads (..))
 
+import DedupeTests (dedupeTests)
 import GuardTests (guardTests)
 import KernelTests (kernelTests)
 import NamesTests (namesTests)
@@ -31,5 +33,9 @@ main = do
   -- 这条路就物理上断了——不依赖"每个用例记得设环境变量"。
   withSystemTempDirectory "pm-test-cfg" $ \d -> do
     setEnv "PM_CONFIG" (d </> "config.toml")
+    -- **整个套件串行**：SortTests 的 captureStdout 重定向的是**进程级**
+    -- stdout。并行时别的用例（以及 tasty 自己的结果行）会写进同一个句柄——
+    -- 断言读到别人的输出、失败详情反而被吞掉。这是共享资源的正确处置：
+    -- 有一个进程级资源，就不能同时跑两个用例。代价是几秒钟。
     defaultMain
-      (testGroup "pm" [kernelTests, plannerTests, vaultTests, namesTests, guardTests, pathGuardTests, stateGuardTests, serveTests, sortTests])
+      (localOption (NumThreads 1) $ testGroup "pm" [kernelTests, plannerTests, vaultTests, namesTests, guardTests, pathGuardTests, stateGuardTests, serveTests, sortTests, dedupeTests])

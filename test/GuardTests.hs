@@ -440,13 +440,13 @@ caseI11AllWriters = withSystemTempDirectory "pm-guard" $ \tmp -> do
   es <- journalEntries v
   filter isDone es @?= []
   -- savePlanAndMaybeRun：计划不落盘
+  let cfg = mkCfg (tmp </> "main") (Just v)
   pid <- newPlanId
   let plan = Plan pid "vault-push" v (Just "vr") now []
-  code <- savePlanAndMaybeRun (GoOpts False False) plan
+  code <- savePlanAndMaybeRun cfg (GoOpts False False) plan
   code @?= 2
   doesFileExist (planPath v pid) >>= (@?= False)
   -- pickRoot --vault 与 requireRole 同样拒绝
-  let cfg = mkCfg (tmp </> "main") (Just v)
   pr <- pickRoot cfg SelVault
   case pr of
     Left (m, 2) -> assertBool m ("I11" `isInfixOf` m)
