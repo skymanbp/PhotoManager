@@ -495,3 +495,44 @@ root lock，均会让用户决定失真；暂不建议对真实 15 张执行。"
 - 二十/二十一轮登记项照旧：aeson 重复键/深嵌套、跨进程 vault-cache 刷新争用、
   真开端口 raw HTTP 冒烟、`readBodyCapped` 慢速上传预拒、两次 stat 之间被改
   又还原 size+mtime 的对手（§14 TOCTOU 模型内）。
+---
+
+# 第二十三轮（2026-08-24/25，codex `gpt-5.6-sol`，只读静态；范围 6cfd990..4cf718a = 二十二轮 NO-GO 的收口）
+
+**verdict：GO** —— "未发现 critical/major；两条二十二轮必修均已闭合，剩余为已
+登记的 minor 残余、TOCTOU 假设和文案不同步。" 合并前最小修复集：**空**。
+含义：可以在真实库上对 15 张 NEW 执行 `pm vault hold`，并发布 0.4.4。
+
+两条必修的复核：①**FIXED**——创建与复核都走真实 SHA（`holdOpsIO` 先 `nub` 再
+只对 NEW 调 `freshSrcSha`，非 NEW 名字得 `Nothing` 后仍被纯校验拒；生产入口只有
+CLI 与 API 两处且共用它；重新 hold 一张 stale 照片会取当前 SHA 并按名字替换旧
+记录）。②**FIXED**——`requireMain` 只走读路径，写 `.pm` 与开 lock 都在其后；
+锁内 `computeVault` 复检；409/2 翻译仍对。
+
+## 逐条判定
+
+| 项 | 判定 | 要点 |
+|---|---|---|
+| 1 创建路径 | OK | 手调 `holdRequest` 传重复 pair 会形成重复 adds，但 `writeHolds` 的唯一性校验仍拒绝，生产路径无绕过 |
+| 2 预检次序 | OK | 预检与锁内复检之间若 root 被换成**另一个仍合法的** RoleMain 身份，当前不比 `riId`——属 §14 明确排除的恶意 TOCTOU，不阻断 |
+| 3 名单读 | ISSUE（已登记 minor） | 二次读只重试一次，不会活锁；但正常覆盖写的"删正文 → rename tmp"窗口里，读者仍可能看到"正文缺失 + tmp 存在"而报硬错 → 并发 `vault status`/API 可能暂时 code 2/404。hold 事务本身持锁，不会因此覆盖名单 |
+| 4 GUI | OK | `submitting` 在 `try` 前置位，成功/两个显式失败/异常四条分支都经 `finally` 复位，导航与数字键只在提交期间短路 |
+| 5 测试 | OK | 它从源码推演确认 `caseHoldCreateFreshSha` 的构造满足 `statHitStable`（`lastVerified` = mtime + 1h > 2 s 余量），旧实现必转 stale；预检例断言 `.pm` 与 lock 都不存在 |
+| 6 文档 | ISSUE（已修） | README 首页仍写"二十轮 / 203 例"、P4-7 行"206 测试 / 评审待跑"；DESIGN 当前实现行仍 206；"字节一变即失效"比实现强（是**下一次比对**时复核，不是实时监视）；GUI 计划页与安装包描述仍称"写盘一律两段式 / 只生成计划" |
+
+## 新发现与处置（3 minor，无 critical/major）
+
+| 位置 | 内容 | 处置 |
+|---|---|---|
+| `src/Pm/Vault.hs` `freshShaAt` | 文件在扫描后、重 hash 前被删/被占 → `statSnap` 异常未转 `Nothing`，CLI 崩、API 500 | **已修**：外层 `try` 捕 `IOException`，按"本轮不稳定"处理（决定不写、既有决定按失效回到 NEW） |
+| README / DESIGN | 轮次、例数、评审状态过期 | **已修**：README 首页改二十三轮 / 212 例，P4-7 行补两轮 NO-GO 的实际经过与 GO；DESIGN 当前实现行改 P4-7c / 212 |
+| `gui/ui/index.html`、`tauri.conf.json` | 用户可见文案称"所有写盘两段式 / 只生成计划"，但保存 HELD 会直接写主库 `.pm` | **已修**：两处都改成"凡是**动照片字节**的写盘两段式；「暂不同步」是不碰照片的直接决定写入" |
+
+## 真实写入（用户裁定"这 15 张暂时先不同步"，2026-08-25）
+
+`pm vault hold` 15 张 → 名单 15 条，exit 0。核对：`vault-holds.json` 15 条、
+sha 全为 64 hex、名字全平铺且唯一；`pm vault status` 报 "其中 15 张已决定暂不
+同步，不计入待办"，余下 exit 1 仅因那 1 条 RENAME（`_DSC9014.JPG` ≡
+`landscape/_DSC9013_2.JPG`，被 photos.json 引用而 BLOCKED，只报告）。相册仍 94
+张、vault 类目仍 79 张、**vault 仓 `git status` 零改动**——照片与展示集仓一个
+字节都没动。撤销随时 `pm vault unhold <文件…>`，或在 GUI 里改成某个类目。

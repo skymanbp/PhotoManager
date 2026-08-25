@@ -69,7 +69,7 @@
     <!-- ── 计划 ── -->
     <section id="tab-plans" class="tab">
       <header class="page-head"><h1>计划</h1><div class="actions"><button id="btn-plans-reload" class="btn ghost">刷新</button></div></header>
-      <p class="muted small">pm 的一切写盘都是两段式：先生成计划，再 <code>pm apply &lt;id&gt;</code> 执行；执行后可 <code>pm undo</code> 回滚。这里只看，不执行。</p>
+      <p class="muted small">凡是<strong>动照片字节</strong>的写盘都是两段式：先生成计划，再 <code>pm apply &lt;id&gt;</code> 执行；执行后可 <code>pm undo</code> 回滚。这里只看，不执行。（「暂不同步」是例外：它不碰照片，只在主库 <code>.pm</code> 里记一条决定，直接写、随时可撤。）</p>
       <div class="split">
         <table id="plan-table" class="table"><thead><tr><th>类型</th><th>计划 id</th><th>生成时间</th><th>项</th><th>待执行</th><th>跳过</th><th>待裁决</th></tr></thead><tbody></tbody></table>
         <div id="plan-detail" class="detail"><div class="muted">选一个计划查看明细</div></div>
