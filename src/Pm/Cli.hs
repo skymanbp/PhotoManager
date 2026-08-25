@@ -17,6 +17,7 @@ module Pm.Cli
   , applyOnlyToPlan
   , parseOnly
   , stagingFresh
+  , withFreshStagingCatalog
   , reportScanIssues
   , refreshBackupCache
   ) where
@@ -288,6 +289,27 @@ stagingFresh root cat = do
               goneN
               errN
           )
+
+-- | 「先拿到一份**可信的**暂存区索引，再做任何目标位置判定」这道闸：
+-- 报告损坏快照 → 无索引则拒绝 → 索引与盘面不一致则拒绝。
+--
+-- 只有一份定义，因为 @pm import@ / @pm clean staging@ / @pm sort@ 面对的是同
+-- 一个暂存区，都要回答同一个问题：「目标位置上现在有没有东西、是不是同一份
+-- 内容」。判据分成三份，迟早会一处收紧、别处留旧，对同一批文件给出不同结论。
+--
+-- 「无索引」必须是**拒绝**而不是"当作目标为空"：后者是默认覆盖的方向，
+-- 与 I5（不静默覆盖）恰好相反。
+withFreshStagingCatalog :: FilePath -> (Catalog -> IO Int) -> IO Int
+withFreshStagingCatalog root k = do
+  (mcat, warns) <- loadCatalog root
+  mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
+  case mcat of
+    Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
+    Just cat -> do
+      fr <- stagingFresh root cat
+      case fr of
+        Left msg -> putStrLn msg >> pure 2
+        Right () -> k cat
 
 reportScanIssues :: ScanResult -> IO ()
 reportScanIssues result = do

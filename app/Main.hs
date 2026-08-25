@@ -4,19 +4,24 @@
 -- in Pm.Commands / Pm.Cli (库层，P4 的 serve/GUI 复用同一路径).
 module Main (main) where
 
+-- 两摞、各自按字母序：先 base/外部，再 Pm.*。P4-8 与 P5-A 各自把新 import
+-- 塞在了中间（Data.Time / Text.Read / Pm.ConfigEdit），本次归位。
+import Data.Time (Day)
 import Data.Version (showVersion)
 import Options.Applicative
 import Paths_photo_manager (version)
-import System.Exit (exitSuccess, exitWith, ExitCode (..))
+import System.Exit (ExitCode (..), exitSuccess, exitWith)
+import Text.Read (readMaybe)
 
 import Pm.Cli (GoOpts (..), savePlanAndMaybeRun)
 import Pm.Commands
+import Pm.ConfigEdit (ConfigPatch (..), runConfigSet, runConfigShow)
 import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
 import Pm.Names (runNames)
 import Pm.Serve (ServeOpts (..), runServe)
+import Pm.Sort (runSortPlan, runSortSurvey)
 import Pm.Status (StatusOpts (..), runStatus)
 import Pm.Ui (runUi)
-import Pm.ConfigEdit (ConfigPatch (..), runConfigSet, runConfigShow)
 import Pm.Vault (runVaultPush, runVaultStatus)
 import Pm.VaultCmd (runVaultHold)
 import Pm.Versions (runVersions)
@@ -32,6 +37,7 @@ data Cmd
   | CmdApply ApplyOpts
   | CmdResolve ResolveOpts
   | CmdImport GoOpts
+  | CmdSort SortOpts
   | CmdBackup BackupCmd
   | CmdClean GoOpts -- clean staging
   | CmdVaultStatus Bool -- --json（sync_photos.py 兼容输出）
@@ -43,6 +49,17 @@ data Cmd
   | CmdVersions -- 版本组/精确重复报告（只读）
   | CmdServe ServeOpts -- 127.0.0.1 JSON API（缺省只读；--writable 才开生成计划端点）
   | CmdUi -- 拉起 Tauri 桌面 GUI（P4-3；GUI 自己跑 serve）
+
+-- | @pm sort@ 的参数（两种形态见 'run'）。
+data SortOpts = SortOpts
+  { soSrc :: FilePath
+  , soPlace :: Maybe String
+  , soEvent :: Maybe String
+  , soFrom :: Maybe Day
+  , soTo :: Maybe Day
+  , soGapHours :: Double
+  , soGo :: GoOpts
+  }
 
 -- | --backup/--vault 二选一校验后进入命令体。
 withSel :: Bool -> Bool -> (RootSel -> IO Int) -> IO Int
@@ -80,6 +97,17 @@ run (CmdUndo n bku vlt) = withCfg $ \cfg -> withSel bku vlt $ \sel -> runUndoCmd
 run (CmdApply o) = withCfg (runApply o)
 run (CmdResolve o) = withCfg (runResolve o)
 run (CmdImport go) = withCfg (runImport go)
+-- 两种形态：地点与日期区间**给齐**才生成计划，一个都不给是只读提议；
+-- 给一半是使用者写错了，直接报错——不替他猜另一半（I1）。
+run (CmdSort o) = withCfg $ \cfg ->
+  case (soPlace o, soEvent o, soFrom o, soTo o) of
+    (Nothing, Nothing, Nothing, Nothing) -> runSortSurvey (soSrc o) (soGapHours o) cfg
+    (mp, me, Just f, Just t) -> case (mp, me) of
+      (Just _, Just _) -> putStrLn "--place 与 --event 只能给一个" >> pure 2
+      (Just p, Nothing) -> runSortPlan (soGo o) (soSrc o) (Left p) f t cfg
+      (Nothing, Just e) -> runSortPlan (soGo o) (soSrc o) (Right e) f t cfg
+      (Nothing, Nothing) -> putStrLn "给了 --from/--to 就必须给 --place 或 --event" >> pure 2
+    _ -> putStrLn "生成计划需要同时给 --from 与 --to（先不带参数跑一次看分段提议）" >> pure 2
 run (CmdBackup (BackupInit p)) = withCfg (runBackupInit p)
 run (CmdBackup (BackupRun go mworkers)) = withCfg (runBackupRun go mworkers)
 run (CmdClean go) = withCfg (runClean go)
@@ -113,6 +141,7 @@ parserInfo =
           <> command "scan" (info scanP (progDesc "索引主库（增量；首次全量 hash）"))
           <> command "status" (info statusP (progDesc "总览仪表盘（默认命令）"))
           <> command "import" (info importP (progDesc "暂存区 To-Be-Sync'd → Raw/成片 归档计划"))
+          <> command "sort" (info sortP (progDesc "散落新照片按拍摄时间分段 → 暂存区事件夹（不带参数=只读提议）"))
           <> command "backup" (info backupP (progDesc "主库 → 备份盘单向增量（init 登记备份盘）"))
           <> command "clean" (info cleanP (progDesc "clean staging: 三副本确认后的暂存清理计划"))
           <> command "vault" (info vaultP (progDesc "相册 ↔ vault 展示集（status 兼容 sync_photos.py）"))
@@ -181,6 +210,17 @@ parserInfo =
       <$> switch (long "apply" <> help "展示计划后确认执行（缺省只生成计划）")
       <*> switch (long "yes" <> help "跳过交互确认（脚本用）")
   importP = CmdImport <$> goOpts
+  sortP =
+    fmap CmdSort $
+      SortOpts
+        <$> argument str (metavar "源目录" <> help "相机卡/下载目录等，散落新照片所在处（只读，不会被改动）")
+        <*> optional (strOption (long "place" <> metavar "地点" <> help "事件地点；年月自动取自该段起始日"))
+        <*> optional (strOption (long "event" <> metavar "YY-MM-地点" <> help "直接给完整事件夹名（跨月旅程/并入已有事件时用）"))
+        <*> optional (option dayReader (long "from" <> metavar "YYYY-MM-DD" <> help "区间起（含）"))
+        <*> optional (option dayReader (long "to" <> metavar "YYYY-MM-DD" <> help "区间止（含）"))
+        <*> option auto (long "gap-hours" <> metavar "H" <> value 72 <> showDefault <> help "提议分段用的间隔阈值（只影响提议，不影响归位）")
+        <*> goOpts
+  dayReader = maybeReader (readMaybe :: String -> Maybe Day)
   backupP =
     fmap CmdBackup $
       hsubparser

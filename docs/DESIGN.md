@@ -207,6 +207,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm init` | 交互式生成配置 + 各 root 的 `.pm/root-id.json`（含 FS 探测）；root 在 git 工作树内时按 I11 先补 `.gitignore` | 仅 .pm/ |
 | `pm scan [root]` | 全量/增量索引（首扫全量 hash，之后 stat-比对；变更集才重 hash） | 仅 .pm/ |
 | `pm status` | **总览仪表盘**：头行永远打印「索引时间（几分钟前）· 文件数」；各层规模、staging 待归档、备份盘滞后（未挂载则显示上次同步时间）、vault 差异、命名/版本问题计数、最久未验证字节年龄；**每个问题行末尾给出可直接复制的下一步命令** | 否 |
+| `pm sort <源> [--place\|--event --from --to]` | **散落新照片 → 暂存区事件夹**（§7）。不带参数=只读提议：读 EXIF 拍摄时间、按间隔给候选分段、打印每段该敲的命令；给齐地点与区间才生成拷贝计划 | apply 时 |
 | `pm import [--apply]` | To-Be-Sync'd 事件 → `Raw\年\` + `成片\` 归档计划 | apply 时 |
 | `pm backup [--apply]` | 主库 → 备份盘单向增量；备份盘多出的只报 EXTRA 永不动。**`pm backup init <盘上镜像路径>`（P2 落锤）**：插盘后一次性登记——写 role=Backup 的 root-id.json（含 FS 探测）+ 配置记 UUID+盘内相对路径，此后按 UUID 认盘 | apply 时 |
 | `pm clean staging [--apply]` | **隔离区入口**：仅对「Raw/成片 已有同 sha 副本 **且** 备份 root catalog 也有同 sha 副本」（三副本确认）的 staging 文件生成 Quarantine 计划；不满足的标 `HELD(缺哪份)`；备份盘未挂载 → 不生成任何项，报「无法确认第三副本」。**`待修改\` 永不入清理计划（P2 落锤，与 §7 import 不碰同源）**；catalog 声称的两侧副本在计划期再过一次活体 stat 核对，变了降级 HELD | apply 时 |
@@ -359,180 +360,21 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 
 ---
 
-## 7. 归档（`pm import`）
+## 7–10. 归档 · 命名治理 · 备份同步 · Vault 分发
 
-- 输入：`To-Be-Sync'd\Raw\[<年>\]<事件>` → `Raw\<年>\<规范名>\`；
-  `To-Be-Sync'd\Processed\<事件>` → `成片\<规范名>\`。（P2 实测：暂存 Raw 的
-  事件夹直接位于 `Raw\` 下无年份层；计划器两种布局都接受，年份一律由事件名
-  `YY-` 推导，显式年份层与推导不一致 → 不猜，报 unrecognized。）
-- 事件名按 canonical scheme（§8 Scheme A）规范化后落位；侧车跟随；
-  计划期校验同批目标唯一性（两个源撞同一目标 → 连同**同目录同 stem 侧车**
-  整组拒绝，评审 mj-3）；**返修同样升级到 stem 组**（P2.2 mj-3v2：主文件
-  NEEDS-DECISION 时其同 stem 待拷文件悬置为 NEEDS-DECISION，绝不先行落位
-  产生孤立侧车）；目标键一律 **normalise + case-fold** 比较（NTFS 语义，
-  评审 mj-2）；事件名先剥可选 `-Raw` 后缀（大小写不敏感）再验地点非空——
-  `26-04--Raw`（空地点）与 `26-04-Raw`（裸后缀，歧义）都拒绝（评审 mj-1）；
-  生成计划前先做暂存区新鲜度守卫（与索引不一致 → 先 pm scan）。
-- 老事件返修（如 `Processed\23-04-EU`）：逐文件走 §6.1——同 sha skip、
-  不同 sha 标 `NEEDS-DECISION` 交 `pm resolve`。
-- 归档后 staging 原文件**原地不动**；`pm status` 依据**已复验的** Done 标记
-  「已归档，冗余」；清理走 `pm clean staging`（内建三副本前置条件，§5）。
-- `待修改\` 散文件无事件结构：import 不碰，单列「待修改清单」报告。
+四节**已移到配套文档** [`DESIGN-COMMANDS.md`](DESIGN-COMMANDS.md)（2026-08-25）：
 
-## 8. 命名治理（`pm names`）
+| 节 | 内容 |
+|---|---|
+| §7 | 归档（`pm sort` → `pm import`） |
+| §8 | 命名治理（`pm names`） |
+| §9 | 备份同步（`pm backup`） |
+| §10 | Vault 分发与档案侧对接（含 §10.2 实现条目） |
 
-- 事件夹统一到 canonical scheme = **Scheme A `YY-MM-地点-Raw`（用户裁定
-  2026-08-22）**：29/38 已是，与成片对齐；Scheme B 的月份从成片对应事件还原，
-  还原不出的——如 RAW-2025-Summer-Providence 无成片对应——标 NEEDS-DECISION 交用户。
-- 跨层地点别名表（Hunan↔湖南 等）入配置，事件关联用别名闭包。
-- 文件级版本后缀**不强制统一**（信息即历史）——只做清单报告，改名需用户勾选。
-- rename 计划 + 同批目标唯一性校验 + journal 双向映射 + `pm undo` 可回滚。
-- **P3b-2 落锤（2026-08-23 真实库实测，42 事件夹）**：31 合规 / 6 入计划 /
-  3 拒猜 / 2 个 `&` 双月名交用户——逐项经过见 REVIEW-LOG。目录改名走 §6.2
-  （FpDir 指纹），catalog 前缀由 updateCatalog 重写，undo 有 E2E 测试。versions（§5）
-  同日落锤：暂存区与**设计内冗余**不入报告。设计内三判据（2026-08-25 更正，此前
-  只认①，实测误报 7/15）：①`成片↔相册` 同名（相册 ⊂ 成片，I7）；②`成片↔相册`
-  异名但成片那名在相册**已被别的文件占住**（平铺避让，刻意改名；没被占仍报）；
-  ③`Raw↔成片` 同名且该 Raw 事件夹**无**同 stem 原始档（原片本就是 JPG：直出／手机／
-  RAW 遗失后顶替，共同特征是"没有对应的 RAW"；有原始档＝导出件误放，仍报）。stem 经
-  `normalizeStem` 比对，否则 `_DSC2227~2.JPG` 会从 `_DSC2227.ARW` 溜过去；**同层两份
-  不算设计内**。更正后真实库 → 112 版本组 + **8** 组真重复（7 连号跨夹 + 1 根↔子目录）。
-
-## 9. 备份同步（`pm backup`）
-
-- 备份 root 识别：`getLogicalDrives` 枚举 + `SetErrorMode(SEM_FAILCRITICALERRORS)`
-  抑制「请插入磁盘」系统对话框 + 只探 REMOVABLE/FIXED 卷找 `.pm/root-id.json`
-  （role=Backup，UUID 与配置登记值相符才认）；找不到 → 提示插盘，绝不猜。
-  （P2 落锤：GetDriveTypeW/SetErrorMode/GetVolumeInformationW 均无 Win32 包
-  绑定，已在 Pm.Win 自行 foreign import。）
-- 登记入口 = **`pm backup init <盘上镜像路径>`**（P2 落锤，取代原设想的
-  pm init 一并处理）：写 role=Backup root-id.json（含 GetVolumeInformationW
-  探测的 FS 类型）+ 主配置记 `[backup] id/subpath`；拒绝与主库嵌套的路径和
-  git 工作树。exFAT 无元数据日志，rename 原子性弱于 NTFS——doctor 矩阵
-  （§6.4）不依赖原子性假设，仅依赖「tmp 与 dst 不同名」这一约定。
-- 单向 add/update：主库有而备份没有 → Copy；同名不同 hash → 计划标出方向
-  （默认判主库新），**经确认后走 §6.5 supersede 复合**（备份盘旧字节进备份盘
-  自己的 `.pm/trash/`，不丢）；备份盘多出的 → EXTRA 只读报告。
-- 备份 root 的 catalog 记录**备份盘自己 stat 的值**（§3）。备份计划的
-  journal/trash/tmp 全在备份 root 自己的 `.pm` 下（P2 落锤，与效果同卷）；
-  备份路径的 Done 仍一律即时 FlushFileBuffers（不组提交）——理由是可移动
-  介质：结果打印后用户随时可能拔盘，Done 必须在汇报前已落盘；
-  doctor（`--backup`）的 C3/C4 行专门接这个残余。
-- worker 数是 Root 属性：init 探测介质（seek-penalty/MediaType），
-  removable/rotational 默认 1（避免寻道抖动），NVMe/SSD 默认物理核数；可手动覆盖。
-- 拔盘期间 `pm status` 用备份 root 的本地缓存快照报「上次同步时间 + 当时滞后量」。
-
----
-
-## 10. Vault 分发与档案侧对接
-
-### 10.1 `pm vault status` — 逐字段兼容
-
-- 六态语义与 `sync_photos.py` 一致；`--json` **值形状逐字段照抄**：
-  `ok/new/missing/duplicate` 用同形位置元组、`renamed/drift` 的 hash 截断 16 字符、
-  `duplicate` 与 ok/drift 可重叠（不构成划分）、顶层键名同
-  （`source_dir/vault_dir/source_count/vault_count/...`）；退出码 0/1/2 同。
-- **文件过滤集合 = sync_photos.py 的 PHOTO_EXTS 等价类**（jpg/jpeg/png，case-fold）；
-  「只收 jpg/jpeg」的收紧只在 push/ingest **写路径**生效，.png 在 status 里以
-  `UNPUSHABLE` 显式可见而不是被静默过滤。
-- P3 验收：与 sync_photos.py 输出做**集合逐项比对**（非计数比对）。
-- sync_photos.py **退役由 pm 接管（用户裁定 2026-08-22）**：P3 用它做最后一次
-  互校（比对通过才算验收），P5 把档案侧文档/skill 指针改指 `pm vault status`
-  并 `git rm` 该脚本（档案 vault 本地 git 历史可恢复；跨仓改动 confirm-first）。
-- **P3a 实测验收（2026-08-23）**：`pm vault status --json` 与 sync_photos.py
-  双跑真实库，全部 legacy 键**集合逐项一致**——78 OK / 15 NEW / 1 RENAME /
-  0 MISSING / 0 DRIFT / 0 DUPLICATE，source_count 94 / vault_count 79，
-  RENAME 恰为档案侧登记的 `_DSC9014.JPG ≡ landscape/_DSC9013_2.JPG`；
-  UNPUSHABLE 轴当前 .png=0 空洞通过，已由合成 fixture 测试补位（VaultTests）。
-  legacy 逐行为基线与 vault 拓扑实测：`docs/specs/sync-photos-legacy-spec.md`、
-  `docs/specs/vault-topology-p3.md`。vault 侧 sha 缓存放主库 `.pm/vault-cache/`
-  （I11 之前对 vault 目录零写入；status 全链路只读 vault）。
-
-### 10.2 `pm vault push`
-
-- NEW：类别来自 GUI 勾选（P4 后的主路径）或 `--category`/计划文件编辑；
-  CLI 只有文件名可看，**不提供假装能分类的交互表格**，无类别项保持 pending
-  并提示「需要看图分类 → pm ui 或 --category」。原字节直拷（vault 硬规则 1），
-  写路径只收 jpg/jpeg（case-fold）。
-- DRIFT：相册是上游真相 → 逐项确认后走 §6.5 supersede 复合（victim 进
-  vault root 的 `.pm/trash/`，**不依赖「git 历史里有旧版」这类 pm 无法核实的
-  外部前提**）。
-- RENAME：**默认只报告**。vault 文件名是 GitHub Pages URL 的一部分、被
-  portfolio `photos.json` 以完整 URL 引用（§1.3）——pm 对 photos.json 做只读
-  引用检查（路径入 Config），被引用的项标 `BLOCKED(photos.json:<行>)`，
-  未被引用且用户确认的才生成 Rename。
-- MISSING：只报告（可能是有意撤下，决定权在用户）。
-- 结束打印**显式路径**的 git 步骤：`git add landscape portrait urban`（明确
-  禁止 `git add -A`/`git add .`，防把 `.pm/` 等误提交）；pm 不执行 git（I9）。
-- **photos.json 不在 pm 写域**：类别判定/坐标是 AI 视觉判断，属 `/photo-inbox`。
-- **第九态 HELD「暂不同步」（P4-7，用户 2026-08-24 裁定）**：相册里有、但用户
-  决定**先不放进展示集**的照片。它**不是 vault 的第四个类目**——vault 的类目
-  就是展示集 git 仓里的目录，建目录等于把照片发出去，恰好与"不同步"相反。
-  因此它是一条**主库侧的本地决定**，存在主库 `.pm/vault-holds.json`（vault 仓
-  零改动）：`{name, sha, at, note}`。语义：
-  - `new` 键（对外契约、与 sync_photos.py 集合比对面）**不变**，HELD 是它的
-    注解子集；`newActive` = NEW − HELD 才是"待处理"，退出码按它算——用户已经
-    决定不同步的照片不该让 `pm vault status` 永远 exit 1（顶层 `pm status` 读
-    缓存 meta 的 `vmHeld`，同样按 NEW − HELD 显示）。
-  - 记录里存**决定当时的 sha**：照片字节后来被换过（重修图/重导出）→ 决定
-    **失效**（`held_stale`），照片回到 NEW 让用户再看一眼。宁可多问一次，也
-    不让一张已经不是当初那张的照片被旧决定永久压住。复核用的 sha **强制重算**
-    （空缓存调 `shaViaCache` → 真实重读 + 双 stat）：走 `(size,mtime)` 缓存快路
-    时，等长替换 + 还原 mtime 会让旧 sha 被复用、旧决定继续压住新字节（codex
-    二十一轮 major）。代价是每次比对要重读"已决定不同步"的那几张，量级 = 用户
-    自己决定的张数。本轮读不稳定 → 同样按失效处理（fail-closed）。
-  - 名单的「读 → 校验 → 写」是**一个跨进程事务**：整段在主库 `.pm/lock` 里
-    完成（I10）。两个 pm（CLI 与 GUI 的 serve）各读同一份旧名单、各写全量结果，
-    后写者会整份覆盖先写者的决定——serve 的进程内互斥挡不住（二十一轮 major）。
-    锁被占用时不排队，直接告知（CLI exit 2 / API 409）。
-  - 名单本身 fail-closed：解析失败、名字不是平铺 basename、sha 不是 64 hex、
-    同名多条，一律拒绝而不是"跳过坏条目"；正文缺失但残留 `vault-holds.json.tmp`
-    （覆盖写崩在删旧与 rename 之间）同样拒绝——按"空名单"继续等于把用户的决定
-    静默清零。
-  - `pm vault push` **拒收**已 HELD 的文件（先 `pm vault unhold`）；CLI 是
-    `pm vault hold|unhold <文件…>`，GUI 是分类卡上的第四个按钮。
-  - 决定不走两段式计划：它不碰任何照片字节，撤销就是 unhold。身份闸**四道**，
-    次序与 `pm apply` 一致——**取锁前**先做零写入的 `requireMain` 预检（否则
-    `withRootLock` 会先把 `.pm/lock` 建出来再拒绝，二十二轮 major），然后
-    root lock（I10），锁内 `computeVault` 的 `requireMain` 复检，落盘前
-    `writeHolds` 的 `requireWritable`（I11）。
-  - 决定里的 sha **创建与复核都必须是本轮真实重算的**（`freshSrcSha`）：从
-    `vrSrcMeta` / `srcShas` 取会拿到主库 catalog 的 (size,mtime) 命中值，
-    等长替换 + 还原 mtime 时那是陈旧值——二十一轮指出复核会失真，二十二轮
-    指出创建同样会（hold 记下旧 sha → 下一轮复核立刻判失效，决定落不住）。
-- **P3b-1 落锤（2026-08-23）**：CLI 形态 `pm vault push [--category C FILES…]`
-  ——NEW 只推显式点名 + 显式类目的文件（无类目零猜测）；DRIFT 生成
-  NEEDS-DECISION 项，裁决复用 `pm resolve --keep src`（§6.5 supersede，
-  victim 进 vault 侧 `.pm/trash/`）；RENAME/MISSING 只报告。I11 守卫为
-  **文本级** `.gitignore` 含 `.pm/` 行检查（pm 不跑 git，I9）+ role 校验，
-  fail-closed；vault root 由首次生成计划时建立（用户已批准 ignore 行，
-  展示集仓 commit 2d81d36）。执行绑定 bindExecRoot 序：主库 → vault
-  （固定路径无发现流程）→ 备份盘；doctor/trash/undo 增 `--vault` 开关。
-  真实库只读验证：RENAME 项命中 `BLOCKED(photos.json:208)`（实测该行
-  正是 `_DSC9013_2.JPG` 的 Pages URL），15 NEW 待分类不出计划，vault
-  目录零写入。
-- **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
-  [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
-  本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P4-9 / pm 0.4.7 / 220 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG）。
-
-### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
-
-1. `/photo-inbox` SKILL.md 重写：第四阶段机械步骤改为两步调用——
-   `pm vault ingest <files> --category <c>`（拷 相册/ + 拷 vault/ + 冲突检测 +
-   journal 登记 inbox-origin，**不动 _inbox**）；skill 完成 photos.json 写入并
-   `json.tool` 校验通过后，再调 `pm vault ingest --finalize` 移 `_inbox→_done`。
-   顺序保证与 skill 现行「photos.json 成功后才移」硬约束一致；AI 部分
-   （看图分类、坐标、photos.json 内容）保持不变。
-2. ingest 的 journal 来源登记喂 I7：相册 ⊆ 成片 ∪ inbox-origin，doctor 把
-   inbox 来的照片归为「已解释」而非违例。
-3. vault `.gitignore` 追加 `.pm/`（比照现有 `.ce/` 惯例；按档案 vault
-   confirm-before-act 规则先征得同意——I11 在此之前拒绝在 vault 建 root）。
-4. `KB-维护速查.md` §📸 与 档案 `CLAUDE.md` 摄影行更新指针；
-   `record-structure-version.md` Change Log 补记。
-5. `sync_photos.py` 去留按用户决定落实。
-
----
+搬家的理由不是"这几节不重要"，恰恰相反：它们是**逐命令**设计，随命令数线性
+增长，而本文件是 750 行硬预算下的**全局**设计（定位、不变量、架构、安全写
+协议、GUI、测试与验收、风险）。§16 早把"继续削散文"判为死路——P5-A 加 `pm sort`
+时预算再次触顶，于是按这条边界拆开，而不是再削一次事实。
 
 ## 11. GUI（独立桌面程序，Rust / Tauri v2 —— 用户裁定 2026-08-24，改自 8/22 的 C#/Java）
 
@@ -727,19 +569,11 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 
 ---
 
-## 15. 用户决策记录（2026-08-22 AskUserQuestion 收口，已全部落进正文）
+## 15. 用户决策记录（2026-08-22 AskUserQuestion 收口）
 
-1. **计划批准**：v0.2 批准，开工 P0（逐阶段 git commit + 真实库只读验证；
-   写盘功能先 fixture + 小事件试点）
-2. **GUI 形态**：允许 C#/Java 编写 → 独立桌面程序 + `pm serve` JSON API（§11）
-   （**2026-08-24 改判**：GUI 改 Rust + Tauri v2 + 纯静态 HTML，内核保持
-   Haskell；边界不变）
-3. **Raw canonical 命名**：Scheme A `YY-MM-地点-Raw`（§8）
-4. **`sync_photos.py`**：退役由 pm 接管（P3 末次互校 → P5 落实，§10.1）
-
-另（2026-08-22 用户指示）：部分任务经中转站 API 委派 codex `gpt-5.6-sol`
-执行以控制 token 消耗（已配置并 PING 验证）；安全内核与协议测试仍由主线
-编写与审查，codex 用于样板/fixture/GUI 初稿/阶段末独立 review。
+四条裁定（计划批准 / GUI 形态 / Raw Scheme A / `sync_photos.py` 退役）与
+codex 委派方针均**已落进正文**，逐条记录移至
+[`docs/REVIEW-LOG.md`](REVIEW-LOG.md)（同 §16 先例；本文件的 750 行预算）。
 
 ---
 
@@ -748,3 +582,11 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 按时间的评审摘要（2026-08-22 多智能体设计评审、P2/P3 各轮 codex 复审与对应
 收口阶段）已拆到 [`docs/REVIEW-LOG.md`](REVIEW-LOG.md)（2026-08-24，本文件触及
 750 行预算）；逐条处置表在 `docs/reviews/`，实现条目在 §10.2。
+
+**行数预算说明（2026-08-25，已收口）**：P5-A 加 `pm sort` 后本文件涨到 764 行，
+第二次触顶 750。腾挪早已做到头（§15 记录移进 REVIEW-LOG、§7 的评审经过压成短
+引），再减只能删事实——**每加一条命令就要加一节**是结构性的。于是按边界拆：
+逐命令设计 §7–§10 移入 [`DESIGN-COMMANDS.md`](DESIGN-COMMANDS.md)，本文件留全局
+设计（定位、不变量、架构、安全写协议、GUI、测试与验收、风险），回到预算内。编号与
+跨文档引用不变（正文与源码里的 §7/§10.2 照旧成立）。这不是把预算问题挪走：以后
+再加命令，长的是配套文档，本文件的增量只有 §5 命令面的一行。
