@@ -16,7 +16,7 @@ Haskell 写的照片库管理器 + Rust/Tauri 桌面前端：为 `D:\Photography
 > 但"个人项目"不是安全上打折的理由，照片是不可再生数据：pm **没有删除原语**，
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（至今
 > **二十四轮**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉它
-> 就转红"的突变验证用例（219 例，GHC 警告 0）。
+> 就转红"的突变验证用例（220 例，GHC 警告 0）。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
 对抗评审记录：[docs/reviews/](docs/reviews/)（时间线摘要：[docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)）。
@@ -141,9 +141,12 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   RENAME BLOCKED(photos.json) 实测命中 + doctor/trash/undo --vault；
   真实写入待用户在 P4 GUI 里给 15 NEW 分类后再裁定）
 - P3b-2/3 ✅ `pm names`（真实库 42 夹：31 合规 + 6 项计划 + 3 拒猜 + 2 双月名
-  报告；E2E undo 回滚有测试）+ `pm versions`（真实库定位 7 连号跨夹 ARW 重复
-  与 相册 9275≡成片 9274 那 1 例外）—— 6 项真实改名已于 codex 十七轮 GO 后
-  经用户裁定执行（见下方「真实写入」）；versions 处置仍待用户
+  报告；E2E undo 回滚有测试）+ `pm versions`（真实库定位 7 连号跨夹 ARW 重复）
+  —— 6 项真实改名已于 codex 十七轮 GO 后经用户裁定执行（见下方「真实写入」）。
+  **2026-08-25 更正**：曾把 相册 9275≡成片 9274 当成"例外重复"，实为相册平铺
+  下的**撞名避让**（设计内）；同轮还发现 Raw 事件夹里的 JPG 不必然是成片误放
+  ——原片本来就是 JPG 时（相机直出／手机／RAW 遗失）它就是原片。判据补全后
+  真重复从 15 组降到 8 组，处置工具待建
 - P3b-4 ✅ codex 评审 6 major 全修复（组回滚占位隔离 ~displaced、
   vaultIgnoreGuard 加固（.git 文件/祖先仓/反规则）、apply 执行锁内重检 I11、
   缓存绑定 root 身份 + racy-clean 判据统一、UNSTABLE 第八态 fail-closed、
