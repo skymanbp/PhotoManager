@@ -97,6 +97,16 @@ DUPLICATE 与 ok/drift 重叠；JSON 键名/键序/值形状（含 `new` 裸串�
    NEW/MISSING），JSON 尾键 `unstable`（`[name, loc]` 形状）单列，**退出码算
    差异（非零）**——legacy 无撕裂防护，读到什么算什么；pm 状态未知即
    fail-closed。稳定库两跑集合不受影响（unstable 恒空）。
+10. **HELD 是 pm 新增第九态（P4-7，用户裁定 2026-08-24）**：用户决定「暂不
+    同步」的 NEW。它**不改六态集合**——`new` 键仍是完整的 NEW，`held` 与
+    `held_stale` 是尾部**追加**的两个键（形状分别为 `[name, sha16]` 与
+    `[name, why]`），因此按字段的集合比对不受影响。**有意偏离在退出码**：
+    `pm vault status` 的"有差异"改按 `new − held` 判定，即已决定不同步的
+    照片不再让退出码为 1（legacy 无此概念）。验收比对时该轴需**逐项豁免
+    登记**：名单为空时行为与 legacy 完全一致（held 恒空），非空时退出码
+    可能由 1 变 0。决定存主库 `.pm/vault-holds.json`，**vault 仓零改动**；
+    决定里的 sha 在创建与复核两处都强制真实重算（不吃 (size,mtime) 缓存
+    快路，codex 二十一/二十二轮 major）。
 
 ## 7. P5 指针改写清单（档案侧引用 sync_photos.py 的全部位置）
 
