@@ -58,12 +58,17 @@ fn spawn_serve() -> Result<(ApiInfo, Child), String> {
     // closes the pipe and serve exits on EOF — no orphan listener. The pipe
     // handle lives inside `Child` (we never take `child.stdin`), so it stays
     // open exactly as long as we keep the Child.
-    // `--writable`: the GUI is the one client that may ask serve to GENERATE
-    // plans (POST /api/vault/push-plan writes only .pm/plans; nothing is
-    // executed and no photo is touched — apply stays a separate, later step).
+    // `--writable` + `--allow-apply` (P7, user ruling 2026-08-26): the GUI
+    // both GENERATES plans (writes only .pm/plans and pm's own state) and may
+    // EXECUTE a stored plan from the plans page — POST /api/apply is the one
+    // endpoint that moves photo bytes, the page gates it behind a two-click
+    // confirm, and execution itself runs inside `pm serve` with the same
+    // prepare/barrier/journal chain as CLI `pm apply`. This process still
+    // never touches photo files itself, and git stays generate-only (I9).
     cmd.arg("serve")
         .arg("--exit-on-stdin-eof")
         .arg("--writable")
+        .arg("--allow-apply")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());

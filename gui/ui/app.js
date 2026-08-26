@@ -1,10 +1,10 @@
 // pm-ui frontend: vanilla JS, no bundler. Everything comes from `pm serve`
 // over 127.0.0.1 with the session token handed over by the Rust shell.
-// Five writes, none of which moves a photo byte: POST /api/vault/push-plan
-// and /api/sort/plan (both only generate a plan file), /api/vault/hold
-// (records a "not syncing this yet" decision), /api/config and
-// /api/backup-init. Nothing is executed from this page — /api/apply exists
-// but needs `pm serve --allow-apply`, and the GUI never asks for it.
+// Five plan-free writes: POST /api/vault/push-plan and /api/sort/plan（只生成
+// 计划文件）、/api/vault/hold（记一条「暂不同步」决定）、/api/config、
+// /api/backup-init。P7 起（用户裁定 2026-08-26）Rust 壳以 --allow-apply 拉起
+// serve：计划页可以点「执行」（两次点击确认）走 POST /api/apply——那是唯一会
+// 动照片字节的端点，执行链与 CLI 的 pm apply 同源。git 仍只生成命令不执行（I9）。
 (async function () {
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -13,17 +13,24 @@
   const when = (iso) => { try { return new Date(iso).toLocaleString("zh-CN", { hour12: false }); } catch { return iso; } };
   const invoke = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
   let api = null;
+  let allowApply = false; // /api/ping 的事实：没有第三级授权就不渲染「执行」按钮
 
   async function connect() {
     if (!invoke) throw new Error("不在 Tauri 里运行（缺 __TAURI__）");
     api = await invoke("api_info");
     const c = $("#conn"); c.textContent = "已连接 127.0.0.1:" + api.port; c.className = "conn ok";
     const p = await getJson("/api/ping");
+    allowApply = !!p.allowApply;
     $("#root-path").textContent = p.main;
   }
   async function req(path, opts) {
-    const r = await fetch("http://127.0.0.1:" + api.port + path, Object.assign({ headers: { Authorization: "Bearer " + api.token } }, opts || {}));
-    return r;
+    // 根修（P7）：此前这里对 opts 浅合并——调用方一传自己的 headers，整个
+    // headers 对象把缺省那份**替换**掉，Authorization 随之丢失（sort 页
+    // 生成计划自 P5-E 起 401 即此因）。授权头统一在这里并入，调用方只声明
+    // 自己的增量头，别处不再各自拼 Authorization。
+    const o = opts || {};
+    const headers = Object.assign({ Authorization: "Bearer " + api.token }, o.headers || {});
+    return fetch("http://127.0.0.1:" + api.port + path, Object.assign({}, o, { headers }));
   }
   async function get(path) { const r = await req(path); if (!r.ok) throw new Error(path + " → HTTP " + r.status); return r; }
   const getJson = async (p) => (await get(p)).json();
@@ -57,12 +64,12 @@
       const bar = el("div", "bar"); const fill = el("i"); fill.style.width = (100 * l.bytes / Math.max(1, i.bytes)).toFixed(1) + "%"; bar.appendChild(fill); c.appendChild(bar);
       cards.appendChild(c);
     }
-    // 新鲜度
+    // 新鲜度（与 Pm.Status 的渲染同一口径：读取错误也计入，不隐身）
     const fl = $("#fresh-line");
     if (i.freshness) {
-      const f = i.freshness, n = f.new + f.changed + f.missing;
-      fl.textContent = n === 0 ? "✓ 索引与磁盘一致" : `⚠ 索引已过期：新增 ${f.new} / 变更 ${f.changed} / 消失 ${f.missing} → 在终端运行 pm scan`;
-      if (n) steps.push(["索引已过期", "pm scan"]);
+      const f = i.freshness, errs = f.errors || 0, n = f.new + f.changed + f.missing + errs;
+      fl.textContent = n === 0 ? "✓ 索引与磁盘一致" : `⚠ 索引已过期或核对受阻：新增 ${f.new} / 变更 ${f.changed} / 消失 ${f.missing} / 读取错误 ${errs} → 在终端运行 pm scan`;
+      if (n) steps.push(["索引已过期或核对受阻", "pm scan"]);
     } else fl.textContent = "（未核对新鲜度——点右上「核对新鲜度」做一次 stat 级比对，约 2 秒）";
     if (i.oldestVerifiedDays != null) fl.textContent += ` · 最久未验证字节 ${i.oldestVerifiedDays} 天前`;
     if (i.stagingEvents.length) {
@@ -203,7 +210,32 @@
       } catch (err) { ph.textContent = "无缩略图：" + err.message; }
     }
   }
-  const post = (path, body) => req(path, { method: "POST", headers: { Authorization: "Bearer " + api.token, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const post = (path, body) => req(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  // ── 上线命令（P7）──
+  // 文本由服务端 GET /api/publish-commands 生成（Pm.Publish，纯函数）；这里
+  // 只复制。pm 从不执行 git（I9）——粘贴与回车都在用户终端。
+  async function toClipboard(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { return document.execCommand("copy"); } finally { ta.remove(); }
+    }
+  }
+  async function copyPublishCommands() {
+    const note = $("#publish-note"); note.classList.remove("hidden");
+    try {
+      const r = await req("/api/publish-commands");
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { note.textContent = "⚠ " + (j.error || ("HTTP " + r.status)); return; }
+      const text = j.commands.join("\n");
+      const ok = await toClipboard(text);
+      note.textContent = ok
+        ? `✓ 已复制 ${j.commands.length} 行命令——粘进终端，看清每一行再回车（pm 不执行 git）。`
+        : "⚠ 复制失败——命令如下，请手动选取：\n" + text;
+    } catch (e) { note.textContent = "⚠ 请求失败：" + e.message; }
+  }
   async function makePlan() {
     const btn = $("#btn-plan"); btn.disabled = true;
     const out = $("#plan-result");
@@ -273,9 +305,63 @@
     const plan = await getJson("/api/plan/" + id);
     const box = $("#plan-detail"); box.innerHTML = "";
     box.appendChild(el("h3", null, `${plan.kind} · ${plan.id}`));
-    box.appendChild(el("div", "muted small", `root ${plan.rootPath || plan.root || ""} · 生成于 ${when(plan.created)} · 执行：`)).appendChild(el("code", null, "pm apply " + plan.id));
+    box.appendChild(el("div", "muted small", `root ${plan.rootPath || plan.root || ""} · 生成于 ${when(plan.created)} · 终端执行：`)).appendChild(el("code", null, "pm apply " + plan.id));
     const t = el("table", "items"); for (const it of plan.items) t.appendChild(opRow(it)); box.appendChild(t);
+    // 执行入口（P7）：只有 serve 带第三级授权（--allow-apply，pm ui 拉起即是）
+    // 且计划里有待执行项才渲染。两次点击确认——没有弹窗原语，同一个按钮先
+    // arm 再确认，5 秒不点第二下自动解除。
+    const pending = plan.items.filter((it) => it.status && it.status.s === "pending").length;
+    if (allowApply && pending > 0) {
+      const row = el("div", "exec-row");
+      const label = `执行这个计划（${pending} 项待执行）`;
+      const btn = el("button", "btn danger", label);
+      let armed = false, timer = null;
+      btn.onclick = () => {
+        if (!armed) {
+          armed = true; btn.classList.add("armed");
+          btn.textContent = "⚠ 再点一次确认执行（5 秒内）";
+          timer = setTimeout(() => { armed = false; btn.classList.remove("armed"); btn.textContent = label; }, 5000);
+          return;
+        }
+        clearTimeout(timer); btn.classList.remove("armed");
+        applyPlan(plan.id, btn).catch(fail);
+      };
+      row.appendChild(btn);
+      row.appendChild(el("span", "muted small", "两段式的第二段：校验写入 + 日志，事后可 pm undo。重复执行幂等（已落位的项按内容跳过）。"));
+      box.appendChild(row);
+    }
     const det = el("details"); det.appendChild(el("summary", "muted small", "原始 JSON")); det.appendChild(el("pre", "raw", JSON.stringify(plan, null, 2))); box.appendChild(det);
+  }
+
+  // 执行一个已存计划：串行（serve 侧有 seApplyLock + root 锁），结果与逐项
+  // 输出全在 JSON 响应体里（serve 的 stdout 无人排空，不走 stdout）。
+  async function applyPlan(id, btn) {
+    const out = $("#apply-result");
+    btn.disabled = true; btn.textContent = "执行中…（校验写入进行中，别关窗口）";
+    try {
+      const r = await post("/api/apply", { planId: id });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        out.className = "banner bad";
+        out.textContent = "没有执行：" + (j.error || ("HTTP " + r.status));
+        return;
+      }
+      const counts = new Map();
+      for (const it of j.items || []) counts.set(it.outcome, (counts.get(it.outcome) || 0) + 1);
+      const summary = [...counts.entries()].map(([k, v]) => `${k} ×${v}`).join(" · ");
+      const logTail = (j.log || []).slice(-8).join("\n");
+      out.className = "banner " + (j.code === 0 ? "ok" : "warn");
+      out.textContent =
+        (j.code === 0 ? `✓ 执行完成：${j.planId}` : `执行结束（退出码 ${j.code}）：${j.planId}——有未完成/待裁决项，见逐项结果`) +
+        (summary ? `\n逐项：${summary}` : "") +
+        (logTail ? `\n${logTail}` : "") +
+        "\n回滚：终端 pm undo。";
+      await loadPlans();
+    } catch (e) {
+      out.className = "banner bad"; out.textContent = "请求失败：" + e.message;
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   // ── 设置 ──
@@ -292,6 +378,10 @@
     else vn.textContent = "✓ 目录在" + (c.vault.i11 ? " · I11 就绪（.gitignore 已含 .pm/）" : " · ⚠ I11 未就绪：" + (c.vault.i11why || "在这个 git 工作树里建 root 会被拒"));
     cfgTxt("#cfg-photos", c.photosJson && c.photosJson.path);
     cfgTxt("#cfg-workers", c.workers);
+    const pub = c.publish || {};
+    cfgTxt("#cfg-portfolio-dir", pub.portfolioDir);
+    cfgTxt("#cfg-vault-push", pub.vaultPush);
+    cfgTxt("#cfg-portfolio-push", pub.portfolioPush);
     $("#cfg-backup").textContent = c.backup && c.backup.id
       ? "已登记：UUID " + c.backup.id + " · 盘内路径 " + c.backup.subpath + "（按 UUID 认盘，与盘符无关）"
       : "未登记";
@@ -406,13 +496,11 @@
       const isEvent = placeInput.dataset.event === "1";
       const payload = { src, from, to };
       payload[isEvent ? "event" : "place"] = v;
-      const r = await req("/api/sort/plan", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-      });
+      const r = await post("/api/sort/plan", payload);
       const body = await r.json().catch(() => ({}));
       if (!r.ok) { sortNote("bad", body.error || ("HTTP " + r.status)); return; }
       if (body.planId) {
-        sortNote("ok", `计划已生成：${body.planId}\n下一步在终端执行 pm apply ${body.planId}（或到「计划」页查看明细）`);
+        sortNote("ok", `计划已生成：${body.planId}\n下一步到「计划」页查看明细并执行（或在终端 pm apply ${body.planId}）`);
       } else {
         sortNote("warn", `没有生成计划（退出码 ${body.code}）——这一段里没有可归位的文件，或有需要你先处理的冲突。详情见终端。`);
       }
@@ -452,6 +540,16 @@
   $("#btn-cfg-photos-clear").onclick = () => saveConfig({ photosJson: null });
   $("#btn-cfg-workers").onclick = () => saveConfig({ workers: Number(val("#cfg-workers")) });
   $("#btn-cfg-workers-clear").onclick = () => saveConfig({ workers: null });
+  // 上线命令三项：placeholder 写明「留空 = 默认」，因此空着点保存 = 清空
+  // （null），而不是把空串塞给字符闸吃一个「不合法」。
+  const valOrNull = (id) => { const v = val(id); return v === "" ? null : v; };
+  $("#btn-cfg-portfolio-dir").onclick = () => saveConfig({ portfolioDir: valOrNull("#cfg-portfolio-dir") });
+  $("#btn-cfg-portfolio-dir-clear").onclick = () => saveConfig({ portfolioDir: null });
+  $("#btn-cfg-vault-push").onclick = () => saveConfig({ vaultPush: valOrNull("#cfg-vault-push") });
+  $("#btn-cfg-vault-push-clear").onclick = () => saveConfig({ vaultPush: null });
+  $("#btn-cfg-portfolio-push").onclick = () => saveConfig({ portfolioPush: valOrNull("#cfg-portfolio-push") });
+  $("#btn-cfg-portfolio-push-clear").onclick = () => saveConfig({ portfolioPush: null });
+  $("#btn-publish-copy").onclick = () => copyPublishCommands();
   $("#btn-cfg-backup").onclick = () => registerBackup();
 
   try { await connect(); await loadStatus(false); } catch (e) { fail(e); $("#status-banner").className = "banner bad"; $("#status-banner").textContent = "无法连接 pm serve：" + e.message; }
