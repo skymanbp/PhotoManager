@@ -25,7 +25,7 @@ import Pm.Catalog (saveCatalog)
 import Pm.Catalog (loadCatalog)
 import Pm.Cli (GoOpts (..), recheckCleanPlan, savePlanAndMaybeRun, writeBackCatalog)
 import Pm.Commands (InitOpts (..), ResolveOpts (..), RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runClean, runImport, runInit, runResolve, runTrash)
-import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootInfo, readRootState, requireRole, requireWritable, withConfigLock, writeRootInfo, writeSideCache, SideCacheWrite (..))
+import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), createRootInfo, loadConfig, pmDir, readRootInfo, readRootState, requireRole, requireWritable, withConfigLock, writeConfig, writeRootInfo, writeSideCache)
 import Pm.Lock (withRootLock)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec
@@ -38,6 +38,9 @@ import Pm.Plan
 import Pm.Trash (TrashRecord (..), appendManifest, quarTrashRel, trashDir)
 import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.Vault (ensureVaultRoot, runVaultStatus)
+-- 三十五轮 F4 用例的独占句柄 fixture（CREATE_NEW + FILE_SHARE_NONE）
+import Pm.Win (openExclusiveBinary)
+import System.IO (hClose)
 import TestUtil
 
 guardTests :: TestTree
@@ -71,6 +74,9 @@ guardTests =
     , testCase "三十轮 F2 catalog 回写：读→并→写是加锁 RMW（锁被占 → 明说放弃，不静默覆盖）" caseCatalogWriteBackTakesLock
     , testCase "三十轮 F3 init：配置的查在→读旧→写回进 withConfigLock（锁被占 → 不写入）" caseInitTakesConfigLock
     , testCase "三十一轮 F1 侧缓存成对写在 I10 锁内：锁被占 → 两个文件都不写" caseSideCacheTakesLock
+    , testCase "三十二轮 R3 PM_CONFIG 正斜杠拼写 → configFilePath 归一，配置写不被句柄后验误拒" caseConfigPathForwardSlash
+    , testCase "三十五轮 F4 config.toml 被独占占住 → loadConfig Left（不崩、不猜内容）" caseConfigReadLocked
+    , testCase "三十五轮 F4 .gitignore 被独占占住 → I11 守卫拒绝（核不了=不放行）" caseGitignoreReadLocked
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -653,3 +659,53 @@ caseSideCacheTakesLock = withSystemTempDirectory "pm-sclock" $ \tmp -> do
   r2 @?= CacheWritten
   doesFileExist (cacheF "catalog.json") >>= (@?= True)
   doesFileExist (cacheF "meta.json") >>= (@?= True)
+
+-- | 三十二轮 R3：PM_CONFIG 用正斜杠拼写（用户与本仓文档的常见写法）时，
+-- 'configFilePath' 必须归一（makeAbsolute）。P6-C 起配置落位走句柄后验，
+-- 对比基准是 GetFinalPathNameByHandleW 的反斜杠规范形——不归一的原样字符串
+-- 会被当成「打开前已被换成别名/链接」拒绝（首写即失败），且残留 .tmp 卡死
+-- 后续所有配置写。第二次 writeConfig 额外走「删旧 → 落位」的完整删除路。
+-- | 三十五轮 F4：doesFileExist 与 BS.readFile 之间的窗口——config.toml 被
+-- 编辑器/同步器独占（openExclusiveBinary = CREATE_NEW + FILE_SHARE_NONE，
+-- 属性探测照常可见）时，loadConfig 此前裸奔抛异常，**每一条** pm 命令都在
+-- 入口崩掉。读不出 = Left（withCfg 打印后 exit 2），fail-closed 不猜内容。
+caseConfigReadLocked :: IO ()
+caseConfigReadLocked = withSystemTempDirectory "pm-cfglock" $ \tmp -> do
+  mold <- lookupEnv "PM_CONFIG"
+  let cfgFp = tmp </> "config.toml"
+  setEnv "PM_CONFIG" cfgFp
+  flip finally (maybe (pure ()) (setEnv "PM_CONFIG") mold) $ do
+    hLock <- openExclusiveBinary cfgFp
+    ec <- loadConfig
+    hClose hLock
+    case ec of
+      Left m -> assertBool ("应报读取失败: " <> m) ("配置读取失败" `isInfixOf` m)
+      Right c -> assertFailure ("读不出必须 Left，得到: " <> show c)
+
+-- | 三十五轮 F4 同族：.gitignore 被独占时 I11 守卫此前裸奔抛异常，逃出 init
+-- 预检与 Exec 执行前重检。核不了 = 拒绝（与「无 .gitignore」同向 fail-closed），
+-- 绝不当「已覆盖 .pm/」放行。
+caseGitignoreReadLocked :: IO ()
+caseGitignoreReadLocked = withSystemTempDirectory "pm-iglock" $ \tmp -> do
+  let v = tmp </> "v"
+  createDirectoryIfMissing True (v </> ".git")
+  hLock <- openExclusiveBinary (v </> ".gitignore")
+  g <- vaultIgnoreGuard v
+  hClose hLock
+  case g of
+    Left m -> assertBool ("应报读取失败: " <> m) ("读取失败" `isInfixOf` m)
+    Right () -> assertFailure "读不出 .gitignore 必须拒绝（fail-closed）"
+
+caseConfigPathForwardSlash :: IO ()
+caseConfigPathForwardSlash = withSystemTempDirectory "pm-cfgslash" $ \tmp -> do
+  mold <- lookupEnv "PM_CONFIG"
+  let fwd = map (\c -> if c == '\\' then '/' else c) (tmp </> "cfg" </> "config.toml")
+  setEnv "PM_CONFIG" fwd
+  flip finally (maybe (pure ()) (setEnv "PM_CONFIG") mold) $ do
+    _ <- writeConfig (mkCfg (tmp </> "main") Nothing)
+    _ <- writeConfig (mkCfg (tmp </> "main") Nothing)
+    ec <- loadConfig
+    either
+      (assertFailure . ("配置应可读回: " <>))
+      (\c -> cfgMainPath c @?= (tmp </> "main"))
+      ec

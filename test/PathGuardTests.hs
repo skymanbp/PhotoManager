@@ -34,7 +34,7 @@ import Pm.Hash (sha256File)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, readJournal, withJournal)
 import Pm.Op
 import Pm.Plan
-import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, manifestPath, readManifest, trashDir, trashView)
+import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, manifestPath, readManifest, trashDir)
 import Pm.Types (Catalog (..), Entry (..), RootInfo (..), RootRole (..))
 import Pm.Undo (buildUndoPlan)
 import Pm.Win (handleFinalPath, handleIsAt, openBoundTo, openExclusiveBinary, pathAtOrUnder, pathUnder, resolveUnder)
@@ -151,7 +151,7 @@ caseManifestPathEscape = withSystemTempDirectory "pm-guard" $ \dir -> do
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   appendManifest root (TrashRecord "v.jpg" escRel "aa" "test" tpid now)
-  tv <- trashView root
+  tv <- trashViewOK root
   tvRegistered tv @?= []
   assertBool "越界记录应报为损坏行" (not (null (tvWarnings tv)))
   code <- runTrash cfg (TrashEmpty True) root
@@ -220,7 +220,7 @@ caseTrashJunctionConfinement = withSystemTempDirectory "pm-guard" $ \dir -> do
   pathUnder (trashDir root) (link </> "v.jpg") >>= (@?= False) -- 解析后在库外
   -- ①手编记录指向链接内部：listTrashFiles 不递归 → 记录不被视为「在库」
   appendManifest root (TrashRecord "v.jpg" ("link" </> "v.jpg") "aa" "test" tpid now)
-  tv <- trashView root
+  tv <- trashViewOK root
   assertBool "链接内容不得进入 trash 清单" (("link" </> "v.jpg") `notElem` tvUnregistered tv)
   assertBool
     "指向链接内部的记录不得被判为在库"
@@ -350,7 +350,7 @@ caseTrashBaseJunction = withSystemTempDirectory "pm-guard" $ \dir -> do
   -- ① .pm 家族可信性闸：所有 .pm 写入口的共同前提
   requirePmTrusted root >>= either (\m -> assertBool m ("不是 root 下的真实目录" `isInfixOf` m)) (const (assertFailure "requirePmTrusted 应拒绝 junction 基准"))
   -- ② 遍历侧：库外内容不得被列成"隔离文件"
-  tv <- trashView root
+  tv <- trashViewOK root
   tvUnregistered tv @?= []
   -- ③ 唯一 unlink：被劫持基准 → HELD，库外文件存活。
   -- P3b-14：appendManifest 自身现在就拒绝（完整路径 resolveUnder 在 trash

@@ -13,6 +13,7 @@ module Pm.GitGuard
   , findGitAncestor
   ) where
 
+import Control.Exception (IOException, try)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -47,26 +48,32 @@ pmIgnoreGuard role dir0 = do
       if not ex
         then pure (Left (i11Msg igFp "无 .gitignore"))
         else do
-          raw <- BS.readFile igFp
-          let ls = map T.strip (T.lines (TE.decodeUtf8Lenient raw))
-              hasRule = ".pm/" `elem` ls
-              risky l =
-                let f = T.toLower l
-                 in ".pm" `T.isInfixOf` f || T.any (`elem` ("*?[\\" :: String)) f
-              negations = [l | l <- ls, "!" `T.isPrefixOf` l, risky l]
-          case (hasRule, negations) of
-            (False, _) -> pure (Left (i11Msg igFp "缺 `.pm/` 行"))
-            (True, _ : _) ->
-              pure
-                ( Left
-                    ( i11Msg
-                        igFp
-                        ( "存在可能重新包含 .pm 的反规则（含 .pm 或通配符 * ? [ \\）: "
-                            <> T.unpack (T.intercalate ", " negations)
+          -- 三十五轮 F4：.gitignore 被编辑器/同步器短暂独占时裸 BS.readFile
+          -- 抛出，异常逃出 init 预检与 Exec 执行前守卫。核不了 = 拒绝
+          -- （fail-closed，与「无 .gitignore」同向），绝不当「已覆盖」放行。
+          rawE <- try (BS.readFile igFp) :: IO (Either IOException BS.ByteString)
+          case rawE of
+            Left e -> pure (Left (i11Msg igFp ("读取失败（被占/被挪？）: " <> show e)))
+            Right raw -> do
+              let ls = map T.strip (T.lines (TE.decodeUtf8Lenient raw))
+                  hasRule = ".pm/" `elem` ls
+                  risky l =
+                    let f = T.toLower l
+                     in ".pm" `T.isInfixOf` f || T.any (`elem` ("*?[\\" :: String)) f
+                  negations = [l | l <- ls, "!" `T.isPrefixOf` l, risky l]
+              case (hasRule, negations) of
+                (False, _) -> pure (Left (i11Msg igFp "缺 `.pm/` 行"))
+                (True, _ : _) ->
+                  pure
+                    ( Left
+                        ( i11Msg
+                            igFp
+                            ( "存在可能重新包含 .pm 的反规则（含 .pm 或通配符 * ? [ \\）: "
+                                <> T.unpack (T.intercalate ", " negations)
+                            )
                         )
                     )
-                )
-            (True, []) -> pure (Right ())
+                (True, []) -> pure (Right ())
     else do
       manc <- findGitAncestor dir
       case manc of

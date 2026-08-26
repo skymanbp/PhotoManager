@@ -34,7 +34,7 @@ import Pm.Names
 import Pm.Journal (Sync (..))
 import Pm.Op
 import Pm.Plan
-import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, trashDir, trashView)
+import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, trashDir)
 import Pm.Types
 import Pm.Undo (buildUndoPlan)
 
@@ -243,7 +243,7 @@ backupE2eTests =
           map (outcomeLabel . snd) rs @?= ["DONE", "DONE"]
           newC <- readFile (broot </> "成片" </> "a.jpg")
           newC @?= "AAA-NEW!"
-          tv <- trashView broot
+          tv <- trashViewOK broot
           case tvRegistered tv of
             [(r, True)] -> do
               oldC <- readFile (trashDir broot </> trTrashRel r)

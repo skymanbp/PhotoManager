@@ -15,7 +15,7 @@
 --
 --  * @directory@'s @renamePath\/renameFile\/copyFile@ pass
 --    @MOVEFILE_REPLACE_EXISTING@ and silently destroy an existing target —
---    banned in this codebase; use 'moveFileNoReplace'.
+--    banned in this codebase; use 'moveBoundNoReplace'.
 --  * @hFlush@ only pushes handle buffers to the OS; 'flushHandleToDisk' is the
 --    real persistence barrier (FlushFileBuffers).
 --  * GHC inherits the ANSI codepage (CP936 here) for stdout and crashes on
@@ -51,6 +51,7 @@ module Pm.Win
   , volumeFsType
   ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, catch, finally, mask, onException, try)
 import Control.Monad (unless, when)
 import Data.Bits (testBit, (.&.))
@@ -335,7 +336,7 @@ normPath p =
 -- | @.pm@ 内状态文件的受控打开：打开后**立刻**查 link count，\>1 即关闭并
 -- 拒绝。@AppendMode@ 不截断，所以"先打开再判"是安全的——判定失败时尚未写入
 -- 任何字节。截断语义（@WriteMode@）不得用此函数：那会在判定之前就毁掉内容，
--- 覆盖写一律走"独占创建 tmp → 'moveFileNoReplace' 落位"。
+-- 覆盖写一律走"独占创建 tmp → 'moveBoundNoReplace' 落位"。
 openStateAppend :: FilePath -> IO Handle
 openStateAppend fp = do
   h <- openBoundTo AppendMode fp
@@ -357,9 +358,11 @@ openStateAppend fp = do
 -- 少开一次没用的句柄）。真正的判定长在要读写的那个句柄上：开完之后再怎么换
 -- 目录都改不了它指向谁；开之前换过，则句柄的实际路径与期望不符，当场拒绝。
 --
--- 边界（也是这条修法的诚实之处）：@MoveFileEx@ / @RemoveDirectory@ 这类只吃
--- **名字**的 API 没有句柄形态，仍由 'resolveUnder' + 'pathAtOrUnder' 那一层
--- 守；它们的窗口是另一件事，登记在 DESIGN §14。
+-- 边界更新（P6-C）：提交型 rename\/unlink 此前只有名字形态（@MoveFileEx@ \/
+-- @DeleteFileW@ 按名字），是 §14 登记的最后一类窗口；现已全部句柄化
+-- （'moveBoundNoReplace' \/ 'deleteBoundAt'——打开、先验绑定、
+-- @SetFileInformationByHandle@ 提交、rename 另有同句柄后验）。仍留在名字层的
+-- 只剩目标侧的先验（@RootDirectory@ 文档要求为 NULL），见 §14 残余第 1 条。
 openBoundTo :: IOMode -> FilePath -> IO Handle
 openBoundTo mode fp = do
   h <- openBinaryFile fp mode
@@ -483,9 +486,10 @@ openExclusiveBinary fp = do
   pure hd
 
 -- | 重跑安全的独占创建：先删掉同名残留（上次崩溃留下的 pm 自建 tmp），再
--- 'openExclusiveBinary'。这一 unlink 是安全的：对 hardlink，@DeleteFileW@
+-- 'openExclusiveBinary'。这一 unlink 是安全的：对 hardlink，删除 disposition
 -- 只减掉一个目录项，库外原文件的内容不受影响（实测）；对 symlink 删的是链接
--- 本体。残留若是目录则 removeFile 抛异常，整项 fail-closed 中止。
+-- 本体（'deleteBoundAt' 终段不跟随）。残留是**非空目录**时删除失败
+-- （ERROR_DIR_NOT_EMPTY），整项 fail-closed 中止；空目录会被清除（见下）。
 --
 -- ⚠️ 它只在**父目录已被验过**时才安全：残留的 unlink 会沿父目录的 junction
 -- 走出库外（P3b-12 九轮 critical 实测：@.pm\/tmp\/\<planId\>@ 是 junction 时，
@@ -572,19 +576,46 @@ foreign import ccall unsafe "pm_delete_by_handle"
 
 -- | 提交型打开：DELETE 权限、全共享、目录也行（BACKUP_SEMANTICS）、终段
 -- **不跟随**（OPEN_REPARSE_POINT——终段是链接时拿到的是链接本体）。
+--
+-- 三十二轮 R1：被 P6-C 替掉的 @moveFileEx@\/@deleteFile@ 在 Win32 包里都经
+-- @failIfWithRetry@（ERROR_SHARING_VIOLATION=32 时 100ms×20 重试，KB 316609：
+-- 杀毒/索引器短暂持有刚 close 的文件）。句柄化后共享冲突挪到了**打开**这一步
+-- （请求 DELETE 权限撞上别人不带 FILE_SHARE_DELETE 的句柄），重试预算原样搬到
+-- 这里。重试重跑的只是**打开**；回调 @k@（含调用方的 rawBoundTo 先验）在
+-- **最终成功的那个句柄**上执行一次——先验校验的正是最终句柄，保证不削弱
+-- （三十三轮 F2 更正此前「先验逐次重跑」的措辞）。等待用 threadDelay：不是
+-- 掩盖竞态，是对短暂占用的既有礼让语义
+--（because 旧名字口原语内建同款重试，删掉它才是行为回归）。
+--
+-- 三十二轮 R2：CreateFileW 成功返回到 @finally@ 装上之间必须无异步异常窗口
+-- （P3b-12\/P3b-13 两次同型修复的既有纪律），整段 mask；threadDelay 在 mask 下
+-- 仍可中断，等待期间未持有任何句柄。
 withDisposeHandle :: FilePath -> (Ptr () -> IO a) -> IO a
 withDisposeHandle fp k =
   withTString fp $ \pw ->
     alloca $ \hOut ->
-      alloca $ \errP -> do
-        ok <- c_pmOpenForDispose pw hOut errP
-        if ok == 0
-          then do
-            e <- peek errP
-            ioError (userError (fp <> ": 打开失败（DELETE 权限），Win32 错误码 " <> show e))
-          else do
-            h <- peek hOut
-            k h `finally` Win32File.closeHandle h
+      alloca $ \errP ->
+        mask $ \restore -> do
+          let open attempt = do
+                ok <- c_pmOpenForDispose pw hOut errP
+                if ok /= 0
+                  then pure Nothing
+                  else do
+                    e <- peek errP
+                    if e == 32 && attempt < sharingRetries
+                      then threadDelay sharingDelayUs >> open (attempt + 1)
+                      else pure (Just e)
+          me <- open (1 :: Int)
+          case me of
+            Just e ->
+              ioError (userError (fp <> ": 打开失败（DELETE 权限），Win32 错误码 " <> show e <> if e == 32 then "（共享冲突，已重试 " <> show sharingRetries <> " 次）" else ""))
+            Nothing -> do
+              h <- peek hOut
+              restore (k h) `finally` Win32File.closeHandle h
+ where
+  -- 与 Win32 的 failIfWithRetry 同预算（delay 100ms、retries 20）。
+  sharingRetries = 20 :: Int
+  sharingDelayUs = 100 * 1000
 
 -- | 裸 HANDLE 版的 'handleIsAt'（同一比较规则 'normPath'）。
 rawBoundTo :: Ptr () -> FilePath -> IO Bool

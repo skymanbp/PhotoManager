@@ -95,10 +95,10 @@ R4 Haskell）落成以下**硬不变量**，每条都有机制背书，不靠自
 | I4 | 所有 mutation 先写 intent、成功后写 done（append-only NDJSON），**带真实持久化屏障**：intent 在其效果落盘前 `hFlush + FlushFileBuffers`；Copy 的 done 可组提交，Rename 的屏障强制且不可组提交（旧名仅存于日志） | Journal 模块（Win32 boot 库 `flushFileBuffers`，本机已验证存在）；`pm doctor` 对账 §6.4 |
 | I5 | 目的地已存在且内容不同 → **conflict，停该项，不覆盖，无例外**。vault DRIFT 的 supersede 与备份盘更新**不是覆盖**：先 Quarantine 移出旧文件、再 Copy 落新字节（§6.5），旧字节始终在隔离区可还原 | Plan 生成期检查 + Exec 执行期二次检查 + 落位 rename 的 flags=0 语义三重防线 |
 | I6 | 断电 / 拔盘 / 进程被杀后，`pm doctor` 能检出半成品并安全恢复；恢复矩阵覆盖三种 Op 的全部协议步骤与掉电（journal 尾部丢失）模型 | §6.4 矩阵 + §13 两类故障注入 |
-| I7 | 拓扑不变量持续可校验：vault ⊆ 相册；相册 ⊆ 成片 ∪ inbox-origin（journal 中有 ingest 来源记录的集合）；侧车与主文件同批移动 | Catalog 层校验；ingest 登记来源（§10.3） |
+| I7 | 拓扑不变量持续可校验：vault ⊆ 相册；相册 ⊆ 成片 ∪ inbox-origin（journal 中有 ingest 来源记录的集合）；侧车与主文件同批移动 | vault⊆相册 由 `pm vault status` 的 MISSING 态校验；相册⊆成片∪inbox-origin **记录侧**就位（ingest 的 journal Intent 带库外 srcAbs），doctor 的判定侧未实现（§10.3 第 2 项）；侧车同批由 import/sort 的整组悬置保证 |
 | I8 | 相册↔vault 差异与 `sync_photos.py` **逐字段值形状兼容**（六态 + 位置元组 + 16 字符截断 hash + 同一文件过滤集合含 .png，case-fold）；退出码仍是 0/1/2，但**语义自 P4-7 起收窄**：NEW 里已决定「暂不同步」的不再算差异（`new` 键本身不变，见 §10.2 第九态） | §10.1 + §10.2 |
 | I9 | pm 绝不执行 git 命令（vault/portfolio 的 add/commit/push 都由用户手动）；对 portfolio `photos.json` 仅只读引用检查 | Vault 模块无 git 调用 |
-| I10 | pm 单实例：mutation 前对 `.pm/lock` 打开句柄并 `hTryLock`（内核级锁，进程死亡自动释放，锁文件残留无害且无需删除） | base `GHC.IO.Handle.Lock`（Windows 走 LockFileEx） |
+| I10 | pm 单实例：mutation 前对 `.pm/lock` 打开句柄并 `hTryLock`（内核级锁，进程死亡自动释放，锁文件残留无害且无需删除）。三十一轮 F1 起**侧缓存成对写**也在此锁内——只读的 `pm vault status` / GET /api/vault/status 因此也会短暂独占它（锁被占则缓存本轮不刷新，报告不受影响） | base `GHC.IO.Handle.Lock`（Windows 走 LockFileEx） |
 | I11 | pm 不在任何 `.gitignore` 未覆盖 `.pm/` 的 git 工作树内建立 root，**任何 role**（主库/备份/vault）一视同仁：`init` / `backup init` / `vault push` 建 root 前检查（经用户确认追加 ignore 行后才建），`pm apply` 取锁前预检 + 锁内按盘上 role 重检；检查是文本级白名单（恰含 `.pm/` 行；`!` 反规则不得含 `.pm` 或通配符 `* ? [ \`，pm 不实现 wildmatch）；所有直接写 `.pm/` 的入口（计划保存、catalog/侧缓存、doctor --repair、trash、undo/resolve）经 `requireWritable` 同一守卫（P3b-7）；建立身份的三条旁路（`init` / `backup init` / 首次 `vault push`）天然走不了它，改由 `readRootState` 的 `RootUntrusted` 态覆盖（P3b-12），`pm doctor` 每次复查 | §5 init + §10.2 P3b-6/P3b-7 + §10.3 |
 
 **「快」的量化目标**（介质分列，§12）：`pm status` 默认含 stat-only 新鲜度刷新，
@@ -151,17 +151,19 @@ Catalog   = snapshot (catalog.json, 原子替换写 + rename 前 fsync) + journa
 app/Main.hs                 -- 仅选项解析 + 分发；main 首行设置 stdout/stderr UTF-8（§14）
 src/Pm/Cli.hs               -- 计划执行公共路径：root-UUID 绑定、组闭包、clean 执行期复验（P2.1 拆分）
 src/Pm/Commands.hs          -- 各命令编排（P2.1 拆分；serve/GUI 复用同一路径）
+src/Pm/Apply.hs             -- undo/apply/resolve 命令族 + pickRoot（三十四轮从 Commands 拆出，经其再导出）
 src/Pm/Config.hs            -- TOML 配置（roots、别名、后缀表、portfolio photos.json 路径）
 src/Pm/Catalog.hs           -- snapshot + 内存索引
 src/Pm/Journal.hs           -- NDJSON append + 持久化屏障 + replay + 对账
 src/Pm/Scan.hs              -- 增量扫描（stat 比对 → 变更集 → 并行 hash，worker 数取 Root 属性）
-src/Pm/Hash.hs              -- crypton SHA-256 流式（Handle 来自 file-io 的 OsPath API）
+src/Pm/Hash.hs              -- crypton SHA-256 流式 + 目录指纹（Handle 来自 file-io 的 OsPath API）
 src/Pm/Diff.hs              -- 两个 Catalog → 六态差异（纯函数；只认 filename+sha，不看 mtime）
-src/Pm/Plan.hs              -- Diff/规则 → Plan（纯函数，无 IO）
-src/Pm/Exec.hs              -- ★安全内核：全项目唯一有写盘 IO 的模块
+src/Pm/Plan.hs              -- Diff/规则 → Plan（规则/校验为纯函数；计划文件的存/取/枚举 IO 同在此——listPlans 三十五轮自 Serve 迁入）
+src/Pm/Exec.hs              -- ★安全内核：全项目唯一有写盘 IO 的模块（类型面在 Pm.ExecTypes，三十四轮拆出）
+src/Pm/Sort.hs              -- 卡/收件目录 → 分段提议与归位计划（源扫描层在 Pm.SortSource，三十五轮拆出）
 src/Pm/Names.hs             -- 事件夹/文件名解析、规范化、rename 计划（目标唯一性校验）
 src/Pm/Versions.hs          -- 版本组聚合报告
-src/Pm/Vault.hs             -- 相册↔vault 差异 + push/ingest 计划（无 git 调用）
+src/Pm/Vault.hs             -- 相册↔vault 差异 + push/ingest 计划（无 git 调用；纯核心在 Pm.VaultCore，三十四轮拆出）
 src/Pm/Status.hs            -- 仪表盘：statusReport（数据，ToJSON）+ renderStatus（终端）；serve 与 CLI 同源
 src/Pm/Serve.hs             -- wai/warp 127.0.0.1 JSON API（P4-1；供 GUI 桌面程序与 skill 消费，§11）
 gui/                        -- GUI 桌面程序（Rust/Tauri v2，P4-2；独立进程，只经 API 说话，§11）
@@ -170,7 +172,9 @@ test/                       -- tasty: 单元 + QuickCheck + golden + 双模故�
 
 **关键结构性质**：
 
-1. `Plan.hs`、`Diff.hs`、`Names.hs` 是纯函数 → 可 QuickCheck 穷测；
+1. `Diff.hs`、`Names.hs` 与 `Plan.hs` 的规则/校验核心是纯函数 → 可 QuickCheck
+   穷测（Plan.hs 另持计划文件的存/取/枚举 IO——三十五轮据实更正：「无 IO」在
+   savePlan/loadPlan 落进该模块时即已过时）；
 2. `Exec.hs` 是唯一写盘模块，只消费 Plan → 审计面收敛到一个文件；
    **Exec 内禁用 `directory` 的 `renameFile/renamePath/copyFile`**——三者在
    Windows 上均为「目标存在即原子替换」语义（directory-1.3.8.5 haddock 实测：
@@ -182,8 +186,9 @@ test/                       -- tasty: 单元 + QuickCheck + golden + 双模故�
 os-string file-io aeson bytestring text time containers crypton
 optparse-applicative ansi-terminal async stm toml-reader wai warp http-types
 tasty tasty-quickcheck tasty-golden temporary` +
-boot：`Win32`（moveFileEx / flushFileBuffers / SetConsoleOutputCP）、`process`
-（拉起 GUI 进程）。P4-1 实际加入：`wai warp http-types network memory`
+boot：`Win32`（flushFileBuffers / SetConsoleOutputCP / createFile 等句柄工具；
+提交型 rename/unlink 自 P6-C 起走 cbits 的 SetFileInformationByHandle）、
+`process`（拉起 GUI 进程）。P4-1 实际加入：`wai warp http-types network memory`
 （测试 `wai-extra`）。缩略图/看图渲染全部在 GUI 侧（Tauri WebView），
 Haskell 侧无图像解码依赖。
 
@@ -219,7 +224,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm clean staging [--apply]` | **隔离区入口**：仅对「Raw/成片 已有同 sha 副本 **且** 备份 root catalog 也有同 sha 副本」（三副本确认）的 staging 文件生成 Quarantine 计划；不满足的标 `HELD(缺哪份)`；备份盘未挂载 → 不生成任何项，报「无法确认第三副本」。**`待修改\` 永不入清理计划（P2 落锤，与 §7 import 不碰同源）**；catalog 声称的两侧副本在计划期再过一次活体 stat 核对，变了降级 HELD | apply 时 |
 | `pm vault status` | 相册↔vault 六态差异（§10.1 兼容 schema） | 否 |
 | `pm vault push [--apply]` | NEW→定类别后拷入 vault（类别来自 GUI 勾选或 `--category`/计划文件，**CLI 无法看图，不装作能分类**）；DRIFT→确认后 supersede 复合；RENAME→只报告/BLOCKED（§10.2）；结束打印显式 git 步骤 | apply 时 |
-| `pm vault ingest <files> --category <c>`（P6-D） | skill 调用的非交互批量入库：源（`_inbox`，库外）→ 主库 `相册/` + vault `<类目>/` **两份计划**（计划只属于一个 root；主库在前，I7 拓扑方向，主库失败即停）。I5 冲突在生成时即 NEEDS-DECISION；I7 来源登记不新造记录——主库 journal 的 Intent 本来就带库外 srcAbs，inbox-origin 集合 = dst 在 相册/ 且 src 在 root 外的 Copy 记录。`_inbox→_done` 与 photos.json 由调用方收尾，pm 打印显式步骤（同 I9 处理 git）。落实情况见 DESIGN-COMMANDS §10.3 | 是（同协议） |
+| `pm vault ingest <files> --category <c>`（P6-D，三十二轮收紧） | skill 调用的非交互批量入库：源（`_inbox`，库外）→ 主库 `相册/` + vault `<类目>/` **两份计划**（计划只属于一个 root）。预览两份**都**存盘（两段式对两份同样成立）；--apply 时 vault 那份只在主库那份**逐项真的落完**（DONE/同内容 SKIP——退出码 0 分不出 NEEDS-DECISION）后才执行，生成期再把「主库待裁决」耦合到 vault 同名项（I7：vault ⊆ 相册，相册在前）。I5 冲突生成时即 NEEDS-DECISION；校验含 case-fold 批内重名、跨类目占名、「暂不同步」名单（与 push 的 NEW/HELD 闸对齐）与源双 stat。`_inbox→_done` 与 photos.json 由调用方收尾，pm 打印显式步骤（同 I9 处理 git）且只在两份都落完时给。落实见 DESIGN-COMMANDS §10.3 | apply 时 |
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、别名登记、同批目标唯一性校验） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
 | `pm dedupe [--apply]` | **精确重复的逐份裁决计划**（§8.1）：来源就是 `pm versions` 的非设计内精确重复组，每一份出一个 Quarantine 条目、**全部** `NEEDS-DECISION`——留哪一份 pm 判不出就不猜（I1），用 `pm resolve --item N --unskip` 逐份批准。**不**绑复合组（复合组语义是不可拆，而这里要求逐份裁决）；组的完整性由执行期屏障保证：某个 sha 在归档层的最后一份**活**副本不会被隔离掉 | apply 时 |
@@ -274,12 +279,14 @@ pm · 索引 2026-08-22 21:03（4 分钟前）· 4635 文件 / 459.3 GiB
    副本位翻转；不触及介质（介质级见 §6.6）
 6  两个 sha 都 == expectedSha？否 → 删 tmp*，journal ← Failed，报错停该项
 6.5 对 tmp 句柄 FlushFileBuffers（数据先于落位持久化）
-7  落位：Win32.moveFileEx tmp (Just dst) 0（flags=0，**目标存在即失败**——
-   directory 的 renamePath 带 REPLACE_EXISTING 会静默覆盖，Exec 禁用）；
-   返回 ALREADY_EXISTS → 窗口内出现第三方 dst → journal ← Failed(DstAppeared)，
-   保留 tmp 交 doctor，绝不重试覆盖；
-   成功后对 dst 再 stat + sha 复核一次（防撕裂），并把 **dst 自己的 stat**
-   写入目标 root 的 catalog（不写源端 mtimeNs）
+7  落位：`Pm.Win.moveBoundNoReplace tmp dst`（P6-C 句柄形态：打开 tmp、**先验**
+   句柄绑定、SetFileInformationByHandle(FileRenameInfo) 的 **no-replace** 提交
+   ——目标存在即失败，directory 的 renamePath 带 REPLACE_EXISTING 会静默覆盖、
+   Exec 禁用——再**同句柄后验**落点，不符沿句柄改回 tmp 名后响亮报错）；
+   目标已存在 → 窗口内出现第三方 dst → journal ← Failed(DstAppeared)，
+   保留 tmp 交 doctor，绝不重试覆盖；后验不符 → tmp 已回迁、项失败（doctor
+   可对账）。成功后对 dst 再 stat + sha 复核一次（防撕裂），并把 **dst 自己
+   的 stat** 写入目标 root 的 catalog（不写源端 mtimeNs）
 8  journal ← Done(verifiedSha)；hFlush（Done 可组提交：批末或每 N 条
    FlushFileBuffers 一次——缺失的 Done 可由 §6.4 第 3 行从盘面重建）
 ```
@@ -294,7 +301,9 @@ rename 的临时文件——不属于任何用户数据。（此外仅 `pm trash
 1  检查 new 不存在（Plan 期已查 + 执行期二次查，对齐 I5）
 2  journal ← Intent(Rename old new 指纹)；hFlush + FlushFileBuffers
    （屏障强制且不可组提交：旧名仅存在于 journal，rename 一落盘即不可逆推）
-3  Win32.moveFileEx old (Just new) 0；ALREADY_EXISTS → conflict，不动
+3  `Pm.Win.moveBoundNoReplace old new`（先验绑定 + no-replace + 后验/回迁，
+   同 §6.1 步 7；文件与目录同一原语——BACKUP_SEMANTICS 打开）；
+   目标已存在 → conflict，不动
 4  journal ← Done；hFlush + FlushFileBuffers
 ```
 
@@ -307,7 +316,7 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 ```
 1  trash manifest ← 条目(victim 原路径, expectedSha, reason, planId)；FlushFileBuffers
 2  journal ← Intent；屏障同 §6.2
-3  Win32.moveFileEx victim (Just .pm/trash/<ts>/<相对路径>) 0
+3  `Pm.Win.moveBoundNoReplace victim (.pm/trash/<ts>/<相对路径>)`（同 §6.1 步 7）
 4  journal ← Done；屏障
 ```
 
@@ -372,7 +381,10 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   补记/删 tmp」整段在锁内（锁被占退回只读诊断）；执行后的 catalog 回写是
   加锁 RMW（锁被占则明说放弃，pm scan 可补）；侧缓存 catalog+meta 的**成对写**
   整段在锁内（三十一轮 F1，backup-cache 与 vault-cache 共用一个入口；锁被占
-  = CacheLockBusy，降级为"本轮不刷新"，与 junction 拒绝的硬停是不同构造子）；
+  = CacheLockBusy，降级为"本轮不刷新"，与 junction 拒绝的硬停是不同构造子。
+  作用域（三十二轮登记）：锁只串行化**写者**；掉电停在 catalog 与 meta 两次
+  replace 之间会留跨代对——换 vault 再换回的场景下旧 meta 会放行新 catalog，
+  兜底是 sha 复用前逐条 (size,mtime)+racy 余量复验，缓存本身可重建）；
   配置的全部四条读改写路径
   （config set / API config / backup init / **pm init --force**）都在
   `withConfigLock` 内。进程内互斥（serve 的 MVar）不算——它挡不住第二个 pm。
@@ -418,7 +430,8 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `GET /api/vault/new`、`GET /api/plans`、`GET /api/plan/<id>`、
   `GET /api/thumb/<sha>`（只提供 catalog 里 JPEG 条目的原字节，读取前逐级
   `resolveUnder`——扫描后被换成库外链接的条目不跟随；缩放由 GUI 做）。vault
-  两个端点会刷新 `.pm/vault-cache`，进程内互斥串行化（并发争用固定 tmp 名）。
+  两个端点会刷新 `.pm/vault-cache`：进程内 MVar + 跨进程 root 锁（三十一轮
+  F1）串行化，锁被占则本轮不刷新（报告不受影响）。
 - **三级授权（P5-C）**：`serve` 的授权分三级、缺省最弱——①无开关＝只读；
   ②`--writable`＝POST 端点可**生成计划**（只写 `.pm/plans` 与少量 pm 自身状态，
   **不执行、不碰照片**）；③`--allow-apply`＝才允许 `POST /api/apply` **执行**已存
@@ -610,8 +623,9 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
      `FileDispositionInfo`，终段不跟随）。`RemoveDirectory` 经清点在 pm 中
      **从未被使用**。残余缩小为：目标侧做不到先验（文档明确
      `SetFileInformationByHandle` 的 `RootDirectory` 必须为 NULL）——后验是
-     **提交后检出**而非阻止；后验不符且回迁也失败的瞬间，对象停在一条**已知
-     并被报告**的路径上，字节不丢、错误响亮，不再有任何静默错位。
+     **提交后检出**而非阻止；后验不符时对象要么被沿句柄改回原名，要么停在
+     报文给出的实际落点（反查失败时报「未知」，见第 5 条）——字节不丢、
+     错误响亮，不再有任何静默错位。
   2. Exec 的内容复核（`sha256File`）按名字打开：**Rename 的旧名复核、
      Quarantine 的 victim 复核**读后紧跟同一路径上的落位——落位自身已有先验 +
      后验（见 1），读口伪造的收益只剩让一次操作失败得更晚；**Copy 的落点同
@@ -622,7 +636,10 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
      那一半，别名那一半（同一对象两个名字）要靠 `FileId`，thumb 尚未用它。
   4. `handleIsAt` 的路径规范化是手写的（去 `\\?\` 前缀、按分隔符切、折
      大小写），对 `\\?\UNC\`、卷 GUID 路径、8.3 短名、尾随点/空格、NFC/NFD
-     未逐一处理。方向是**多拒**（比不上就拒绝，fail-closed），不是放行。
+     未逐一处理；P6-C 起提交侧 `rawBoundTo` 共用同一比较。方向是**多拒**
+     （比不上就拒绝，fail-closed），不是放行——但提交侧的多拒是把功能锁死
+     而非只拒读，所以路径入口必须先归一：三十二轮 R3 把唯一不经 canonicalize
+     的入口（`PM_CONFIG`）在 `configFilePath` 源头 `makeAbsolute`。
   5. 挂载卷若无 DOS 路径，`GetFinalPathNameByHandleW` 反查失败 → 判否 →
      该配置下取用口全部拒绝。已知代价，非静默失败。
   6. **库外源目录不做限域**：`pm sort` 的卡/收件目录不在任何 root 之内，
@@ -638,12 +655,12 @@ REVIEW-LOG 第 28 轮。
 | 风险 | 对策 |
 |---|---|
 | **Windows 输出编码（ACP=936）**：GHC 默认 CP936，emoji/勾号直接崩进程、重定向输出 GBK 字节（本机已实测复现） | main 首行 `hSetEncoding stdout/stderr utf8`；`--json` 走 ByteString 直写绕开编码器与 CRLF；console 场景 `SetConsoleOutputCP(65001)`；§13 编码回归测试 |
-| `directory` rename/copy 的替换语义（静默覆盖） | Exec 禁用清单 + 一律 `moveFileEx … 0`（§6.1/§6.2）；P1 测试覆盖 ALREADY_EXISTS 分支 |
+| `directory` rename/copy 的替换语义（静默覆盖） | Exec 禁用清单 + 一律 `Pm.Win.moveBoundNoReplace`（句柄形态 no-replace，§6.1/§6.2）；P1 测试覆盖目标已存在分支 |
 | 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4）+ 矩阵 C3/C4 + doctor 默认复验窗口 + 轮转重 hash（§6.6） |
 | 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤）；CJK 路径入 golden |
 | 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode + 只探 REMOVABLE/FIXED（§9） |
 | exFAT 备份盘（无元数据日志、rename 原子性弱） | 矩阵不依赖原子性；FS 类型/粒度入 root-id.json；mtime 只做同 root 缓存键（§3） |
-| Lightroom / 用户并发改文件 | Plan 前提复核 + 双 stat + 落位 flags=0 三重防线 |
+| Lightroom / 用户并发改文件 | Plan 前提复核 + 双 stat + 落位 no-replace 三重防线；杀毒/索引器的短暂占用按 Win32 同款预算重试（100ms×20，三十二轮 R1）；读口（sha256File/目录指纹/枚举）的 IOException 一律落 fail-closed 桶而非逃顶——vault 主循环入 UNSTABLE、Exec 逐项 OFailed、生成期整批拒绝、doctor 报「读取失败」行（三十四轮全仓 grep、三十五轮按 IO 读原语全集清点补漏——目录枚举口与 config.toml/`.gitignore` 控制文件读口；执行期**写口**逃逸 = §6.4 进程死亡语义，journal 有 Intent、doctor 对账，登记为已设计行为） |
 | catalog 损坏 | journal 重建 + 快照 3 份轮换 + doctor 校验 |
 | vault 是 git 工作树（.pm 污染 / git clean 风险 / 误提交） | I11 + `.gitignore` 追加 `.pm/`（P5 confirm-first）+ git 提示显式路径禁 `-A` |
 | vault 改名打断 portfolio 线上 URL | RENAME 默认只报告 + photos.json 只读引用检查标 BLOCKED（§10.2） |
@@ -654,7 +671,7 @@ REVIEW-LOG 第 28 轮。
 | 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：**下一次比对**（`pm vault status` / GUI 刷新）复核到字节已变即失效并回到 NEW——不是实时监视；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |
-| 相册↔成片 1 个例外文件 | doctor 报告单列，结合 inbox-origin 判定（I7），用户裁决 |
+| 相册↔成片 1 个例外文件 | 暂人工裁决——doctor 的 inbox-origin 判定侧未实现（§10.3 第 2 项，记录侧已在 journal） |
 
 ---
 

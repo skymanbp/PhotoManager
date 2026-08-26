@@ -25,7 +25,12 @@ module TestUtil
   , scanQuiet
   , elemSubstr
   , pad2
+  , mkVaultCfg
+  , writeF
+  , mkMain
+  , execNow
   , captureStdout
+  , trashViewOK
   ) where
 
 import Control.Exception (SomeException, bracket, finally, throwIO, try)
@@ -40,7 +45,8 @@ import System.IO (IOMode (..), hClose, hFlush, hGetContents, hSetEncoding, openF
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty.HUnit
 
-import Pm.Config (RootIdState (..), createRootInfo, readRootState)
+import Pm.Cli (executePlanNow)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, readRootState, writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity, runDoctor)
 import Pm.Exec
 import Pm.Hash
@@ -48,7 +54,13 @@ import Pm.Journal
 import Pm.Op
 import Pm.Plan
 import Pm.Scan (ScanOpts (..), ScanResult (..), scanRoot)
+import Pm.Trash (TrashView, trashView)
 import Pm.Types
+
+-- | 'trashView' 三十五轮 Either 化（枚举 fail-closed）后的测试解包：正常
+-- fixture 里枚举失败即测试失败，各用例照旧拿 TrashView 断言。
+trashViewOK :: FilePath -> IO TrashView
+trashViewOK root = trashView root >>= either (assertFailure . ("trashView 枚举失败: " <>)) pure
 
 -- | 造一个 src 文件并生成对应的 Copy op（含真实前置条件）。
 mkCopyOp :: FilePath -> String -> FilePath -> IO Op
@@ -138,8 +150,9 @@ execOk :: Plan -> IO [(PlanItem, ItemOutcome)]
 execOk = execOkWith defaultExecEnv
 
 -- | 同上，但由调用方给 'ExecEnv'。需要它的是**要屏障的计划种类**
--- （'Pm.Plan.kindNeedsBarrier'）：内核对缺席的屏障整批拒绝，所以考 Op 机制
--- 而非考屏障的用例必须显式挂一个放行屏障 @Just pure@，写出来而不是默认得到。
+-- （'Pm.Plan.kindBarrier' 给 Just 的那些）：内核对缺席的屏障整批拒绝，所以考
+-- Op 机制而非考屏障的用例必须显式挂一个放行屏障 @Just (\\_ _ -> pure [])@，
+-- 写出来而不是默认得到。
 execOkWith :: ExecEnv -> Plan -> IO [(PlanItem, ItemOutcome)]
 execOkWith env plan = do
   r <- execPlan env plan
@@ -211,3 +224,29 @@ captureStdout act = withSystemTempDirectory "pm-cap" $ \dir -> do
     t <- hGetContents rh
     length t `seq` pure t
   pure (txt, a)
+
+
+-- vault 系 IO 用例的共享 fixture（三十四轮拆分 VaultTests 时上移，逐字节搬移）。
+
+mkVaultCfg :: FilePath -> FilePath -> Config
+mkVaultCfg root vdir =
+  Config
+    { cfgMainPath = root
+    , cfgVaultPath = Just vdir
+    , cfgPhotosJson = Nothing
+    , cfgWorkers = Nothing
+    , cfgBackupId = Nothing
+    , cfgBackupSubpath = Nothing
+    }
+
+writeF :: FilePath -> String -> IO ()
+writeF fp s = createDirectoryIfMissing True (takeDirectory fp) >> writeFile fp s
+
+-- | 主库 root 标识（P3b-6 复审 B1：computeVault 以主库身份读 相册/写 vault-cache，
+-- 缺 RoleMain 标识 → exit 2；IO 用例先建标识）。
+mkMain :: FilePath -> IO ()
+mkMain root = writeRootInfo root (RootInfo "main-rid" RoleMain t0 Nothing)
+
+-- | 立即执行的 runPlan（测试用：跳过交互确认，仍走完整 Exec 内核）。
+execNow :: Config -> Plan -> IO Int
+execNow cfg p = savePlan p >> executePlanNow cfg p

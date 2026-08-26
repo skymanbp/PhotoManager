@@ -13,6 +13,7 @@ module Pm.Plan
   , planPath
   , savePlan
   , loadPlan
+  , listPlans
   , renderPlan
   , groupClosure
   , BarrierKind (..)
@@ -28,10 +29,10 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime)
-import Control.Exception (bracket)
+import Control.Exception (IOException, bracket, try)
 import Control.Monad (when)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FilePath ((</>))
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
+import System.FilePath (dropExtension, takeExtension, (</>))
 import System.IO (hClose)
 import Text.Printf (printf)
 
@@ -144,7 +145,7 @@ planPath root pid = plansDir root </> (T.unpack pid <> ".json")
 
 -- | P3b-12（九轮复审 major）：此前是覆盖写，计划文件名被预置成库外对象的
 -- hardlink 时会写穿到库外（探针实证同型）。改为「独占创建 tmp → 删旧 →
--- 'moveFileNoReplace' 落位」：tmp 走 @CREATE_NEW@，删旧对 hardlink 只减一个
+-- 'moveBoundNoReplace' 落位」：tmp 走 @CREATE_NEW@，删旧对 hardlink 只减一个
 -- 目录项。删旧与落位之间崩溃会丢掉计划文件——可接受：计划可重新生成，耐久层
 -- 是 journal（DESIGN §3）。
 -- P3b-14（十一轮）：建目录之后对**完整路径**再验一次（同
@@ -205,6 +206,33 @@ loadPlan' root pid = do
               | Left e <- validatePlan p -> Left (e <> "，拒绝装载")
               | otherwise -> Right p
 
+-- | 列出 @root\/.pm\/plans@ 下装得出来的计划；装不出来的按 (文件名, 原因)
+-- 返回。目录本身经 'requirePmTrusted' + 完整路径 'resolveUnder'，每个计划经
+-- 'loadPlan'（受信取用口）；文件名只是候选 id，先过 'isValidPlanId'。
+--
+-- 三十五轮 F3：从 Pm.Serve 迁入（计划枚举与 'loadPlan' 同域；Serve 已触及
+-- 750 行预算，原处再导出）并给枚举包 try——@.pm\/plans@ 被良性进程占住/
+-- 挪走时 listDirectory 抛出，此前逃到 warp 的 500 兜底，GUI 拿不到结构化
+-- errors。枚举失败 = errors 一条、plans 空（fail-closed，原因不吞）。
+listPlans :: FilePath -> IO ([Plan], [(String, String)])
+listPlans root = do
+  tr <- requirePmTrusted root
+  case tr of
+    Left m -> pure ([], [("", m)])
+    Right () -> do
+      m <- resolveUnder root (".pm" </> pmSubPlans)
+      case m of
+        Nothing -> pure ([], [("", untrustedMsg (root </> ".pm" </> pmSubPlans))])
+        Just d -> do
+          ex <- doesDirectoryExist d
+          namesE <- try (if ex then listDirectory d else pure []) :: IO (Either IOException [FilePath])
+          case namesE of
+            Left e -> pure ([], [("", "计划目录枚举失败（被占/介质错误？）: " <> show e)])
+            Right names -> do
+              let pids = [T.pack (dropExtension n) | n <- names, takeExtension n == ".json", isValidPlanId (T.pack (dropExtension n))]
+              rs <- mapM (\pid -> fmap ((,) (T.unpack pid)) (loadPlan root pid)) pids
+              pure ([p | (_, Right p) <- rs], [(n, e) | (n, Left e) <- rs])
+
 renderPlan :: Plan -> [String]
 renderPlan p =
   ("计划 " <> T.unpack (plId p) <> " (" <> T.unpack (plKind p) <> ") · root " <> plRootPath p)
@@ -237,7 +265,9 @@ groupClosure p sel =
 -- 此前「哪些 kind 要屏障」是 'Pm.Plan' 的一张布尔表、「挂哪个屏障」是
 -- 'Pm.Cli' 的另一张函数表，两半靠一条测试钉住一致。现在收成**一个**分类器：
 -- 内核据它判「要不要」，命令层对它做 total 的模式匹配给出「是哪个」——漏一个
--- 构造子编译器直接报错，一致性不再靠测试。
+-- 构造子 = @-Wall@ 的 incomplete-patterns 警告（纪律 warnings 0；非 @-Werror@
+-- 硬失败，三十二轮更正措辞），真漏进运行期在锁内、journal 前硬崩不放行；
+-- 构造子接没接**对**由 DedupeTests casePreExecRow 按降级理由区分钉住。
 --
 -- 屏障存在的理由（二十九轮 critical，对抗复核未能驳倒）：屏障若跑在
 -- 'Pm.Lock.withRootLock' 之外，两个 pm 进程各跑 @pm apply <同一计划>@ 的

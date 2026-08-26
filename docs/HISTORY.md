@@ -1,4 +1,4 @@
-# PhotoManager 开发史（P0 – P5）
+# PhotoManager 开发史（P0 – P6）
 
 > 从 README 移出的完整阶段日志（2026-08-25，README 按九段标准重构）。
 > 逐轮评审的处置细节在 [REVIEW-LOG.md](REVIEW-LOG.md)，评审原文在
@@ -270,7 +270,9 @@
 - P6-A ✅ 屏障协议类型封闭（路线图②，三十轮 F4 上游修法）：屏障从「返回新
   Plan」改「返回降级清单」，新 Plan 由内核构造——升级/改写 Op/改写元数据在
   类型上写不出来，barrierDrift 删除；两张表收成一个 BarrierKind（total 匹配，
-  漏写编译不过）。内核仅存自卫 = 清单自洽（序号存在且 StPending）。变异 2/2
+  漏写 = -Wall 警告 + 运行期锁内硬崩；三十二轮更正此前「编译不过」的过强
+  措辞——项目无 -Werror）。内核仅存自卫 = 清单自洽（序号存在且 StPending）。
+  变异 2/2
 - P6-B ✅ 第 31 轮 F1：侧缓存 catalog+meta 成对写进 I10 锁（backup-cache 与
   vault-cache 一处锁两类，二十轮登记的 vault-cache 争用残余随之关闭）；
   Pm.Lock 原语下沉进 Pm.Config（依赖方向），三态返回区分锁被占与 junction
@@ -278,8 +280,10 @@
   hold 用例 exit 2，实测显形后改三态）。变异 1/1
 - P6-C ✅ 提交型操作句柄化（路线图③）：moveBoundNoReplace（先验源绑定 +
   no-replace + 同句柄后验落点 + 不符回迁）与 deleteBoundAt（先验绑定 +
-  FileDispositionInfo，终段不跟随）替换全部 9 处 moveFileNoReplace 与 7 处
-  提交时 removeFile；moveFileNoReplace 删除。RemoveDirectory 清点为零使用。
+  FileDispositionInfo，终段不跟随）替换全部 9 处 moveFileNoReplace 与 **9** 处
+  提交时 removeFile（1 处用户数据 unlink = trash empty + 8 处 pm 自有 tmp/
+  轮转；三十二轮实数更正，此前误记 7）；moveFileNoReplace 删除。
+  RemoveDirectory 清点为零使用。
   杀手锏用例：目标父层在 CpCopyAfterFlush 换成 junction——旧实现静默把照片
   落到库外并报 DONE，新实现后验检出、沿句柄回迁、项失败、库外零字节。
   变异 3/3（后验/落位先验/删除先验各杀恰好一条）。289 tests
@@ -290,3 +294,45 @@
   photos.json 由调用方收尾，pm 打印显式步骤（同 I9 处理 git）。fail-closed
   校验全部错误一次列完。293 tests（289+4），变异 3/3（类目校验/I5 分流/
   源缺失各杀恰好一条）
+- P6-E ✅ 第 32 轮门禁收口（执行者切换：codex 通道 4/4 空跑 → 独立多代理
+  Workflow 五镜头 + 对抗复核；复核撞限额的 9 条由主线第一手补做）：29 条
+  finding 聚 4 根全修——①ingest 完成判据一码三义（`PlanRun` 三态 +
+  `fullyExecuted` 闸 + 预览两份都存盘 + I7 生成期耦合 + 收尾步骤闸）；
+  ②ingest 补齐与 push 对齐的闸（requireMain / case-fold 重名 / 跨类目占名 /
+  HELD 名单 / 源双 stat）；③句柄化找回名字口原语内建的鲁棒性
+  （withDisposeHandle 补 err-32 100ms×20 重试 + mask 关句柄泄漏窗）；
+  ④PM_CONFIG 在 configFilePath 源头 makeAbsolute（正斜杠/相对拼写不再被
+  句柄后验误拒）。文档统一修 §6 落位协议等约二十处；REVIEW-LOG 拆卷。
+  298 tests（293+5），变异 11/11 各杀恰好一条（10 主循环 + HELD case-fold
+  补验；三十三轮 F3 更正此前误记的 10/10）。逐条处置见 REVIEW-LOG 第 32 轮
+- P6-F ✅ 第 33 轮门禁收口（codex 恢复后首轮**钉 SHA** 评审，NO-GO，minset
+  恰 1 条）：ingest 生成期 IO 异常逃顶——probe 与 mkItem 的读口无 try，
+  `doesFileExist` 通过后源/目标被良性进程占住即让 CLI 崩溃（违反 §14 防
+  崩溃）。修法与 pm sort 二十五轮同纪律：逐文件 try、错误聚合一次列完、
+  退出 2 零计划；过深嵌套顺手拆出 `runTwoPlans`。另两条 DOC（Win.hs 重试
+  注释措辞、变异计数 10/10→11/11 统一）当轮修。299 tests（298+1），变异
+  2/2。逐条处置见 REVIEW-LOG 第 33 轮（本条目为三十四轮补记——当轮漏立）
+- P6-G ✅ 第 34 轮门禁收口（codex 又 4/4 空跑 → 独立 Workflow 三镜头 +
+  逐条对抗复核，钉 `972b049`）：minset 2 条同根——「读口 fail-closed」纪律
+  从未全仓扫。①`computeVault'` 枚举-hash 主循环无 try（全模块唯一 try 在
+  freshShaAt，二十三轮只修了那一个调用点）→ 读失败落既有 UNSTABLE 桶；
+  连带 listFlatPhotos / photosJsonRef Either 化（枚举失败整体拒绝；photos
+  引用读不出按「可能被引用」，不 fail-open）。②Exec 裸 sha256File 共 5 处
+  （复核把镜头报的 1 处扩成 5）→ 逐口 try 给 OFailed。rule-09 全仓普查
+  再扫 Doctor 6 处 / resolveKeep / Names 指纹并修。第三条 finding（c2 断言
+  不判别）被复核**证伪**，只登记取舍。750 行预算四次拆分（VaultCore /
+  ExecTypes / Apply / VaultHoldTests，字节级搬移 + 再导出）。305 tests
+  （299+6），变异 6/6 各杀恰好一条。逐条处置见 REVIEW-LOG 第 34 轮
+- P6-H ✅ 第 35 轮门禁收口（codex 钉 SHA `39edbb8`，NO-GO，minset 4 条 +
+  1 DOC）：根因是三十四轮的全仓 grep **命中未逐一记账**——目录枚举口与
+  控制文件读口两类整类漏网。①push 无项分支与 status 是两个出口谓词
+  （二十一轮 hasDiff/hasDiffR 分叉同型复发）：UNSTABLE-only 时 `pm vault
+  push` 报 0 → unstable 项收进 hasDiffR，出口判定只此一个谓词；
+  ②Names/Sort 生成期枚举 → try + 错误明说 + 零计划 exit 2（与二十五轮
+  sort、三十三轮 ingest 同纪律）；③Doctor（trashView/staleTmpFiles）→
+  TRASH-ENUM/TMP-ENUM Bad 行且按白名单构造绝缘于 --repair，Trash
+  list/empty 拒绝并明说，Serve `/api/plans` 结构化 errors（listPlans
+  迁入 Pm.Plan）；④config.toml/`.gitignore` 控制文件读口 → Left
+  （I11 核不了 = 不放行）。750 行预算引发 Pm.SortSource 拆出（字节级
+  搬移）。308 tests（305+3），变异 3/3 各杀恰好一条。逐条处置见
+  REVIEW-LOG 第 35 轮

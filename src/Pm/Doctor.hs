@@ -148,19 +148,32 @@ runDoctor' root opts = do
   c4Findings <- concat <$> mapM (verifyDone root intents restoredAfterLastDone) donesAfterClean
 
   -- Trash reconciliation (Q1 + purged records)
-  tv <- trashView root
-  let q1 =
-        [ Finding "Q1" Warn ("trash 中无 manifest 记录的文件: " <> f) ""
-        | f <- tvUnregistered tv
-        ]
-      manifestWarns = [Finding "TRASH-MANIFEST" Bad w "" | w <- tvWarnings tv]
+  -- 三十五轮 F3（同型扫尽收尾）：trash/tmp 的枚举此前裸奔——doctor 是恢复
+  -- 工具，读口异常逃顶让它在最需要的时刻崩掉。枚举失败 → 专用 Bad 行
+  -- （TRASH-ENUM/TMP-ENUM 不在 --repair 的 Warn 白名单，oid 前缀判据也
+  -- 不匹配，进不了任何修复推导）；stale 清单按空处理 = --repair 零删除。
+  etv <- trashView root
+  let (q1, manifestWarns) = case etv of
+        Left e ->
+          ([Finding "TRASH-ENUM" Bad ("trash 枚举失败——Q1 对账本轮核不了: " <> e) "解除占用后重跑 pm doctor"], [])
+        Right tv ->
+          ( [ Finding "Q1" Warn ("trash 中无 manifest 记录的文件: " <> f) ""
+            | f <- tvUnregistered tv
+            ]
+          , [Finding "TRASH-MANIFEST" Bad w "" | w <- tvWarnings tv]
+          )
 
   -- Stale tmp files not tied to any pending intent
-  stale <- staleTmpFiles root (mapMaybe (pendingTmp root) pending)
-  let staleFindings =
-        [ Finding "TMP-STALE" Warn ("孤儿临时文件: " <> f) "--repair 将删除（pm 自建 tmp，非用户数据）"
-        | f <- stale
-        ]
+  estale <- staleTmpFiles root (mapMaybe (pendingTmp root) pending)
+  let (stale, staleFindings) = case estale of
+        Left e ->
+          ([], [Finding "TMP-ENUM" Bad ("tmp 枚举失败——孤儿 tmp 本轮核不了: " <> e) "解除占用后重跑 pm doctor"])
+        Right fs ->
+          ( fs
+          , [ Finding "TMP-STALE" Warn ("孤儿临时文件: " <> f) "--repair 将删除（pm 自建 tmp，非用户数据）"
+            | f <- fs
+            ]
+          )
 
   -- Catalog verification age
   (mcat, _) <- loadCatalog root
@@ -285,10 +298,16 @@ classifyPending' root (oid, op) = case op of
     dstEx <- doesFileExist dstAbs
     if dstEx
       then do
-        dsha <- sha256File dstAbs
-        if dsha == sha
-          then pure [Finding "C2" Warn (T.unpack oid <> ": dst 完好、Done 丢失 (" <> dstRel <> ")") "--repair 将补记 Done"]
-          else pure [Finding "C5" Bad (T.unpack oid <> ": dst 存在但内容不符 (" <> dstRel <> ")") "--repair 将生成 dst 隔离计划（经 pm apply 确认执行），源文件未受影响"]
+        -- 三十四轮（同型扫尽）：doctor 是恢复工具，读口异常逃顶让它在最需要
+        -- 的时刻崩掉。dst 读不出 → 判不出 C2/C5，报 Bad 行「C?」——既不在
+        -- --repair 的 Warn 白名单（C2/R2/Q-DONE-LOST）也不是 C5 行，不触发
+        -- 任何修复推导（fail-closed），稍后重跑。
+        dshaE <- try (sha256File dstAbs) :: IO (Either IOException Text)
+        case dshaE of
+          Left e -> pure [Finding "C?" Bad (T.unpack oid <> ": dst 读取失败（" <> show e <> "），C2/C5 判不出——稍后重跑 pm doctor") ""]
+          Right dsha
+            | dsha == sha -> pure [Finding "C2" Warn (T.unpack oid <> ": dst 完好、Done 丢失 (" <> dstRel <> ")") "--repair 将补记 Done"]
+            | otherwise -> pure [Finding "C5" Bad (T.unpack oid <> ": dst 存在但内容不符 (" <> dstRel <> ")") "--repair 将生成 dst 隔离计划（经 pm apply 确认执行），源文件未受影响"]
       else do
         -- P3b-15：.pm/tmp 的存在性探测也走受信解析（此前 doesFileExist 会
         -- 跟随链接，影响 C1 的分类文本；不涉及写，但同规则无例外）。
@@ -327,10 +346,11 @@ classifyPending' root (oid, op) = case op of
         case (oldEx, newEx) of
           (True, False) -> pure [Finding "R1" Info (T.unpack oid <> ": rename 未执行 (" <> old <> " → " <> new <> ")，重跑原计划即可") ""]
           (False, True) -> do
-            ok <- verifyFp (root </> new) fp
-            if ok
-              then pure [Finding "R2" Warn (T.unpack oid <> ": rename 已执行、Done 丢失 (" <> new <> ")") "--repair 将补记 Done"]
-              else pure [Finding "R2" Bad (T.unpack oid <> ": rename 目标存在但指纹不符 (" <> new <> ")，需人工核查") ""]
+            eok <- verifyFp (root </> new) fp
+            pure $ case eok of
+              Left e -> [Finding "R2" Bad (T.unpack oid <> ": rename 目标读取失败（" <> e <> "），本轮核不了——稍后重跑 pm doctor") ""]
+              Right True -> [Finding "R2" Warn (T.unpack oid <> ": rename 已执行、Done 丢失 (" <> new <> ")") "--repair 将补记 Done"]
+              Right False -> [Finding "R2" Bad (T.unpack oid <> ": rename 目标存在但指纹不符 (" <> new <> ")，需人工核查") ""]
           (True, True) -> pure [Finding "R3" Warn (T.unpack oid <> ": rename 未执行且目标被占 (" <> new <> ")" ) "解决占用后重新生成计划"]
           (False, False) -> pure [Finding "R?" Bad (T.unpack oid <> ": 新旧路径都不存在，超出矩阵，需人工核查") ""]
   OpQuarantine victim sha _ -> do
@@ -359,8 +379,12 @@ classifyPending' root (oid, op) = case op of
               else Finding "Q-DONE-LOST" Bad (T.unpack oid <> ": trash 位置内容与 Intent sha 不符 (" <> trashRel <> ")，需人工核查") ""
           ]
       (PmStateMissing, True) -> do
-        vsha <- sha256File (root </> victim)
-        let note = if vsha == sha then "victim 原位完好" else "victim 原位但内容已变"
+        -- 三十四轮（同型扫尽）：victim 读不出时如实说"读不出"（Q2 不进任何
+        -- 修复推导，note 只影响文本）。
+        vshaE <- try (sha256File (root </> victim)) :: IO (Either IOException Text)
+        let note = case vshaE of
+              Left e -> "victim 原位读取失败（" <> show e <> "，被占？稍后重跑）"
+              Right vsha -> if vsha == sha then "victim 原位完好" else "victim 原位但内容已变"
         pure [Finding "Q2" Info (T.unpack oid <> ": 隔离未执行，" <> note <> "，重跑原计划即可") ""]
       (PmStateMissing, False) -> pure [Finding "Q?" Bad (T.unpack oid <> ": victim 与 trash 均不存在，需人工核查") ""]
 
@@ -369,13 +393,24 @@ existsAny p = do
   f <- doesFileExist p
   if f then pure True else doesDirectoryExist p
 
-verifyFp :: FilePath -> Fingerprint -> IO Bool
+-- | 三十四轮（同型扫尽）：读失败 ≠ 指纹不符——两者的下一步不同（稍后重跑
+-- vs 人工核查），折叠成 False 会把占用误报成内容问题；Left 由调用方报
+-- Bad（不进 --repair 的 Warn 白名单）。
+verifyFp :: FilePath -> Fingerprint -> IO (Either String Bool)
 verifyFp p (FpFileSha s) = do
   isF <- doesFileExist p
-  if isF then (== s) <$> sha256File p else pure False
+  if not isF
+    then pure (Right False)
+    else do
+      r <- try (sha256File p) :: IO (Either IOException Text)
+      pure (either (Left . show) (Right . (== s)) r)
 verifyFp p (FpDir s) = do
   isD <- doesDirectoryExist p
-  if isD then (== s) <$> dirFingerprint p else pure False
+  if not isD
+    then pure (Right False)
+    else do
+      r <- try (dirFingerprint p) :: IO (Either IOException Text)
+      pure (either (Left . show) (Right . (== s)) r)
 
 -- C4: an interrupted batch's Done claims re-verified against disk.
 -- @restoredAfter oid@ = 该 oid 的最后一次 Done 之后存在对应 ~r 复位 Done
@@ -410,10 +445,13 @@ verifyDone root intents restoredAfter (oid, msha, mtrash) =
     if not ex
       then pure [Finding "C4" Bad (T.unpack oid <> ": Done 记录的目标不存在 (" <> rel <> ")") "不删任何东西；该项标回未确认，重新生成计划"]
       else do
-        actual <- sha256File abs'
-        if actual == sha
-          then pure []
-          else
+        -- 三十四轮（同型扫尽）：读失败按"本轮核不了"报 Bad，不折叠成 CORRUPT。
+        actualE <- try (sha256File abs') :: IO (Either IOException Text)
+        case actualE of
+          Left e -> pure [Finding "C4" Bad (T.unpack oid <> ": Done 目标读取失败（" <> show e <> "），本轮核不了——稍后重跑 pm doctor") ""]
+          Right actual
+            | actual == sha -> pure []
+            | otherwise ->
             pure
               [ Finding
                   "C4"
@@ -449,29 +487,36 @@ verifyDone root intents restoredAfter (oid, msha, mtrash) =
 -- P3b-14（十一轮 #4）：判据从 'isNameSurrogate'（Unknown 算 False，会把"查不出
 -- 是什么"的名字当普通文件送去 --repair 删除）改为 'probeName' 只放行
 -- **明确的** NamePlain——不进列表 = 不删，与"链接本体不列出"同一 fail-closed。
-staleTmpFiles :: FilePath -> [FilePath] -> IO [FilePath]
+-- 三十五轮 F3：枚举包 try（Either 化）——probeName/doesDirectoryExist 守卫
+-- 与 listDirectory 之间有窗口，目录被占/被挪时异常会让整个 doctor 崩掉。
+-- Left 由调用方报 TMP-ENUM Bad 且 stale 清单按空处理（--repair 零删除）。
+staleTmpFiles :: FilePath -> [FilePath] -> IO (Either String [FilePath])
 staleTmpFiles root expected = do
   let base = pmDir root </> pmSubTmp
   basePlain <- (== NamePlain) <$> probeName base
   ex <- doesDirectoryExist base
   if not basePlain || not ex
-    then pure []
+    then pure (Right [])
     else do
-      plans <- listDirectory base
-      files <- concat <$> forM plans (\p -> do
-        let pd = base </> p
-        pk <- probeName pd
-        isD <- doesDirectoryExist pd
-        if pk /= NamePlain
-          then pure []
-          else
-            if isD
-              then do
-                inner <- listDirectory pd
-                filterM (fmap (== NamePlain) . probeName) (map (pd </>) inner)
-              else pure [pd])
-      onlyFiles <- filterM doesFileExist files
-      pure [f | f <- onlyFiles, f `notElem` expected]
+      r <- try $ do
+        plans <- listDirectory base
+        files <- concat <$> forM plans (\p -> do
+          let pd = base </> p
+          pk <- probeName pd
+          isD <- doesDirectoryExist pd
+          if pk /= NamePlain
+            then pure []
+            else
+              if isD
+                then do
+                  inner <- listDirectory pd
+                  filterM (fmap (== NamePlain) . probeName) (map (pd </>) inner)
+                else pure [pd])
+        onlyFiles <- filterM doesFileExist files
+        pure [f | f <- onlyFiles, f `notElem` expected]
+      pure $ case (r :: Either IOException [FilePath]) of
+        Left e -> Left (show e)
+        Right fs -> Right fs
 
 deepVerify :: FilePath -> Catalog -> IO [Finding]
 deepVerify root cat = do
@@ -481,11 +526,17 @@ deepVerify root cat = do
     if not ex
       then pure [Finding "DEEP" Warn ("条目在盘上消失: " <> enPath e) "跑 pm scan 刷新索引"]
       else do
-        actual <- sha256File abs'
-        pure
-          [ Finding "DEEP-CORRUPT" Bad ("内容与索引 sha 不符: " <> enPath e) "核查介质；如源仍在他处，重新拷贝"
-          | actual /= enSha e
-          ]
+        -- 三十四轮（同型扫尽）：--deep 扫全库、窗口以分钟计，一个被占的
+        -- 文件不该让整轮诊断崩掉；读失败也不得折叠成 CORRUPT（下一步不同：
+        -- 稍后重跑 vs 核查介质）。
+        actualE <- try (sha256File abs') :: IO (Either IOException Text)
+        pure $ case actualE of
+          Left ioe ->
+            [Finding "DEEP" Warn ("条目读取失败（被占/介质？）: " <> enPath e <> "（" <> show ioe <> "）") "稍后重跑 pm doctor --deep"]
+          Right actual ->
+            [ Finding "DEEP-CORRUPT" Bad ("内容与索引 sha 不符: " <> enPath e) "核查介质；如源仍在他处，重新拷贝"
+            | actual /= enSha e
+            ]
   pure (concat results)
 
 -- Safe closures only (journal appends / own-tmp deletion). C5 plans are
@@ -528,22 +579,28 @@ applyRepairs root findings pending stale = do
         putStrLn ("  修复: 清除孤儿 tmp " <> f)
   forM_ c5 $ \(oid, op) -> case op of
     OpCopy _ dstRel _ _ _ -> do
-      actual <- sha256File (root </> dstRel)
-      pid <- newPlanId
-      now <- getCurrentTime
-      minfo <- readRootInfo root
-      let p =
-            Plan
-              { plId = pid
-              , plKind = "doctor-c5-quarantine"
-              , plRootPath = root
-              , plRootId = riId <$> minfo
-              , plCreated = now
-              , plItems =
-                  [PlanItem 0 (OpQuarantine dstRel actual ("doctor-c5:" <> oid)) StPending Nothing]
-              }
-      fp <- savePlan p
-      putStrLn ("  修复: C5 隔离计划已生成 " <> fp <> " → 审阅后 pm apply " <> T.unpack pid)
+      -- 三十四轮（同型扫尽）：隔离计划记录的是 victim 当下的 sha，读不出就
+      -- 生成不了（也不能拿 Intent 的 sha 顶替——C5 的前提正是内容不符）；
+      -- 跳过该项并明说（fail-closed），稍后重跑。
+      actualE <- try (sha256File (root </> dstRel)) :: IO (Either IOException Text)
+      case actualE of
+        Left e -> putStrLn ("  跳过: C5 隔离计划未生成（dst 读取失败: " <> show e <> "）——稍后重跑 pm doctor --repair")
+        Right actual -> do
+          pid <- newPlanId
+          now <- getCurrentTime
+          minfo <- readRootInfo root
+          let p =
+                Plan
+                  { plId = pid
+                  , plKind = "doctor-c5-quarantine"
+                  , plRootPath = root
+                  , plRootId = riId <$> minfo
+                  , plCreated = now
+                  , plItems =
+                      [PlanItem 0 (OpQuarantine dstRel actual ("doctor-c5:" <> oid)) StPending Nothing]
+                  }
+          fp <- savePlan p
+          putStrLn ("  修复: C5 隔离计划已生成 " <> fp <> " → 审阅后 pm apply " <> T.unpack pid)
     _ -> pure ()
 
 isPrefixOfStr :: String -> String -> Bool

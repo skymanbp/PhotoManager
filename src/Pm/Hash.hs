@@ -9,6 +9,7 @@ module Pm.Hash
   , copyFileHashed
   , StatSnap (..)
   , statSnap
+  , dirFingerprint
   , nsToUtc
   , utcToNs
   , statHitStable
@@ -18,14 +19,18 @@ module Pm.Hash
   ) where
 
 import Control.Exception (IOException, bracket, try)
-import Crypto.Hash (Context, Digest, SHA256, hashFinalize, hashInit, hashUpdate)
+import Crypto.Hash (Context, Digest, SHA256 (..), hashFinalize, hashInit, hashUpdate, hashWith)
 import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as TE
+import Control.Monad (forM)
+import Data.List (sort)
 import Data.Ratio ((%))
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
-import System.Directory (getFileSize, getModificationTime)
+import System.Directory (doesDirectoryExist, getFileSize, getModificationTime, listDirectory, pathIsSymbolicLink)
+import System.FilePath ((</>))
 import System.IO.Error (isDoesNotExistError)
 import System.IO
 
@@ -202,3 +207,35 @@ statSnap fp = do
   -- truncation is lossless for every filesystem we can meet.
   let ns = truncate (utcTimeToPOSIXSeconds mt * 1_000_000_000) :: Integer
   pure (StatSnap sz ns)
+
+-- | 目录指纹：递归树上每个条目一行 @类型\\t相对路径\\t大小\\tmtimeNs@
+-- （目录大小记 -1、mtime 记 0），排序后 sha256。P3b-5 复审 B2：原先只看
+-- 直接子项的名字+大小，换成同名同大小的另一棵树也能通过。不含文件内容
+-- hash——Rename 不触碰内容、undo 可逆，而 Raw 事件夹动辄数十 GB，计划期
+-- 与执行期两次全量 hash 的代价与收益不成比例（§14 单机威胁模型下作为
+-- 残余风险记录：需同时伪造整棵树的名字、大小与 mtime）。
+dirFingerprint :: FilePath -> IO Text
+dirFingerprint dir = do
+  entries <- walk ""
+  let payload = TE.encodeUtf8 (T.pack (unlines (sort entries)))
+      digest = hashWith SHA256 payload :: Digest SHA256
+  pure (T.pack (show digest))
+ where
+  walk rel = do
+    let here = if null rel then dir else dir </> rel
+    names <- listDirectory here
+    fmap concat . forM names $ \n -> do
+      let relN = if null rel then n else rel </> n
+          absN = dir </> relN
+      -- P3b-6 复审 minor：symlink/junction 记为 l 条目、**不跟随**——指回祖先
+      -- 的 junction 会无限递归；Scan.listTree 对 reparse point 同策略。
+      isLink <- pathIsSymbolicLink absN
+      if isLink
+        then pure ["l\t" <> relN <> "\t-1\t0"]
+        else do
+          isD <- doesDirectoryExist absN
+          if isD
+            then (("d\t" <> relN <> "\t-1\t0") :) <$> walk relN
+            else do
+              s <- statSnap absN
+              pure ["f\t" <> relN <> "\t" <> show (ssSize s) <> "\t" <> show (ssMtimeNs s)]

@@ -27,10 +27,12 @@ module Pm.Names
   , runNames
   ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (forM, forM_)
 import Data.Char (isDigit, toLower)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
+import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath ((</>))
@@ -224,59 +226,81 @@ runNames runPlan cfg = do
   if not ex
     then putStrLn ("Raw 层不存在: " <> rawTop) >> pure 2
     else do
-      years0 <- listDirectory rawTop
-      yearDirs <- filterDirs rawTop (sort years0)
-      let (validYears, oddTop) = span' isYearName yearDirs
-      rawYears <- forM validYears $ \yd -> do
-        evs0 <- listDirectory (rawTop </> yd)
-        evs <- filterDirs (rawTop </> yd) (sort evs0)
-        pure (yd, evs)
-      processed <- do
-        pex <- doesDirectoryExist (root </> "成片")
-        if pex then listDirectory (root </> "成片") >>= filterDirs (root </> "成片") else pure []
-      let rep = namesPlan rawYears processed
-      printf
-        "命名: 已合规 %d · 待改名 %d · 待裁决 %d · 无法识别 %d\n"
-        (nrOkCount rep)
-        (length (nrRenames rep))
-        (length (nrDecisions rep))
-        (length (nrUnrecognized rep))
-      forM_ oddTop $ \d -> putStrLn ("  ⚠ Raw 下非年份目录（不碰）: " <> d)
-      forM_ (nrUnrecognized rep) $ \p -> putStrLn ("  ⚠ 无法识别（不猜，不入计划）: " <> p)
-      forM_ (nrDecisions rep) $ \(p, why) -> putStrLn ("  ✋ NEEDS-DECISION " <> p <> " —— " <> why)
-      -- 计划期盘面校验：目标路径已被文件**或**目录占用 → 该项降为裁决
-      -- （不覆盖，I5 计划期防线；P3b-5 复审 B3：只查目录会让文件占位漏进计划）
-      checked <- forM (nrRenames rep) $ \(yd, old, new) -> do
-        let target = rawTop </> yd </> new
-        tex <- (||) <$> doesFileExist target <*> doesDirectoryExist target
-        pure (if tex then Left (yd </> old, "目标路径已在盘上存在（文件或目录）: " <> new) else Right (yd, old, new))
-      forM_ [d | Left d <- checked] $ \(p, why) ->
-        putStrLn ("  ✋ NEEDS-DECISION " <> p <> " —— " <> why)
-      let finalRenames = [r | Right r <- checked]
-      if null finalRenames
-        then do
-          putStrLn "✓ 无可机械执行的改名"
-          pure (if null (nrDecisions rep) && null (nrUnrecognized rep) && null [() | Left _ <- checked] then 0 else 1)
-        else do
-          -- P3b-5 复审 B1：以主库身份改名的前提是该路径确为 RoleMain root
-          er <- requireRole RoleMain root
-          case er of
-            Left msg -> putStrLn msg >> pure 2
-            Right info -> do
-              items <- forM (zip [0 ..] finalRenames) $ \(i, (yd, old, new)) -> do
-                fp <- dirFingerprint (rawTop </> yd </> old)
-                pure (PlanItem i (OpRename ("Raw" </> yd </> old) ("Raw" </> yd </> new) (FpDir fp)) StPending Nothing)
-              pid <- newPlanId
-              now <- getCurrentTime
-              runPlan
-                Plan
-                  { plId = pid
-                  , plKind = "names"
-                  , plRootPath = root
-                  , plRootId = Just (riId info)
-                  , plCreated = now
-                  , plItems = items
-                  }
+      -- 三十五轮 F2（与本函数下方的生成期指纹同纪律）：年份夹/事件夹/成片的
+      -- 三层枚举此前裸奔——目录被良性进程占住/挪走时 listDirectory 抛出直接
+      -- 崩掉 CLI；静默当空更糟（漏报待改名项）。整段包 try，读不出 = 整批
+      -- 拒绝 exit 2，零计划。
+      enumE <- try $ do
+        years0 <- listDirectory rawTop
+        yearDirs <- filterDirs rawTop (sort years0)
+        let (validYears, oddTop) = span' isYearName yearDirs
+        rawYears <- forM validYears $ \yd -> do
+          evs0 <- listDirectory (rawTop </> yd)
+          evs <- filterDirs (rawTop </> yd) (sort evs0)
+          pure (yd, evs)
+        processed <- do
+          pex <- doesDirectoryExist (root </> "成片")
+          if pex then listDirectory (root </> "成片") >>= filterDirs (root </> "成片") else pure []
+        pure (oddTop, rawYears, processed)
+      case (enumE :: Either IOException ([String], [(String, [String])], [String])) of
+        Left e -> do
+          putStrLn ("枚举失败（被占/介质错误？）: " <> show e <> " —— 解除占用后重跑，未生成计划")
+          pure 2
+        Right (oddTop, rawYears, processed) -> do
+          let rep = namesPlan rawYears processed
+          printf
+            "命名: 已合规 %d · 待改名 %d · 待裁决 %d · 无法识别 %d\n"
+            (nrOkCount rep)
+            (length (nrRenames rep))
+            (length (nrDecisions rep))
+            (length (nrUnrecognized rep))
+          forM_ oddTop $ \d -> putStrLn ("  ⚠ Raw 下非年份目录（不碰）: " <> d)
+          forM_ (nrUnrecognized rep) $ \p -> putStrLn ("  ⚠ 无法识别（不猜，不入计划）: " <> p)
+          forM_ (nrDecisions rep) $ \(p, why) -> putStrLn ("  ✋ NEEDS-DECISION " <> p <> " —— " <> why)
+          -- 计划期盘面校验：目标路径已被文件**或**目录占用 → 该项降为裁决
+          -- （不覆盖，I5 计划期防线；P3b-5 复审 B3：只查目录会让文件占位漏进计划）
+          checked <- forM (nrRenames rep) $ \(yd, old, new) -> do
+            let target = rawTop </> yd </> new
+            tex <- (||) <$> doesFileExist target <*> doesDirectoryExist target
+            pure (if tex then Left (yd </> old, "目标路径已在盘上存在（文件或目录）: " <> new) else Right (yd, old, new))
+          forM_ [d | Left d <- checked] $ \(p, why) ->
+            putStrLn ("  ✋ NEEDS-DECISION " <> p <> " —— " <> why)
+          let finalRenames = [r | Right r <- checked]
+          if null finalRenames
+            then do
+              putStrLn "✓ 无可机械执行的改名"
+              pure (if null (nrDecisions rep) && null (nrUnrecognized rep) && null [() | Left _ <- checked] then 0 else 1)
+            else do
+              -- P3b-5 复审 B1：以主库身份改名的前提是该路径确为 RoleMain root
+              er <- requireRole RoleMain root
+              case er of
+                Left msg -> putStrLn msg >> pure 2
+                Right info -> do
+                  -- 三十四轮（同型扫尽，与 Ingest 生成期同纪律）：Raw 事件夹动辄
+                  -- 数十 GB，指纹遍历窗口内 Lightroom 正写入/文件被独占都会抛——
+                  -- 逐项 try、错误一次列完、整批拒绝（exit 2，零计划），不逃顶。
+                  itemsE <- forM (zip [0 ..] finalRenames) $ \(i, (yd, old, new)) -> do
+                    fpE <- try (dirFingerprint (rawTop </> yd </> old)) :: IO (Either IOException T.Text)
+                    pure $ case fpE of
+                      Left e -> Left (yd </> old <> " 指纹读取失败（" <> show e <> "）")
+                      Right fp -> Right (PlanItem i (OpRename ("Raw" </> yd </> old) ("Raw" </> yd </> new) (FpDir fp)) StPending Nothing)
+                  case [e | Left e <- itemsE] of
+                    errs@(_ : _) -> do
+                      mapM_ (\e -> putStrLn ("  ✗ " <> e)) errs
+                      putStrLn "生成期读取失败（被占/介质错误？）：整批拒绝，未生成计划——解除占用后重跑"
+                      pure 2
+                    [] -> do
+                      pid <- newPlanId
+                      now <- getCurrentTime
+                      runPlan
+                        Plan
+                          { plId = pid
+                          , plKind = "names"
+                          , plRootPath = root
+                          , plRootId = Just (riId info)
+                          , plCreated = now
+                          , plItems = [it | Right it <- itemsE]
+                          }
  where
   isYearName n = length n == 4 && all isDigit n && take 2 n == "20"
   span' p xs = (filter p xs, filter (not . p) xs)

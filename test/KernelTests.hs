@@ -28,7 +28,8 @@ import Pm.Plan
 import Pm.Trash
 import Pm.Types
 import Pm.Undo (buildUndoPlan)
-import Pm.Win (moveBoundNoReplace)
+import Pm.Win (moveBoundNoReplace, openExclusiveBinary)
+import System.IO (hClose)
 import System.IO.Temp (withSystemTempDirectory)
 
 import TestUtil
@@ -199,6 +200,20 @@ execCopyTests =
             other -> assertFailure ("expected conflict, got " <> show (map snd other))
           dstEx <- doesFileExist (root </> "相册" </> "a.jpg")
           dstEx @?= False
+    , testCase "三十四轮: dst 被独占占住 → OFailed（I5 判不出同异：不跳过、不覆盖、不逃逸），journal 零条目" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+          createDirectoryIfMissing True (root </> "相册")
+          hLock <- openExclusiveBinary (root </> "相册" </> "a.jpg")
+          op <- mkCopyOp (dir </> "s.jpg") "MINE" ("相册" </> "a.jpg")
+          plan <- mkPlanIO root [op]
+          rs <- execOk plan
+          hClose hLock
+          case rs of
+            [(_, OFailed m)] -> assertBool ("应指明目标读取失败: " <> m) ("目标读取失败" `elemSubstr` m)
+            other -> assertFailure ("expected OFailed, got " <> show (map snd other))
+          es <- journalEntries root
+          filter isIntent es @?= [] -- 拒绝发生在 Intent 之前
     , testCase "dst appears during write window → CONFLICT, interloper intact, tmp retained" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"
@@ -275,6 +290,20 @@ execRenameTests =
           case rs of
             [(_, OConflict _)] -> pure ()
             other -> assertFailure ("expected conflict, got " <> show (map snd other))
+    , testCase "三十四轮: 源被独占占住 → OFailed 指纹读取失败（≠ 指纹不符 CONFLICT），两侧不动" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+          createDirectoryIfMissing True root
+          hLock <- openExclusiveBinary (root </> "a.txt")
+          plan <- mkPlanIO root [OpRename "a.txt" "b.txt" (FpFileSha "0000")]
+          rs <- execOk plan
+          hClose hLock
+          case rs of
+            [(_, OFailed m)] -> assertBool ("应指明指纹读取失败: " <> m) ("指纹读取失败" `elemSubstr` m)
+            other -> assertFailure ("expected OFailed, got " <> show (map snd other))
+          aEx <- doesFileExist (root </> "a.txt")
+          bEx <- doesFileExist (root </> "b.txt")
+          (aEx, bEx) @?= (True, False)
     ]
 
 execQuarantineTests :: TestTree
@@ -295,7 +324,7 @@ execQuarantineTests =
               c @?= "VICTIM"
               origEx <- doesFileExist (root </> "相册" </> "v.jpg")
               origEx @?= False
-              tv <- trashView root
+              tv <- trashViewOK root
               length (tvRegistered tv) @?= 1
               tvUnregistered tv @?= []
             other -> assertFailure ("expected quarantine done, got " <> show (map snd other))
@@ -311,6 +340,18 @@ execQuarantineTests =
             other -> assertFailure ("expected conflict, got " <> show (map snd other))
           ex <- doesFileExist (root </> "v.jpg")
           ex @?= True
+    , testCase "三十四轮: victim 被独占占住 → OFailed 读取失败（内容核不了 → 不隔离、不逃逸），victim 原位" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+          createDirectoryIfMissing True (root </> "相册")
+          hLock <- openExclusiveBinary (root </> "相册" </> "v.jpg")
+          plan <- mkPlanIO root [OpQuarantine ("相册" </> "v.jpg") "beef" "test"]
+          rs <- execOk plan
+          hClose hLock
+          case rs of
+            [(_, OFailed m)] -> assertBool ("应指明 victim 读取失败: " <> m) ("victim 读取失败" `elemSubstr` m)
+            other -> assertFailure ("expected OFailed, got " <> show (map snd other))
+          doesFileExist (root </> "相册" </> "v.jpg") >>= (@?= True)
     ]
 
 injectionTests :: TestTree
@@ -568,6 +609,19 @@ doctorTests =
           createDirectoryIfMissing True root
           (fs, code) <- runDoctor root (DoctorOpts False False)
           ([(fRow f, fSeverity f) | f <- fs, fSeverity f >= Warn], code) @?= ([], 0)
+    , testCase "三十四轮: --deep 遇独占占住的条目 → DEEP 读取失败 Warn，doctor 不崩" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+          createDirectoryIfMissing True (root </> "相册")
+          hLock <- openExclusiveBinary (root </> "相册" </> "locked.jpg")
+          saveCatalog root (mkCat [mkE ("相册" </> "locked.jpg") "aa"])
+          (fs, code) <- runDoctor root (DoctorOpts True False)
+          hClose hLock
+          let deepRows = [f | f <- fs, fRow f == "DEEP"]
+          case deepRows of
+            [f] -> assertBool ("应指明读取失败: " <> fDetail f) ("读取失败" `elemSubstr` fDetail f)
+            other -> assertFailure ("expected 1 DEEP finding, got " <> show (map fDetail other))
+          code @?= 1 -- 状态未知 → 非零退出
     , testCase "P2.3: 二次复位在 rename 后崩溃 → 次序感知 R2 补记，repair 后收敛" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"
@@ -623,7 +677,7 @@ undoTests =
           _ <- execOk up
           dstEx <- doesFileExist (root </> "相册" </> "a.jpg")
           dstEx @?= False
-          tv <- trashView root
+          tv <- trashViewOK root
           case tvRegistered tv of
             [(r, present)] -> do
               present @?= True

@@ -10,8 +10,10 @@
 -- 用例钉一条：删掉对应的屏障，用例必须转红。
 module StateGuardTests (stateGuardTests) where
 
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (SomeException, try)
 import Control.Monad (forM_, when)
+import System.IO (IOMode (ReadMode), hClose, openBinaryFile)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BSL
 import Data.List (isInfixOf)
@@ -60,6 +62,7 @@ stateGuardTests =
     , testCase "P6-C 落位后验：目标父层在窗口内被换成 junction → 检出、沿句柄回迁、项失败，库外零字节" caseMoveBoundDetectsDestSwap
     , testCase "P6-C 落位先验：源经 junction 路径到达 → 拒绝，两侧原封不动" caseMoveBoundSrcViaJunction
     , testCase "P6-C 删除先验：经 junction 路径 → 拒绝目标幸存；终段 symlink → 删链接本体不删目标" caseDeleteBoundViaJunction
+    , testCase "三十二轮 R1：短暂共享冲突（err 32）→ 提交型打开按 Win32 同款预算重试而非立刻失败" caseDisposeRetriesSharing
     ]
 
 -- 本模块只需要 hardlink（/H）与文件 symlink（无开关）两种形态；目录 junction
@@ -566,3 +569,19 @@ caseDeleteBoundViaJunction = withSystemTempDirectory "pm-sguard" $ \dir -> do
   deleteBoundAt (dir </> "ln.txt")
   doesFileExist (dir </> "ln.txt") >>= (@?= False)
   readFile (dir </> "target.txt") >>= (@?= "TARGET")
+
+-- | 三十二轮 R1：被 P6-C 替掉的名字口原语（Win32 的 moveFileEx/deleteFile）
+-- 内建「ERROR_SHARING_VIOLATION=32 → 100ms×20 重试」（KB 316609：杀毒/索引器
+-- 短暂持有刚 close 的文件）；句柄化后冲突挪到打开那一步，重试预算必须跟着搬。
+-- fixture：GHC 的 openBinaryFile 不带 FILE_SHARE_DELETE，另一线程 300ms 后
+-- 才放手——无重试的实现（旧 withDisposeHandle）在这里**立刻**抛 err 32；
+-- 有重试的在 ≤2s 预算内等到句柄释放并删除成功。300ms 对 2s 预算余量 6 倍，
+-- 只在整机停顿 >1.7s 时才可能误红。
+caseDisposeRetriesSharing :: IO ()
+caseDisposeRetriesSharing = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let f = dir </> "busy.txt"
+  writeFile f "X"
+  h <- openBinaryFile f ReadMode
+  _ <- forkIO (threadDelay 300000 >> hClose h)
+  deleteBoundAt f
+  doesFileExist f >>= (@?= False)

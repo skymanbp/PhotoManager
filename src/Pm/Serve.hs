@@ -73,20 +73,20 @@ import Network.HTTP.Types
 import Network.Socket
 import Network.Wai
 import Network.Wai.Handler.Warp (defaultSettings, runSettingsSocket)
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
-import System.FilePath (dropExtension, takeExtension, (</>))
+import System.Directory (doesDirectoryExist, doesFileExist)
+import System.FilePath (takeExtension)
 import GHC.IO.Handle (hDuplicateTo)
 import System.IO (IOMode (ReadMode, WriteMode), hClose, hFlush, hIsEOF, openFile, stdin, stdout)
 
 import Pm.Catalog (loadCatalog)
 import Pm.Cli (GoOpts (..), executePlanNowWith)
 import Pm.Commands (afterApply, loadPlanAnyRoot, prepareApply)
-import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, pmSubPlans, requirePmTrusted, requireWritable, untrustedMsg, withConfigLock)
+import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, requireWritable, withConfigLock)
 import Pm.ConfigEdit (checkPatch, configTxn)
 import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
 import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, loadPlan, savePlan)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, listPlans, savePlan)
 import Pm.Sort (SortSegment (..), SortSurvey (..), runSortPlan, surveySort)
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
@@ -760,21 +760,3 @@ planSummary p =
   -- 层的事实（Done），不在计划文件上（DESIGN §3）。
   count s = length [() | it <- plItems p, piStatus it == s]
 
--- | 列出 @root/.pm/plans@ 下装得出来的计划；装不出来的按 (文件名, 原因) 返回。
--- 目录本身经 'requirePmTrusted' + 完整路径 'resolveUnder'，每个计划经
--- 'loadPlan'（受信取用口）；文件名只是候选 id，先过 'isValidPlanId'。
-listPlans :: FilePath -> IO ([Plan], [(String, String)])
-listPlans root = do
-  tr <- requirePmTrusted root
-  case tr of
-    Left m -> pure ([], [("", m)])
-    Right () -> do
-      m <- resolveUnder root (".pm" </> pmSubPlans)
-      case m of
-        Nothing -> pure ([], [("", untrustedMsg (root </> ".pm" </> pmSubPlans))])
-        Just d -> do
-          ex <- doesDirectoryExist d
-          names <- if ex then listDirectory d else pure []
-          let pids = [T.pack (dropExtension n) | n <- names, takeExtension n == ".json", isValidPlanId (T.pack (dropExtension n))]
-          rs <- mapM (\pid -> fmap ((,) (T.unpack pid)) (loadPlan root pid)) pids
-          pure ([p | (_, Right p) <- rs], [(n, e) | (n, Left e) <- rs])

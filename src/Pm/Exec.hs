@@ -28,29 +28,24 @@ module Pm.Exec
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad (forM)
-import Crypto.Hash (Digest, SHA256 (..), hashWith)
-import Data.List (sort)
-import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
-import Data.Time (UTCTime, getCurrentTime)
+import Data.Time (getCurrentTime)
 import System.Directory
   ( createDirectoryIfMissing
   , doesDirectoryExist
   , doesFileExist
   , doesPathExist
-  , listDirectory
   , pathIsSymbolicLink
   , setModificationTime
   )
 -- isRelative 不再引入：P3b-8 六轮复审——execItem 的路径自查改用 Pm.Op.opPathsOk
 -- （isRelative 对 "\\evil"/"c:evil" 都答 True，而 </> 对二者是整体替换）。
-import System.FilePath (splitDirectories, takeDirectory, takeExtension, takeFileName, (</>))
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Error (isDoesNotExistError)
 
 import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requirePmTrusted)
+import Pm.ExecTypes
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Hash
 import Pm.Journal
@@ -63,68 +58,6 @@ import Pm.Types
 -- resolveUnder（基准自身也可能被劫持），pathAtOrUnder 负责 .pm 语义排除。
 import Pm.Win (deleteBoundAt, moveBoundNoReplace, pathAtOrUnder, resolveUnder)
 
--- | Protocol step markers, one between every pair of externally visible
--- effects (§13 P3 fault injection).
-data Checkpoint
-  = CpCopyAfterDstCheck
-  | CpCopyAfterIntent
-  | CpCopyAfterTmp
-  | CpCopyAfterFlush
-  | CpCopyAfterMove
-  | CpRenAfterIntent
-  | CpRenAfterMove
-  | CpQuarAfterManifest
-  | CpQuarAfterIntent
-  | CpQuarAfterMove
-  deriving (Show, Eq)
-
-data ExecEnv = ExecEnv
-  { eeCheckpoint :: Checkpoint -> IO ()
-  , eeDoneSync :: Sync
-    -- ^ Copy 的 Done 持久化模式。主库默认 Buffered（可组提交，C2/C3 从盘面
-    -- 重建）；备份路径必须 Barrier（DESIGN.md §9）—— 备份盘是可移动介质，
-    -- 打印结果后用户随时可能拔盘，Done 必须在汇报前已落盘。
-    -- Rename/Quarantine 的 Done 永远 Barrier，不受此字段影响。
-  , eeExpectRootId :: Maybe Text
-    -- ^ 评审 cx-1：拿到锁之后、动盘之前复验 root-id.json 的 UUID。盘符会
-    -- 漂移（备份盘 E: → F:），路径不是身份；不符即整批拒绝执行。
-    -- Nothing = 跳过（测试用临时 root 无标识）。
-  , eeBarrier :: Maybe (BarrierKind -> Plan -> IO [(Int, Text)])
-    -- ^ 执行期**组屏障**（二十九轮 critical；三十轮 F4 类型封闭）。逐项的 sha
-    -- 复核由内核自己做；钩子做的是**跨条目**判断——「该内容在归档层还留得下
-    -- 一份活副本吗」——需要 catalog 与备份盘发现，属命令层知识。
-    --
-    -- 钩子只能返回**降级清单** @[(piIx, 原因)]@，新 Plan 由内核构造
-    -- （'applyDemotions'）：升级回 pending、改写 Op、改写计划元数据在类型上
-    -- **写不出来**，不再靠事后核对（旧 barrierDrift 已删）。内核仅存的自卫是
-    -- 清单必须指向存在且 StPending 的条目——否则屏障的世界观与计划不符，
-    -- 整批拒绝。「要不要屏障」仍是内核的知识（'Pm.Plan.kindBarrier'）：
-    -- 该有而这里是 Nothing → 整批拒绝，缺席不会退化成静默跳过（P3b-5/A3）。
-  }
-
-defaultExecEnv :: ExecEnv
-defaultExecEnv =
-  ExecEnv
-    { eeCheckpoint = \_ -> pure ()
-    , eeDoneSync = Buffered
-    , eeExpectRootId = Nothing
-    , eeBarrier = Nothing
-    }
-
-data ItemOutcome
-  = ODone {oSha :: Maybe Text, oDstStat :: Maybe StatSnap, oTrashRel :: Maybe FilePath}
-  | OSkippedIdentical
-  | ONotExecuted -- item was marked skipped / needs-decision
-  | OConflict String
-  | OFailed String
-  deriving (Show, Eq)
-
-outcomeLabel :: ItemOutcome -> String
-outcomeLabel ODone {} = "DONE"
-outcomeLabel OSkippedIdentical = "SKIP(同内容)"
-outcomeLabel ONotExecuted = "未执行"
-outcomeLabel (OConflict m) = "CONFLICT: " <> m
-outcomeLabel (OFailed m) = "FAILED: " <> m
 
 -- 子目录名取自 'Pm.Config' 的单一真源，'requirePmTrusted' 校验的就是这一条。
 tmpDirFor :: FilePath -> Text -> FilePath
@@ -519,10 +452,16 @@ execCopy' env root j oid ix op dstAbs = do
           dstExists <- doesFileExist dstAbs
           if dstExists
             then do
-              dsha <- sha256File dstAbs
-              if dsha == opSha op
-                then pure OSkippedIdentical
-                else pure (OConflict "目标已存在且内容不同（I5：不覆盖）")
+              -- 三十四轮（同型扫尽，与 Ingest.mkItem 逐字同形）：I5 同异判定的
+              -- 读口 fail-closed——目标被 AV/索引器独占时读不出，既不能当
+              -- "相同"跳过也不能当"不同"报冲突，更不能逃逸放弃整批剩余项；
+              -- OFailed，占用解除后重跑同计划即可（已落项自动 SKIP）。
+              dshaE <- try (sha256File dstAbs) :: IO (Either IOException Text)
+              case dshaE of
+                Left e -> pure (OFailed ("目标读取失败（I5 同异判不出，不动）: " <> show e))
+                Right dsha
+                  | dsha == opSha op -> pure OSkippedIdentical
+                  | otherwise -> pure (OConflict "目标已存在且内容不同（I5：不覆盖）")
             else do
               let pid' = planIdOf oid
                   tname = tmpNameFor ix (opDstRel op)
@@ -555,7 +494,22 @@ execCopyTmp :: ExecEnv -> Journal -> Text -> Op -> FilePath -> FilePath -> IO It
 execCopyTmp env j oid op tmp dstAbs = do
   wsha <- copyFileHashed (opSrcAbs op) tmp
   eeCheckpoint env CpCopyAfterTmp
-  rsha <- sha256File tmp
+  -- 三十四轮（同型扫尽）：tmp 复读是 Intent 之后的读口——逃逸会以进程死亡
+  -- 语义放弃整批剩余项。按同函数 moveBound/落位复核的既有形态 JFailed +
+  -- OFailed；tmp 保留（读都读不出就不试删，孤儿 tmp 由 doctor 清理）。
+  rshaE <- try (sha256File tmp) :: IO (Either IOException Text)
+  case rshaE of
+    Left ex -> do
+      tf <- getCurrentTime
+      jAppend j Barrier (JFailed oid ("tmp 复读失败: " <> T.pack (show ex)) tf)
+      pure (OFailed ("tmp 复读失败（tmp 保留，交 pm doctor）: " <> show ex))
+    Right rsha ->
+      execCopyLand env j oid op tmp dstAbs wsha rsha
+
+-- | 'execCopyTmp' 的落位阶段（复读已成功）。拆出顶层纯粹是嵌套深度，
+-- 参数原样透传，分支与拆分前逐字一致。
+execCopyLand :: ExecEnv -> Journal -> Text -> Op -> FilePath -> FilePath -> Text -> Text -> IO ItemOutcome
+execCopyLand env j oid op tmp dstAbs wsha rsha =
   if wsha /= opSha op || rsha /= opSha op
     then do
       -- §6.1 footnote: the one permitted unlink — our own tmp
@@ -632,16 +586,24 @@ execRename' env j oid op oldAbs newAbs = do
       if newIsFile || newIsDir
         then pure (OConflict "重命名目标已存在（I5：不覆盖）")
         else do
-          fpOk <- case opFp op of
-            FpFileSha s
-              | oldIsFile -> (== s) <$> sha256File oldAbs
-              | otherwise -> pure False
-            FpDir s
-              | oldIsDir -> (== s) <$> dirFingerprint oldAbs
-              | otherwise -> pure False
-          if not fpOk
-            then pure (OConflict "内容指纹与计划时不符（对象已被改动）")
-            else do
+          -- 三十四轮（同型扫尽）：指纹读口 fail-closed——读失败 ≠ 指纹不符
+          -- （下一步不同：稍后重跑 vs 对象被改动需重新生成计划），不得折叠
+          -- 成 False，也不得逃逸放弃整批剩余项。
+          fpOkE <-
+            try
+              ( case opFp op of
+                  FpFileSha s
+                    | oldIsFile -> (== s) <$> sha256File oldAbs
+                    | otherwise -> pure False
+                  FpDir s
+                    | oldIsDir -> (== s) <$> dirFingerprint oldAbs
+                    | otherwise -> pure False
+              )
+              :: IO (Either IOException Bool)
+          case fpOkE of
+            Left ex -> pure (OFailed ("指纹读取失败（与计划相符与否判不出，不动）: " <> show ex))
+            Right False -> pure (OConflict "内容指纹与计划时不符（对象已被改动）")
+            Right True -> do
               t1 <- getCurrentTime
               -- Barrier is mandatory here and Done may NOT be group-committed:
               -- the old name exists only in this journal (I1).
@@ -687,16 +649,23 @@ execQuarantine' env root j oid trashRel op victimAbs trashAbs = do
       tex <- doesFileExist trashAbs
       if tex
         then do
-          tsha <- sha256File trashAbs
-          if tsha == opVictimSha op
-            then pure (ODone (Just (opVictimSha op)) Nothing (Just trashRel))
-            else pure (OConflict "victim 不在原位且本计划 trash 内容不符，需人工核查")
+          -- 三十四轮（同型扫尽）：重跑判定的读口 fail-closed——trash 读不出
+          -- 就确认不了上次是否已执行，不动、不猜（I1）。
+          tshaE <- try (sha256File trashAbs) :: IO (Either IOException Text)
+          case tshaE of
+            Left ioe -> pure (OFailed ("victim 不在原位且 trash 读取失败（上次是否已执行确认不了）: " <> show ioe))
+            Right tsha
+              | tsha == opVictimSha op -> pure (ODone (Just (opVictimSha op)) Nothing (Just trashRel))
+              | otherwise -> pure (OConflict "victim 不在原位且本计划 trash 内容不符，需人工核查")
         else pure (OConflict "victim 不存在")
     else do
-      vsha <- sha256File victimAbs
-      if vsha /= opVictimSha op
-        then pure (OConflict "victim 内容与计划时不符（不动）")
-        else do
+      -- 三十四轮（同型扫尽）：victim 读口 fail-closed——读不出就核不了内容
+      -- 是否仍与计划相符，不动（隔离的前提是"确认是这份内容"）。
+      vshaE <- try (sha256File victimAbs) :: IO (Either IOException Text)
+      case vshaE of
+        Left ioe -> pure (OFailed ("victim 读取失败（内容核不了，不动）: " <> show ioe))
+        Right vsha | vsha /= opVictimSha op -> pure (OConflict "victim 内容与计划时不符（不动）")
+        Right _ -> do
           now0 <- getCurrentTime
           appendManifest
             root
@@ -729,70 +698,3 @@ execQuarantine' env root j oid trashRel op victimAbs trashAbs = do
 
 planIdOf :: Text -> Text
 planIdOf oid = T.takeWhile (/= '#') oid
-
--- | 目录指纹：递归树上每个条目一行 @类型\\t相对路径\\t大小\\tmtimeNs@
--- （目录大小记 -1、mtime 记 0），排序后 sha256。P3b-5 复审 B2：原先只看
--- 直接子项的名字+大小，换成同名同大小的另一棵树也能通过。不含文件内容
--- hash——Rename 不触碰内容、undo 可逆，而 Raw 事件夹动辄数十 GB，计划期
--- 与执行期两次全量 hash 的代价与收益不成比例（§14 单机威胁模型下作为
--- 残余风险记录：需同时伪造整棵树的名字、大小与 mtime）。
-dirFingerprint :: FilePath -> IO Text
-dirFingerprint dir = do
-  entries <- walk ""
-  let payload = TE.encodeUtf8 (T.pack (unlines (sort entries)))
-      digest = hashWith SHA256 payload :: Digest SHA256
-  pure (T.pack (show digest))
- where
-  walk rel = do
-    let here = if null rel then dir else dir </> rel
-    names <- listDirectory here
-    fmap concat . forM names $ \n -> do
-      let relN = if null rel then n else rel </> n
-          absN = dir </> relN
-      -- P3b-6 复审 minor：symlink/junction 记为 l 条目、**不跟随**——指回祖先
-      -- 的 junction 会无限递归；Scan.listTree 对 reparse point 同策略。
-      isLink <- pathIsSymbolicLink absN
-      if isLink
-        then pure ["l\t" <> relN <> "\t-1\t0"]
-        else do
-          isD <- doesDirectoryExist absN
-          if isD
-            then (("d\t" <> relN <> "\t-1\t0") :) <$> walk relN
-            else do
-              s <- statSnap absN
-              pure ["f\t" <> relN <> "\t" <> show (ssSize s) <> "\t" <> show (ssMtimeNs s)]
-
--- | Fold executed outcomes back into the mutated root's catalog. A directory
--- rename rewrites the path prefix of every entry beneath it.
-updateCatalog :: UTCTime -> [(PlanItem, ItemOutcome)] -> Catalog -> Catalog
-updateCatalog now results cat = foldl step cat results
- where
-  step c (item, out) = case (piOp item, out) of
-    (OpCopy _ dstRel sha _ _, ODone _ (Just st) _) ->
-      c
-        { catEntries =
-            Map.insert
-              dstRel
-              Entry
-                { enPath = dstRel
-                , enSize = ssSize st
-                , enMtimeNs = ssMtimeNs st
-                , enSha = sha
-                , enKind = classifyExt (takeExtension dstRel)
-                , enLastVerified = Just now
-                }
-              (catEntries c)
-        }
-    (OpRename old new _, ODone {}) ->
-      c {catEntries = Map.fromList (map (rekey old new) (Map.toList (catEntries c)))}
-    (OpQuarantine victim _ _, ODone {}) ->
-      c {catEntries = Map.delete victim (catEntries c)}
-    _ -> c
-  rekey old new (k, e) =
-    let oldParts = splitDirectories old
-        kParts = splitDirectories k
-     in if take (length oldParts) kParts == oldParts
-          then
-            let k' = foldr1 (</>) (splitDirectories new <> drop (length oldParts) kParts)
-             in (k', e {enPath = k'})
-          else (k, e)
