@@ -219,7 +219,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm clean staging [--apply]` | **隔离区入口**：仅对「Raw/成片 已有同 sha 副本 **且** 备份 root catalog 也有同 sha 副本」（三副本确认）的 staging 文件生成 Quarantine 计划；不满足的标 `HELD(缺哪份)`；备份盘未挂载 → 不生成任何项，报「无法确认第三副本」。**`待修改\` 永不入清理计划（P2 落锤，与 §7 import 不碰同源）**；catalog 声称的两侧副本在计划期再过一次活体 stat 核对，变了降级 HELD | apply 时 |
 | `pm vault status` | 相册↔vault 六态差异（§10.1 兼容 schema） | 否 |
 | `pm vault push [--apply]` | NEW→定类别后拷入 vault（类别来自 GUI 勾选或 `--category`/计划文件，**CLI 无法看图，不装作能分类**）；DRIFT→确认后 supersede 复合；RENAME→只报告/BLOCKED（§10.2）；结束打印显式 git 步骤 | apply 时 |
-| `pm vault ingest`（**计划中，尚未实现**） | skill 调用的非交互批量入口：拷 相册/ + 拷 vault 类目 + 冲突检测 + journal 登记 inbox-origin。`--finalize` 移 `_inbox→_done` 那一步**不会**由 pm 做——`_inbox` 不在任何 pm root 内，给 pm 一条「搬第三处目录里的文件」的能力等于在模型外开口子（同 I9 的处理：打印显式步骤，由 skill 自己做）。落实情况见 DESIGN-COMMANDS §10.3 | — |
+| `pm vault ingest <files> --category <c>`（P6-D） | skill 调用的非交互批量入库：源（`_inbox`，库外）→ 主库 `相册/` + vault `<类目>/` **两份计划**（计划只属于一个 root；主库在前，I7 拓扑方向，主库失败即停）。I5 冲突在生成时即 NEEDS-DECISION；I7 来源登记不新造记录——主库 journal 的 Intent 本来就带库外 srcAbs，inbox-origin 集合 = dst 在 相册/ 且 src 在 root 外的 Copy 记录。`_inbox→_done` 与 photos.json 由调用方收尾，pm 打印显式步骤（同 I9 处理 git）。落实情况见 DESIGN-COMMANDS §10.3 | 是（同协议） |
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、别名登记、同批目标唯一性校验） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
 | `pm dedupe [--apply]` | **精确重复的逐份裁决计划**（§8.1）：来源就是 `pm versions` 的非设计内精确重复组，每一份出一个 Quarantine 条目、**全部** `NEEDS-DECISION`——留哪一份 pm 判不出就不猜（I1），用 `pm resolve --item N --unskip` 逐份批准。**不**绑复合组（复合组语义是不可拆，而这里要求逐份裁决）；组的完整性由执行期屏障保证：某个 sha 在归档层的最后一份**活**副本不会被隔离掉 | apply 时 |
@@ -370,7 +370,10 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `pm trash empty` 从读 manifest 视图到唯一那次 unlink 整段在锁内；
   `pm resolve` 锁内重载计划再写回；doctor `--repair` 的「读 journal → 判定 →
   补记/删 tmp」整段在锁内（锁被占退回只读诊断）；执行后的 catalog 回写是
-  加锁 RMW（锁被占则明说放弃，pm scan 可补）；配置的全部四条读改写路径
+  加锁 RMW（锁被占则明说放弃，pm scan 可补）；侧缓存 catalog+meta 的**成对写**
+  整段在锁内（三十一轮 F1，backup-cache 与 vault-cache 共用一个入口；锁被占
+  = CacheLockBusy，降级为"本轮不刷新"，与 junction 拒绝的硬停是不同构造子）；
+  配置的全部四条读改写路径
   （config set / API config / backup init / **pm init --force**）都在
   `withConfigLock` 内。进程内互斥（serve 的 MVar）不算——它挡不住第二个 pm。
   内核对「该有屏障而调用方没给」整批拒绝，缺席不会退化成静默跳过。
@@ -599,18 +602,22 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
   **不含** Exec 三条 Op 里的用户数据内容读（`sha256File`）——见下。
 
 - **剩下的窗口**（逐条登记，不是"属安全软件范畴"一句带过）：
-  1. `MoveFileEx` / `RemoveDirectory` 这类只吃**名字**、没有句柄形态的 API
-     （落位 rename、`pm trash empty` 的唯一 unlink）。仍由 `resolveUnder` +
-     `pathAtOrUnder` 守。
-  2. Exec 的内容复核（`sha256File`）按名字打开，分两类（三十轮 F5 更正——
-     此前把两类混说成"读后紧跟 move"）：**Rename 的旧名复核与 Quarantine 的
-     victim 复核**，读之后紧接着就是同一路径上的 `moveFileNoReplace`，赢得下
-     读那一跳的攻击者同样赢得下 move 那一跳，后果由 move 产生，不构成独立
-     窗口；**Copy 的落点同内容判定**没有后续 move——伪造相等只会让这一次
-     Copy 被静默跳过（`OSkippedIdentical`），落点空着、旧字节仍在 trash，
-     doctor 对账可见，不是覆盖也不是丢失。两类都不值得换 `openBoundTo`：
-     那会造出"读口已关"的假象——真要关这一类，方向是落位 rename 改成句柄
-     形态（`SetFileInformationByHandle` + `FILE_RENAME_INFO`）。
+  1. ~~`MoveFileEx` / `RemoveDirectory` 名字口~~ **已关（P6-C，路线图③）**：
+     全部提交型操作改句柄形态——落位走 `Pm.Win.moveBoundNoReplace`（打开源、
+     **先验**句柄绑定、`SetFileInformationByHandle(FileRenameInfo)` no-replace、
+     **同句柄后验**对象落点，不符即沿句柄改回原名再响亮报错）；`pm trash
+     empty` 的唯一 unlink 与全部 tmp/轮转清除走 `deleteBoundAt`（先验绑定 +
+     `FileDispositionInfo`，终段不跟随）。`RemoveDirectory` 经清点在 pm 中
+     **从未被使用**。残余缩小为：目标侧做不到先验（文档明确
+     `SetFileInformationByHandle` 的 `RootDirectory` 必须为 NULL）——后验是
+     **提交后检出**而非阻止；后验不符且回迁也失败的瞬间，对象停在一条**已知
+     并被报告**的路径上，字节不丢、错误响亮，不再有任何静默错位。
+  2. Exec 的内容复核（`sha256File`）按名字打开：**Rename 的旧名复核、
+     Quarantine 的 victim 复核**读后紧跟同一路径上的落位——落位自身已有先验 +
+     后验（见 1），读口伪造的收益只剩让一次操作失败得更晚；**Copy 的落点同
+     内容判定**没有后续 move，伪造相等只会让该次 Copy 静默跳过
+     （`OSkippedIdentical`），旧字节仍在 trash，doctor 对账可见。仍不换
+     `openBoundTo`：那只是把"读到谁"绑住，动作侧的保证已在 1 里给足。
   3. `openBoundTo` 只比对**路径**，对库内 hardlink 判是。所以它关掉的是竞态
      那一半，别名那一半（同一对象两个名字）要靠 `FileId`，thumb 尚未用它。
   4. `handleIsAt` 的路径规范化是手写的（去 `\\?\` 前缀、按分隔符切、折

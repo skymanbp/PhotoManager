@@ -693,7 +693,7 @@ resolveEvent d poe = do
     Just _ -> Right name
 
 -- root 不再单独传：它恒等于 @cfgMainPath cfg@，两个参数表达同一件事时，
--- 迟早会有一处传错。计划的执行期复验钩子也要 Config（'Pm.Cli.preExecFor'）。
+-- 迟早会有一处传错。计划的执行期屏障也要 Config（'Pm.Cli.runBarrier'）。
 buildPlan :: Config -> GoOpts -> RootInfo -> String -> [FilePath] -> Catalog -> IO (Int, Maybe T.Text)
 buildPlan cfg go info ev picked cat = do
   let root = cfgMainPath cfg

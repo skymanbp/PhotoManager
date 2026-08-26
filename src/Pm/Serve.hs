@@ -488,7 +488,7 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
   -- init` 完全相同（共用 'backupInitRun'，本端点只负责渲染结果）。
   -- P5-C：唯一会**动照片字节**的端点。它不新增任何执行能力——装载、按 UUID
   -- 绑 root、--only 组闭包全部走 CLI 的同一个 'prepareApply'，执行期复验走同一
-  -- 张 'preExecFor' 表，执行与 catalog 回写走同一个 'executePlanNowWith'。API
+  -- 个 'Pm.Cli.runBarrier'（由内核在锁内跑），执行与 catalog 回写走同一个 'executePlanNowWith'。API
   -- 与 CLI 对「这个计划该怎么执行」只有一个答案。
   --
   -- 逐项结果与提示**走 JSON 响应体**，不走 stdout：`pm ui` 只读一行 announce

@@ -25,7 +25,7 @@ import Pm.Catalog (saveCatalog)
 import Pm.Catalog (loadCatalog)
 import Pm.Cli (GoOpts (..), recheckCleanPlan, savePlanAndMaybeRun, writeBackCatalog)
 import Pm.Commands (InitOpts (..), ResolveOpts (..), RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runClean, runImport, runInit, runResolve, runTrash)
-import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootInfo, readRootState, requireRole, requireWritable, withConfigLock, writeRootInfo)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootInfo, readRootState, requireRole, requireWritable, withConfigLock, writeRootInfo, writeSideCache, SideCacheWrite (..))
 import Pm.Lock (withRootLock)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec
@@ -70,6 +70,7 @@ guardTests =
     , testCase "三十轮 F2 doctor --repair：读→判→修整段在 I10 锁内（锁被占 → 只诊断，tmp 不删）" caseDoctorRepairTakesLock
     , testCase "三十轮 F2 catalog 回写：读→并→写是加锁 RMW（锁被占 → 明说放弃，不静默覆盖）" caseCatalogWriteBackTakesLock
     , testCase "三十轮 F3 init：配置的查在→读旧→写回进 withConfigLock（锁被占 → 不写入）" caseInitTakesConfigLock
+    , testCase "三十一轮 F1 侧缓存成对写在 I10 锁内：锁被占 → 两个文件都不写" caseSideCacheTakesLock
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -417,10 +418,8 @@ caseMainIsBackupWitness = withSystemTempDirectory "pm-guard" $ \tmp -> do
   let qplan =
         Plan pid "clean-staging" mainP (Just "bk") now
           [PlanItem 0 (OpQuarantine ("To-Be-Sync'd" </> "x.jpg") "s" "clean-staging:test") StPending Nothing]
-  plan' <- recheckCleanPlan cfg qplan
-  case map piStatus (plItems plan') of
-    [StNeedsDecision _] -> pure ()
-    other -> assertFailure ("expected demotion, got " <> show other)
+  dem <- recheckCleanPlan cfg qplan
+  map fst dem @?= [0]
   -- trash empty：clean-staging 记录 HELD，文件仍在
   let rel = "p" </> "x.jpg"
   createDirectoryIfMissing True (trashDir mainP </> "p")
@@ -634,3 +633,23 @@ caseInitTakesConfigLock = withSystemTempDirectory "pm-ilock" $ \tmp -> do
     c2 <- runInit o
     c2 @?= 0
     doesFileExist cfgFp >>= (@?= True)
+
+-- | 三十一轮 F1：catalog.json + meta.json 是成对状态，写在锁外时两个 pm 交错
+-- 写会得到不配对的缓存。锁被占 → Left 且**两个文件一个都不写**（半对更糟）。
+-- backup-cache 与 vault-cache 共用 writeSideCache，一处锁两类同享。
+caseSideCacheTakesLock :: IO ()
+caseSideCacheTakesLock = withSystemTempDirectory "pm-sclock" $ \tmp -> do
+  let root = tmp </> "main"
+  createDirectoryIfMissing True root
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "rs" RoleMain now Nothing)
+  let cat = mkCat []
+      cacheF n = root </> ".pm" </> "backup-cache" </> n
+  r1 <- withRootLock root (writeSideCache root "backup-cache" cat (mkE "m" "s"))
+  r1 @?= Just CacheLockBusy
+  doesFileExist (cacheF "catalog.json") >>= (@?= False)
+  doesFileExist (cacheF "meta.json") >>= (@?= False)
+  r2 <- writeSideCache root "backup-cache" cat (mkE "m" "s")
+  r2 @?= CacheWritten
+  doesFileExist (cacheF "catalog.json") >>= (@?= True)
+  doesFileExist (cacheF "meta.json") >>= (@?= True)

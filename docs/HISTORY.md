@@ -266,5 +266,27 @@
   再扫出四处证据在锁外的路径，一次修完：trash empty 的 manifest 视图、
   resolve 的锁内重载写回、catalog 回写的加锁 RMW、doctor --repair 整段
   进锁（锁被占退回只读诊断）；`pm init --force` 补进 withConfigLock（配置
-  第四条读改写路径）；barrierDrift 冻结计划元数据。六道新闸各自突变转红
-
+  第四条读改写路径）；barrierDrift 冻结计划元数据。六道新闸各自突变转红
+- P6-A ✅ 屏障协议类型封闭（路线图②，三十轮 F4 上游修法）：屏障从「返回新
+  Plan」改「返回降级清单」，新 Plan 由内核构造——升级/改写 Op/改写元数据在
+  类型上写不出来，barrierDrift 删除；两张表收成一个 BarrierKind（total 匹配，
+  漏写编译不过）。内核仅存自卫 = 清单自洽（序号存在且 StPending）。变异 2/2
+- P6-B ✅ 第 31 轮 F1：侧缓存 catalog+meta 成对写进 I10 锁（backup-cache 与
+  vault-cache 一处锁两类，二十轮登记的 vault-cache 争用残余随之关闭）；
+  Pm.Lock 原语下沉进 Pm.Config（依赖方向），三态返回区分锁被占与 junction
+  拒绝（vault-holds 事务在锁内经 computeVault 自持——压成一个 Left 会让全部
+  hold 用例 exit 2，实测显形后改三态）。变异 1/1
+- P6-C ✅ 提交型操作句柄化（路线图③）：moveBoundNoReplace（先验源绑定 +
+  no-replace + 同句柄后验落点 + 不符回迁）与 deleteBoundAt（先验绑定 +
+  FileDispositionInfo，终段不跟随）替换全部 9 处 moveFileNoReplace 与 7 处
+  提交时 removeFile；moveFileNoReplace 删除。RemoveDirectory 清点为零使用。
+  杀手锏用例：目标父层在 CpCopyAfterFlush 换成 junction——旧实现静默把照片
+  落到库外并报 DONE，新实现后验检出、沿句柄回迁、项失败、库外零字节。
+  变异 3/3（后验/落位先验/删除先验各杀恰好一条）。289 tests
+- P6-D ✅ `pm vault ingest`（路线图①，§10.3 第 1/2 项）：非交互批量入库的
+  机械层。一条命令出**两份计划**（主库 相册/ + vault 类目/，计划只属于一个
+  root；主库在前，失败即停）；I5 冲突生成时即 NEEDS-DECISION；I7 来源登记 =
+  主库 journal Intent 自带的库外 srcAbs，不新造记录；`_inbox→_done` 与
+  photos.json 由调用方收尾，pm 打印显式步骤（同 I9 处理 git）。fail-closed
+  校验全部错误一次列完。293 tests（289+4），变异 3/3（类目校验/I5 分流/
+  源缺失各杀恰好一条）

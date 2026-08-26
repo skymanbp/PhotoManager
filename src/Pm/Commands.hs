@@ -41,7 +41,7 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Data.Time (diffUTCTime, getCurrentTime)
 import GHC.Conc (getNumProcessors)
-import System.Directory (doesDirectoryExist, doesFileExist, makeAbsolute, removeFile)
+import System.Directory (doesDirectoryExist, doesFileExist, makeAbsolute)
 import System.FilePath (splitExtension, (</>))
 import Text.Printf (printf)
 
@@ -56,7 +56,6 @@ import Pm.Diff
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Hash (ContentProbe (..), probeConfined, sha256File)
 import Pm.Import
-import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
 import Pm.Scan
@@ -64,7 +63,7 @@ import Pm.Trash
 import Pm.Types
 import Pm.Undo (buildUndoPlan)
 import Pm.Vault (computeVault, gitStepsLines, planCategories)
-import Pm.Win (resolveUnder, volumeFsType)
+import Pm.Win (deleteBoundAt, resolveUnder, volumeFsType)
 
 data InitOpts = InitOpts
   { ioMain :: FilePath
@@ -379,7 +378,10 @@ trashEmptyLocked cfg root yes = do
             else do
               -- pm 全程唯一 unlink 用户数据的位置：仅限上面逐项列出、且已通过
               -- canonical 限域的条目（DESIGN §5 pm trash empty；I2 的最终出口）。
-              forM_ purgeable $ \(_, abs') -> removeFile abs'
+              -- P6-C：unlink 改句柄形态——打开（终段不跟随）→ 先验句柄绑定
+              -- 就是这条已限域的路径 → 句柄上置 delete。resolveUnder 与删除
+              -- 之间的窗口不再存在：换掉中途任何一层都会让先验不符而拒绝。
+              forM_ purgeable $ \(_, abs') -> deleteBoundAt abs'
               putStrLn ("✓ 已清除 " <> show (length purgeable) <> " 项（manifest 记录保留为历史）")
               pure (if heldN == 0 then 0 else 1)
 
@@ -832,7 +834,7 @@ runClean go cfg = do
                   now <- getCurrentTime
                   -- P2.2（复审 cx-3 旁路封堵）：--apply 即时路径同样在
                   -- 确认后、执行前重验三副本，与 pm apply 无差别——两者现在
-                  -- 共用 'preExecFor'，不再各自记得传钩子。
+                  -- 屏障经 'Pm.Cli.runBarrier' 由内核在锁内跑，不再各自记得传钩子。
                   savePlanAndMaybeRun
                     cfg
                     go

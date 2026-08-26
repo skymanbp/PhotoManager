@@ -22,10 +22,9 @@ import Test.Tasty.HUnit
 
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isInfixOf)
-import Data.Maybe (fromJust, isJust)
 
 import Pm.Catalog (saveCatalog)
-import Pm.Cli (preExecFor)
+import Pm.Cli (runBarrier)
 import Pm.Exec (ExecEnv (..), defaultExecEnv, execPlan)
 import Pm.Lock (withRootLock)
 import Pm.Commands (TrashCmd (..), runTrash)
@@ -56,9 +55,8 @@ dedupeTests =
     , testCase "trash empty：dedupe 记录归档层无活副本 → HELD 不删；有 → 清除" caseTrashEmptyBarrier
     , testCase "屏障在 root 锁**内**跑（屏障里再取同一把锁必须失败）" caseBarrierRunsInsideLock
     , testCase "内核 fail-closed：dedupe 计划没装屏障 → 整批拒绝，不是静默跳过" caseKernelRefusesMissingBarrier
-    , testCase "内核不信屏障：把条目升级回 pending → 整批拒绝" caseBarrierMayNotPromote
+    , testCase "内核只收自洽的降级清单：未知序号 / 已 skip 条目 → 整批拒绝" caseBarrierBadDemotion
     , testCase "trash empty 也在 I10 锁内：锁被占 → 退出，一个文件不删、manifest 一行不读" caseTrashEmptyTakesLock
-    , testCase "内核冻结屏障返回值的计划元数据：改写 plId → 整批拒绝" caseBarrierMetaFrozen
     ]
 
 -- ─── 纯核心 ────────────────────────────────────────────────────────────────
@@ -103,21 +101,32 @@ caseReasonPrefix = do
 
 -- ─── 执行期屏障（真实文件） ────────────────────────────────────────────────
 
+-- | 把降级清单折回旧断言用的标签序列：屏障接口改为「返回降级清单、内核应用」
+-- （三十轮 F4 类型封闭）后，各用例的**语义断言不变**，只换读法。
+tagsOf :: Plan -> [(Int, T.Text)] -> [String]
+tagsOf plan dem =
+  [ if piIx it `elem` map fst dem then "DECIDE" else "PENDING"
+  | it <- plItems plan
+  ]
+
 -- | 两份同字节：批准其中一份 → 那一份保持 PENDING；两份都批准 → 两份都降级。
 caseBarrierKeepsOne :: IO ()
 caseBarrierKeepsOne = withDup $ \root sha a b -> do
-  p1 <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha)]
-  map statusTag (plItems p1) @?= ["PENDING"]
-  p2 <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha), (b, sha)]
-  map statusTag (plItems p2) @?= ["DECIDE", "DECIDE"]
+  pl1 <- planOf [(a, sha)]
+  d1 <- recheckDedupeItems root (dupCat sha a b) pl1
+  tagsOf pl1 d1 @?= ["PENDING"]
+  pl2 <- planOf [(a, sha), (b, sha)]
+  d2 <- recheckDedupeItems root (dupCat sha a b) pl2
+  tagsOf pl2 d2 @?= ["DECIDE", "DECIDE"]
 
 -- | catalog 声称第二份还在，盘上已经没有 → 不能放行。这正是"生成计划与执行
 -- 之间的世界会变"：另一份可能已被别的计划移走。
 caseBarrierSurvivorMissing :: IO ()
 caseBarrierSurvivorMissing = withDup $ \root sha a b -> do
   removeFile (root </> b)
-  p <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha)]
-  map statusTag (plItems p) @?= ["DECIDE"]
+  pl <- planOf [(a, sha)]
+  d <- recheckDedupeItems root (dupCat sha a b) pl
+  tagsOf pl d @?= ["DECIDE"]
 
 -- | 幸存者 b 是 hardlink，但它的另一端在库外的第三个名字上——它与受害者 a
 -- 仍是**两个不同的对象**，屏障应当放行。
@@ -131,8 +140,9 @@ caseBarrierSurvivorHardlink = withDup $ \root sha a b -> do
   removeFile (root </> b)
   writeFile outside dupBody
   _ <- readCreateProcess (shell ("mklink /H " <> q (root </> b) <> " " <> q outside)) ""
-  p <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha)]
-  map statusTag (plItems p) @?= ["PENDING"]
+  pl <- planOf [(a, sha)]
+  d <- recheckDedupeItems root (dupCat sha a b) pl
+  tagsOf pl d @?= ["PENDING"]
 
 -- | 受害者与幸存者互为 hardlink：**同一个对象**的两个名字。隔离掉 a 之后
 -- 「归档层还有一份」在物理上是假的——两个名字下只有一份字节。屏障必须拦。
@@ -143,8 +153,9 @@ caseBarrierSameObject :: IO ()
 caseBarrierSameObject = withDup $ \root sha a b -> do
   removeFile (root </> b)
   _ <- readCreateProcess (shell ("mklink /H " <> q (root </> b) <> " " <> q (root </> a))) ""
-  p <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha)]
-  map statusTag (plItems p) @?= ["DECIDE"]
+  pl <- planOf [(a, sha)]
+  d <- recheckDedupeItems root (dupCat sha a b) pl
+  tagsOf pl d @?= ["DECIDE"]
 
 -- | 受害者名单只差大小写：仍要算成同一份，否则 b 会被当成"另一份幸存者"，
 -- 屏障放行，两份一起进 trash。
@@ -152,8 +163,9 @@ caseBarrierCaseFold :: IO ()
 caseBarrierCaseFold = withDup $ \root sha a b -> do
   let bUp = map upper b
       upper c = if c >= 'a' && c <= 'z' then toEnum (fromEnum c - 32) else c
-  p <- recheckDedupeItems root (dupCat sha a b) =<< planOf [(a, sha), (bUp, sha)]
-  map statusTag (plItems p) @?= ["DECIDE", "DECIDE"]
+  pl <- planOf [(a, sha), (bUp, sha)]
+  d <- recheckDedupeItems root (dupCat sha a b) pl
+  tagsOf pl d @?= ["DECIDE", "DECIDE"]
 
 -- | 暂存区不是归档层：To-Be-Sync'd 里的同 sha 副本不能充当"还留着一份"。
 caseStagingIsNotSurvivor :: IO ()
@@ -164,31 +176,30 @@ caseStagingIsNotSurvivor = withDup $ \root sha a _ -> do
   let cat = mkCat [ent a sha, ent stg sha]
   archiveLayerRel stg @?= False
   survivingArchiveCopies cat Set.empty (T.pack sha) @?= [a]
-  p <- recheckDedupeItems root cat =<< planOf [(a, sha)]
-  map statusTag (plItems p) @?= ["DECIDE"]
+  pl <- planOf [(a, sha)]
+  d <- recheckDedupeItems root cat pl
+  tagsOf pl d @?= ["DECIDE"]
 
 -- ─── 接线（两条路径共用一张表 / trash empty 的分流） ──────────────────────
 
--- | 屏障表有**两半**：'Pm.Plan.kindNeedsBarrier' 说哪些种类要屏障（内核据此
--- fail-closed），'Pm.Cli.preExecFor' 说是哪一个。两半必须逐 kind 一致——
--- 一边有一边没有，就是「内核以为有人管，其实没人管」或「内核整批拒绝一个
--- 本来能跑的计划」。这条用例把两半钉在一起，并验 dedupe 那个屏障真的降级。
+-- | 三十轮 F4 类型封闭之后，「要不要屏障」与「是哪个屏障」由同一个
+-- 'BarrierKind' 钉死（'runBarrier' 对构造子 total 匹配，漏写编译不过），
+-- 旧的"两半表一致"测试退役。这里钉的是分类器的**覆盖面**——哪些 kind 进
+-- 屏障、哪些明确不进——以及 dedupe 屏障经 'runBarrier' 真的给出降级清单。
 casePreExecRow :: IO ()
 casePreExecRow = withDup $ \root sha a b -> do
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
   let cfg = Config root Nothing Nothing Nothing Nothing Nothing
-      kinds = ["dedupe", "clean-staging", "sort", "backup", "import", "names", "undo", "vault-push"]
-  -- 两半一致：kindNeedsBarrier k  ⟺  preExecFor 给得出屏障
-  [(k, kindNeedsBarrier k) | k <- kinds]
-    @?= [(k, isJust (preExecFor cfg k)) | k <- kinds]
-  -- 两份都批准 → dedupe 那个屏障生效，全部降级
+  kindBarrier "dedupe" @?= Just BarrierDedupe
+  kindBarrier "clean-staging" @?= Just BarrierClean
+  forM_ ["sort", "backup", "import", "names", "undo", "vault-push", "restore-from-backup"] $ \k ->
+    kindBarrier k @?= Nothing
+  -- 两份都批准 → dedupe 屏障给出全量降级清单
   pd <- planOf [(a, sha), (b, sha)]
-  p1 <- fromJust (preExecFor cfg "dedupe") pd {plRootPath = root}
-  map statusTag (plItems p1) @?= ["DECIDE", "DECIDE"]
-  -- 对照：sort 在表外，两半都说"不需要"
-  isJust (preExecFor cfg "sort") @?= False
+  dem <- runBarrier cfg BarrierDedupe pd {plRootPath = root}
+  map fst dem @?= [0, 1]
 
 -- | @pm trash empty@ 的永久删除前分流：reason 带 dedupe 前缀的记录要走
 -- 「归档层还留着一份活副本吗」这道屏障。归档层没有 → HELD，文件仍在；
@@ -228,11 +239,11 @@ caseBarrierRunsInsideLock = withDup $ \root sha a b -> do
   saveCatalog root (dupCat sha a b)
   plan <- (\p -> p {plRootPath = root}) <$> planOf [(a, sha)]
   seen <- newIORef Nothing
-  let probe p = do
+  let probe _ p = do
         held <- withRootLock root (pure ())
         writeIORef seen (Just held)
         -- 全部降级，免得这条用例真去动盘
-        pure p {plItems = [it {piStatus = StNeedsDecision "test"} | it <- plItems p]}
+        pure [(piIx it, "test") | it <- plItems p]
   _ <- execPlan defaultExecEnv {eeBarrier = Just probe} plan
   m <- readIORef seen
   -- Just Nothing = 屏障被调用了（外层 Just），且锁已被持有（内层 Nothing）
@@ -256,24 +267,25 @@ caseKernelRefusesMissingBarrier = withDup $ \root sha a b -> do
   doesFileExist (root </> a) >>= (@?= True)
   doesFileExist (root </> b) >>= (@?= True)
 
--- | 屏障是命令层传进来的函数，内核对它一贯不信任。把用户已经 skip 的条目
--- **升级**回 pending 等于绕过用户的决定去动盘——整批拒绝，不是只忽略那一项。
-caseBarrierMayNotPromote :: IO ()
-caseBarrierMayNotPromote = withDup $ \root sha a b -> do
+-- | 三十轮 F4 类型封闭后，「升级回 pending / 改写 Op / 改写元数据」在类型上
+-- 写不出来；内核仅存的自卫是降级清单必须**自洽**。两个失洽形态都要拒：
+-- 清单指向不存在的序号；清单指向用户已 skip 的条目（屏障的世界观与计划不符）。
+caseBarrierBadDemotion :: IO ()
+caseBarrierBadDemotion = withDup $ \root sha a b -> do
   now <- getCurrentTime
   writeRootInfo root (RootInfo "r" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
   p0 <- planOf [(a, sha)]
-  let plan =
-        p0
-          { plRootPath = root
-          , plItems = [it {piStatus = StSkippedByUser} | it <- plItems p0]
-          }
-      evil p = pure p {plItems = [it {piStatus = StPending} | it <- plItems p]}
-  r <- execPlan defaultExecEnv {eeBarrier = Just evil} plan
-  case r of
-    Right _ -> assertFailure "内核接受了一个把条目升级回 pending 的屏障"
-    Left m -> assertBool ("应因屏障改写计划被拒，实为: " <> m) ("升级回 pending" `isInfixOf` m)
+  let plan = p0 {plRootPath = root}
+  r1 <- execPlan defaultExecEnv {eeBarrier = Just (\_ _ -> pure [(99, "?")])} plan
+  case r1 of
+    Right _ -> assertFailure "内核接受了指向不存在序号的降级清单"
+    Left m -> assertBool ("应因未知序号被拒，实为: " <> m) ("不存在的条目序号" `isInfixOf` m)
+  let skipped = plan {plItems = [it {piStatus = StSkippedByUser} | it <- plItems plan]}
+  r2 <- execPlan defaultExecEnv {eeBarrier = Just (\_ _ -> pure [(0, "?")])} skipped
+  case r2 of
+    Right _ -> assertFailure "内核接受了降级已 skip 条目的清单"
+    Left m -> assertBool ("应因非 PENDING 被拒，实为: " <> m) ("不是 PENDING" `isInfixOf` m)
   doesFileExist (root </> a) >>= (@?= True)
 
 -- | 同根第二处：@pm trash empty@ 是 pm 全程唯一 unlink 用户数据的路径，
@@ -297,22 +309,6 @@ caseTrashEmptyTakesLock = withDup $ \root sha a b -> do
   mc @?= Just 2
   assertBool "锁被占时不得读 manifest（坏行警告不应出现）" (not ("manifest 损坏行" `isInfixOf` out))
   doesFileExist (trashDir root </> rel) >>= (@?= True)
-
--- | 三十轮 F4：屏障是命令层传进来的函数，内核冻结它能改的范围——不止状态
--- 只许降级（caseBarrierMayNotPromote），**计划元数据也不许动**：plId 参与
--- opId/tmp/trash 路径推导，被改写会让 journal 的 opId 与旧计划碰撞。
-caseBarrierMetaFrozen :: IO ()
-caseBarrierMetaFrozen = withDup $ \root sha a b -> do
-  now <- getCurrentTime
-  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
-  saveCatalog root (dupCat sha a b)
-  plan <- (\p -> p {plRootPath = root}) <$> planOf [(a, sha)]
-  let evil p = pure p {plId = "20260101-000000-ffffff"}
-  r <- execPlan defaultExecEnv {eeBarrier = Just evil} plan
-  case r of
-    Right _ -> assertFailure "内核接受了改写 plId 的屏障"
-    Left m -> assertBool ("应因元数据改写被拒，实为: " <> m) ("元数据" `isInfixOf` m)
-  doesFileExist (root </> a) >>= (@?= True)
 
 -- ─── fixtures ──────────────────────────────────────────────────────────────
 
@@ -354,13 +350,6 @@ planOf vs =
           | (ix, (v, sha)) <- zip [0 ..] vs
           ]
       }
-
-statusTag :: PlanItem -> String
-statusTag it = case piStatus it of
-  StPending -> "PENDING"
-  StSkippedByUser -> "SKIPPED"
-  StNeedsDecision _ -> "DECIDE"
-
 
 -- | 引号包路径：路径里有空格时 mklink 会把参数拆开。
 q :: FilePath -> String

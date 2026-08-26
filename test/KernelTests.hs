@@ -28,7 +28,7 @@ import Pm.Plan
 import Pm.Trash
 import Pm.Types
 import Pm.Undo (buildUndoPlan)
-import Pm.Win (moveFileNoReplace)
+import Pm.Win (moveBoundNoReplace)
 import System.IO.Temp (withSystemTempDirectory)
 
 import TestUtil
@@ -118,22 +118,22 @@ catalogTests =
 moveTests :: TestTree
 moveTests =
   testGroup
-    "Pm.Win.moveFileNoReplace (I5 cornerstone)"
+    "Pm.Win.moveBoundNoReplace (I5 cornerstone, P6-C 句柄形态)"
     [ testCase "refuses when destination exists" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           writeFile (dir </> "a.txt") "AAA"
           writeFile (dir </> "b.txt") "BBB"
-          r <- try (moveFileNoReplace (dir </> "a.txt") (dir </> "b.txt")) :: IO (Either IOException ())
+          r <- try (moveBoundNoReplace (dir </> "a.txt") (dir </> "b.txt")) :: IO (Either IOException ())
           case r of
             Left _ -> pure ()
-            Right () -> assertFailure "moveFileNoReplace overwrote an existing destination"
+            Right () -> assertFailure "moveBoundNoReplace overwrote an existing destination"
           ca <- readFile (dir </> "a.txt")
           cb <- readFile (dir </> "b.txt")
           (ca, cb) @?= ("AAA", "BBB")
     , testCase "moves when destination absent" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           writeFile (dir </> "a.txt") "AAA"
-          moveFileNoReplace (dir </> "a.txt") (dir </> "c.txt")
+          moveBoundNoReplace (dir </> "a.txt") (dir </> "c.txt")
           ea <- doesFileExist (dir </> "a.txt")
           cc <- readFile (dir </> "c.txt")
           (ea, cc) @?= (False, "AAA")

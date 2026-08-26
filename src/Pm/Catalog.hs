@@ -14,14 +14,14 @@ import Control.Monad (foldM, when)
 import Data.Aeson (eitherDecodeStrict', encode)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
 import System.IO (hClose)
 
 import Pm.Config (pmDir, readPmState, requirePmTrusted, resolvePmPath)
 import Pm.Op (userRelOk)
 import Pm.Types
-import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary)
+import Pm.Win (deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary)
 
 catalogPath :: FilePath -> FilePath
 catalogPath root = pmDir root </> "catalog.json"
@@ -116,14 +116,14 @@ saveCatalog root cat = do
   removeIfExists g2
   renameIfExists g1 g2
   renameIfExists base g1
-  moveFileNoReplace tmp base
+  moveBoundNoReplace tmp base
 
 removeIfExists :: FilePath -> IO ()
 removeIfExists fp = do
   exists <- doesFileExist fp
-  when exists (removeFile fp)
+  when exists (deleteBoundAt fp)
 
 renameIfExists :: FilePath -> FilePath -> IO ()
 renameIfExists src dst = do
   exists <- doesFileExist src
-  when exists (moveFileNoReplace src dst)
+  when exists (moveBoundNoReplace src dst)

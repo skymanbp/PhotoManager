@@ -27,7 +27,7 @@ import Test.Tasty.HUnit
 
 import Pm.Catalog (catalogPath, loadCatalog, saveCatalog)
 import Pm.Commands (TrashCmd (..), initPreflight, runTrash)
-import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootState, requirePmTrusted, writeRootInfo, writeSideCache)
+import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), createRootInfo, pmDir, readRootState, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
 import Pm.Exec
 import Pm.Hash (sha256File)
@@ -646,7 +646,9 @@ caseSideCacheJunction = withSystemTempDirectory "pm-guard" $ \dir -> do
       (const (assertFailure "枚举式可信闸应当抓到 junction 化的 vault-cache"))
   -- writeSideCache 拒绝，且**一个字节都不写**
   w <- writeSideCache root "vault-cache" (mkCat [mkE ("相册" </> "a.jpg") "aa"]) (mkCat [])
-  either (\m -> assertBool m ("vault-cache" `isInfixOf` m)) (const (assertFailure "侧缓存写应被拒绝")) w
+  case w of
+    CacheRefused m -> assertBool m ("vault-cache" `isInfixOf` m)
+    other -> assertFailure ("侧缓存写应被拒绝，实为 " <> show other)
   readFile (outside </> "catalog.json") >>= (@?= "OUTSIDE-CATALOG")
   readFile (outside </> "meta.json") >>= (@?= "OUTSIDE-META")
   removeDirectoryLink (pmDir root </> "vault-cache")

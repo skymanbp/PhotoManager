@@ -26,7 +26,8 @@
 module Pm.Win
   ( setupConsole
   , flushHandleToDisk
-  , moveFileNoReplace
+  , moveBoundNoReplace
+  , deleteBoundAt
   , pathUnder
   , pathAtOrUnder
   , isNameSurrogate
@@ -51,7 +52,7 @@ module Pm.Win
   ) where
 
 import Control.Exception (SomeException, catch, finally, mask, onException, try)
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.Bits (testBit, (.&.))
 import Data.Char (toLower)
 import Data.Text (Text)
@@ -60,7 +61,7 @@ import Data.Word (Word32, Word64, Word8)
 import Foreign.Marshal.Alloc (alloca, allocaBytes)
 import Foreign.Ptr (Ptr, intPtrToPtr, nullPtr)
 import Foreign.Storable (peek, peekByteOff)
-import System.Directory (canonicalizePath, doesPathExist, removeFile)
+import System.Directory (canonicalizePath, doesPathExist)
 import System.FilePath (splitDirectories, (</>))
 import System.IO
 import qualified System.Win32.Console as Win32Console
@@ -105,11 +106,6 @@ flushHandleToDisk h = do
   hFlush h
   withHandleToHANDLE h Win32File.flushFileBuffers
 
--- | Rename with flags = 0: same-volume move that FAILS if the destination
--- exists (ERROR_ALREADY_EXISTS surfaces as an IOException). This is the only
--- rename primitive Exec-side code may use (invariant I5).
-moveFileNoReplace :: FilePath -> FilePath -> IO ()
-moveFileNoReplace src dst = Win32File.moveFileEx src (Just dst) 0
 
 -- | @pathUnder base p@ = @p@ **解析后**是否严格落在 @base@ 之内。
 --
@@ -293,14 +289,17 @@ handleFileId h = do
 -- 取不到（挂载点没有 DOS 路径、句柄类型不支持…）→ Nothing，调用方一律
 -- fail-closed。
 handleFinalPath :: Handle -> IO (Maybe FilePath)
-handleFinalPath h =
-  withHandleToHANDLE h $ \raw ->
-    allocaBytes (finalPathCch * 2) $ \buf ->
-      alloca $ \errP -> do
-        n <- c_pmFinalPathByHandle raw buf (fromIntegral finalPathCch) errP
-        if n == 0 || n >= fromIntegral finalPathCch
-          then pure Nothing
-          else Just <$> peekTString buf
+handleFinalPath h = withHandleToHANDLE h rawFinalPath
+
+-- | 裸 HANDLE 版（提交型句柄操作直接持 CreateFileW 的句柄，不经 GHC Handle）。
+rawFinalPath :: Ptr () -> IO (Maybe FilePath)
+rawFinalPath raw =
+  allocaBytes (finalPathCch * 2) $ \buf ->
+    alloca $ \errP -> do
+      n <- c_pmFinalPathByHandle raw buf (fromIntegral finalPathCch) errP
+      if n == 0 || n >= fromIntegral finalPathCch
+        then pure Nothing
+        else Just <$> peekTString buf
 
 -- | 缓冲区上限。Win32 长路径上限 32767 wchar；pm 自己的路径预检
 -- （'Pm.Scan' 的 maxPathLen）远低于它，取这个上限只是为了"够不到就算失败"
@@ -318,17 +317,20 @@ handleIsAt h expected = do
   pure $ case m of
     Nothing -> False
     Just real -> normPath real == normPath expected
+
+-- | 'handleIsAt' 与 'rawBoundTo' 共用的比较规范化。
+normPath :: FilePath -> [String]
+normPath p =
+  [ map toLower c
+  | c <- splitDirectories (dropExtended p)
+  , not (null c)
+  , c /= "\\"
+  , c /= "/"
+  ]
  where
-  normPath p =
-    [ map toLower c
-    | c <- splitDirectories (dropExtended p)
-    , not (null c)
-    , c /= "\\"
-    , c /= "/"
-    ]
-  dropExtended p = case p of
+  dropExtended q = case q of
     ('\\' : '\\' : '?' : '\\' : rest) -> rest
-    _ -> p
+    _ -> q
 
 -- | @.pm@ 内状态文件的受控打开：打开后**立刻**查 link count，\>1 即关闭并
 -- 拒绝。@AppendMode@ 不截断，所以"先打开再判"是安全的——判定失败时尚未写入
@@ -497,7 +499,11 @@ openFreshBinary :: FilePath -> IO Handle
 openFreshBinary fp = do
   lnk <- isNameSurrogate fp
   ex <- doesPathExist fp
-  when (lnk || ex) (removeFile fp)
+  -- P6-C：残留清除改句柄形态（'deleteBoundAt'——打开终段不跟随、先验绑定、
+  -- 句柄上置 delete disposition）。行为差异一处：残留是**空目录**时旧
+  -- removeFile 抛异常、现在会被清除——pm 自建 tmp 名被空目录占住本就该让路；
+  -- 非空目录仍失败（ERROR_DIR_NOT_EMPTY），fail-closed 不变。
+  when (lnk || ex) (deleteBoundAt fp)
   openExclusiveBinary fp
 
 -- ─── Backup-drive discovery primitives (§9) ─────────────────────────────────
@@ -552,3 +558,92 @@ volumeFsType c =
           then pure Nothing
           else Just . T.pack <$> peekTString fsName
   fsBufChars = 64 :: Int
+
+-- ─── 提交型句柄操作（P6-C，路线图③） ───────────────────────────────────────
+
+foreign import ccall unsafe "pm_open_for_dispose"
+  c_pmOpenForDispose :: LPTSTR -> Ptr (Ptr ()) -> Ptr Word32 -> IO Word32
+
+foreign import ccall unsafe "pm_rename_by_handle"
+  c_pmRenameByHandle :: Ptr () -> LPTSTR -> Ptr Word32 -> IO Word32
+
+foreign import ccall unsafe "pm_delete_by_handle"
+  c_pmDeleteByHandle :: Ptr () -> Ptr Word32 -> IO Word32
+
+-- | 提交型打开：DELETE 权限、全共享、目录也行（BACKUP_SEMANTICS）、终段
+-- **不跟随**（OPEN_REPARSE_POINT——终段是链接时拿到的是链接本体）。
+withDisposeHandle :: FilePath -> (Ptr () -> IO a) -> IO a
+withDisposeHandle fp k =
+  withTString fp $ \pw ->
+    alloca $ \hOut ->
+      alloca $ \errP -> do
+        ok <- c_pmOpenForDispose pw hOut errP
+        if ok == 0
+          then do
+            e <- peek errP
+            ioError (userError (fp <> ": 打开失败（DELETE 权限），Win32 错误码 " <> show e))
+          else do
+            h <- peek hOut
+            k h `finally` Win32File.closeHandle h
+
+-- | 裸 HANDLE 版的 'handleIsAt'（同一比较规则 'normPath'）。
+rawBoundTo :: Ptr () -> FilePath -> IO Bool
+rawBoundTo raw expected = do
+  m <- rawFinalPath raw
+  pure (maybe False (\real -> normPath real == normPath expected) m)
+
+rawRename :: Ptr () -> FilePath -> IO (Maybe Word32)
+rawRename h dst =
+  withTString dst $ \pw ->
+    alloca $ \errP -> do
+      ok <- c_pmRenameByHandle h pw errP
+      if ok == 0 then Just <$> peek errP else pure Nothing
+
+-- | 句柄形态的 no-replace 落位（路线图③；此前是 @MoveFileExW@ 名字口——
+-- DESIGN §14 登记的最后一类窗口）。协议：
+--
+--   1. 打开源并**先验**句柄绑定的就是这条路径（打开前被换成别名 → 拒绝）；
+--   2. @SetFileInformationByHandle(FileRenameInfo)@，no-replace（I5：目标已
+--      存在 → 失败，绝不覆盖）；
+--   3. **后验**：问同一个句柄"对象现在在哪条路径"。目标的某一层在窗口里被换
+--      成 junction 时对象会落到别处——后验当场发现，沿同一句柄改回原名，
+--      再响亮报错。字节不丢、位置已知。
+--
+-- 目标侧做不到先验（文档明确 SetFileInformationByHandle 的 RootDirectory
+-- 必须为 NULL），后验 + 回迁是句柄能给到的最强保证。
+moveBoundNoReplace :: FilePath -> FilePath -> IO ()
+moveBoundNoReplace src dst = withDisposeHandle src $ \h -> do
+  okSrc <- rawBoundTo h src
+  unless okSrc $
+    ioError (userError (src <> ": 句柄绑定的不是这条路径（打开前已被换成别名/链接），拒绝落位"))
+  r <- rawRename h dst
+  case r of
+    Just e ->
+      ioError (userError (src <> " -> " <> dst <> ": rename 失败（Win32 错误码 " <> show e <> "，183=目标已存在）"))
+    Nothing -> do
+      okDst <- rawBoundTo h dst
+      unless okDst $ do
+        actual <- rawFinalPath h
+        rb <- rawRename h src
+        ioError . userError $
+          dst
+            <> ": 落位后对象不在期望路径（目标某层在窗口内被换成链接？）——实际落点 "
+            <> maybe "未知" id actual
+            <> case rb of
+              Nothing -> "；已沿同一句柄改回原名"
+              Just e -> "；改回原名也失败（Win32 错误码 " <> show e <> "），对象仍在实际落点"
+
+-- | 句柄形态的 unlink（此前是 @removeFile@ 名字口）。打开（终段不跟随）→
+-- 先验绑定 → @FileDispositionInfo@。终段是 symlink 时删的是链接本体，目标
+-- 不受影响；目录为空时同样可删（pm 自建 tmp 名被空目录占住的情形）。
+deleteBoundAt :: FilePath -> IO ()
+deleteBoundAt fp = withDisposeHandle fp $ \h -> do
+  ok <- rawBoundTo h fp
+  unless ok $
+    ioError (userError (fp <> ": 句柄绑定的不是这条路径（别名/链接），拒绝删除"))
+  r <- alloca $ \errP -> do
+    okD <- c_pmDeleteByHandle h errP
+    if okD == 0 then Just <$> peek errP else pure Nothing
+  case r of
+    Just e -> ioError (userError (fp <> ": 句柄删除失败，Win32 错误码 " <> show e))
+    Nothing -> pure ()

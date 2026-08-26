@@ -12,7 +12,7 @@ module Pm.Cli
   , executePlanNowWith
   , savePlanAndMaybeRun
   , bindExecRoot
-  , preExecFor
+  , runBarrier
   , writeBackCatalog
   , recheckCleanPlan
   , recheckCleanItems
@@ -43,7 +43,7 @@ import Pm.Backup
 import Pm.Catalog (loadCatalog, saveCatalog)
 import Pm.Clean (threeCopiesStillExist)
 import Pm.Hash (ContentProbe (..), probeConfined)
-import Pm.Config (Config (..), readRootInfo, requireMain, requireWritable)
+import Pm.Config (Config (..), SideCacheWrite (..), readRootInfo, requireMain, requireWritable)
 import Pm.Dedupe (recheckDedupeItems)
 import Pm.Diff (BackupDiff (..))
 import Pm.Exec (ExecEnv (..), ItemOutcome (..), defaultExecEnv, execPlan, outcomeLabel, updateCatalog)
@@ -114,11 +114,11 @@ executePlanNow' cfg sink plan = do
           { eeDoneSync = if plKind plan == "backup" then Barrier else Buffered
           , eeExpectRootId = plRootId plan
           , -- 二十九轮 critical：屏障装进 ExecEnv，由内核在 withRootLock **内**
-            -- 跑。此前三条执行路径各自在锁外调一次 preExecFor——判据与动盘不在
-            -- 同一个跨进程事务里，两个 pm 进程可以双双放行同一内容的不同副本。
-            -- 现在这是唯一一处装配点：调用方连"跳过屏障"这个选项都没有，而
-            -- 'Pm.Plan.kindNeedsBarrier' 说要却没装上时内核整批拒绝。
-            eeBarrier = preExecFor cfg (plKind plan)
+            -- 跑；这是唯一一处装配点，调用方连"跳过屏障"这个选项都没有。
+            -- 无条件装上（不再按 kind 挑）：内核先查 'Pm.Plan.kindBarrier'，
+            -- 不需要屏障的计划根本不会调它；需要而没装（库层调用者用
+            -- defaultExecEnv）仍整批拒绝。
+            eeBarrier = Just (runBarrier cfg)
           }
   r <- execPlan env plan
   case r of
@@ -136,22 +136,15 @@ executePlanNow' cfg sink plan = do
   isBad (OFailed _) = True
   isBad _ = False
 
--- | 计划种类 → **执行期复验钩子**的唯一一张表。
+-- | 'Pm.Plan.BarrierKind' → 屏障实现。对构造子做 **total** 模式匹配：内核那半
+-- （「要不要屏障」）与这半（「是哪个」）由同一个类型钉死，新加一种屏障漏写
+-- 这里直接编译不过（三十轮 F4 的类型封闭；此前是两张表靠一条测试钉一致）。
 --
--- 此前「clean 计划要重验三副本」这件事写在两处：'Pm.Commands.runApply' 里按
--- @plKind@ 分支一次，@runClean@ 把 'recheckCleanPlan' 传给
--- 'savePlanAndMaybeRunWith' 又一次。P2.2 封堵的正是其中一条路径漏掉复验的
--- 旁路——两处写同一件事，迟早会有一处忘记跟上。现在加一种需要执行期屏障的
--- 计划 = 在这张表里加一行，两条路径同时生效。
---
--- 与 'Pm.Plan.kindNeedsBarrier' 是同一张表的两半：那边说**要不要**（内核据此
--- fail-closed），这边说**是哪个**。两边必须逐 kind 一致，用例 caseBarrierTable
--- 钉住这一点。
-preExecFor :: Config -> T.Text -> Maybe (Plan -> IO Plan)
-preExecFor cfg kind
-  | kind == "clean-staging" = Just (recheckCleanPlan cfg)
-  | kind == "dedupe" = Just (recheckDedupePlan cfg)
-  | otherwise = Nothing
+-- 返回**降级清单** @[(piIx, 原因)]@，新计划由内核构造（'Pm.Exec.applyDemotions'）
+-- ——屏障在类型上就写不出「升级/改写 Op/改写元数据」。
+runBarrier :: Config -> BarrierKind -> Plan -> IO [(Int, T.Text)]
+runBarrier cfg BarrierClean = recheckCleanPlan cfg
+runBarrier cfg BarrierDedupe = recheckDedupePlan cfg
 
 -- | 存盘 → 展示 → 确认 → 执行。执行期屏障由 'executePlanNowWith' 装进
 -- ExecEnv、由内核在锁内跑，这里既不必也不能选择跳过它。
@@ -240,7 +233,7 @@ bindExecRoot cfg plan rid = do
 -- 见证 + 真实重 hash），不过的降级 NEEDS-DECISION——计划生成与执行之间的
 -- 世界会变。P2.2 起没有豁免路径：`pm apply` 与 `pm clean staging --apply`
 -- 即时执行都走这里（旁路封堵）。
-recheckCleanPlan :: Config -> Plan -> IO Plan
+recheckCleanPlan :: Config -> Plan -> IO [(Int, T.Text)]
 recheckCleanPlan cfg plan = do
   let mroot = cfgMainPath cfg
   -- P3b-7 复审 B1：主库见证必须来自 RoleMain root——配置主路径若与备份 root
@@ -258,10 +251,10 @@ recheckCleanPlan cfg plan = do
     (_, Nothing, _) -> demoteAllPending "复验三副本" plan "主库无索引"
     (_, _, Left msg) -> demoteAllPending "复验三副本" plan ("备份盘不在线: " <> msg)
 
--- | 可测核心：给定已解析的两侧 root+catalog，逐项重验并降级。
-recheckCleanItems :: FilePath -> Catalog -> FilePath -> Catalog -> Plan -> IO Plan
+-- | 可测核心：给定已解析的两侧 root+catalog，逐项重验，返回**降级清单**。
+recheckCleanItems :: FilePath -> Catalog -> FilePath -> Catalog -> Plan -> IO [(Int, T.Text)]
 recheckCleanItems mroot mainCat broot bakCat plan = do
-  items' <- forM (plItems plan) $ \it -> case (piStatus it, piOp it) of
+  dems <- forM (plItems plan) $ \it -> case (piStatus it, piOp it) of
     (StPending, OpQuarantine v sha _) -> do
       -- 将被移走的就是 victim 本身：见证与它同身份不算另一份副本
       -- （codex 二十八轮 #2）。读不到它的身份就没法做这个判断 → 判不过
@@ -271,28 +264,24 @@ recheckCleanItems mroot mainCat broot bakCat plan = do
         CpSha _ vid -> threeCopiesStillExist mroot mainCat broot bakCat [vid] sha
         _ -> pure False
       if ok
-        then pure it
+        then pure []
         else do
           putStrLn ("  ⚠ 执行期三副本复验不过，该项暂停: " <> v)
-          pure it {piStatus = StNeedsDecision "执行期三副本复验不过 → pm scan / pm backup 后重新生成清理计划"}
-    _ -> pure it
-  pure plan {plItems = items'}
+          pure [(piIx it, "执行期三副本复验不过 → pm scan / pm backup 后重新生成清理计划")]
+    _ -> pure []
+  pure (concat dems)
 
--- | 复验**条件本身**不可得（主库身份不符、无索引、备份盘不在线…）时，把全部
--- 待执行项降级 NEEDS-DECISION。fail-closed：拿不到证据就不执行，而不是按生成
--- 时的判断继续。clean 与 dedupe 共用——两者对"证据取不到"的处置必须一致。
-demoteAllPending :: String -> Plan -> String -> IO Plan
+-- | 复验**条件本身**不可得（主库身份不符、无索引、备份盘不在线…）时，降级
+-- 全部待执行项。fail-closed：拿不到证据就不执行，而不是按生成时的判断继续。
+-- clean 与 dedupe 共用——两者对"证据取不到"的处置必须一致。
+demoteAllPending :: String -> Plan -> String -> IO [(Int, T.Text)]
 demoteAllPending what plan why = do
   putStrLn ("⚠ 无法" <> what <> "（" <> why <> "），全部待执行项暂停")
   pure
-    plan
-      { plItems =
-          [ if piStatus it == StPending
-              then it {piStatus = StNeedsDecision (T.pack ("执行期无法" <> what <> ": " <> why))}
-              else it
-          | it <- plItems plan
-          ]
-      }
+    [ (piIx it, T.pack ("执行期无法" <> what <> ": " <> why))
+    | it <- plItems plan
+    , piStatus it == StPending
+    ]
 
 -- | @dedupe@ 计划的执行期屏障（'Pm.Dedupe.recheckDedupeItems'）：批准隔离的
 -- 条目不得把某个 sha 在归档层的**最后一份活副本**也隔离掉。
@@ -300,7 +289,7 @@ demoteAllPending what plan why = do
 -- 主库身份先验、**再**读 catalog（P3b-8 复审 B1 的次序纪律：任何主库侧读取
 -- 都在身份闸之后）。与 clean 不同，这里不需要备份盘——dedupe 的保证是"归档层
 -- 还留着一份"，与第三副本无关，所以一块没插的盘不该拖住它。
-recheckDedupePlan :: Config -> Plan -> IO Plan
+recheckDedupePlan :: Config -> Plan -> IO [(Int, T.Text)]
 recheckDedupePlan cfg plan = do
   emain <- requireMain cfg
   case emain of
@@ -437,4 +426,7 @@ refreshBackupCache cfg broot bakCat d = do
       , bmUpdate = length (bdUpdate d)
       , bmExtra = length (bdExtra d)
       }
-  either (\e -> putStrLn ("\9888 备份缓存未写入: " <> e)) pure wc
+  case wc of
+    CacheWritten -> pure ()
+    CacheLockBusy -> putStrLn "⚠ 备份缓存本轮未刷新（另一个 pm 正持有主库锁）——下一次命令会重建"
+    CacheRefused e -> putStrLn ("⚠ 备份缓存未写入: " <> e)

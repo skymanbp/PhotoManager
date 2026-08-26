@@ -41,7 +41,9 @@ module Pm.Config
   , withPmStateAppend
   , resolvePmPath
   , readSideCache
+  , SideCacheWrite (..)
   , writeSideCache
+  , withRootLock
   , writePmState
   ) where
 
@@ -61,7 +63,6 @@ import System.Directory
   , doesFileExist
   , getXdgDirectory
   , listDirectory
-  , removeFile
   )
 import System.Environment (lookupEnv)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hTryLock)
@@ -75,8 +76,9 @@ import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Types
 import Pm.Win
   ( NameKind (..)
+  , deleteBoundAt
   , flushHandleToDisk
-  , moveFileNoReplace
+  , moveBoundNoReplace
   , openFreshBinary
   , openStateAppend
   , openStateLock
@@ -194,8 +196,8 @@ writeConfig c = do
     BS.hPut h (TE.encodeUtf8 (renderConfig c))
     flushHandleToDisk h
   old <- doesFileExist fp
-  when old (removeFile fp)
-  moveFileNoReplace tmp fp
+  when old (deleteBoundAt fp)
+  moveBoundNoReplace tmp fp
   pure fp
 
 -- | 配置的**读改写事务锁**（二十四轮 minor）。配置是全机器一份的，而编辑层有
@@ -487,12 +489,12 @@ createRootInfo' root info = do
   bracket (openFreshBinary tmp) hClose $ \h -> do
     BSL.hPut h (Aeson.encode info)
     flushHandleToDisk h
-  r <- try (moveFileNoReplace tmp final) :: IO (Either IOException ())
+  r <- try (moveBoundNoReplace tmp final) :: IO (Either IOException ())
   case r of
     Right () -> pure (Right ())
     Left e -> do
       -- §6.1 脚注：pm 自建、从未落位的 tmp 是唯一允许 unlink 的东西
-      removeFile tmp
+      deleteBoundAt tmp
       pure (Left (final <> " 已存在或不可创建（不覆盖既有身份）: " <> show e))
 
 -- | 覆盖写标识——仅供测试 fixture 与显式重写场景；生产建 root 一律走
@@ -515,18 +517,68 @@ writeRootInfo root info = do
 -- **库外**的 catalog.json\/meta.json（实测库外文件变成了 pm 写的内容）。
 -- 现在每个文件的完整路径在建目录前后各过一次 'resolveUnder'，与 Exec 的
 -- tmp 落位同款。
-writeSideCache :: Aeson.ToJSON meta => FilePath -> FilePath -> Catalog -> meta -> IO (Either String ())
+-- | Run the action holding the root's exclusive mutation lock; Nothing if
+-- another pm instance holds it. （原 Pm.Lock，三十一轮下沉至此——见该模块头。）
+--
+-- 两层内核级互斥，都随进程死亡自动释放：GHC 运行时对可写打开的跨进程文件锁
+-- （Windows LockFileEx；第二个可写打开直接 resource busy），以及显式
+-- 'hTryLock'。P3b-14：锁文件先过完整路径 'resolveUnder'；P3b-15：改用
+-- 'openStateLock' 在句柄上查 link count（.pm/lock 被 hardlink 到库外文件时
+-- 会锁住共享对象，跨库互斥/对外部程序 DoS）。
+withRootLock :: FilePath -> IO a -> IO (Maybe a)
+withRootLock root act = do
+  createDirectoryIfMissing True (pmDir root)
+  ml <- resolveUnder root (".pm" </> "lock")
+  lockFp <- case ml of
+    Nothing -> ioError (userError (untrustedMsg (pmDir root </> "lock")))
+    Just fp -> pure fp
+  -- ReadWriteMode inside: creates the file if missing, never truncates.
+  r <- try (openStateLock lockFp)
+  case r of
+    Left (e :: IOException)
+      | isAlreadyInUseError e -> pure Nothing
+      | otherwise -> throwIO e
+    Right h ->
+      ( do
+          ok <- hTryLock h ExclusiveLock
+          if ok then Just <$> act else pure Nothing
+      )
+        `finally` hClose h
+
+-- | 侧缓存成对写的三种结局。锁被占与不可信**必须**是不同构造子：前者是
+-- 良性并发（含 vault-holds 事务在锁内经 computeVault 走到这里的自持情形），
+-- 降级为"本轮不刷新"即可——缓存可由下一次命令重建；后者是 junction 劫持，
+-- 继续写等于把 pm 的写交给库外（P3b-13），必须硬停。压成一个 Left 会让调用
+-- 方要么把劫持当并发放过、要么把并发当劫持硬停（三十一轮实测：后者让全部
+-- hold 用例 exit 2）。
+data SideCacheWrite
+  = CacheWritten
+  | CacheLockBusy
+  | CacheRefused String
+  deriving (Show, Eq)
+
+writeSideCache :: Aeson.ToJSON meta => FilePath -> FilePath -> Catalog -> meta -> IO SideCacheWrite
 writeSideCache root sub cat meta = do
-  let dir = pmDir root </> sub
-  pre <- resolveUnder root (".pm" </> sub)
-  case pre of
-    Nothing -> pure (Left (untrustedMsg dir))
-    Just _ -> do
-      createDirectoryIfMissing True dir
-      r1 <- writeCacheFile root sub "catalog.json" (Aeson.encode cat)
-      case r1 of
-        Left e -> pure (Left e)
-        Right () -> writeCacheFile root sub "meta.json" (Aeson.encode meta)
+  -- 三十一轮 F1：catalog.json + meta.json 是**成对**状态，两文件之间没有锁时
+  -- 两个 pm（两次 pm backup、或 backup 与 afterApply）交错写会得到 catalog 与
+  -- meta 不配对的缓存。成对写整段进 I10 锁；拿不到锁 = 有人（可能是本进程的
+  -- 外层事务）正持有该 root，本轮放弃。统一修复：backup-cache 与 vault-cache
+  -- 共用本函数，二十轮登记的 vault-cache 跨进程争用残余随本条一并关闭。
+  m <- withRootLock root $ do
+    let dir = pmDir root </> sub
+    pre <- resolveUnder root (".pm" </> sub)
+    case pre of
+      Nothing -> pure (Left (untrustedMsg dir))
+      Just _ -> do
+        createDirectoryIfMissing True dir
+        r1 <- writeCacheFile root sub "catalog.json" (Aeson.encode cat)
+        case r1 of
+          Left e -> pure (Left e)
+          Right () -> writeCacheFile root sub "meta.json" (Aeson.encode meta)
+  pure (case m of
+    Nothing -> CacheLockBusy
+    Just (Left e) -> CacheRefused e
+    Just (Right ()) -> CacheWritten)
 
 writeCacheFile :: FilePath -> FilePath -> FilePath -> BSL.ByteString -> IO (Either String ())
 writeCacheFile root sub name bytes = do
@@ -560,8 +612,8 @@ writeJsonReplacing fp bytes = do
     BSL.hPut h bytes
     flushHandleToDisk h
   old <- doesFileExist fp
-  when old (removeFile fp)
-  moveFileNoReplace tmp fp
+  when old (deleteBoundAt fp)
+  moveBoundNoReplace tmp fp
 
 freshRootId :: IO Text
 freshRootId = do

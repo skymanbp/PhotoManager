@@ -22,7 +22,7 @@ import qualified Data.Text as T
 import Data.Time (UTCTime)
 import System.FilePath ((</>))
 
-import Pm.Config (Config (..), pmSubBackupCache, readRootInfo, readSideCache, writeSideCache)
+import Pm.Config (Config (..), SideCacheWrite (..), pmSubBackupCache, readRootInfo, readSideCache, writeSideCache)
 import Pm.Types
 import Pm.Win (listCandidateDrives, suppressCriticalErrorDialogs)
 
@@ -105,7 +105,7 @@ instance FromJSON BackupCacheMeta where
 
 -- | Snapshot copy of the backup catalog + meta, kept on the MAIN root
 -- (shared pair-write: Pm.Config.writeSideCache).
-writeBackupCache :: FilePath -> Catalog -> BackupCacheMeta -> IO (Either String ())
+writeBackupCache :: FilePath -> Catalog -> BackupCacheMeta -> IO SideCacheWrite
 writeBackupCache mainRoot = writeSideCache mainRoot pmSubBackupCache
 
 -- P3b-14（十一轮复审 major）：读侧与写侧同规格。此前是自由拼路径 + 按名字

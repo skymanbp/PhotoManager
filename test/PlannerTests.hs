@@ -355,7 +355,7 @@ cleanTests =
           plan <- mkCleanPlan mroot (cleanPlanItems (clEligible rep))
           -- 这条考的是 Quarantine 落 trash 的机制，不是三副本屏障（那在
           -- GuardTests / CleanTests 里）；clean-staging 要屏障，显式放行。
-          rs <- execOkWith defaultExecEnv {eeBarrier = Just pure} plan
+          rs <- execOkWith defaultExecEnv {eeBarrier = Just (\_ _ -> pure [])} plan
           map (outcomeLabel . snd) rs @?= ["DONE"]
           stEx <- doesFileExist (mroot </> srel)
           stEx @?= False
@@ -615,10 +615,8 @@ p22Tests =
           length (plItems plan) @?= 1
           -- 计划保存后世界变了：备份见证退化
           writeFile (broot </> "成片" </> "c.jpg") "XX"
-          plan' <- recheckCleanItems mroot mcat broot bcat plan
-          case map piStatus (plItems plan') of
-            [StNeedsDecision _] -> pure ()
-            other -> assertFailure ("expected demotion, got " <> show other)
+          dem <- recheckCleanItems mroot mcat broot bcat plan
+          map fst dem @?= [piIx it | it <- plItems plan]
     , testCase "P2.2: bindExecRoot 主库 UUID 校验 + 重绑定" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"

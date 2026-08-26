@@ -56,7 +56,7 @@ import System.FilePath (splitDirectories, takeExtension, (</>))
 import Text.Printf (printf)
 
 import Pm.Catalog (loadCatalog)
-import Pm.Config (Config (..), RootIdState (..), createRootInfo, freshRootId, pmSubVaultCache, readRootInfo, readRootState, readSideCache, requireMain, writeSideCache)
+import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), createRootInfo, freshRootId, pmSubVaultCache, readRootInfo, readRootState, readSideCache, requireMain, writeSideCache)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
@@ -237,7 +237,7 @@ readVaultCacheMeta mainRoot = readSideCache mainRoot pmSubVaultCache "meta.json"
 readVaultCacheCatalog :: FilePath -> IO (Either String (Maybe Catalog))
 readVaultCacheCatalog mainRoot = readSideCache mainRoot pmSubVaultCache "catalog.json"
 
-writeVaultCache :: FilePath -> Catalog -> VaultCacheMeta -> IO (Either String ())
+writeVaultCache :: FilePath -> Catalog -> VaultCacheMeta -> IO SideCacheWrite
 writeVaultCache mainRoot = writeSideCache mainRoot pmSubVaultCache
 
 -- ─── IO：列目录 + 缓存感知 sha ──────────────────────────────────────────────
@@ -469,11 +469,13 @@ computeVault' quiet cfg vaultDir = do
                     , vmHeld = length held
                     }
             -- 缓存目录不可信（junction 化）是硬失败：继续下去等于把 pm 的写
-            -- 交给库外（P3b-13 十轮 critical）。
+            -- 交给库外（P3b-13 十轮 critical）。锁被占则只是缓存本轮不刷新
+            -- （三十一轮 F1；vault-holds 事务在锁内走到这里就是这种情形），
+            -- 报告本身是本轮新算的，不受影响。
             wc <- writeVaultCache root (Catalog "vault-cache" now (entryMap vEntries)) meta
             case wc of
-              Left e -> pure (Left (e, 2))
-              Right () ->
+              CacheRefused e -> pure (Left (e, 2))
+              _ ->
                 pure . Right $
                   VaultReport
                     { vrSrcDir = srcDir

@@ -21,7 +21,7 @@ import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, removeFile)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.IO (hClose)
 import System.IO.Error (isDoesNotExistError)
 import System.FilePath (joinPath, makeRelative, splitDirectories, (</>))
@@ -36,7 +36,7 @@ import Pm.Op
 import Pm.Plan
 import Pm.Trash
 import Pm.Types
-import Pm.Win (NameKind (..), openStateRead, probeName, resolveUnder)
+import Pm.Win (NameKind (..), deleteBoundAt, openStateRead, probeName, resolveUnder)
 
 data DoctorOpts = DoctorOpts
   { doDeep :: Bool
@@ -524,7 +524,7 @@ applyRepairs root findings pending stale = do
     case m of
       Nothing -> putStrLn ("  跳过: " <> f <> " 不再是可信路径（junction/symlink？），不删除——人工核查")
       Just fp -> do
-        removeFile fp -- pm 自建的 .pm/tmp 文件，从未 rename 落位，非用户数据
+        deleteBoundAt fp -- pm 自建的 .pm/tmp 文件，从未 rename 落位，非用户数据（P6-C 句柄形态）
         putStrLn ("  修复: 清除孤儿 tmp " <> f)
   forM_ c5 $ \(oid, op) -> case op of
     OpCopy _ dstRel _ _ _ -> do
