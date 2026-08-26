@@ -649,3 +649,22 @@ rootLink（塌 False 只丢一条「源根是链接」诊断行，无递归/计�
 新分支无配对用例、不可变异验证——按三十四轮 R2/R9 先例登记为代码级核查；
 310 tests 全绿、GHC 警告 0 维持。收敛既成，转入释放链（逐步摆清单 +
 AskUserQuestion，用户裁定在案）。
+
+## 第 38 轮（P6-J `6c6f049`，codex 钉 SHA，聚焦验证轮）——**GO，minset 空**
+
+GO 后收口提交的专项验证（attempt 1 即真跑，watchdog 三判据全过）。四镜头
+全绿：①修法等价性逐格核对——四种探针输入只有「Left 非 ENOENT：继续→跳过」
+一格变化，`--ignore-all-space` 证实 WalkDotDirs/SkipDotDirs 块纯重缩进，
+IOException 收窄只放走本就不该捕的异步异常；错误桶经 srErrors→CLI 逐项
+显示且 scan 返回 1、Sort 侧入 sfErrors 呈现语义正确。②同型清点复核：全仓
+五个 pathIsSymbolicLink 调用点与 §37 的「四处塌 Bool + 一处裸调上抛」
+一一对应无漏项；getFileSize/getModificationTime 只在 statSnap 内、各消费
+链均有 fail-closed 归宿。③文档与收敛表述不夸大。④无「本提交内成立 ∧
+未登记 ∧ 模型内可达」的新根。
+
+**新登记残余（父提交既存，非本轮引入）**：`freshnessSweep` 过滤
+statSnap Left 且只按遍历错误计 errN——已入 catalog 的条目读不出会落
+goneN（保守向：新鲜度不过 → 先 pm scan）；**未入 catalog 的新文件**若
+stat 失败则对计数不可见。报告面小洞，不在动盘路径上，登记待后续轮裁定。
+
+门禁自此**含 GO 后收口在内**全部过审。释放链已经用户确认启动。
