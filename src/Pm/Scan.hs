@@ -15,7 +15,7 @@ module Pm.Scan
   ) where
 
 import Control.Concurrent.Async (replicateConcurrently_)
-import Control.Exception (SomeException, try)
+import Control.Exception (IOException, SomeException, try)
 import Control.Monad (forM)
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -24,6 +24,7 @@ import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, pathIsSymbolicLink)
 import System.FilePath (takeExtension, takeFileName, (</>))
 import System.IO (hPutStrLn, stderr)
+import System.IO.Error (isDoesNotExistError)
 import Text.Printf (printf)
 
 import Pm.Hash
@@ -101,36 +102,45 @@ listTreeWith dots root = go ""
           if length abs' >= maxPathLen
             then pure ([], [(relPath, "path too long (>=240 chars)")])
             else do
-              symRes <- try (pathIsSymbolicLink abs') :: IO (Either SomeException Bool)
-              -- A failed symlink probe (ACL-denied etc.) is treated as
-              -- "not a symlink" so the entry still gets stat'ed below and the
-              -- real error surfaces there instead of being swallowed here.
-              let isSym = either (const False) id symRes
-              if isSym
-                then pure ([], [(relPath, "symlink/reparse point skipped")])
-                else do
-                  isDir <- doesDirectoryExist abs'
-                  if isDir
-                    then case dots of
-                      -- 'WalkDotDirs' 的唯一例外：pm 自己的状态目录。源恰好是
-                      -- 一个 pm 库根时，@.pm\\tmp@ 里是**半写入**的临时文件、
-                      -- @.pm\\trash@ 里是已隔离的文件——它们头部有合法 EXIF，
-                      -- 会被当成待归位的照片拷走（codex 二十七轮 #3）。
-                      --
-                      -- 判据是**内容**不是名字（codex 二十八轮 #3）：目录里有
-                      -- @root-id.json@ 才是 pm 状态目录——这正是 pm 自己认 root
-                      -- 的方式。按名字判两个方向都错：卡上一个普通的、名叫
-                      -- @.pm@ 的用户目录会被整个跳过（里面的照片一格都不进）；
-                      -- 而真状态目录被改名或经别名到达时判据根本不触发。
-                      WalkDotDirs -> do
-                        isState <- doesFileExist (abs' </> "root-id.json")
-                        if isState
-                          then pure ([], [(relPath, "pm 状态目录（内含 root-id.json），源遍历不进入")])
-                          else go relPath
-                      SkipDotDirs
-                        | take 1 (takeFileName name) == "." -> pure ([], [])
-                        | otherwise -> go relPath
-                    else pure ([relPath], [])
+              symRes <- try (pathIsSymbolicLink abs') :: IO (Either IOException Bool)
+              -- 三十七轮（GO 后按 quality-over-cost 收口）：探测异常（非「不存
+              -- 在」）按「是链接」处理——同 Trash.linkish / Exec.slotOccupied
+              -- 的既有纪律。旧写法塌成 False 的辩解（「真实错误会在下面的 stat
+              -- 再现」）只对普通文件成立：junction 的属性读瞬时失败后，递归会
+              -- **顺利**跟着链接下去，错误永不再现，库外文件被当库内条目索引。
+              -- 「不存在」（条目在遍历窗口内消失）仍走 stat 路径，在那里响亮
+              -- 入错。异常类型同步收窄 SomeException→IOException（Ctrl-C 不吞）。
+              case symRes of
+                Left e
+                  | not (isDoesNotExistError e) ->
+                      pure ([], [(relPath, "链接属性查不出（" <> show e <> "），按链接跳过、不递归")])
+                _ -> do
+                  let isSym = either (const False) id symRes
+                  if isSym
+                    then pure ([], [(relPath, "symlink/reparse point skipped")])
+                    else do
+                      isDir <- doesDirectoryExist abs'
+                      if isDir
+                        then case dots of
+                          -- 'WalkDotDirs' 的唯一例外：pm 自己的状态目录。源恰好是
+                          -- 一个 pm 库根时，@.pm\\tmp@ 里是**半写入**的临时文件、
+                          -- @.pm\\trash@ 里是已隔离的文件——它们头部有合法 EXIF，
+                          -- 会被当成待归位的照片拷走（codex 二十七轮 #3）。
+                          --
+                          -- 判据是**内容**不是名字（codex 二十八轮 #3）：目录里有
+                          -- @root-id.json@ 才是 pm 状态目录——这正是 pm 自己认 root
+                          -- 的方式。按名字判两个方向都错：卡上一个普通的、名叫
+                          -- @.pm@ 的用户目录会被整个跳过（里面的照片一格都不进）；
+                          -- 而真状态目录被改名或经别名到达时判据根本不触发。
+                          WalkDotDirs -> do
+                            isState <- doesFileExist (abs' </> "root-id.json")
+                            if isState
+                              then pure ([], [(relPath, "pm 状态目录（内含 root-id.json），源遍历不进入")])
+                              else go relPath
+                          SkipDotDirs
+                            | take 1 (takeFileName name) == "." -> pure ([], [])
+                            | otherwise -> go relPath
+                        else pure ([relPath], [])
         pure (concatMap fst results, concatMap snd results)
 
 -- | Stat-only freshness comparison of a directory tree against a catalog

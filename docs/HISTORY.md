@@ -351,3 +351,14 @@
   --force 闸且丢 mold），同表三态化一并修。310 tests（308+2），变异 m24
   恰杀穷举表、m25 设计上双杀（穷举表 + 悬空 junction E2E）。逐条处置见
   REVIEW-LOG 第 36 轮
+- P6-J ✅ 第 37 轮门禁 **GO、minset 空——收敛达成**（codex 钉 b68cb2e+
+  0c48b28，216 次命令执行；attempt-1 被通道故障杀死、看门判据补「必须含
+  verdict 行」后重跑）。五镜头全绿：F1 三态修法逐格核对、68 个存在性命中
+  重扫无第二放行口、测试/变异/文档登记一致、读口回归无新第三类。GO 后按
+  quality-over-cost 收口一处「评审归为已登记残余、第一方证实注释自辩不
+  成立」的缺陷：Scan 树遍历的链接探针异常塌 False——junction 属性读瞬时
+  失败后递归顺利跟过去、库外文件入索引。修同 Trash.linkish 纪律（非
+  ENOENT 按链接跳过入错误桶）+ 该处 SomeException 收窄 IOException；同型
+  四处清点（Trash/Exec 已保守为范式、SortSource 仅诊断行登记）。无确定性
+  注入形态按 R2/R9 登记。310 tests，警告 0。按用户裁定转入释放链（每个
+  动盘步骤先摆清单 + AskUserQuestion）

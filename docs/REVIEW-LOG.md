@@ -607,3 +607,45 @@ Catalog/Plan/Trash 都写 pm 自有状态文件。声明的本意是照片字节
 （NameSurrogate → Right False）杀 2 条**——穷举表与悬空 junction E2E 都是
 它的设计探测器，不为凑「恰好一条」缩表。运行记录在会话 scratchpad
 `mut36-results.txt`。
+
+## 第 37 轮（P6-I `b68cb2e` + P6-I2 `0c48b28`，codex 钉双 SHA）——**GO，minset 空：门禁收敛**
+
+**执行者插曲二**：attempt 1 半途夭折——codex 连续畸形工具调用（missing
+field `target`）+ upstream 失败后，把中途分析当最终消息交出（58 次命令
+执行、344 字节、无 verdict 行）。看门旧判据（exec>0 ∧ 字节>200）误收——
+判据即根因，补上「结果必须含 verdict 行」后整轮重跑；夭折产物改名留证。
+重跑 attempt 1 真跑（216 次命令执行）出本轮 verdict。
+
+五镜头全绿：F1 三态修法逐格核对成立（probeName 错误码语义、classifyGitProbe
+方向、三条正常路径与父提交等价、surrogate 只朝更严、canonicalizePath 成功
+值不变、findGitAncestor 无外部消费者、各调用方拒绝方向保持）；rule-09 重扫
+68 个存在性命中逐处落入 §36 四类、无第二个无兜底放行口（init 闸修法核过：
+mold 保留、--force 语义保留、probeName 在既有配置锁内无新锁边界）；测试与
+变异登记一致（310=308+2、m24/m25 与登记吻合）；文档五处对齐（README「每道
+闸都有突变用例」对 init 接线略宽——评审判定 §36 已登记，不重列）；读口回归
+未发现新的「已证实且未登记」第三类。**minset: ∅——按用户裁定（"没有『未
+登记且模型内可达』的新根，即发布"），门禁自本轮收敛。**
+
+### GO 后收口（quality-over-cost 裁定）：Scan 链接探针塌 False
+
+评审把 `Scan.listTreeWith` 的 pathIsSymbolicLink 异常按 False 继续归为
+「已登记未证实残余」（登记点 = 行内注释的自辩）。第一方核实推翻该自辩：
+「真实错误会在下面的 stat 再现」只对普通文件成立——junction 属性读瞬时
+失败后，递归会**顺利**跟着链接下去，错误永不再现，库外文件被当库内 rel
+条目索引（下游：backup 会把外来字节拷进备份根、报告面被污染；删除屏障
+不受影响——probeConfined/resolveUnder 拒经 junction 的路径）。可达性与
+三十六轮 F1 同类（属性读遇 ACL/介质错误而其余操作成功），一致性要求同判。
+修：与 Trash.linkish / Exec.slotOccupied 同纪律——非「不存在」的探测异常
+按「是链接」跳过并入错误桶；「不存在」仍走 stat 路径响亮入错；该处 try
+同步收窄 SomeException→IOException（Ctrl-C 不吞）。
+
+**链接属性探针类清点**（try-塌 False 形态全仓四处）：Scan（本轮修）；
+Trash.linkish 与 Exec.slotOccupied（已保守，为范式）；SortSource 的
+rootLink（塌 False 只丢一条「源根是链接」诊断行，无递归/计划决策依赖——
+登记不修）。Hash.dirFingerprint 的裸 pathIsSymbolicLink 异常**上抛**进
+调用者 try = 响亮 fail-closed，属安全形态（塌 False 才危险，上抛不是）。
+
+**验证登记**：探测异常无确定性注入形态（错误码 5/53 在测试里造不出），
+新分支无配对用例、不可变异验证——按三十四轮 R2/R9 先例登记为代码级核查；
+310 tests 全绿、GHC 警告 0 维持。收敛既成，转入释放链（逐步摆清单 +
+AskUserQuestion，用户裁定在案）。

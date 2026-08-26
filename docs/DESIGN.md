@@ -662,7 +662,7 @@ REVIEW-LOG 第 28 轮。
 | 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤）；CJK 路径入 golden |
 | 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode + 只探 REMOVABLE/FIXED（§9） |
 | exFAT 备份盘（无元数据日志、rename 原子性弱） | 矩阵不依赖原子性；FS 类型/粒度入 root-id.json；mtime 只做同 root 缓存键（§3） |
-| Lightroom / 用户并发改文件 | Plan 前提复核 + 双 stat + 落位 no-replace 三重防线；杀毒/索引器的短暂占用按 Win32 同款预算重试（100ms×20，三十二轮 R1）；读口（sha256File/目录指纹/枚举）的 IOException 一律落 fail-closed 桶而非逃顶——vault 主循环入 UNSTABLE、Exec 逐项 OFailed、生成期整批拒绝、doctor 报「读取失败」行（三十四轮全仓 grep、三十五轮按 IO 读原语全集清点补漏——目录枚举口与 config.toml/`.gitignore` 控制文件读口；执行期**写口**逃逸 = §6.4 进程死亡语义，journal 有 Intent、doctor 对账，登记为已设计行为） |
+| Lightroom / 用户并发改文件 | Plan 前提复核 + 双 stat + 落位 no-replace 三重防线；杀毒/索引器的短暂占用按 Win32 同款预算重试（100ms×20，三十二轮 R1）；读口（sha256File/目录指纹/枚举）的 IOException 一律落 fail-closed 桶而非逃顶——vault 主循环入 UNSTABLE、Exec 逐项 OFailed、生成期整批拒绝、doctor 报「读取失败」行（三十四轮全仓 grep、三十五轮按 IO 读原语全集清点补漏——目录枚举口与 config.toml/`.gitignore` 控制文件读口；三十七轮链接属性探针查不出按「是链接」跳过不递归、不塌 False；执行期**写口**逃逸 = §6.4 进程死亡语义，journal 有 Intent、doctor 对账，登记为已设计行为） |
 | catalog 损坏 | journal 重建 + 快照 3 份轮换 + doctor 校验 |
 | vault 是 git 工作树（.pm 污染 / git clean 风险 / 误提交） | I11 + `.gitignore` 追加 `.pm/`（P5 confirm-first）+ git 提示显式路径禁 `-A`；守卫自身 fail-closed：`.git` 存在性探测走 probeName 三态（查不出 ≠ 不存在，三十六轮）、`.gitignore` 读失败拒绝（三十五轮） |
 | vault 改名打断 portfolio 线上 URL | RENAME 默认只报告 + photos.json 只读引用检查标 BLOCKED（§10.2） |
