@@ -426,8 +426,12 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `Host` 须**恰好**是 `127.0.0.1` 或 `127.0.0.1:<1-5 位十进制端口>`（精确解析，
   挡 DNS rebinding；十八轮把前缀判定收紧）；`--port` 限 0..65535（越界不静默
   折回）；带 `Origin` 的请求只接受 `tauri://localhost` / `http(s)://tauri.localhost`
-  （预检 OPTIONS 免 token）。只读端点：`GET /api/ping`、`GET /api/status[?fresh=1]`
-  （与 `pm status` 同源的 `StatusReport`，含退出码）、`GET /api/vault/status`
+  （预检 OPTIONS 免 token）。只读端点：`GET /api/ping`（P7 起带 `allowApply`，
+  GUI 据此决定渲染不渲染计划页的「执行」按钮）、`GET /api/status[?fresh=1]`
+  （与 `pm status` 同源的 `StatusReport`，含退出码）、
+  `GET /api/publish-commands`（P7：把配置好的两仓路径/push 目标拼成上线命令
+  文本，纯函数 `Pm.Publish.publishCommands`——pm 不执行 git，GUI 只复制）、
+  `GET /api/vault/status`
   （与 `pm vault status --json` 的 stdout **逐字节相同，含末尾 LF**）、
   `GET /api/vault/new`、`GET /api/plans`、`GET /api/plan/<id>`、
   `GET /api/thumb/<sha>`（只提供 catalog 里 JPEG 条目的原字节，读取前逐级
@@ -446,19 +450,31 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   响应体**，不走 stdout——`pm ui` 只读一行 announce 就丢掉 BufReader，serve 的
   stdout 此后无人排空，照着打会填满管道缓冲。
 - **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
-  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。目前共**四个**生成计划类
-  写端点——
+  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。共**五个** `--writable`
+  级写端点，都不执行、不碰照片——
   `POST /api/vault/push-plan`（P4-5，本条）、`POST /api/vault/hold`（P4-7）、
-  `POST /api/config` 与 `POST /api/backup-init`（P4-8，均见下）；
-  **apply 端点仍未开**。第一个是 `POST /api/vault/push-plan`，
+  `POST /api/config` 与 `POST /api/backup-init`（P4-8，均见下）、
+  `POST /api/sort/plan`（P5-E，见下）；执行是第 ③ 级 `POST /api/apply`
+  （P5-C 实现，P7 起由 GUI 使用，见上文三级授权与下文 P7 条）。
+  第一个是 `POST /api/vault/push-plan`，
   体 `{"assignments":[{"name","category"},…]}`，上限 64 KiB（413）；校验与计划
   构造和 CLI `pm vault push` **共用**（`checkAssignments` / `vaultPushItems` /
   `mkVaultPushPlan`，fail-closed：任一指派不合法整体 400 并列出全部错误）；落盘
   前同样过 `requireWritable`（I11 + 身份）。写域限于 **vault 的 `.pm`**：计划落
   `.pm/plans`，首次请求还会经 `ensureVaultRoot` 幂等建 `.pm/root-id`（含 I11
   守卫）——二十轮纠正了此前"只写 plans"的措辞；**不执行、不碰照片**。响应带计划、
-  文件路径、`pm apply <id>` 提示与 git 步骤。**apply 端点尚未开**：执行仍在终端；
-  届时先过 codex 评审再请用户裁定。
+  文件路径、`pm apply <id>` 提示与 git 步骤。
+- **GUI 执行面 + 上线命令（P7，用户裁定 2026-08-26「GUI 加执行功能」→
+  澄清为「执行 pm 计划」）**：`pm ui` 的 Rust 壳自 P7 起以 `--allow-apply`
+  拉起 serve；计划页对有待执行项的计划渲染「执行」按钮——**同一按钮两次点击
+  确认**（先 arm、5 秒不确认自动解除；WebView 无弹窗原语），走
+  `POST /api/apply`，逐项结果与 log 从 JSON 响应体渲染，并指明 `pm undo`。
+  git 依旧只生成不执行（I9 不变）：配置新增 `[portfolio] dir` 与
+  `[vault]/[portfolio] push`（push 目标过 `pushTargetOk` 字符闸——生成文本
+  是整块复制进终端的，能长出第二条命令的字符在设置入口即拒），状态页
+  vault 卡的「复制上线命令」把 `GET /api/publish-commands` 的文本复制给
+  用户自己粘贴执行；vault 会话侧的对应入口是档案仓的 `/photo-publish` skill
+  （列清单确认后代执行，vault 根仓永不 push）。
 - **整理新照片（P5-E，GUI 第六页）**：两个端点，都不执行。
   `GET /api/sort/survey?src=…&gap=…` 是只读提议，走 CLI 同一个
   `Pm.Sort.surveySort`——页面上的分段与终端建议的命令因此不可能各说各话；
@@ -669,7 +685,7 @@ REVIEW-LOG 第 28 轮。
 | file-io 未经上游在 GHC 9.10.3 测试 | P0 冒烟 + FilePath 降级预案（§4） |
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |
 | GUI 工具链 | 2026-08-24 改判 Rust/Tauri：cargo、tauri-cli、WebView2、MSVC 本机均已在，零安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
-| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable`（只有 GUI 拉起时置位）才开四个写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）、记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）、改配置（写 XDG 的 config.toml，主库路径只读）、登记备份盘（在目标盘上建备份 root 标识，守卫链同 CLI）（§11）。同用户的进程若拿到 token 也能打这四个端点——本节威胁模型不防同机同用户恶意进程；它至多让磁盘上多一个**计划文件**、改动一条**本地决定**（可 unhold 撤销）、改一条配置路径（主库路径改不动，其余可当场改回）或在某块盘上多一个备份 root 标识，照片零改动，执行仍需人在终端 `pm apply` |
+| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable` 开五个生成计划类写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）、记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）、改配置（写 XDG 的 config.toml，主库路径只读）、登记备份盘（在目标盘上建备份 root 标识，守卫链同 CLI）、生成 sort 计划（写主库 `.pm/plans`）（§11），照片零改动。P7 起 `pm ui` 以 `--allow-apply` 拉起：同用户进程若拿到 token 还能经 `POST /api/apply` 执行**已存的计划**——本节威胁模型本就不防同机同用户恶意进程（这样的进程不需要 token，直接跑 `pm apply` 甚至直接改文件即可），token 不是对同用户进程的防线；apply 能做的仍只限两段式的第二段（有计划文件才有动作，journal 全程记录、可 undo，无删除/覆盖原语） |
 | 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：**下一次比对**（`pm vault status` / GUI 刷新）复核到字节已变即失效并回到 NEW——不是实时监视；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |

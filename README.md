@@ -48,7 +48,10 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 - **功能九 · 安全网**：`pm trash`（隔离区列表/清空，永久删除前重验副本）、
   `pm undo`（整计划回滚）、`pm doctor`（崩溃恢复对账 + 完整性体检 + 轮转重验）。
 - **功能十 · GUI**：六页 Tauri 桌面前端（状态 / 整理新照片 / 分类推送 / 计划 /
-  设置 / 上手）——只生成计划、记录决定与改配置，**执行永远在终端**。
+  设置 / 上手）——生成计划、记录决定、改配置；0.6.0 起计划页可**直接执行**
+  已存计划（同一按钮两次点击确认，执行链与 `pm apply` 同源，事后可 `pm undo`），
+  状态页可一键**复制上线命令**（按设置里的两仓路径/push 目标生成 git 命令文本，
+  复制后自己粘进终端——pm 不执行 git）。
 
 **明确不做的**：不适配其他目录结构；不执行 git（I9）；`photos.json` 不在写域
 （类别与坐标是看图判断，归上游工作流）；没有删除原语（I2）。
@@ -82,12 +85,14 @@ pm ui                            # 桌面 GUI
 ```
 
 GUI 六页：**状态**（Raw·成片·相册·暂存四层卡 + vault 同步差异清单 + 备份盘滞后
-+ "下一步"）、**整理新照片**（填源目录 → 按拍摄时间分段 → 每段填地点/选已有事件
++ "下一步"；vault 卡可一键**复制上线命令**——两仓 git 序列按设置生成，pm 不执行
+git）、**整理新照片**（填源目录 → 按拍摄时间分段 → 每段填地点/选已有事件
 → 生成拷贝计划；源目录只读）、**分类推送**（相册里 vault 还没有的照片，缩略图
-选类目，或选第四个按钮「暂不同步」→ 保存决定 / 生成推送计划）、**计划**（逐项明细）、
-**设置**（路径与并发：vault / photos.json / 并发数可改、备份盘可登记；主库路径
-只读——它是身份锚点，改它等于换一个库，留给 `pm init`）、**上手**。GUI 只生成
-计划、记录决定与改配置，执行永远在终端。
+选类目，或选第四个按钮「暂不同步」→ 保存决定 / 生成推送计划）、**计划**（逐项
+明细；0.6.0 起可**直接执行**待执行计划——同一按钮两次点击确认，执行链与
+`pm apply` 同源，事后可 `pm undo`）、**设置**（路径与并发：vault / photos.json /
+并发数可改、备份盘可登记、上线命令的 portfolio 仓路径与两仓 push 目标可自定义；
+主库路径只读——它是身份锚点，改它等于换一个库，留给 `pm init`）、**上手**。
 
 常用命令一览：
 
@@ -113,7 +118,9 @@ pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先
 pm doctor                        # 崩溃恢复对账 + 完整性体检（默认只读）
 pm undo <planId>                 # 整体回滚已执行的计划
 pm config                        # 打印配置与每条路径的健康状态（只读）
-pm config set --vault <目录>     # 改 vault / --photos-json / --workers（主库路径只读，用 pm init）
+pm config set --vault <目录>     # 改 vault / --photos-json / --workers /
+                                 # --portfolio-dir / --vault-push / --portfolio-push
+                                 # （上线命令三项；主库路径只读，用 pm init）
 pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读，见 --writable / --allow-apply）
 ```
 
@@ -149,10 +156,11 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
    的标签、统一边界检查、读不到即交人判断（fail-closed），不猜文件修改时间。
 8. **GUI 永不直接碰照片**。Rust 壳层只做 spawn / 交 token / kill 三件事，一切经
    `pm serve`（127.0.0.1 + 随机端口 + Bearer token 常量时间比对 + Host/Origin
-   校验）；serve 三级授权：**缺省只读**；`--writable`（只有 GUI 拉起时置位）只开
-   四个写端点——生成推送计划（写 vault 的 `.pm/plans`）、记「暂不同步」决定
-   （写主库 `.pm/vault-holds.json`）、改配置（主库路径只读）、登记备份盘——
-   **没有一个碰照片字节**；`--allow-apply` 才能执行，GUI 从不传它。
+   校验）；serve 三级授权：**缺省只读**；`--writable` 开五个写端点——生成
+   推送计划与 sort 计划（写 `.pm/plans`）、记「暂不同步」决定、改配置（主库
+   路径只读）、登记备份盘——**没有一个碰照片字节**；`--allow-apply` 才开
+   `POST /api/apply`（唯一动照片字节的端点，0.6.0 起 GUI 拉起时传它，页面
+   两次点击确认；执行发生在 serve 进程里，走与 CLI 同一条装载/复验/journal 链）。
 
 ## 实际效果展示
 
@@ -268,6 +276,10 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   升级/改写在类型上写不出来。
 - ~~落位 rename 的句柄形态~~ ✅ P6-C：全部提交型 rename/unlink 走
   `SetFileInformationByHandle`（先验绑定 + 同句柄后验 + 回迁），名字口清零。
+- ~~GUI 执行面~~ ✅ P7（用户裁定 2026-08-26）：`pm ui` 以 `--allow-apply`
+  拉起，计划页两次点击确认后直接执行已存计划（执行链与 CLI 同源）；上线命令
+  一键复制（`[portfolio] dir` + 两仓 push 目标可配，push 目标过字符闸；pm 不
+  执行 git）；档案 vault 侧新增 `/photo-publish` skill 作代执行入口。
 
 **已知限制**：
 
