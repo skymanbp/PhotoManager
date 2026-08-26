@@ -52,14 +52,14 @@ import Pm.Clean
 import Pm.Cli
 import Pm.Dedupe
 import Pm.Config
-import Pm.GitGuard (pmIgnoreGuard)
+import Pm.GitGuard (classifyGitProbe, pmIgnoreGuard)
 import Pm.Hash (ContentProbe (..), probeConfined)
 import Pm.Import
 import Pm.Plan
 import Pm.Scan
 import Pm.Trash
 import Pm.Types
-import Pm.Win (deleteBoundAt, resolveUnder, volumeFsType)
+import Pm.Win (deleteBoundAt, probeName, resolveUnder, volumeFsType)
 
 data InitOpts = InitOpts
   { ioMain :: FilePath
@@ -131,26 +131,33 @@ runInit o = do
       -- 锁内登记备份盘，A 再无锁写回，登记被静默抹掉。整段进配置锁、锁内
       -- 重读；root 标识的创建不动配置文件，留在锁外（initMarker）。
       mw <- withConfigLock $ do
-        exists <- doesFileExist cfgFp
-        if exists && not (ioForce o)
-          then pure (Left ("配置已存在: " <> cfgFp <> "（--force 覆盖）"))
-          else do
-            -- --force 重建时保留既有备份盘登记（那是 backup init 的产物）
-            mold <- if exists then either (const Nothing) Just <$> loadConfig else pure Nothing
-            vaultOk <- mapM doesDirectoryExist (ioVault o)
-            case (ioVault o, vaultOk) of
-              (Just vp, Just False) -> pure (Left ("vault 路径不存在: " <> vp))
-              _ ->
-                Right
-                  <$> writeConfig
-                    Config
-                      { cfgMainPath = mainPath
-                      , cfgVaultPath = ioVault o
-                      , cfgPhotosJson = ioPhotosJson o
-                      , cfgWorkers = ioWorkers o
-                      , cfgBackupId = maybe Nothing cfgBackupId mold
-                      , cfgBackupSubpath = maybe Nothing cfgBackupSubpath mold
-                      }
+        -- 三十六轮同类扫尽：这里的 exists 是全仓唯一 False→放行 且无下游
+        -- 响亮失败兜底的布尔探针——doesFileExist 把 ACL/介质错误塌成 False，
+        -- 「配置已存在（--force 覆盖）」闸被绕过且 mold 丢失，既有备份盘
+        -- 登记被无 --force 覆盖掉。同 F1 三态化：查不出 = 不写入。
+        kE <- classifyGitProbe <$> probeName cfgFp
+        case kE of
+          Left why -> pure (Left ("配置文件 " <> cfgFp <> " " <> why))
+          Right exists ->
+            if exists && not (ioForce o)
+              then pure (Left ("配置已存在: " <> cfgFp <> "（--force 覆盖）"))
+              else do
+                -- --force 重建时保留既有备份盘登记（那是 backup init 的产物）
+                mold <- if exists then either (const Nothing) Just <$> loadConfig else pure Nothing
+                vaultOk <- mapM doesDirectoryExist (ioVault o)
+                case (ioVault o, vaultOk) of
+                  (Just vp, Just False) -> pure (Left ("vault 路径不存在: " <> vp))
+                  _ ->
+                    Right
+                      <$> writeConfig
+                        Config
+                          { cfgMainPath = mainPath
+                          , cfgVaultPath = ioVault o
+                          , cfgPhotosJson = ioPhotosJson o
+                          , cfgWorkers = ioWorkers o
+                          , cfgBackupId = maybe Nothing cfgBackupId mold
+                          , cfgBackupSubpath = maybe Nothing cfgBackupSubpath mold
+                          }
       case mw of
         Nothing -> putStrLn "另一个 pm 正在改配置（config.lock 被持有），初始化未写入，稍后重试" >> pure 2
         Just (Left msg) -> putStrLn msg >> pure 2

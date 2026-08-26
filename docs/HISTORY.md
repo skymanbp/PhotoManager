@@ -346,5 +346,8 @@
   Either；canonicalizePath 一并 try。类界写明：布尔探针只允许出现在
   False→拒绝 的位置。3 条 DOC 当轮修（35 轮清点表补录三处已保护命中 /
   README-DESIGN 规模数字各注采样日 / 「Exec 唯一写盘」收窄为「唯一动照片
-  字节」）。310 tests（308+2），变异 m24 恰杀穷举表、m25 设计上双杀
-  （穷举表 + 悬空 junction E2E）。逐条处置见 REVIEW-LOG 第 36 轮
+  字节」）。随后全仓布尔存在探针逐处分类（约 60 命中）：唯一 False→放行
+  且无下游响亮失败兜底的是 `pm init` 配置存在闸（exists 塌 False 绕过
+  --force 闸且丢 mold），同表三态化一并修。310 tests（308+2），变异 m24
+  恰杀穷举表、m25 设计上双杀（穷举表 + 悬空 junction E2E）。逐条处置见
+  REVIEW-LOG 第 36 轮
