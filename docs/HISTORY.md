@@ -303,4 +303,5 @@
   （withDisposeHandle 补 err-32 100ms×20 重试 + mask 关句柄泄漏窗）；
   ④PM_CONFIG 在 configFilePath 源头 makeAbsolute（正斜杠/相对拼写不再被
   句柄后验误拒）。文档统一修 §6 落位协议等约二十处；REVIEW-LOG 拆卷。
-  298 tests（293+5），变异 10/10 各杀恰好一条。逐条处置见 REVIEW-LOG 第 32 轮
+  298 tests（293+5），变异 11/11 各杀恰好一条（10 主循环 + HELD case-fold
+  补验；三十三轮 F3 更正此前误记的 10/10）。逐条处置见 REVIEW-LOG 第 32 轮

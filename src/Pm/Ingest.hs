@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | @pm vault ingest@（P6-D，DESIGN-COMMANDS §10.3 第 1/2 项）：skill 调用的
 -- 非交互批量入库。pm 只做它 root 内的两次拷贝——@_inbox@ 的成品 JPG →
@@ -21,11 +22,17 @@
 -- （逐项 DONE\/同内容 SKIP，而不是退出码 0——NEEDS-DECISION 不进退出码）后
 -- 才执行。生成期再加一道耦合：主库某项是待裁决时，vault 同名那项也压成待
 -- 裁决，单独 @pm apply@ vault 计划无法先于相册落下这个名字（I7：vault ⊆ 相册）。
+--
+-- 生成期的一切源\/目标 IO 都是 fail-closed（三十三轮 F1，与 'Pm.Sort' 二十五
+-- 轮确立的「逐文件 try，读取失败整批拒绝」同一纪律）：@doesFileExist@ 通过后
+-- 文件被良性进程移走\/占住时，stat\/hash 的异常不逃顶（那是 CLI 崩溃，违反
+-- §14 的防崩溃要求），而是聚合成错误清单、退出码 2、一份计划不出。
 module Pm.Ingest
   ( runVaultIngest
   , ingestSteps
   ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (forM)
 import Data.Char (toLower)
 import Data.List (intercalate, nub, sort)
@@ -47,8 +54,8 @@ import Pm.VaultHold (VaultHold (..), readHolds)
 
 -- | 与 'Pm.Vault.runVaultPush' 同款调用形：@runPlan@ 由命令层给
 -- （'Pm.Cli.savePlanAndMaybeRun''），本函数只负责校验、两份计划的构造与
--- 次序协议。@go@ 只用于分辨 'PrSaved' 的成因（纯预览，还是 --apply 下用户
--- 对主库那份答了 n——后者不得再把 vault 那份送进确认流程）。
+-- 次序协议。@applyMode@ 只用于分辨 'PrSaved' 的成因（纯预览，还是 --apply 下
+-- 用户对主库那份答了 n——后者不得再把 vault 那份送进确认流程）。
 --
 -- fail-closed：任何一条校验不过就一份计划都不出，并把**全部**错误一次列完
 -- （skill 好一次修完重试）。
@@ -80,63 +87,84 @@ runVaultIngest runPlan applyMode cat files0 cfg = do
                   -- 'Pm.Scan' 的 hashOne 同协议）——_inbox 正是「还在往里写」的
                   -- 目录，单次 stat 会把撕裂 sha 配上最终 (size,mtime)，执行期
                   -- 前提复核照过、落位才 hash 失配，报成介质问题（误诊）。
-                  probed0 <- forM files $ \f -> do
-                    pre <- statSnap f
-                    sha <- sha256File f
-                    post <- statSnap f
-                    pure (f, sha, post, pre == post)
-                  let unstable = [f | (f, _, _, False) <- probed0]
-                  if not (null unstable)
+                  -- 三十三轮 F1：整段逐文件 try——校验通过后源被移走/占住时
+                  -- stat/hash 会抛，异常必须变成错误清单而不是 CLI 崩溃。
+                  probedE <- forM files $ \f -> do
+                    r <- try $ do
+                      pre <- statSnap f
+                      sha <- sha256File f
+                      post <- statSnap f
+                      pure (sha, post, pre == post)
+                    pure (f, r :: Either IOException (T.Text, StatSnap, Bool))
+                  let ioErrs =
+                        [ f <> " 读取失败（" <> show e <> "）——校验之后被移走/占住？源必须逐个可读"
+                        | (f, Left e) <- probedE
+                        ]
+                      unstable = [f | (f, Right (_, _, False)) <- probedE]
+                  if not (null ioErrs && null unstable)
                     then do
+                      mapM_ (putStrLn . ("  ✗ " <>)) ioErrs
                       mapM_ (\f -> putStrLn ("  ✗ " <> f <> " 读取期间在变化（还在写入/同步？）→ 等它稳定后重试")) unstable
                       pure 2
                     else do
-                      let probed = [(f, sha, st) | (f, sha, st, True) <- probed0]
-                      mainItems <- forM (zip [0 ..] probed) $ \(ix, (f, sha, st)) ->
+                      let probed = [(f, sha, st) | (f, Right (sha, st, True)) <- probedE]
+                      mainItemsE <- forM (zip [0 ..] probed) $ \(ix, (f, sha, st)) ->
                         mkItem (cfgMainPath cfg) ("相册" </> takeFileName f) ix f sha st
-                      vaultItems0 <- forM (zip [0 ..] probed) $ \(ix, (f, sha, st)) ->
+                      vaultItemsE <- forM (zip [0 ..] probed) $ \(ix, (f, sha, st)) ->
                         mkItem vaultDir (cat </> takeFileName f) ix f sha st
-                      let vaultItems = zipWith coupleWithMain mainItems vaultItems0
-                      pidM <- newPlanId
-                      pidV <- newPlanId
-                      let mainPlan = Plan pidM "vault-ingest" (cfgMainPath cfg) (Just (riId mi)) now mainItems
-                          vaultPlan = Plan pidV "vault-ingest" vaultDir (Just (riId vi)) now vaultItems
-                      r1 <- runPlan mainPlan
-                      case r1 of
-                        PrRefused _ -> pure 2
-                        PrSaved
-                          | applyMode -> do
-                              -- 用户对主库那份答了 n：vault 那份既不执行也不再
-                              -- 询问（答 y 会让 vault 先于相册落下，逆 I7 次序）。
-                              putStrLn "主库（相册）那份已存盘、未执行（你答了 n）。vault 那份本轮不生成——次序是相册在前（I7）；pm apply 主库那份后重跑本命令"
-                              pure 1
-                          | otherwise -> do
-                              -- 纯预览：两段式协议对两份同样成立（三十二轮，
-                              -- 此前 vault 那份根本不存盘，预览面缺一半）。
-                              r2 <- runPlan vaultPlan
-                              case r2 of
-                                PrRefused _ -> pure 2
-                                _ -> do
-                                  mapM_ putStrLn (ingestOrderLines pidM pidV cat)
-                                  pure 1
-                        PrRun c1 rs1
-                          | c1 == 0 && fullyExecuted rs1 -> do
-                              r2 <- runPlan vaultPlan
-                              case r2 of
-                                PrRefused _ -> pure 2
-                                PrSaved -> do
-                                  putStrLn ("vault 那份已存盘未执行：pm apply " <> T.unpack pidV <> "（相册已完成，次序满足）；完成后重跑本命令拿收尾步骤")
-                                  pure 1
-                                PrRun c2 rs2
-                                  | c2 == 0 && fullyExecuted rs2 -> do
-                                      mapM_ putStrLn (ingestSteps vaultDir pidV cat files)
-                                      pure 0
-                                  | otherwise -> do
-                                      putStrLn "vault 那份有未完成项——收尾步骤不给：**源文件必须留在原位**（计划里的 opSrcAbs 指着它们），pm resolve / pm apply 收敛后重跑本命令"
-                                      pure (max 1 (max c1 c2))
-                          | otherwise -> do
-                              putStrLn "主库（相册）那份有未完成项（失败/冲突/待裁决——待裁决不进退出码，也算未完成）：vault 那份不执行（I7：vault ⊆ 相册，相册在前）；pm resolve 处理后重跑本命令"
-                              pure (max c1 1)
+                      let dstErrs = [e | Left e <- mainItemsE <> vaultItemsE]
+                      if not (null dstErrs)
+                        then mapM_ (putStrLn . ("  ✗ " <>)) dstErrs >> pure 2
+                        else do
+                          let mainItems = [it | Right it <- mainItemsE]
+                              vaultItems = zipWith coupleWithMain mainItems [it | Right it <- vaultItemsE]
+                          pidM <- newPlanId
+                          pidV <- newPlanId
+                          let mainPlan = Plan pidM "vault-ingest" (cfgMainPath cfg) (Just (riId mi)) now mainItems
+                              vaultPlan = Plan pidV "vault-ingest" vaultDir (Just (riId vi)) now vaultItems
+                          runTwoPlans runPlan applyMode cat files vaultDir mainPlan vaultPlan
+
+-- | 两份计划的次序协议（三十二轮 R4；从 'runVaultIngest' 拆出压嵌套）。
+-- 次序 = 主库（相册）在前，vault 只在主库**真的全部落完**后执行（I7 拓扑）。
+runTwoPlans :: (Plan -> IO PlanRun) -> Bool -> String -> [FilePath] -> FilePath -> Plan -> Plan -> IO Int
+runTwoPlans runPlan applyMode cat files vaultDir mainPlan vaultPlan = do
+  let pidV = plId vaultPlan
+  r1 <- runPlan mainPlan
+  case r1 of
+    PrRefused _ -> pure 2
+    PrSaved
+      | applyMode -> do
+          -- 用户对主库那份答了 n：vault 那份既不执行也不再询问
+          -- （答 y 会让 vault 先于相册落下，逆 I7 次序）。
+          putStrLn "主库（相册）那份已存盘、未执行（你答了 n）。vault 那份本轮不生成——次序是相册在前（I7）；pm apply 主库那份后重跑本命令"
+          pure 1
+      | otherwise -> do
+          -- 纯预览：两段式协议对两份同样成立（三十二轮，
+          -- 此前 vault 那份根本不存盘，预览面缺一半）。
+          r2 <- runPlan vaultPlan
+          case r2 of
+            PrRefused _ -> pure 2
+            _ -> do
+              mapM_ putStrLn (ingestOrderLines (plId mainPlan) pidV cat)
+              pure 1
+    PrRun c1 rs1
+      | c1 == 0 && fullyExecuted rs1 -> do
+          r2 <- runPlan vaultPlan
+          case r2 of
+            PrRefused _ -> pure 2
+            PrSaved -> do
+              putStrLn ("vault 那份已存盘未执行：pm apply " <> T.unpack pidV <> "（相册已完成，次序满足）；完成后重跑本命令拿收尾步骤")
+              pure 1
+            PrRun c2 rs2
+              | c2 == 0 && fullyExecuted rs2 -> do
+                  mapM_ putStrLn (ingestSteps vaultDir pidV cat files)
+                  pure 0
+              | otherwise -> do
+                  putStrLn "vault 那份有未完成项——收尾步骤不给：**源文件必须留在原位**（计划里的 opSrcAbs 指着它们），pm resolve / pm apply 收敛后重跑本命令"
+                  pure (max 1 (max c1 c2))
+      | otherwise -> do
+          putStrLn "主库（相册）那份有未完成项（失败/冲突/待裁决——待裁决不进退出码，也算未完成）：vault 那份不执行（I7：vault ⊆ 相册，相册在前）；pm resolve 处理后重跑本命令"
+          pure (max c1 1)
 
 -- | 「真的全部落完」：每一项都是 DONE 或同内容 SKIP。三十二轮 R4 的判据
 -- 本体——ONotExecuted（待裁决\/用户 skip）不计入退出码，@c == 0@ 不等于它。
@@ -162,21 +190,27 @@ coupleWithMain m v
 -- | 一条计划项。I5：目标已存在且内容不同 → 生成时即 NEEDS-DECISION（不静默
 -- 覆盖，也不静默丢弃——交 @pm resolve --keep@）；同内容 → 照常 PENDING，
 -- 执行期落 @SKIP(同内容)@。
-mkItem :: FilePath -> FilePath -> Int -> FilePath -> T.Text -> StatSnap -> IO PlanItem
+--
+-- 三十三轮 F1：目标**已存在但读不出**（存在性探测之后被移走\/占住\/ACL）时
+-- I5 的同异判不出——fail-closed 返回 Left，调用方聚合后整批拒绝，而不是让
+-- hash 异常把 CLI 崩掉。
+mkItem :: FilePath -> FilePath -> Int -> FilePath -> T.Text -> StatSnap -> IO (Either String PlanItem)
 mkItem root dstRel ix srcAbs sha st = do
   let op = OpCopy srcAbs dstRel sha (ssSize st) (ssMtimeNs st)
       dstAbs = root </> dstRel
   ex <- doesFileExist dstAbs
-  status <-
+  est <-
     if not ex
-      then pure StPending
+      then pure (Right StPending)
       else do
-        dsha <- sha256File dstAbs
-        pure $
-          if dsha == sha
-            then StPending -- 执行期 OSkippedIdentical，不再重拷
-            else StNeedsDecision "目标已存在且内容不同（I5）→ pm resolve --keep src|dst|both"
-  pure (PlanItem ix op status Nothing)
+        edsha <- try (sha256File dstAbs) :: IO (Either IOException T.Text)
+        pure $ case edsha of
+          Left e ->
+            Left (dstAbs <> " 已存在但读不出（" <> show e <> "）——I5 同异判不出，整批拒绝")
+          Right dsha
+            | dsha == sha -> Right StPending -- 执行期 OSkippedIdentical，不再重拷
+            | otherwise -> Right (StNeedsDecision "目标已存在且内容不同（I5）→ pm resolve --keep src|dst|both")
+  pure ((\s -> PlanItem ix op s Nothing) <$> est)
 
 -- | 全部校验错误一次列完。三十二轮补两道与 push 对齐的闸：
 --

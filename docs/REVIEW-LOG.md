@@ -254,8 +254,10 @@ rename 落进同一格是保守方向。下一轮起 codex 评审对象一律钉
 - **根 C：句柄化丢掉名字口原语内建的鲁棒性**（R1/R2）：被替换的
   moveFileEx/deleteFile 在 Win32 里都经 failIfWithRetry（err 32 → 100ms×20，
   KB 316609，杀毒/索引器短暂持有）——`withDisposeHandle` 一次就报错是未登记的
-  行为回归，重试预算按原样搬到打开步（每次重试先验重跑，不削弱保证）；同函数
-  的裸 HANDLE 获取补 mask（同模块第三次出现的漏句柄形态，照 reparseTag 判例）。
+  行为回归，重试预算按原样搬到打开步（重试重跑的是**打开**；回调含先验在
+  **最终成功句柄**上执行一次，先验校验的正是最终句柄——三十三轮 F2 更正本段
+  此前「先验逐次重跑」的措辞）；同函数的裸 HANDLE 获取补 mask（同模块第三次
+  出现的漏句柄形态，照 reparseTag 判例）。
 - **根 D：比较规范化上了提交路而路径入口未归一**（R3）：`rawBoundTo` 与
   `handleIsAt` 共用手写 normPath，`PM_CONFIG` 是唯一不经 canonicalize 的
   入口——正斜杠/相对拼写会被句柄后验当成链接攻击拒绝，且首败残留 .tmp 卡死
@@ -281,8 +283,39 @@ DESIGN-COMMANDS §8.1 按类型封闭改写（kindNeedsBarrier/barrierDrift 死�
 统一更正为「-Wall 警告 + 运行期锁内硬崩」（项目无 -Werror）。
 
 **收敛证据**：298 tests（293+5：ingest 3 新 + R1 重试 + R3 归一），GHC 警告
-0；变异 **10/10 各杀恰好一个用例**（R4 闸/R5 闸/requireMain/case-fold/跨类目/
-HELD/I7 耦合/预览两段式/err-32 重试/PM_CONFIG 归一）。R2 的 mask 与 R9 的
-双 stat 无确定性触发形态、不可变异验证，如实登记为评审核验项（后者与
+0；变异 **11/11 各杀恰好一个用例**（三十三轮 F3 更正：此前此处误记 10/10——
+主循环 10 项：R4 闸/R5 闸/requireMain/case-fold/跨类目/HELD/I7 耦合/预览
+两段式/err-32 重试/PM_CONFIG 归一，加交叉复核后补验的 HELD case-fold 共 11；
+运行记录在会话 scratchpad `mut32-results.txt` + m12 单跑输出）。R2 的 mask 与
+R9 的双 stat 无确定性触发形态、不可变异验证，如实登记为评审核验项（后者与
 Scan.hs hashOne 逐字同形）。本文件触及 750 行预算 → 拆卷：29 轮前史料移
-[`REVIEW-LOG-1.md`](REVIEW-LOG-1.md)（纯字节搬移，拼接校验等于原文）。
+[`REVIEW-LOG-1.md`](REVIEW-LOG-1.md)（**正文**纯字节搬移、拼接校验等于原文；
+两卷各加数行卷首说明——三十三轮按实况精化措辞）。
+
+## 第 33 轮（P6-E `314efe6`，codex 钉 SHA）——NO-GO，minset 1 条已修
+
+codex 恢复后的首轮**钉 SHA**评审（260 次命令，attempt 1 即真跑；上一轮交叉
+复核读活树的教训落进流程）。五镜头把第 32 轮四根修复全部验干净：PlanRun
+三态穷尽、`planRunCode` 逐位保持旧 Int 契约、`fullyExecuted [] = False` 无
+协议洞、ingest 各分支退出码与次序正确、耦合只降级、重试只对 err 32、mask
+覆盖完整、configFilePath 归一不伤既有可用值、§6 新文字与 Exec 一致。minset
+恰一条：
+
+**F1 ingest 生成期 IO 异常逃顶（已修）**。probe 的 statSnap/sha256File 与
+mkItem 的目标 sha256File 都无 try——`doesFileExist` 通过后源/目标被良性
+进程移走/占住，异常直接逃到无顶层 handler 的 main，CLI 崩溃而非干净报错
+（违反 §14 防崩溃；可用性损失，无字节风险）。与 pm sort 二十五轮确立的
+「逐文件 try，读取失败整批拒绝」同一纪律——ingest 新代码漏了同款。修：
+probe 逐文件 try + mkItem 改回 Either，错误聚合一次列完、退出 2、零计划；
+过深嵌套顺手拆出 `runTwoPlans`。用例 caseIngestUnreadable 用独占句柄
+（FILE_SHARE_NONE：存在性探测按属性照常 True、ReadMode 打开必抛）造确定性
+占用，源/目标两侧各断言；变异 2/2（去 probe try / 去 mkItem try 各恰好
+转红该用例——Ingest 变异无依赖路径影响其它 F1 字样用例）。
+
+另两条 DOC 当轮修：**F2** Win.hs 重试注释「先验逐次重跑」措辞过强——真实
+语义是重试重跑**打开**、回调含先验在最终句柄上执行一次（保证不削弱），注释
+与本文件 32 轮节已同步更正；**F3** 变异计数 REVIEW-LOG/HISTORY 的 10/10 与
+提交信息的 11/11 矛盾——真值 11，两处文档已统一并注明运行记录出处；拆卷
+「纯搬移」措辞按实况精化。residuals 与第 32 轮登记一致，无新增。
+
+299 tests（298+1），GHC 警告 0。

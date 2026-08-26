@@ -581,8 +581,10 @@ foreign import ccall unsafe "pm_delete_by_handle"
 -- @failIfWithRetry@（ERROR_SHARING_VIOLATION=32 时 100ms×20 重试，KB 316609：
 -- 杀毒/索引器短暂持有刚 close 的文件）。句柄化后共享冲突挪到了**打开**这一步
 -- （请求 DELETE 权限撞上别人不带 FILE_SHARE_DELETE 的句柄），重试预算原样搬到
--- 这里——每次重试从打开重来，调用方在句柄上做的先验因此逐次重跑，不削弱任何
--- 保证。等待用 threadDelay：不是掩盖竞态，是对短暂占用的既有礼让语义
+-- 这里。重试重跑的只是**打开**；回调 @k@（含调用方的 rawBoundTo 先验）在
+-- **最终成功的那个句柄**上执行一次——先验校验的正是最终句柄，保证不削弱
+-- （三十三轮 F2 更正此前「先验逐次重跑」的措辞）。等待用 threadDelay：不是
+-- 掩盖竞态，是对短暂占用的既有礼让语义
 --（because 旧名字口原语内建同款重试，删掉它才是行为回归）。
 --
 -- 三十二轮 R2：CreateFileW 成功返回到 @finally@ 装上之间必须无异步异常窗口

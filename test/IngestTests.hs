@@ -32,6 +32,8 @@ import Pm.Op
 import Pm.Plan
 import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.VaultHold (VaultHold (..))
+import Pm.Win (openExclusiveBinary)
+import System.IO (hClose)
 import TestUtil (captureStdout, isIntent, journalEntries, t0)
 
 ingestTests :: TestTree
@@ -45,6 +47,7 @@ ingestTests =
     , testCase "R4 闸：主库有待裁决项（退出码仍 0）→ vault 那份不执行" caseIngestVaultGate
     , testCase "R5 闸：vault 那份未全落完 → 收尾步骤（move _done）不打印" caseIngestStepsGate
     , testCase "R6 闸：配置主库路径指向 backup root → requireMain 拒绝，一份计划不出" caseIngestRequireMain
+    , testCase "三十三轮 F1：源/目标存在但读不出（独占占住）→ 错误清单 + 退出 2 + 零计划，不是 CLI 崩溃" caseIngestUnreadable
     ]
 
 -- | 临时主库 + vault + 一个 _inbox。回调收 (cfg, inbox 目录)。
@@ -231,5 +234,27 @@ caseIngestRequireMain = withIngestEnvRole RoleBackup $ \cfg inbox -> do
   (runP, gotP) <- capturePlans PrSaved
   c <- runVaultIngest runP False "landscape" [inbox </> "a.jpg"] cfg
   c @?= 2
+  ps <- gotP
+  length ps @?= 0
+
+-- | 三十三轮 F1：生成期的源/目标 IO 全部 fail-closed。`doesFileExist` 通过后
+-- 文件被良性进程占住（这里用独占句柄 FILE_SHARE_NONE 造成确定性占用：存在性
+-- 探测按属性走、照常 True，sha256File 的 ReadMode 打开必抛）——异常必须变成
+-- 错误清单 + 退出 2 + 零计划，而不是逃顶把 CLI 崩掉。
+caseIngestUnreadable :: IO ()
+caseIngestUnreadable = withIngestEnv $ \cfg inbox -> do
+  (runP, gotP) <- capturePlans PrSaved
+  -- 目标侧：相册\a.jpg 存在但读不出 → mkItem 的 I5 同异判不出，整批拒绝
+  writeFile (inbox </> "a.jpg") "AAA"
+  createDirectoryIfMissing True (cfgMainPath cfg </> "相册")
+  h <- openExclusiveBinary (cfgMainPath cfg </> "相册" </> "a.jpg")
+  c1 <- runVaultIngest runP False "landscape" [inbox </> "a.jpg"] cfg
+  hClose h
+  c1 @?= 2
+  -- 源侧：_inbox 的源被独占占住 → 探证阶段 try 接住，同样整批拒绝
+  h2 <- openExclusiveBinary (inbox </> "b.jpg")
+  c2 <- runVaultIngest runP False "landscape" [inbox </> "b.jpg"] cfg
+  hClose h2
+  c2 @?= 2
   ps <- gotP
   length ps @?= 0
