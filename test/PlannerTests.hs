@@ -593,7 +593,7 @@ p22Tests =
           let rec1 = TrashRecord "v.jpg" rel "aa" "supersede:test" "p" now
           appendManifest root rec1
           appendManifest root rec1
-          let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+          let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
           code <- runTrash cfg (TrashEmpty True) root
           code @?= 0
           ex <- doesFileExist (trashDir root </> rel)
@@ -623,7 +623,7 @@ p22Tests =
           createDirectoryIfMissing True root
           now <- getCurrentTime
           writeRootInfo root (RootInfo "rid-A" RoleMain now Nothing)
-          let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+          let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
           plan0 <- mkPlanIO (dir </> "stale-path") []
           let plan = plan0 {plKind = "import"}
           r <- bindExecRoot cfg plan "rid-A"

@@ -87,7 +87,7 @@ tok :: BS.ByteString
 tok = "0123456789abcdef0123456789abcdef"
 
 mkCfg :: FilePath -> Config
-mkCfg root = Config root Nothing Nothing Nothing Nothing Nothing
+mkCfg root = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- | 把 PM_CONFIG 指向的那份配置**先建起来**。'Pm.ConfigEdit.configTxn' 在锁内
 -- 重新读盘（不拿内存里的旧快照写回），因此配置文件必须已存在——生产里

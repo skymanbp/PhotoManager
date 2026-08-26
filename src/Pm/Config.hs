@@ -97,6 +97,14 @@ data Config = Config
     -- ^ 备份 root 的 UUID（`pm backup init` 登记；发现流程按 UUID 认盘，§9）
   , cfgBackupSubpath :: Maybe FilePath
     -- ^ 备份镜像相对盘根的位置（如 "Photography"）；盘符不入配置
+  , cfgPortfolioDir :: Maybe FilePath
+    -- ^ portfolio 仓的本地路径（P7 上线命令生成用；photos-json 是只读引用
+    -- 检查，这个是仓本身，两者独立可设）
+  , cfgVaultPush :: Maybe String
+    -- ^ 展示集仓 @git push@ 的目标（如 "origin main"）；不设 = 裸 @git push@。
+    -- 字符闸在 'Pm.Publish.pushTargetOk'（设置入口统一过 checkPatch）。
+  , cfgPortfolioPush :: Maybe String
+    -- ^ portfolio 仓 push 目标；同上
   }
   deriving (Show, Eq)
 
@@ -109,6 +117,9 @@ instance TOML.DecodeTOML Config where
       <*> TOML.getFieldsOpt ["main", "workers"]
       <*> TOML.getFieldsOpt ["backup", "id"]
       <*> TOML.getFieldsOpt ["backup", "subpath"]
+      <*> TOML.getFieldsOpt ["portfolio", "dir"]
+      <*> TOML.getFieldsOpt ["vault", "push"]
+      <*> TOML.getFieldsOpt ["portfolio", "push"]
 
 -- | 配置文件位置。**`PM_CONFIG` 覆盖**优先于 XDG 目录，理由两条：
 --
@@ -180,11 +191,19 @@ renderConfig c =
               ["", "[backup]", "id = '" <> bid <> "'", "subpath = '" <> T.pack sub <> "'"]
             _ -> []
          )
-      <> maybe [] (\p -> ["", "[vault]", "path = '" <> T.pack p <> "'"]) (cfgVaultPath c)
-      <> maybe
-        []
-        (\p -> ["", "[portfolio]", "photos-json = '" <> T.pack p <> "'"])
-        (cfgPhotosJson c)
+      -- 每张表渲染**所有**已设字段：渲染器漏一个字段，下一次任何写回就把
+      -- 用户设过的那项静默抹掉（round-trip 由 configTxn 的写后重读顺带验证）。
+      <> section "vault" [("path", cfgVaultPath c), ("push", cfgVaultPush c)]
+      <> section
+        "portfolio"
+        [ ("photos-json", cfgPhotosJson c)
+        , ("dir", cfgPortfolioDir c)
+        , ("push", cfgPortfolioPush c)
+        ]
+ where
+  section name kvs = case [k <> " = '" <> T.pack v <> "'" | (k, Just v) <- kvs] of
+    [] -> []
+    ls -> ["", "[" <> name <> "]"] <> ls
 
 -- | 写配置。P4-8 起 GUI 也能改配置，半写的 config.toml 会让**每一条** pm
 -- 命令都起不来。

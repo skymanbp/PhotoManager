@@ -80,7 +80,7 @@ guardTests =
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
-mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing
+mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 caseWildcardNegations :: IO ()
 caseWildcardNegations = withSystemTempDirectory "pm-guard" $ \tmp -> do

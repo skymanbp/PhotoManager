@@ -25,12 +25,18 @@ import System.Directory (doesDirectoryExist, doesFileExist)
 
 import qualified Data.Text as T
 import Pm.Config (Config (..), configFilePath, loadConfig, withConfigLock, writeConfig)
+import Pm.Publish (pushTargetOk)
 
 -- | 三态字段：'Nothing' = 本次不动；@Just Nothing@ = 清空；@Just (Just x)@ = 设成 x。
 data ConfigPatch = ConfigPatch
   { cpVault :: Maybe (Maybe FilePath)
   , cpPhotosJson :: Maybe (Maybe FilePath)
   , cpWorkers :: Maybe (Maybe Int)
+  , cpPortfolioDir :: Maybe (Maybe FilePath)
+    -- ^ P7：portfolio 仓本地路径（上线命令生成用）
+  , cpVaultPush :: Maybe (Maybe String)
+    -- ^ P7：展示集仓 push 目标；字符闸 'pushTargetOk'
+  , cpPortfolioPush :: Maybe (Maybe String)
   , cpMain :: Maybe (Maybe FilePath)
     -- ^ 只为**拒绝**而存在：任何试图经编辑层改主库路径的请求都要报错，而不是
     -- 被静默忽略——静默忽略会让调用方以为改成功了。
@@ -43,7 +49,7 @@ data ConfigPatch = ConfigPatch
   deriving (Show, Eq)
 
 emptyPatch :: ConfigPatch
-emptyPatch = ConfigPatch Nothing Nothing Nothing Nothing
+emptyPatch = ConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- | 线格式：**键缺省** = 不动，**键为 null** = 清空，否则设值。三态必须分得
 -- 开——否则"清空 vault 路径"和"不改 vault 路径"会撞成同一个请求。实例写在
@@ -54,7 +60,14 @@ instance Aeson.FromJSON ConfigPatch where
           Nothing -> pure Nothing
           Just Aeson.Null -> pure (Just Nothing)
           Just v -> Just . Just <$> Aeson.parseJSON v
-    ConfigPatch <$> fld "vault" <*> fld "photosJson" <*> fld "workers" <*> fld "main"
+    ConfigPatch
+      <$> fld "vault"
+      <*> fld "photosJson"
+      <*> fld "workers"
+      <*> fld "portfolioDir"
+      <*> fld "vaultPush"
+      <*> fld "portfolioPush"
+      <*> fld "main"
 
 -- | fail-closed：任一条不合法就整体不写，并一次返回全部错误（GUI 能一次标完）。
 -- 路径存在性是 IO 判定：设一个不存在的 vault 目录只会让后续每条命令报错，不如
@@ -71,17 +84,25 @@ checkPatch p = do
       isFile <- doesFileExist j
       pure [j <> " 不是一个已存在的文件（photos.json 只读引用检查用；不需要就留空）" | not isFile]
     _ -> pure []
+  ep <- case cpPortfolioDir p of
+    Just (Just v) -> do
+      isDir <- doesDirectoryExist v
+      pure [v <> " 不是一个已存在的目录（portfolio 仓路径；不需要就留空）" | not isDir]
+    _ -> pure []
   let ew = case cpWorkers p of
         Just (Just w) | w < 1 || w > 64 -> ["并发数 " <> show w <> " 越界（1..64）"]
         _ -> []
+      -- push 目标进的是「整块复制到终端」的命令文本：字符闸见 pushTargetOk。
+      es =
+        [ "push 目标 " <> show t <> " 不合法（≤200 字符，只允许字母数字、空格与 -._/:@~^）"
+        | Just (Just t) <- [cpVaultPush p, cpPortfolioPush p]
+        , not (pushTargetOk t)
+        ]
       -- @Just _@ 同时盖住 @Just (Just v)@（想改成 v）与 @Just Nothing@
       -- （main: null，想清空）：两者都是"经编辑层动主库"，一律拒。
       em = ["主库路径只读：改它等于换一个库，请在终端 pm init --main <路径>" | Just _ <- [cpMain p]]
-      en =
-        [ "没有要改的项"
-        | cpVault p == Nothing && cpPhotosJson p == Nothing && cpWorkers p == Nothing && cpMain p == Nothing
-        ]
-  pure (em <> en <> ev <> ej <> ew)
+      en = ["没有要改的项" | p == emptyPatch]
+  pure (em <> en <> ev <> ej <> ep <> ew <> es)
 
 -- | 施加（纯函数）。调用方须先过 'checkPatch'。
 applyPatch :: Config -> ConfigPatch -> Config
@@ -90,6 +111,9 @@ applyPatch c p =
     { cfgVaultPath = maybe (cfgVaultPath c) id (cpVault p)
     , cfgPhotosJson = maybe (cfgPhotosJson c) id (cpPhotosJson p)
     , cfgWorkers = maybe (cfgWorkers c) id (cpWorkers p)
+    , cfgPortfolioDir = maybe (cfgPortfolioDir c) id (cpPortfolioDir p)
+    , cfgVaultPush = maybe (cfgVaultPush c) id (cpVaultPush p)
+    , cfgPortfolioPush = maybe (cfgPortfolioPush c) id (cpPortfolioPush p)
     }
 
 -- | 一次配置**读改写**。**必须在 'withConfigLock' 之内调用**：锁内重新从盘上
@@ -129,6 +153,12 @@ runConfigShow c = do
     Just j -> do
       ex <- doesFileExist j
       putStrLn ("  photos.json " <> j <> mark ex)
+  case cfgPortfolioDir c of
+    Nothing -> putStrLn "  portfolio （未设，只影响上线命令生成）→ pm config set --portfolio-dir <仓路径>"
+    Just d -> do
+      ex <- doesDirectoryExist d
+      putStrLn ("  portfolio " <> d <> mark ex)
+  putStrLn ("  push 目标  展示集 " <> maybe "（默认 git push）" id (cfgVaultPush c) <> " · portfolio " <> maybe "（默认 git push）" id (cfgPortfolioPush c))
   putStrLn ("  并发数    " <> maybe "（默认=核数）" show (cfgWorkers c))
   case (cfgBackupId c, cfgBackupSubpath c) of
     (Just i, Just s) -> putStrLn ("  备份盘    UUID " <> T.unpack i <> " · 盘内路径 " <> s <> "（按 UUID 认盘，与盘符无关）")

@@ -417,7 +417,7 @@ withLib k = withSystemTempDirectory "pm-sort" $ \tmp -> do
   createDirectoryIfMissing True root
   _ <- ensureTestRoot RoleMain root
   scanQuiet "test-root" root >>= saveCatalog root
-  k src root (Config root Nothing Nothing Nothing Nothing Nothing)
+  k src root (Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
 
 sortPlan :: FilePath -> Config -> IO Int
 sortPlan src cfg = fst <$> runSortPlan (GoOpts False False) src (Left "Atlanta") (d 2026 8 25) (d 2026 8 26) cfg

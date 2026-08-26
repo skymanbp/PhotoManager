@@ -187,6 +187,9 @@ parserInfo =
               <$> optional (option auto (long "workers" <> metavar "N" <> help "扫描并发数（1..64）；备份盘不读它，默认单线程防 HDD 寻道抖动，另用 pm backup --workers"))
               <*> switch (long "no-workers" <> help "清空并发数（回到默认=核数）")
           )
+      <*> triple "portfolio-dir" "portfolio 仓的本地路径（上线命令生成用）"
+      <*> triple "vault-push" "展示集仓的 push 目标（如 origin main；不设 = 裸 git push）"
+      <*> triple "portfolio-push" "portfolio 仓的 push 目标（同上）"
       -- 只为**拒绝**而存在（internal，不出现在帮助里）：与 JSON 的
       -- @"main": null@ 同构——出现即拒，不区分"设值"还是"清空"。
       <*> (fmap Just <$> optional (strOption (long "main" <> metavar "PATH" <> internal)))

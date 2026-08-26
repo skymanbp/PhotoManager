@@ -146,7 +146,7 @@ caseStatusFreshnessErrExit :: IO ()
 caseStatusFreshnessErrExit =
   withSystemTempDirectory "pm-status-err" $ \dir -> do
     let root = dir </> "root"
-        cfg = Config root Nothing Nothing Nothing Nothing Nothing
+        cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
     createDirectoryIfMissing True root
     now <- getCurrentTime
     writeRootInfo root (RootInfo "m" RoleMain now Nothing)

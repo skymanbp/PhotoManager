@@ -85,6 +85,7 @@ import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
 import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, listPlans, savePlan)
+import Pm.Publish (publishCommands)
 import Pm.Sort (SortSegment (..), SortSurvey (..), runSortPlan, surveySort)
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
@@ -213,7 +214,9 @@ route env req jsonR err corsHdrs respond = do
 routeWith :: Config -> ServeEnv -> Request -> Reply -> (Status -> String -> IO ResponseReceived) -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req) of
   ("GET", ["api", "ping"]) ->
-    jsonR status200 [] (object ["ok" .= True, "main" .= cfgMainPath cfg, "vault" .= cfgVaultPath cfg])
+    -- allowApply：GUI 据此决定计划页要不要渲染「执行」按钮——按钮出现在
+    -- 没有第三级授权的 serve 上，点了只会收 403（P7）。
+    jsonR status200 [] (object ["ok" .= True, "main" .= cfgMainPath cfg, "vault" .= cfgVaultPath cfg, "allowApply" .= seAllowApply env])
   ("GET", ["api", "status"]) -> do
     let fresh = lookup "fresh" (queryString req) == Just (Just "1")
     r <- statusReport cfg (StatusOpts (not fresh))
@@ -384,6 +387,13 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
           , "photosJson" .= photosJ
           , "workers" .= cfgWorkers cfg
           , "backup" .= object ["id" .= cfgBackupId cfg, "subpath" .= cfgBackupSubpath cfg]
+          , -- P7：上线命令的三项自定义（portfolio 仓路径 + 两个 push 目标）。
+            "publish"
+              .= object
+                [ "portfolioDir" .= cfgPortfolioDir cfg
+                , "vaultPush" .= cfgVaultPush cfg
+                , "portfolioPush" .= cfgPortfolioPush cfg
+                ]
           ]
       )
   -- P4-8：第三个写端点——改配置（vault / photos.json / 并发数）。主库路径
@@ -525,6 +535,13 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                             , "id" .= case o of BiReused _ i -> i; BiCreated _ i _ _ -> i
                             ]
                         )
+  -- P7 只读端点：把配置好的两仓路径/push 目标拼成上线命令文本。pm 绝不执行
+  -- git（I9）——GUI 只把这段文本复制给用户，执行在用户终端。生成逻辑在
+  -- 'Pm.Publish.publishCommands'（纯函数，测试直打）。
+  ("GET", ["api", "publish-commands"]) ->
+    case publishCommands cfg of
+      Left m -> err status409 m
+      Right ls -> jsonR status200 [] (object ["commands" .= ls])
   ("GET", ["api", "plans"]) -> do
     (ps, errs) <- listPlans (cfgMainPath cfg)
     (vps, verrs) <- maybe (pure ([], [])) listPlans (cfgVaultPath cfg)
