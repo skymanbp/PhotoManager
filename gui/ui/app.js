@@ -35,11 +35,20 @@
   async function get(path) { const r = await req(path); if (!r.ok) throw new Error(path + " → HTTP " + r.status); return r; }
   const getJson = async (p) => (await get(p)).json();
   function fail(e) { const c = $("#conn"); c.textContent = "⚠ " + e.message; c.className = "conn bad"; }
+  // 「最新请求胜出」（40 轮 #5 的类级修法）：每个视图一个代号，await 回来时
+  // 代号已变就丢弃这次响应——快速连点/切页/键盘会让旧响应晚到并覆盖新
+  // 选择；计划明细乱序时「执行」按钮绑的就是旧计划。凡是会被用户重复触发、
+  // 且渲染依赖「当前选择」的加载器一律走它，不各自发明。
+  const gens = {};
+  const stamp = (k) => (gens[k] = (gens[k] || 0) + 1);
+  const stale = (k, g) => g !== gens[k];
 
   // ── 状态 ──
   const LAYER = { Raw: ["Raw 原片", "var(--raw)"], "成片": ["成片", "var(--proc)"], "相册": ["相册（收藏）", "var(--album)"], "To-Be-Sync'd": ["暂存区", "var(--stage)"] };
   async function loadStatus(fresh) {
+    const gen = stamp("status");
     const s = await getJson("/api/status" + (fresh ? "?fresh=1" : ""));
+    if (stale("status", gen)) return;
     const banner = $("#status-banner"); banner.className = "banner hidden"; banner.textContent = "";
     const steps = [];
     if (!s.index) {
@@ -85,6 +94,7 @@
     // vault（用完整差异接口，"差哪些"）
     try {
       const v = await getJson("/api/vault/status");
+      if (stale("status", gen)) return;
       // held 是 new 的注解子集（六态集合不变）：算"还差多少"时要扣掉
       const held = (v.held || []).length;
       const diff = v.new.length - held + v.missing.length + v.renamed.length + v.drift.length + v.unstable.length;
@@ -121,7 +131,6 @@
 
   // ── 分类推送 ──
   let thumbUrls = [];
-  let vaultGen = 0;   // single-flight 代号：新一轮作废旧一轮
   let vaultDrift = 0; // 没有 NEW 但有 DRIFT 时，也能出纯裁决计划
   let heldInitial = new Set(); // 打开这一页时盘上已有的「暂不同步」决定
   let submitting = false;      // 提交期间冻结选择：两步必须看同一份快照
@@ -155,18 +164,18 @@
     $("#btn-plan").disabled = cats === 0 && vaultDrift === 0 && !ops.hold.length && !ops.unhold.length;
   }
   async function loadVault() {
-    // single-flight：连按数字键 2 会并发起多轮，旧轮在新轮 revoke 之后
+    // single-flight：连按数字键 3 会并发起多轮，旧轮在新轮 revoke 之后
     // 还会继续下载原图并建 blob URL（codex 二十轮 minor）。用代号作废旧轮。
-    const gen = ++vaultGen;
+    const gen = stamp("vault");
     const grid = $("#vault-grid"); grid.innerHTML = "";
     for (const u of thumbUrls) URL.revokeObjectURL(u); thumbUrls = [];
     assign.clear(); vaultDrift = 0; heldInitial = new Set(); $("#plan-result").className = "banner hidden";
     let meta;
     try { meta = await getJson("/api/vault/new"); } catch (e) {
-      if (gen !== vaultGen) return; // 旧轮失败：别动新一轮的网格
+      if (stale("vault", gen)) return; // 旧轮失败：别动新一轮的网格
       grid.appendChild(el("div", "muted", "vault 未配置或不可用：" + e.message)); updateProgress(0); return;
     }
-    if (gen !== vaultGen) return;
+    if (stale("vault", gen)) return;
     vaultDrift = (meta.drift || []).length;
     heldInitial = new Set((meta.held || []).map((e) => e.name));
     for (const n of heldInitial) assign.set(n, HOLD); // 回显盘上已有的决定
@@ -197,12 +206,12 @@
     }
     // 顺序拉图（每张原图可能几十 MB），缩小后再挂上去
     for (const [e, ph] of cards) {
-      if (gen !== vaultGen) return; // 已被新一轮取代：不再下载、不再建 URL
+      if (stale("vault", gen)) return; // 已被新一轮取代：不再下载、不再建 URL
       try {
         if (!e.sha) throw new Error("catalog 无 sha");
         const blob = await (await get("/api/thumb/" + e.sha)).blob();
         const small = await shrink(blob);
-        if (gen !== vaultGen) return;
+        if (stale("vault", gen)) return;
         if (!small) { ph.textContent = "缩略失败（不挂原图）"; continue; }
         const url = URL.createObjectURL(small); thumbUrls.push(url);
         const img = document.createElement("img"); img.alt = e.name; img.src = url;
@@ -274,7 +283,9 @@
 
   // ── 计划 ──
   async function loadPlans() {
+    const gen = stamp("plans");
     const d = await getJson("/api/plans");
+    if (stale("plans", gen)) return;
     const tb = $("#plan-table tbody"); tb.innerHTML = "";
     $("#plan-detail").innerHTML = ""; $("#plan-detail").appendChild(el("div", "muted", d.plans.length ? "选一个计划查看明细" : "还没有计划"));
     const sorted = d.plans.slice().sort((a, b) => (a.created < b.created ? 1 : -1));
@@ -302,7 +313,11 @@
     return tr;
   }
   async function showPlan(id) {
+    // 明细与「执行」按钮绑定的是**这份响应**的计划：旧响应晚到必须丢弃，否则
+    // 用户按 B 的选择意图点两下、执行的却是 A（40 轮 #5）。
+    const gen = stamp("plan");
     const plan = await getJson("/api/plan/" + id);
+    if (stale("plan", gen)) return;
     const box = $("#plan-detail"); box.innerHTML = "";
     box.appendChild(el("h3", null, `${plan.kind} · ${plan.id}`));
     box.appendChild(el("div", "muted small", `root ${plan.rootPath || plan.root || ""} · 生成于 ${when(plan.created)} · 终端执行：`)).appendChild(el("code", null, "pm apply " + plan.id));
@@ -320,7 +335,8 @@
       btn.onclick = () => {
         if (!armed) {
           armed = true; btn.classList.add("armed");
-          btn.textContent = "⚠ 再点一次确认执行（5 秒内）";
+          // 确认文案带计划 id：看清要执行的是哪一份再点第二下
+          btn.textContent = `⚠ 再点一次确认执行 ${plan.id}（5 秒内）`;
           timer = setTimeout(disarm, 5000);
           return;
         }
@@ -372,7 +388,9 @@
   // ── 设置 ──
   const cfgTxt = (id, v) => { $(id).value = v == null ? "" : String(v); };
   async function loadConfig() {
+    const gen = stamp("config");
     const c = await getJson("/api/config");
+    if (stale("config", gen)) return;
     $("#config-path").textContent = "配置文件：" + c.configPath;
     const rootWord = { present: "身份就位", absent: "还没有 root 标识", corrupt: "root 标识损坏——人工核查", untrusted: "路径不可信——人工核查" };
     $("#cfg-main").textContent = c.main.path + "（" + (rootWord[c.main.root] || c.main.root) + (c.main.exists ? "" : " · 目录不存在") + "）";
@@ -437,8 +455,12 @@
     $("#sort-result").className = "banner hidden";
     $("#sort-segments").innerHTML = ""; $("#sort-left").innerHTML = "";
     $("#sort-summary").textContent = "扫描中…（读 EXIF 拍摄时间，不改动源目录）";
+    // 同一类竞态：换了源目录再点一次，旧源的提议晚到会把「生成计划」绑到
+    // 旧的 sv.src 上——计划生成会落到错的目录。
+    const gen = stamp("sort");
     const r = await req("/api/sort/survey?src=" + encodeURIComponent(src) + "&gap=" + gap);
     const body = await r.json().catch(() => ({}));
+    if (stale("sort", gen)) return;
     if (!r.ok) { $("#sort-summary").textContent = ""; sortNote("bad", body.error || ("HTTP " + r.status)); return; }
     lastSurvey = body;
     renderSurvey(body);

@@ -470,8 +470,12 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   确认**（先 arm、5 秒不确认自动解除；WebView 无弹窗原语），走
   `POST /api/apply`，逐项结果与 log 从 JSON 响应体渲染，并指明 `pm undo`。
   git 依旧只生成不执行（I9 不变）：配置新增 `[portfolio] dir` 与
-  `[vault]/[portfolio] push`（push 目标过 `pushTargetOk` 字符闸——生成文本
-  是整块复制进终端的，能长出第二条命令的字符在设置入口即拒），状态页
+  `[vault]/[portfolio] push`。生成文本是整块复制进终端的，粘进哪个 shell
+  由用户定——三十九/四十轮先后抓到展开字符、bash 双引号内尾随 `\` 撑开引号、
+  `git add "-A"` 选项注入，黑名单补不全；`Pm.Publish` 因此**解析而非过滤**：
+  路径解析为盘符绝对路径 + 白名单分量后以 `/` 重渲染（`cmdPath`），push
+  目标按 `<remote> [<refspec>]` 语法解析且段首必为字母数字（`pushTarget`），
+  操作数前一律 `--`；设置入口与生成汇点各验一次，不合格整体拒绝。状态页
   vault 卡的「复制上线命令」把 `GET /api/publish-commands` 的文本复制给
   用户自己粘贴执行；vault 会话侧的对应入口是档案仓的 `/photo-publish` skill
   （列清单确认后代执行，vault 根仓永不 push）。

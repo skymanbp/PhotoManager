@@ -378,8 +378,9 @@ attempt 1 即真跑（188 次命令执行，watchdog 三判据全过）。六条
    单击即再执行。修：confirm 分支先 `disarm()` 再发请求，成功/失败出口都
    回到全新未确认按钮（label 还原）。
 6. **REVIEW-LOG-1.md 1027 行超预算（minor）**：冻结档案在无豁免口径下同样
-   违规——逐字分卷为 REVIEW-LOG-1（449，v0.1→v0.2 + P3b）与 REVIEW-LOG-1B
-   （586，P4 GUI + 用户决策记录），指针链同步。
+   违规——逐字分卷为 REVIEW-LOG-1（451，v0.1→v0.2 + P3b）与 REVIEW-LOG-1B
+   （586，P4 GUI + 用户决策记录）；1027 → 451+586 = 1037，多出的 10 行是两卷
+   卷首/指针元数据（40 轮流哈希核对正文逐字相同），指针链同步。
 
 GO-notes：Win.hs volumeFsType 的 SomeException 保留为已登记残余（评审建议
 后续显式重抛 AsyncException，登记不动）；测试算术 305→311→311→317 标签级
@@ -402,3 +403,62 @@ m39-4  vault add 退回 -A            → 红（publishCommands 显式类目）
 m39-5  tomlStr 恒 literal           → 红（round-trip 单引号路径）
 #5 为 JS，无 HUnit 配对——node --check + 代码级核查登记
 ```
+
+## 第 40 轮（P7-G `a6a0922`，codex 钉 SHA，聚焦验证轮）——NO-GO，minset {2,4,5,6} → P7-H
+
+attempt 1 即真跑（204 次命令执行）。39 轮六条修法逐格核对：#1 三态与前缀
+覆盖、#3 tomlStr 全字段覆盖与 `\uXXXX` 合法性、#5 armed 消费、#6 分卷流哈希
+逐字相同——四条 GO-note。7 条 NO-GO 行**先聚类再找上游根因**（用户指令
+2026-08-26），三簇：
+
+### 簇 A（3 条，Publish.hs）——上游根因：黑名单过滤后原样拼接
+
+- #2 critical：`pathArgOk` 放行奇数个尾随 `\`——bash 双引号内 `\"` 是转义，
+  `D:\safe;whoami;\` 让引号撑到下一行，第二行的首个 `"` 才闭合，`;whoami;`
+  落在引号外执行（词法推演成立；PowerShell 无此语义）。
+- #2 major：push 字符白名单放行 `--force origin main` → `git push --force`。
+- #4 major：`git add "<photos.json>"` 无 `--`，手编 `-A` 过 pathArgOk →
+  实测 `git add "-A"` = 整仓 add（`git add -- -A` 只加名为 `-A` 的文件）。
+
+三条同形：配置值被**黑名单过滤后当文本拼进 argv 位置**。黑名单要逐 shell
+枚举「能长出第二条命令」的字符类——39 轮补展开字符，40 轮补引号终结符与
+选项前缀，无法证明补全。类级修法 = **解析而非过滤**（与 P3b-16「返回解析后
+路径而非 Bool」同一原则）：`cmdPath` 把值解析成盘符 + 分量、分量按白名单
+（字母数字含 CJK、空格、`-_.()'+,=@~#&`）验证、以 `/` **重渲染**（git 在
+Windows 接受；三 shell 双引号内都无转义语义——反斜杠类整体消失）；
+`pushTarget` 按 `<remote> [<refspec>]` 解析、段首必为字母数字（选项 `-`、
+强推 `+`、删远端 `:branch` 三种形态一并出局）；操作数前一律 `--`（实测
+`git push -- --verbose main` 把 `--verbose` 当仓库名）；photos.json 改为仓内
+相对路径（不在仓内即拒）。设置入口（checkPatch：portfolioDir 只服务命令
+生成，嵌不进即拒）与生成汇点各验一次。
+
+### 簇 B（1 条，app.js）——上游根因：异步响应落 DOM 无「最新请求胜出」
+
+- #5 major：`showPlan` 无 single-flight，快速点 B 后 A 的响应晚到覆盖明细，
+  「执行」按钮绑的是 A。全仓同形清点：loadStatus / loadPlans / loadConfig /
+  sortScan（换源再扫，旧源提议晚到会把「生成计划」绑到旧 src）同样裸落；只有
+  loadVault 自带代号。类级修法：统一 `stamp/stale` 代号助手，五个加载器全部
+  走它，确认文案带计划 id。JS 无 HUnit 配对——node --check + 代码级核查登记。
+
+### 簇 C（3 条，文档）——上游根因：手抄数字/口径未从源再导出
+
+REVIEW-LOG 写 449 实为 451（分卷多出 10 行元数据）；DESIGN-COMMANDS 322 →
+当前；GUI 帮助未说明 portfolio 命令以 photos.json 为必要条件。修法之外的
+纪律：发布前所有计数字面量从命令输出再导出一遍（wc -l / 测试总数）。
+
+### 收敛证据（P7-H）
+
+**325 tests（324+1：caseCmdPath）**，GHC 警告 0。变异逐个恰好配对转红后还原：
+
+```
+m40-1  pushTarget 去段首检查        → 3 红（语法穷举 / 汇点复验 / checkPatch）
+m40-2  分量白名单放行 ';'           → 3 红（cmdPath 穷举 / 汇点复验 / checkPatch）
+m40-2b 渲染改回 '\' 分隔            → 2 红（渲染钉 / 结构钉「命令行无反斜杠」）
+m40-3  add 去 --                    → 1 红（结构钉「操作数前必有 --」）
+m40-4  photos.json 仓内检查去掉      → 1 红（仓外拒绝钉）
+m40-5  checkPatch 去 portfolioDir 可嵌检查 → 1 红
+```
+
+m40-1 首跑只红 2 条：汇点复验的选项样例 `-f origin main` 是**三段**，先被
+段数规则拒，钉不住段首规则——改成两段全白名单字符的 `--mirror origin` /
+`origin -f` 后 3 红。判别力不是写了断言就有，得让被测规则是唯一能拒它的。

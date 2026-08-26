@@ -122,9 +122,9 @@
         </div>
 
         <div class="cfg">
-          <div class="k">photos.json（可选）</div>
+          <div class="k">photos.json（可选；配置了下面的 portfolio 仓路径则必填）</div>
           <div class="row"><input id="cfg-photos" type="text" spellcheck="false" placeholder="portfolio 的 photos.json 路径"><button id="btn-cfg-photos" class="btn">保存</button><button id="btn-cfg-photos-clear" class="btn ghost">清空</button></div>
-          <div class="s">只用于 RENAME 的<strong>只读</strong>引用检查：被它引用的文件名不会被改名（会打断已上线的图片链接）。</div>
+          <div class="s">两个用途：RENAME 的<strong>只读</strong>引用检查（被它引用的文件名不会被改名，会打断已上线的图片链接）；以及上线命令里 portfolio 仓<strong>唯一</strong>会 add 的文件——它必须在 portfolio 仓内。</div>
         </div>
 
         <div class="cfg">
@@ -138,7 +138,7 @@
           <div class="row"><input id="cfg-portfolio-dir" type="text" spellcheck="false" placeholder="portfolio 仓的本地路径（可选）"><button id="btn-cfg-portfolio-dir" class="btn">保存</button><button id="btn-cfg-portfolio-dir-clear" class="btn ghost">清空</button></div>
           <div class="row"><input id="cfg-vault-push" type="text" spellcheck="false" placeholder="展示集仓 push 目标，如 origin main（留空 = git push）"><button id="btn-cfg-vault-push" class="btn">保存</button><button id="btn-cfg-vault-push-clear" class="btn ghost">清空</button></div>
           <div class="row"><input id="cfg-portfolio-push" type="text" spellcheck="false" placeholder="portfolio 仓 push 目标（留空 = git push）"><button id="btn-cfg-portfolio-push" class="btn">保存</button><button id="btn-cfg-portfolio-push-clear" class="btn ghost">清空</button></div>
-          <div class="s">「复制上线命令」按 vault 目录 + 这三项生成两仓的 git 提交/推送命令。pm 从不替你执行 git（不变量 I9）——复制后自己粘进终端，看清再回车。</div>
+          <div class="s">「复制上线命令」按 vault 目录 + 这三项生成两仓的 git 提交/推送命令：展示集仓只显式 add landscape / portrait / urban 三个类目，portfolio 仓只 add 上面的 photos.json（所以填了 portfolio 仓路径就必须同时设 photos.json，否则拒绝生成——永不整仓 add）。路径只接受盘符绝对路径且只含字母数字、空格与 -_.()'+,=@~#&，push 目标形如 <code>origin main</code>。pm 从不替你执行 git（不变量 I9）——复制后自己粘进终端，看清再回车。</div>
         </div>
 
         <div class="cfg">

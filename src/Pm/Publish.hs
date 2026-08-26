@@ -5,46 +5,101 @@
 -- 执行都发生在用户自己的终端里。与 'Pm.Vault.gitStepsLines'（推送计划附带的
 -- git 步骤）同一原则——命令生成在服务端一处，GUI 只渲染，不自己拼。
 --
--- 39 轮 #2/#4 后的两条纪律：
+-- 39/40 轮后的三条纪律：
 --
---   1. **汇点复验**：checkPatch 只闸住 API/CLI 写入口，手编 config.toml 可以
---      绕过它。生成是唯一汇点，push 目标与每条要嵌进命令的路径在这里**再验
---      一次**，不合格整体拒绝（Left），不出半块可疑文本。
---   2. **永不 @git add -A@**：与 'Pm.Vault.gitStepsLines' 的「明确禁止
---      git add -A / git add .」同一条红线——展示集仓按固定类目显式 add，
---      portfolio 仓只 add photos.json；photos.json 未配置就拒绝生成而不是
---      退化成整仓 add。
+--   1. **解析而非过滤**（40 轮 #2/#4 的上游根因）：配置值不再「黑名单过滤后
+--      原样拼进命令」——黑名单要逐 shell 枚举能长出第二条命令的字符，39 轮补
+--      展开字符、40 轮补引号终结符（bash 双引号内尾随 @\\@ 把引号撑到下一行）
+--      与选项前缀（@git add "-A"@ 实测 = 整仓 add），无法证明补全。改为把值
+--      **解析**成结构（'cmdPath' 盘符 + 分量、'pushTarget' 段列表），按白名单
+--      验证，再**重新渲染**：路径分隔符统一 @/@（git 在 Windows 接受；bash /
+--      PowerShell / cmd 的双引号内都没有转义语义），操作数前一律 @--@。
+--   2. **汇点复验**：checkPatch 只闸住 API/CLI 写入口，手编 config.toml 可以
+--      绕过它。生成是唯一汇点，每个要嵌进命令的值在这里**再验一次**，不合格
+--      整体拒绝（Left），不出半块可疑文本。
+--   3. **永不 @git add -A@**：展示集仓按固定类目显式 add，portfolio 仓只 add
+--      仓内相对路径的 photos.json；photos.json 未配置或不在仓内就拒绝生成。
 module Pm.Publish
   ( publishCommands
-  , pushTargetOk
+  , CmdPath
+  , cmdPath
+  , renderCmdPath
   , pathArgOk
+  , pushTarget
+  , pushTargetOk
   ) where
 
-import Data.Char (isAlphaNum, isControl)
-import Data.List (intercalate)
+import Data.Char (isAlphaNum, isAscii, isAsciiLower, isAsciiUpper, toLower)
+import Data.Either (isRight)
+import Data.List (dropWhileEnd, isPrefixOf)
 
 import Pm.Config (Config (..))
 import Pm.VaultCore (fixedCategories)
 
--- | push 目标（如 @origin main@、@git\@github.com:u\/r.git main@）的字符闸。
--- 生成的文本是要被整块复制进终端的：分号、管道、引号、反引号、@$@ 这类能让
--- 粘贴块长出第二条命令的字符一律拒绝。设置写入口（'Pm.ConfigEdit.checkPatch'
--- 与 @POST \/api\/config@ 共用）与生成汇点（'publishCommands'）都用它。
-pushTargetOk :: String -> Bool
-pushTargetOk s = not (null s) && length s <= 200 && all ok s
- where
-  ok ch = isAlphaNum ch || ch `elem` ("-._/:@~^ " :: String)
+-- | 已验证可嵌入命令行的路径：只接受盘符绝对路径，分量字符走白名单，
+-- 渲染形态固定为 @X:/a/b@（无尾随分隔符）。盘符开头必是字母——argv 位置上
+-- 永远不会以 @-@ 开头被 git 当成选项。
+newtype CmdPath = CmdPath {renderCmdPath :: String}
+  deriving (Show, Eq)
 
--- | 要嵌进命令行双引号里的**路径**的字符闸（39 轮 #2）。@$@ 在 PowerShell
--- 与 bash 的双引号内都触发展开——@D:\\repo$(...)@ 是合法 Windows 路径，粘贴
--- 即执行子表达式（实测）；反引号是 PowerShell 转义、@%@ 是 cmd 变量展开、
--- @!@ 是交互式 bash 的历史展开、@"@ 直接破坏引号结构。含这些字符的路径
--- **拒绝生成**（让用户手动执行），而不是尝试逐 shell 转义——同一块文本要
--- 粘进哪个 shell 由用户定，不存在对所有 shell 都安全的转义形。
-pathArgOk :: FilePath -> Bool
-pathArgOk p = not (null p) && all ok p
+-- | 分量字符白名单：字母数字（含 CJK）、空格与 @-_.()'+,=\@~#&@。这些在三个
+-- shell 的双引号内都是字面量；@" $ ` \\ % ! ;@ 与控制符一律不在名单上。
+compCharOk :: Char -> Bool
+compCharOk ch = isAlphaNum ch || ch `elem` (" -_.()'+,=@~#&" :: String)
+
+cmdPath :: FilePath -> Either String CmdPath
+cmdPath p
+  | length p > 240 = Left "超过 240 字符"
+  | otherwise = case p of
+      (d : ':' : sep : rest)
+        | (isAsciiUpper d || isAsciiLower d) && isSep sep -> do
+            let comps = dropWhileEnd null (splitSeps rest)
+            mapM_ compOk comps
+            pure (CmdPath (d : ":/" <> joinSlash comps))
+      _ -> Left "只接受盘符绝对路径（如 D:\\目录）"
  where
-  ok ch = not (isControl ch) && ch `notElem` ("\"$`%!" :: String)
+  isSep c = c == '\\' || c == '/'
+  splitSeps s = case break isSep s of
+    (a, []) -> [a]
+    (a, _ : b) -> a : splitSeps b
+  joinSlash = foldr1' (\a b -> a <> "/" <> b)
+  foldr1' _ [] = ""
+  foldr1' f xs = foldr1 f xs
+  compOk c
+    | null c = Left "含空分量（连续分隔符）"
+    | c == "." || c == ".." = Left "含 . 或 .. 分量"
+    | last c == ' ' || last c == '.' = Left ("分量以空格或点结尾: " <> c)
+    | not (all compCharOk c) = Left ("分量含白名单外字符: " <> c)
+    | otherwise = Right ()
+
+-- | 便捷谓词（测试与入口校验用）。
+pathArgOk :: FilePath -> Bool
+pathArgOk = isRight . cmdPath
+
+-- | push 目标语法：@<remote> [<refspec>]@，最多两段、单个空格分隔；每段以
+-- ASCII 字母数字**开头**（永远不会是选项 @-x@、强推 @+ref@ 或删远端分支的
+-- @:branch@ 形态），其余只含字母数字与 @-._/:\@~^@。设置写入口
+-- （'Pm.ConfigEdit.checkPatch'）与生成汇点（'publishCommands'）都用它。
+pushTarget :: String -> Either String [String]
+pushTarget s
+  | length s > 200 = Left "超过 200 字符"
+  | null ts = Left "为空"
+  | s /= unwords ts = Left "多余空白"
+  | length ts > 2 = Left "须为 <remote> [<refspec>] 两段以内"
+  | otherwise = mapM tok ts
+ where
+  ts = words s
+  tok t = case t of
+    [] -> Left "空段"
+    (h : _)
+      | not (asciiAlnum h) -> Left ("段须以字母数字开头（拒绝选项、强推与删除形态）: " <> t)
+      | not (all tokCh t) -> Left ("段含白名单外字符: " <> t)
+      | otherwise -> Right t
+  tokCh c = asciiAlnum c || c `elem` ("-._/:@~^" :: String)
+  asciiAlnum c = isAscii c && isAlphaNum c
+
+pushTargetOk :: String -> Bool
+pushTargetOk = isRight . pushTarget
 
 -- | 生成两仓上线命令（纯函数；@GET \/api\/publish-commands@ 原样返回）。
 -- 配置了哪侧就出哪侧；两侧都没配 → Left 指路设置页；任一项复验不过 →
@@ -57,24 +112,23 @@ publishCommands c = case (cfgVaultPath c, cfgPortfolioDir c) of
     ps <- maybe (Right []) pfSec mp
     pure (vs <> ps)
  where
-  q p = "\"" <> p <> "\""
-  gitC d args = "git -C " <> q d <> " " <> args
-  push t = "push" <> maybe "" (" " <>) t
-  checkPath what p
-    | pathArgOk p = Right p
-    | otherwise =
-        Left (what <> " 路径含无法安全嵌入命令的字符（\" $ ` % ! 或控制符）：" <> p <> " ——不生成，请手动执行")
+  q s = "\"" <> s <> "\""
+  gitC d args = "git -C " <> q (renderCmdPath d) <> " " <> args
+  push ts = "push" <> (if null ts then "" else " -- " <> unwords ts)
+  checkPath what p = case cmdPath p of
+    Right d -> Right d
+    Left why -> Left (what <> " 路径无法安全嵌入命令（" <> why <> "）：" <> p <> " ——不生成，请手动执行")
   checkPush what mt = case mt of
-    Nothing -> Right Nothing
-    Just t
-      | pushTargetOk t -> Right (Just t)
-      | otherwise -> Left (what <> " 的 push 目标不合法（配置文件被手改过？）：" <> t)
+    Nothing -> Right []
+    Just t -> case pushTarget t of
+      Right ts -> Right ts
+      Left why -> Left (what <> " 的 push 目标不合法（" <> why <> "；配置文件被手改过？）：" <> t)
   vaultSec v = do
     v' <- checkPath "vault 展示集" v
     t <- checkPush "展示集仓" (cfgVaultPush c)
     pure
       [ "# ① 展示集仓（推送前建议先看 pm vault status 是否全绿；显式类目，永不整仓 add）"
-      , gitC v' ("add " <> intercalate " " fixedCategories)
+      , gitC v' ("add -- " <> unwords fixedCategories)
       , gitC v' "commit -m \"photos: 更新展示集\""
       , gitC v' (push t)
       ]
@@ -84,10 +138,17 @@ publishCommands c = case (cfgVaultPath c, cfgPortfolioDir c) of
       Nothing ->
         Left "portfolio 仓已配置但 photos.json 路径未设——不生成整仓 add（会把无关改动一起推上去）；先在设置页补 photos.json"
       Just j -> checkPath "photos.json" j
+    rel <- case relUnder d j of
+      Just r -> Right r
+      Nothing -> Left ("photos.json 不在 portfolio 仓内（" <> renderCmdPath j <> " ∉ " <> renderCmdPath d <> "）——不生成")
     t <- checkPush "portfolio 仓" (cfgPortfolioPush c)
     pure
       [ "# ② portfolio 仓（只提交 photos.json；它由你在该仓里更新，pm 不写它）"
-      , gitC d ("add " <> q j)
+      , gitC d ("add -- " <> q rel)
       , gitC d "commit -m \"photos: 同步 photos.json\""
       , gitC d (push t)
       ]
+  -- 仓内相对路径（Windows 路径不分大小写，按折叠后比较）；不在仓内 → Nothing。
+  relUnder (CmdPath base) (CmdPath full)
+    | map toLower (base <> "/") `isPrefixOf` map toLower full = Just (drop (length base + 1) full)
+    | otherwise = Nothing

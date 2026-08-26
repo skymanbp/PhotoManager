@@ -25,7 +25,7 @@ import System.Directory (doesDirectoryExist, doesFileExist)
 
 import qualified Data.Text as T
 import Pm.Config (Config (..), configFilePath, loadConfig, withConfigLock, writeConfig)
-import Pm.Publish (pushTargetOk)
+import Pm.Publish (cmdPath, pushTarget)
 
 -- | 三态字段：'Nothing' = 本次不动；@Just Nothing@ = 清空；@Just (Just x)@ = 设成 x。
 data ConfigPatch = ConfigPatch
@@ -87,16 +87,20 @@ checkPatch p = do
   ep <- case cpPortfolioDir p of
     Just (Just v) -> do
       isDir <- doesDirectoryExist v
-      pure [v <> " 不是一个已存在的目录（portfolio 仓路径；不需要就留空）" | not isDir]
+      -- 这项**只**用于生成上线命令：目录在但嵌不进命令行的路径设了也没用，
+      -- 当场按 'cmdPath' 的白名单语法拒（vault/photos.json 另有用途，不在此拒）。
+      pure
+        ([v <> " 不是一个已存在的目录（portfolio 仓路径；不需要就留空）" | not isDir]
+          <> either (\why -> [v <> " 无法安全嵌入上线命令（" <> why <> "）——这项只用于生成命令，换一个只含字母数字、空格与 -_.()'+,=@~#& 的盘符绝对路径，或留空"]) (const []) (cmdPath v))
     _ -> pure []
   let ew = case cpWorkers p of
         Just (Just w) | w < 1 || w > 64 -> ["并发数 " <> show w <> " 越界（1..64）"]
         _ -> []
-      -- push 目标进的是「整块复制到终端」的命令文本：字符闸见 pushTargetOk。
+      -- push 目标进的是「整块复制到终端」的命令文本：语法闸见 'Pm.Publish.pushTarget'。
       es =
-        [ "push 目标 " <> show t <> " 不合法（≤200 字符，只允许字母数字、空格与 -._/:@~^）"
+        [ "push 目标 " <> show t <> " 不合法（" <> why <> "；须为 <remote> [<refspec>]，每段以字母数字开头，只含字母数字与 -._/:@~^，≤200 字符）"
         | Just (Just t) <- [cpVaultPush p, cpPortfolioPush p]
-        , not (pushTargetOk t)
+        , Left why <- [pushTarget t]
         ]
       -- @Just _@ 同时盖住 @Just (Just v)@（想改成 v）与 @Just Nothing@
       -- （main: null，想清空）：两者都是"经编辑层动主库"，一律拒。

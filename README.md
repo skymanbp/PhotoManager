@@ -278,8 +278,9 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   `SetFileInformationByHandle`（先验绑定 + 同句柄后验 + 回迁），名字口清零。
 - ~~GUI 执行面~~ ✅ P7（用户裁定 2026-08-26）：`pm ui` 以 `--allow-apply`
   拉起，计划页两次点击确认后直接执行已存计划（执行链与 CLI 同源）；上线命令
-  一键复制（`[portfolio] dir` + 两仓 push 目标可配，push 目标过字符闸；pm 不
-  执行 git）；档案 vault 侧新增 `/photo-publish` skill 作代执行入口。
+  一键复制（`[portfolio] dir` + 两仓 push 目标可配；路径与 push 目标**解析后
+  重渲染**——白名单语法、`/` 分隔、操作数前 `--`，而不是黑名单过滤后原样拼；
+  pm 不执行 git）；档案 vault 侧新增 `/photo-publish` skill 作代执行入口。
 
 **已知限制**：
 
