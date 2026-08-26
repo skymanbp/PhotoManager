@@ -571,6 +571,35 @@ Catalog/Plan/Trash 都写 pm 自有状态文件。声明的本意是照片字节
 「纯函数无 IO」同族：架构声明与代码事实的漂移，在有人拿它做判断之前据实
 收窄。
 
+### 同类扫尽（rule 09）：全仓布尔存在探针逐处分类
+
+按 doesFileExist/doesDirectoryExist/doesPathExist 全集清点 src/ + app/
+（约 60 命中），判据 = False 的去向是否放行 ∧ 下游有无响亮失败兜底：
+
+- **False→拒绝/报告即停**（安全方向，不动）：init/backup init/ingest 的
+  路径预检、ConfigEdit/Serve 的编辑校验、loadConfig 的「无配置」、
+  requirePmTrusted 的「非目录」、GitGuard 的「无 .gitignore」、
+  SortSource/Names/Sort 的源根检查。
+- **False→继续但下游响亮失败兜底**（不动）：写路径的「old? → delete →
+  moveBoundNoReplace」三连（Config writeConfig/writeJsonReplacing、Plan
+  savePlan——探针说谎则 no-replace 落位当场炸）；Exec/Apply/Names/Ingest
+  的目标占位判定（误判空位 → 执行期 no-replace/I5 复核挡住；误判占位 →
+  只是多拒一步）；Exec:335 与 Win slotOccupied 已是 try/异常按占用。
+- **False→更保守的误报**（不动，登记）：catalog/侧缓存当缺失重建、trash
+  枚举底座缺失答空（清除少删不会多删）、doctor 的 C/R/Q 行判定（探针塌
+  False 只流向非 --repair 行或把已完成误报成未完成；--repair 白名单只收
+  Warn+oid 组合且只补记录不动字节）、vault listFlatPhotos 目录缺失答空
+  （报告面偏 MISSING，push 的 MISSING 只报告）、Scan 的嵌套 root-id 判定
+  （塌 False 会把 .pm 内容当照片索引——catalog 污染可重扫修复，计划执行
+  仍有全部屏障）。
+- **False→放行且无兜底**（修，全仓唯一一处）：`pm init` 的配置存在闸
+  （Commands.hs）——exists 塌 False 绕过「配置已存在（--force 覆盖）」且
+  mold 丢失，既有备份盘登记被无 --force 覆盖。同 F1 三态化
+  （classifyGitProbe 通用化为存在性收口表，消息去 .git 化）；接线无独立
+  判别用例（Unknown 不可 E2E 注入；Surrogate 在旧写法下也非静默——落位
+  no-replace 会响亮失败），由共享分类器的穷举表 + 本条登记承载
+  （三十四轮 R2/R9 先例）。
+
 ### 收敛证据
 
 **310 tests（308+2）**，GHC 警告 0（touch 强制重编译改动文件后核实）。变异

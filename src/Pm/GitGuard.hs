@@ -34,12 +34,15 @@ import System.FilePath (takeDirectory, (</>))
 import Pm.Types (RootRole (..))
 import Pm.Win (NameKind (..), probeName)
 
--- | @.git@ 名字探测的三态判定（纯函数，用例穷举全部构造子）：
+-- | 存在性探测的三态收口表（纯函数，用例穷举全部构造子）。为 @.git@ 而生
+-- （三十六轮 F1），但表本身与名字无关——同轮类扫尽后 `pm init` 的配置存在闸
+-- 也用它（Commands.hs，全仓唯一另一处 False→放行 且无下游响亮失败兜底的
+-- 布尔探针）。消息不含具体名字，调用方自行前缀路径：
 --
---   * @Right True@ —— git 语境成立：普通目录（仓根）与普通文件（worktree\/
---     submodule 链接）都算；**surrogate 也算**（junction\/symlink，含悬空——
---     git 自己把悬空 @.git@ 当损坏仓而不是无仓；「当有」只会把守卫引向更严的
---     一侧：本层查 .gitignore、祖先层直接拒绝，不会放行）。
+--   * @Right True@ —— 名字被占着：普通目录\/文件都算；**surrogate 也算**
+--     （junction\/symlink，含悬空——对 .git，git 自己把悬空当损坏仓而不是
+--     无仓；对配置，链接占名 = 已存在。「当有」只会把守卫引向更严一侧，
+--     不会放行）。
 --   * @Right False@ —— 名字确实不存在（GetFileAttributes 错误码 2\/3）。
 --   * @Left@ —— 查不出（ACL 5\/断网 53\/介质错误……）：核不了 = 不放行，与
 --     「读不到 .gitignore」（三十五轮 F4）同向。
@@ -48,7 +51,7 @@ classifyGitProbe NameMissing = Right False
 classifyGitProbe NamePlain = Right True
 classifyGitProbe NameSurrogate = Right True
 classifyGitProbe ProbeUnknown =
-  Left "查不出 .git 是否存在（ACL/介质错误？）——核不了 = 不放行，解除后重试"
+  Left "存在性查不出（ACL/介质错误？）——核不了 = 不放行，解除后重试"
 
 -- | 三种 git 语境全覆盖：
 --
