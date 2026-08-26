@@ -50,6 +50,7 @@ module Pm.Config
 import Control.Exception (IOException, bracket, finally, throwIO, try)
 import Control.Monad (when)
 import Crypto.Random (getRandomBytes)
+import Data.Char (isControl)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
@@ -177,18 +178,35 @@ loadConfig = do
             Left e -> pure (Left (T.unpack (TOML.renderTOMLError e)))
             Right c -> pure (Right c)
 
--- | TOML literal strings (single quotes) keep Windows backslashes verbatim.
+-- | TOML 字符串值编码（39 轮 #3）。此前所有字符串值裸拼 literal 单引号：
+-- 值本身含 @'@（如 @D:\\O'Brien@，能过 checkPatch 的合法目录名）就写出
+-- **非法 TOML**——而 writeConfig 先落盘后重读，正式配置已被顶掉，每一条
+-- pm 命令自此起不来。能用 literal（反斜杠原样，Windows 路径可读）就用；
+-- 含单引号/控制符退到 basic string 并转义。**渲染器所有字符串值必须经它。**
+tomlStr :: Text -> Text
+tomlStr v
+  | T.all litOk v = "'" <> v <> "'"
+  | otherwise = "\"" <> T.concatMap esc v <> "\""
+ where
+  litOk ch = ch /= '\'' && not (isControl ch)
+  esc ch = case ch of
+    '"' -> "\\\""
+    '\\' -> "\\\\"
+    _
+      | isControl ch -> T.pack (printf "\\u%04X" (fromEnum ch))
+      | otherwise -> T.singleton ch
+
 renderConfig :: Config -> Text
 renderConfig c =
   T.unlines $
     [ "# pm 配置 —— 手动编辑后无需任何重载步骤"
     , "[main]"
-    , "path = '" <> T.pack (cfgMainPath c) <> "'"
+    , "path = " <> tomlStr (T.pack (cfgMainPath c))
     ]
       <> maybe [] (\w -> ["workers = " <> T.pack (show w)]) (cfgWorkers c)
       <> ( case (cfgBackupId c, cfgBackupSubpath c) of
             (Just bid, Just sub) ->
-              ["", "[backup]", "id = '" <> bid <> "'", "subpath = '" <> T.pack sub <> "'"]
+              ["", "[backup]", "id = " <> tomlStr bid, "subpath = " <> tomlStr (T.pack sub)]
             _ -> []
          )
       -- 每张表渲染**所有**已设字段：渲染器漏一个字段，下一次任何写回就把
@@ -201,7 +219,7 @@ renderConfig c =
         , ("push", cfgPortfolioPush c)
         ]
  where
-  section name kvs = case [k <> " = '" <> T.pack v <> "'" | (k, Just v) <- kvs] of
+  section name kvs = case [k <> " = " <> tomlStr (T.pack v) | (k, Just v) <- kvs] of
     [] -> []
     ls -> ["", "[" <> name <> "]"] <> ls
 

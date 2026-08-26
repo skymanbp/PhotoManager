@@ -316,15 +316,19 @@
       const label = `执行这个计划（${pending} 项待执行）`;
       const btn = el("button", "btn danger", label);
       let armed = false, timer = null;
+      const disarm = () => { armed = false; clearTimeout(timer); btn.classList.remove("armed"); btn.textContent = label; };
       btn.onclick = () => {
         if (!armed) {
           armed = true; btn.classList.add("armed");
           btn.textContent = "⚠ 再点一次确认执行（5 秒内）";
-          timer = setTimeout(() => { armed = false; btn.classList.remove("armed"); btn.textContent = label; }, 5000);
+          timer = setTimeout(disarm, 5000);
           return;
         }
-        clearTimeout(timer); btn.classList.remove("armed");
-        applyPlan(plan.id, btn).catch(fail);
+        // 确认即**消费** armed（39 轮 #5）：此前这里不复位，请求失败后按钮
+        // 恢复可点时仍处于已确认态——单击一次就能再执行。每次执行后回到
+        // 全新未确认状态，失败重试也要重新点两下。
+        disarm();
+        applyPlan(plan.id, btn, label).catch(fail);
       };
       row.appendChild(btn);
       row.appendChild(el("span", "muted small", "两段式的第二段：校验写入 + 日志，事后可 pm undo。重复执行幂等（已落位的项按内容跳过）。"));
@@ -335,7 +339,7 @@
 
   // 执行一个已存计划：串行（serve 侧有 seApplyLock + root 锁），结果与逐项
   // 输出全在 JSON 响应体里（serve 的 stdout 无人排空，不走 stdout）。
-  async function applyPlan(id, btn) {
+  async function applyPlan(id, btn, label) {
     const out = $("#apply-result");
     btn.disabled = true; btn.textContent = "执行中…（校验写入进行中，别关窗口）";
     try {
@@ -360,7 +364,8 @@
     } catch (e) {
       out.className = "banner bad"; out.textContent = "请求失败：" + e.message;
     } finally {
-      btn.disabled = false;
+      // 失败路径按钮还挂在页上：恢复成未确认原文案（armed 已在点击处消费）
+      btn.disabled = false; btn.textContent = label;
     }
   }
 

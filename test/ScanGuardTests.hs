@@ -48,8 +48,9 @@ scanGuardTests :: TestTree
 scanGuardTests =
   testGroup
     "三十九轮 扫描/新鲜度的「出错 = 查不出」纪律"
-    [ testCase "sweepCounts 穷举：出错路径不隐身、不算消失、必入错误数" caseSweepCounts
+    [ testCase "sweepCounts 穷举：出错路径不隐身、不算消失、必入错误数（含子树覆盖）" caseSweepCounts
     , testCase "E2E：ACL 全拒文件 → freshnessSweep 报错误而非「消失」，解除即归零" caseFreshnessSweepDenied
+    , testCase "E2E：基准目录被拒 → 错误口而非全零/整批消失（39 轮 #1，守卫不得 fail-open）" caseFreshnessSweepBaseDenied
     , testCase "E2E：scan 遇探针失败文件 → 不入索引、带路径入错误桶（三十七轮分支配对用例）" caseScanDeniedProbe
     , testCase "E2E：源根不可达 → listSource 整体拒绝不半扫（probeNotes 行登记无注入形态）" caseSourceRootProbeDenied
     , testCase "init 配置闸组合形态：非法字符名 → ProbeUnknown → classifyGitProbe Left 核不了" caseInitProbeUnknown
@@ -77,6 +78,13 @@ caseSweepCounts = do
   sweepCounts [] ["a"] catA @?= (0, 0, 0, 1)
   -- 遍历错在别的路径上：a 仍是真消失，错误另计
   sweepCounts [] ["sub"] catA @?= (0, 0, 1, 1)
+  -- 39 轮 #1：遍历错误按**子树**覆盖——目录 sub 列举失败时，catalog 里
+  -- sub\a.jpg 是「核不了」而非「消失」，且不与目录错误双重计数
+  sweepCounts [] ["sub"] (Map.fromList [("sub" </> "a.jpg", ent "s")]) @?= (0, 0, 0, 1)
+  -- 前缀必须按路径分量对齐：sub 出错不覆盖同前缀异分量的 subx.jpg
+  sweepCounts [] ["sub"] (Map.fromList [("subx.jpg", ent "x")]) @?= (0, 0, 1, 1)
+  -- 空路径 = 基准自身出错，覆盖整棵树（catalog 谁都不算消失）
+  sweepCounts [] [""] catA @?= (0, 0, 0, 1)
   -- 混合：b 新增；d 真消失；a（stat 失败）与 c（遍历错）都只走错误口
   sweepCounts
     [("a", boom), ("b", okS)]
@@ -98,6 +106,32 @@ caseFreshnessSweepDenied =
     r @?= (0, 0, 0, 1)
     r2 <- freshnessSweep dir "" cat
     r2 @?= (0, 0, 0, 0)
+
+-- | 39 轮 #1 E2E：**基准目录**被拒时此前 doesDirectoryExist 塌 False——
+-- catalog 空则全零（守卫 fail-open 放行），非空则整批误报「消失」。三态化后
+-- 两种 catalog 都必须走错误口；解除即恢复。
+caseFreshnessSweepBaseDenied :: IO ()
+caseFreshnessSweepBaseDenied =
+  withSystemTempDirectory "pm-fresh-base" $ \dir -> do
+    let base = dir </> "staging"
+    createDirectoryIfMissing True base
+    writeFile (base </> "a.jpg") "aa"
+    s <- statSnap (base </> "a.jpg")
+    let cat = Map.fromList [("staging" </> "a.jpg", Entry ("staging" </> "a.jpg") (ssSize s) (ssMtimeNs s) "x" KindPhoto Nothing)]
+    -- 对照：可读时一致
+    freshnessSweep dir "staging" cat >>= (@?= (0, 0, 0, 0))
+    -- 基准被拒 + catalog 空：旧实现 (0,0,0,0)（fail-open），现在必须报错误
+    rEmpty <- withDenyAll base (freshnessSweep dir "staging" Map.empty)
+    rEmpty @?= (0, 0, 0, 1)
+    -- 基准被拒 + catalog 非空：旧实现整批「消失」，现在同样只走错误口
+    rCat <- withDenyAll base (freshnessSweep dir "staging" cat)
+    rCat @?= (0, 0, 0, 1)
+    -- 真 ENOENT 保持现状语义：条目确实消失
+    freshnessSweep dir "no-such-dir" cat >>= (@?= (0, 0, 1, 0))
+    -- ProbeUnknown 分支（`_`）的确定性注入：非法字符名 → GetFileAttributes
+    -- 错误码 123 → 探不出，同样只走错误口而非全零（deny(F) 走的是 NamePlain→
+    -- 非目录那一支——见 caseSourceRootProbeDenied 上方的实验记录，两支各自钉）
+    freshnessSweep dir "st<aging" Map.empty >>= (@?= (0, 0, 0, 1))
 
 caseScanDeniedProbe :: IO ()
 caseScanDeniedProbe =

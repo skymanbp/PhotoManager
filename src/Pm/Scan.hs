@@ -19,18 +19,20 @@ import Control.Concurrent.Async (replicateConcurrently_)
 import Control.Exception (IOException, try)
 import Control.Monad (forM)
 import Data.IORef
+import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, pathIsSymbolicLink)
-import System.FilePath (takeExtension, takeFileName, (</>))
+import System.FilePath (pathSeparator, takeExtension, takeFileName, (</>))
 import System.IO (hPutStrLn, stderr)
 import System.IO.Error (isDoesNotExistError)
 import Text.Printf (printf)
 
 import Pm.Hash
 import Pm.Types
+import Pm.Win (NameKind (..), probeName)
 
 -- | Full-path length guard (DESIGN.md §14 长路径预检): refuse early and
 -- loudly instead of corrupting behaviour near MAX_PATH.
@@ -153,9 +155,20 @@ listTreeWith dots root = go ""
 freshnessSweep :: FilePath -> FilePath -> Map.Map FilePath Entry -> IO (Int, Int, Int, Int)
 freshnessSweep root relPrefix catSlice = do
   let base = if null relPrefix then root else root </> relPrefix
-  ex <- doesDirectoryExist base
-  (files, errs) <- if ex then listTree base else pure ([], [])
-  let pfx rel = if null relPrefix then rel else relPrefix </> rel
+  -- 基准目录三态（39 轮 #1）：此前 doesDirectoryExist 二态——目录被拒时塌
+  -- False，整棵树按「没有文件」算：catalog 空则全零（stagingFresh 放行，
+  -- fail-open），非空则整批误报「消失」。probeName 探不出（ACL/介质错误）
+  -- 时按一条覆盖全树的遍历错误处理；真 ENOENT 保持现状语义（条目确实消失）。
+  k <- probeName base
+  (files, errs) <- case k of
+    NamePlain -> do
+      isDir <- doesDirectoryExist base
+      if isDir
+        then listTree base
+        else pure ([], [("", "基准不是目录（或目录性查不出），树核不了")])
+    NameMissing -> pure ([], [])
+    _ -> pure ([], [("", "基准目录探不出（" <> show k <> "），树核不了")])
+  let pfx rel = if null rel then relPrefix else if null relPrefix then rel else relPrefix </> rel
   snaps <- forM files $ \rel -> do
     r <- try (statSnap (base </> rel)) :: IO (Either IOException StatSnap)
     pure (pfx rel, r)
@@ -174,9 +187,15 @@ sweepCounts :: [(FilePath, Either IOException StatSnap)] -> [FilePath] -> Map.Ma
 sweepCounts snaps walkErrPaths catSlice = (newN, changedN, goneN, errN)
  where
   disk = Map.fromList [(rel, s) | (rel, Right s) <- snaps]
-  fails = Set.fromList ([rel | (rel, Left _) <- snaps] <> walkErrPaths)
+  statFails = Set.fromList [rel | (rel, Left _) <- snaps]
+  -- 遍历错误按**子树**覆盖（39 轮 #1）：目录 @sub@ 列举失败时，catalog 里
+  -- @sub\a.jpg@ 同样核不了——只按精确键剔除会让后代条目被误报「消失」且与
+  -- 该目录的错误双重计数。空路径 = 基准自身出错，覆盖整棵树。
+  walkCovered k = any (\p -> null p || p == k || (p <> [pathSeparator]) `isPrefixOf` k) walkErrPaths
   newN = Map.size (disk `Map.difference` catSlice)
-  goneN = Map.size (Map.withoutKeys (catSlice `Map.difference` disk) fails)
+  goneN =
+    Map.size
+      (Map.filterWithKey (\k _ -> not (walkCovered k)) (Map.withoutKeys (catSlice `Map.difference` disk) statFails))
   changedN =
     length
       [ ()
@@ -184,7 +203,7 @@ sweepCounts snaps walkErrPaths catSlice = (newN, changedN, goneN, errN)
       , Just e <- [Map.lookup rel catSlice]
       , enSize e /= ssSize s || enMtimeNs e /= ssMtimeNs s
       ]
-  errN = length walkErrPaths + length [() | (_, Left _) <- snaps]
+  errN = length walkErrPaths + Set.size statFails
 
 scanRoot :: ScanOpts -> Maybe Catalog -> Text -> FilePath -> IO ScanResult
 scanRoot opts oldCat rootId root = do

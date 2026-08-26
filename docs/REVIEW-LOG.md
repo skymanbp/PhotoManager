@@ -1,8 +1,8 @@
 # pm 评审记录（现行卷：第 35 轮起）
 
 > 从 `docs/DESIGN.md` §16 拆出（2026-08-24）；因 750 行预算多次分卷：
-> **v0.1→v0.2 设计评审、P3b 逐轮收口、P4 GUI、用户决策记录**在
-> [`REVIEW-LOG-1.md`](REVIEW-LOG-1.md)；**第 29–34 轮（P5 后期→P6 中期）**在
+> **v0.1→v0.2 设计评审、P3b 逐轮收口**在 [`REVIEW-LOG-1.md`](REVIEW-LOG-1.md)，
+> **P4 GUI 与用户决策记录**在 [`REVIEW-LOG-1B.md`](REVIEW-LOG-1B.md)；**第 29–34 轮（P5 后期→P6 中期）**在
 > [`REVIEW-LOG-2.md`](REVIEW-LOG-2.md)（2026-08-26 拆出）；每轮评审的逐条
 > 处置表在 [`docs/reviews/`](reviews/)。本文件装第 35 轮起的评审段。
 
@@ -347,3 +347,58 @@ ServeTests 952→629 + ServeWriteTests 376；SortTests 1044→571 + SortGuardTes
 - 状态页新鲜度补 errors 口径（与 Pm.Status 渲染一致）；「复制上线命令」按钮
   + 设置页三项。验证：node --check、cargo check (msvc)、真库 serve 冒烟
   （ping allowApply=true / config.publish / publish-commands 200）。
+
+## 第 39 轮（P7-F `76eaaa2` 送审，codex 钉 SHA）——NO-GO，minset 6 条全修（P7-G）
+
+attempt 1 即真跑（188 次命令执行，watchdog 三判据全过）。六条第一方全部
+核实成立（#2/#3 各有实证探针：PowerShell 双引号内 `$()` 确实展开、含 `'`
+路径写盘后 TOML 解码确实失败且 configTxn 已换正式文件）：
+
+1. **freshnessSweep 基准两态 + 遍历错误无子树覆盖（major）**：基准目录被拒
+   时 doesDirectoryExist 塌 False → catalog 空则全零（stagingFresh 放行，
+   fail-open）；goneN 只按精确键剔错，`sub` 枚举失败时 `sub\a.jpg` 既计
+   消失又计错误。修：基准 probeName 三态（Missing 保 ENOENT 语义；Plain
+   而非目录、或探不出 → 一条覆盖全树的遍历错误）；`walkCovered` 按路径
+   分量前缀覆盖后代、从 gone 剔除不双计。
+2. **上线命令生成无路径闸（critical）**：`$()` 在 PowerShell/bash 双引号内
+   都展开——合法 Windows 路径粘贴即执行；且手编 config.toml 绕过
+   checkPatch。修：新 `pathArgOk`（`" $ ` % !` 与控制符拒），
+   `publishCommands` 汇点对 push 目标与每条路径**再验一次**，不合格整体
+   Left——拒绝生成而非逐 shell 转义（目标 shell 由用户定，无通用安全转义）。
+3. **TOML 渲染器无字符串转义（major）**：`D:\O'Brien` 过 checkPatch 后写成
+   非法 TOML，配置当场变砖（既有字段同根，P7 新字段新增可达实例）。修：
+   新 `tomlStr`——可 literal 则 literal，含 `'`/控制符退 basic string 转义；
+   渲染器所有字符串值必经它（round-trip 用例逐字段钉）。
+4. **vault 段 `add -A`（major）**：与 DESIGN §14 及 gitStepsLines「明确禁止
+   add -A」直接冲突。修：展示集按 `fixedCategories` 显式 add；portfolio 缺
+   photos.json 配置时**拒绝生成**而非退化整仓 add。收口时生成文本的注释行
+   自身含「add -A」字样撞上「任何一行不得含 add -A」的钉——改写注释措辞，
+   钉保持全行扫描不放松。
+5. **GUI armed 未在确认时消费（major）**：失败后按钮恢复可用且仍 armed，
+   单击即再执行。修：confirm 分支先 `disarm()` 再发请求，成功/失败出口都
+   回到全新未确认按钮（label 还原）。
+6. **REVIEW-LOG-1.md 1027 行超预算（minor）**：冻结档案在无豁免口径下同样
+   违规——逐字分卷为 REVIEW-LOG-1（449，v0.1→v0.2 + P3b）与 REVIEW-LOG-1B
+   （586，P4 GUI + 用户决策记录），指针链同步。
+
+GO-notes：Win.hs volumeFsType 的 SomeException 保留为已登记残余（评审建议
+后续显式重抛 AsyncException，登记不动）；测试算术 305→311→311→317 标签级
+核对成立；Serve 鉴权/执行链无旁路，DESIGN §14 token 表述诚实。
+
+### 收敛证据（P7-G）
+
+**324 tests（322+2：caseFreshnessSweepBaseDenied / casePublishSinkGuards）**，
+GHC 警告 0。变异验证中**修正一处归因**：目录级 deny(F) 实测走的是
+NamePlain→doesDirectoryExist 塌 False 的「非目录」支（§P7-A ACL 实验早有
+记录），不是 ProbeUnknown 支——后者以非法字符名（ERROR_INVALID_NAME 123）
+确定性注入补钉，三态三支自此各有配对：
+
+```
+m39-1  walkCovered 去前缀覆盖        → 红（sweepCounts 穷举）
+m39-2  ProbeUnknown 支塌空          → 红（基准被拒 E2E·非法名钉）
+m39-2b NamePlain 非目录支塌空        → 红（基准被拒 E2E·deny(F) 钉）
+m39-3  pathArgOk 放开               → 红（汇点复验）
+m39-4  vault add 退回 -A            → 红（publishCommands 显式类目）
+m39-5  tomlStr 恒 literal           → 红（round-trip 单引号路径）
+#5 为 JS，无 HUnit 配对——node --check + 代码级核查登记
+```

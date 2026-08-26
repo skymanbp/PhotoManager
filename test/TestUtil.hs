@@ -252,6 +252,9 @@ mkVaultCfg root vdir =
     , cfgWorkers = Nothing
     , cfgBackupId = Nothing
     , cfgBackupSubpath = Nothing
+    , cfgPortfolioDir = Nothing
+    , cfgVaultPush = Nothing
+    , cfgPortfolioPush = Nothing
     }
 
 writeF :: FilePath -> String -> IO ()
