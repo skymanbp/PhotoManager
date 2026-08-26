@@ -332,6 +332,13 @@ caseServePlans :: IO ()
 caseServePlans = withSystemTempDirectory "pm-serve" $ \dir -> do
   let root = dir </> "root"
   (cfg, _, sj, _) <- fixture root
+  -- 第一方自审 R1：.pm/plans 被文件占名（列不了目录）→ errors 一条，不得
+  -- 静默当「没有计划」（旧 doesDirectoryExist 塌 False → 空列表零报错）。
+  writeFile (pmDir root </> "plans") ""
+  (ps0, errs0) <- listPlans root
+  ps0 @?= []
+  assertBool ("plans 占名应报 errors: " <> show errs0) (not (null errs0))
+  removeFile (pmDir root </> "plans")
   plan <- mkPlanIO root [OpRename ("相册" </> "a.jpg") ("相册" </> "a2.jpg") (FpFileSha sj)]
   _ <- savePlan plan
   (ps, errs) <- listPlans root

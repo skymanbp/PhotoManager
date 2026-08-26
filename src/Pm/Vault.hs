@@ -20,6 +20,7 @@ module Pm.Vault
   , readVaultCacheMeta
   , VaultReport (..)
   , computeVault
+  , listFlatPhotos
   , ensureVaultRoot
   , vaultIgnoreGuard
   , gitStepsLines
@@ -49,7 +50,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Generics (Generic)
-import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory (canonicalizePath, doesDirectoryExist, listDirectory)
 import System.FilePath (splitDirectories, takeExtension, (</>))
 import Text.Printf (printf)
 
@@ -59,10 +60,11 @@ import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
 import Pm.Plan
+import Pm.Publish (vaultCommands)
 import Pm.Types
 import Pm.VaultCore (VaultDiff (..), fixedCategories, photoExtFold, pushableExt, renderVaultJson, vaultDiff)
 import Pm.VaultHold (VaultHold (..), readHolds, splitHeld)
-import Pm.Win (volumeFsType)
+import Pm.Win (volumeFsType, whenPresent)
 
 -- ─── vault 侧缓存（主库 .pm\/vault-cache\/，display + sha 复用） ─────────────
 
@@ -115,24 +117,19 @@ writeVaultCache mainRoot = writeSideCache mainRoot pmSubVaultCache
 -- （Explorer、用户手工整理），listDirectory 抛出会一路逃顶；而静默退化成
 -- 空列表更糟——整个另一侧会被伪报成 MISSING/NEW。枚举失败 = Left，
 -- 调用方整体拒绝本轮报告（exit 2，与 "source missing" 同级）。
+--
+-- 第一方自审 R1：存在性此前是 @doesDirectoryExist@ 二态——类目目录被 ACL 拒时
+-- 塌成「不存在 = 空」，整个类目的照片伪报 NEW、一张都不 MISSING。改走
+-- 'whenPresent' 三态：缺席才是空，查不出 = Left（本轮报告整体拒绝）。
 listFlatPhotos :: FilePath -> IO (Either String ([FilePath], [FilePath]))
 listFlatPhotos dir = do
-  ex <- doesDirectoryExist dir
-  if not ex
-    then pure (Right ([], []))
-    else do
-      r <-
-        try
-          ( do
-              names <- listDirectory dir
-              mapM (\n -> (,) n <$> doesDirectoryExist (dir </> n)) names
-          )
-          :: IO (Either IOException [(FilePath, Bool)])
-      pure $ case r of
-        Left e -> Left (dir <> " 枚举失败（" <> show e <> "）")
-        Right flagged ->
-          let (dirs, files) = partition snd flagged
-           in Right (sort (filter photoExtFold (map fst files)), sort (map fst dirs))
+  r <- whenPresent dir (listDirectory dir >>= mapM (\n -> (,) n <$> doesDirectoryExist (dir </> n)))
+  pure $ case r of
+    Left e -> Left (dir <> " 枚举失败（" <> e <> "）")
+    Right Nothing -> Right ([], [])
+    Right (Just flagged) ->
+      let (dirs, files) = partition snd flagged
+       in Right (sort (filter photoExtFold (map fst files)), sort (map fst dirs))
 
 -- | 取一个文件的 sha：stat 与缓存条目一致（statHitStable：含 racy 余量
 -- 判据，评审 #4）→ 复用；否则真实重读，双 stat 防撕裂。三轮不稳 →
@@ -485,14 +482,21 @@ ensureVaultRoot vaultDir = do
               pure (Right info)
 
 -- | push 收尾要打印的显式 git 步骤（纯函数；I9：pm 自己绝不执行）。
-gitStepsLines :: FilePath -> Text -> [String] -> [String]
-gitStepsLines vaultDir pid cats =
-  [ "→ vault 侧 git 收尾（pm 不执行 git；明确禁止 git add -A / git add .）："
-  , "    cd " <> vaultDir
-  , "    git add " <> unwords (sort (nub cats))
-  , "    git commit -m \"photos: pm vault push " <> T.unpack pid <> "\""
-  , "    git push origin main"
-  ]
+--
+-- 第一方自审 R2：文本由 'Pm.Publish.vaultCommands' 生成——与「复制上线命令」
+-- 同一生成点，push 目标取自设置、路径解析后重渲染、操作数前 @--@。此前这里
+-- 是第二个生成器：硬打不加引号的 @cd@ 与 @git push origin main@，P7 加了可配
+-- 的 push 目标它却不知道。生成不了（路径嵌不进命令）就把原因说出来，让用户
+-- 手动做；三个消费点（CLI push 收尾、API push-plan 响应、ingest 收尾）共用。
+gitStepsLines :: Config -> FilePath -> Text -> [String] -> [String]
+gitStepsLines cfg vaultDir pid cats =
+  "→ vault 侧 git 收尾（pm 不执行 git；显式类目，明确禁止 git add -A / git add .）："
+    : case vaultCommands cfg vaultDir (sort (nub cats)) ("photos: pm vault push " <> T.unpack pid) of
+      Right ls -> map ("    " <>) ls
+      Left why ->
+        [ "    （无法安全生成命令：" <> why <> "）"
+        , "    请在 " <> vaultDir <> " 里手动：git add <类目…> → git commit → git push"
+        ]
 
 -- | 计划涉及的 vault 类目（= 各 Copy dst 的第一层目录；git add 的显式对象）。
 planCategories :: Plan -> [String]
@@ -510,19 +514,18 @@ planCategories plan =
 -- BS.readFile 抛出会让整个 push 崩掉；而读不出也**不得**答「未被引用」——
 -- 那是 fail-open，会诱导用户改名打断已上线 URL。读失败 = Left，调用方按
 -- 「可能被引用」报告（fail-closed）。
+-- 第一方自审 R1：存在性探测也三态化——@doesFileExist@ 把 ACL 拒绝塌成「不存
+-- 在」，正是上一段说的那个 fail-open 口子的另一半（三十四轮只堵了读取那半）。
 photosJsonRef :: Maybe FilePath -> FilePath -> IO (Either String (Maybe Int))
 photosJsonRef Nothing _ = pure (Right Nothing)
 photosJsonRef (Just fp) name = do
-  ex <- doesFileExist fp
-  if not ex
-    then pure (Right Nothing)
-    else do
-      r <- try (BS.readFile fp) :: IO (Either IOException BS.ByteString)
-      pure $ case r of
-        Left e -> Left (show e)
-        Right raw ->
-          let ls = zip [1 :: Int ..] (T.lines (TE.decodeUtf8Lenient raw))
-           in Right (case [i | (i, l) <- ls, T.pack name `T.isInfixOf` l] of i : _ -> Just i; [] -> Nothing)
+  r <- whenPresent fp (BS.readFile fp)
+  pure $ case r of
+    Left e -> Left e
+    Right Nothing -> Right Nothing
+    Right (Just raw) ->
+      let ls = zip [1 :: Int ..] (T.lines (TE.decodeUtf8Lenient raw))
+       in Right (case [i | (i, l) <- ls, T.pack name `T.isInfixOf` l] of i : _ -> Just i; [] -> Nothing)
 
 -- | `pm vault push [--category C FILES...]`：
 -- NEW×已定类目 → Copy 计划项；DRIFT → NEEDS-DECISION（pm resolve --keep src
@@ -575,7 +578,7 @@ runVaultPush runPlan mCat files cfg = do
                     Right plan -> do
                       code <- runPlan plan
                       when (code == 0) $
-                        mapM_ putStrLn (gitStepsLines (vrVaultDir r) (plId plan) (planCategories plan))
+                        mapM_ putStrLn (gitStepsLines cfg (vrVaultDir r) (plId plan) (planCategories plan))
                       pure code
 
 -- ─── vault push 的计划构造（CLI 与 `pm serve` 的 POST /api/vault/push-plan 共用，P4-5） ──

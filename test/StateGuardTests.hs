@@ -19,7 +19,7 @@ import qualified Data.ByteString.Lazy as BSL
 import Data.List (isInfixOf)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, removeDirectory, removeDirectoryLink)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeDirectory, removeDirectoryLink)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
@@ -27,7 +27,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (loadCatalog, saveCatalog)
-import Pm.Config (Config (..), SideCacheWrite (..), pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
+import Pm.Config (Config (..), SideCacheWrite (..), ensurePmSubdir, pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
 import Pm.Exec (Checkpoint (..), ExecEnv (..), ItemOutcome (..), defaultExecEnv, dirFingerprint, execPlan)
 import Pm.GitGuard (classifyGitProbe, vaultIgnoreGuard)
@@ -66,6 +66,7 @@ stateGuardTests =
     , testCase "三十二轮 R1：短暂共享冲突（err 32）→ 提交型打开按 Win32 同款预算重试而非立刻失败" caseDisposeRetriesSharing
     , testCase "三十六轮 F1 classifyGitProbe 三态穷举：查不出 ≠ 不存在（ProbeUnknown 必须 Left）" caseClassifyGitProbe
     , testCase "三十六轮 F1 悬空 .git junction → 判 git 语境要 .gitignore（布尔探针会当「无 git」放行）" caseDanglingGitJunction
+    , testCase "第一方自审 R5：.pm 是 junction → ensurePmSubdir/savePlan/appendManifest 拒绝且库外零目录副作用" caseEnsurePmSubdirNoSideEffect
     ]
 
 -- 本模块只需要 hardlink（/H）与文件 symlink（无开关）两种形态；目录 junction
@@ -617,3 +618,33 @@ caseDanglingGitJunction = withSystemTempDirectory "pm-sguard" $ \dir -> do
     Right () -> assertFailure "悬空 .git junction 被当成「无 git 语境」放行（三十六轮 F1 的形状）"
     Left msg -> assertBool ("应按 git 语境要求 .gitignore: " <> msg) (".gitignore" `isInfixOf` msg)
   removeDirectoryLink (v </> ".git")
+
+-- ─── 第一方自审 R5：`.pm` 子目录「先限域再建」───────────────────────────────
+
+-- | @.pm@ 整个是 junction 时，旧序「先 createDirectoryIfMissing 子目录、再
+-- resolveUnder 限域」照样会**拒绝**——但 mkdir 已经穿透 junction 把
+-- @plans/@\/@trash/@ 建进了库外，留下目录副作用。'ensurePmSubdir' 把限域挪到
+-- mkdir 之前：把它退回「先建后限域」，下面三条 @doesDirectoryExist … \@?= False@
+-- 转红（拒绝断言仍绿——这正是旧序漏检的原因）。
+caseEnsurePmSubdirNoSideEffect :: IO ()
+caseEnsurePmSubdirNoSideEffect = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside"
+  createDirectoryIfMissing True root
+  createDirectoryIfMissing True outside
+  mkJunction (pmDir root) outside
+  -- 根口：helper 本身
+  eh <- ensurePmSubdir root "probe"
+  either (const (pure ())) (const (assertFailure "ensurePmSubdir 应拒绝 junction 化的 .pm")) eh
+  doesDirectoryExist (outside </> "probe") >>= (@?= False)
+  -- 消费口 1：savePlan（plan 在真实的 root2 上构造，写向被劫持的 root）
+  plan0 <- mkPlanIO (dir </> "root2") []
+  rs <- try (savePlan plan0 {plRootPath = root}) :: IO (Either SomeException FilePath)
+  either (const (pure ())) (const (assertFailure "savePlan 应拒绝 junction 化的 .pm")) rs
+  doesDirectoryExist (outside </> "plans") >>= (@?= False)
+  -- 消费口 2：appendManifest
+  now <- getCurrentTime
+  ra <- try (appendManifest root (TrashRecord "v.jpg" "v.jpg" "aa" "t" tpid now)) :: IO (Either SomeException ())
+  either (const (pure ())) (const (assertFailure "appendManifest 应拒绝 junction 化的 .pm")) ra
+  doesDirectoryExist (outside </> "trash") >>= (@?= False)
+  removeDirectoryLink (pmDir root)

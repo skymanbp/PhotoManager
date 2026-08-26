@@ -462,3 +462,74 @@ m40-5  checkPatch 去 portfolioDir 可嵌检查 → 1 红
 m40-1 首跑只红 2 条：汇点复验的选项样例 `-f origin main` 是**三段**，先被
 段数规则拒，钉不住段首规则——改成两段全白名单字符的 `--mirror origin` /
 `origin -f` 后 3 红。判别力不是写了断言就有，得让被测规则是唯一能拒它的。
+
+## P7-I 第一方全量自审（用户指令 2026-08-26：发布前亲自审一遍代码与架构）
+
+非 codex 轮：主线亲读全部源码——src 全模块 + cbits + gui
+（lib.rs/app.js/index.html）+ 测试语域抽查，阅读序 Win→状态层→命令层→
+serve/gui。发现**先聚类再上溯根因**（同日用户指令），归 8 簇、类级修齐：
+
+### 簇与上游根因
+
+- **R1 布尔存在探针 False→安心继续（读路径漏网）**：36/39 轮的三态类扫只扫
+  了写路径守卫，只读报告路径上 `doesFileExist/doesDirectoryExist` 仍把
+  ProbeUnknown 塌成「没有」——Vault.listFlatPhotos（类目 ACL 拒→当空→全表
+  NEW）、Vault.photosJsonRef（读不出→答「未被引用」，与自身 34 轮注释矛盾）、
+  Sort.existingEvents（→提议重复事件夹）、Plan.listPlans（→页面安静空白）。
+  修：`Pm.Win.whenPresent`（NameMissing→Right Nothing；ProbeUnknown→Left；
+  在场才 try act）四处改用；Ingest.crossCat 走 36 轮既有的
+  `classifyGitProbe <$> probeName`，查不出=errors 一条。
+- **R2 同一命令文本两个生成器**：P7 给上线命令建了解析-重渲染
+  （Publish.cmdPath/pushTarget），CLI push 收尾 Vault.gitStepsLines 仍硬打
+  `cd <dir>`（不引号）+ `git push origin main`（无视 cfgVaultPush）。修：
+  `Publish.vaultCommands` 单生成点（类目白名单、commit 信息字符闸、路径经
+  cmdPath），四个消费口（runVaultPush / Serve push-plan / Apply.afterApply /
+  Ingest.ingestSteps）全走它，Left 时打印原因+手动指引。
+- **R3 Windows 名字合法性知识散三处**：Publish.compOk 有尾随检查、Op.normComp
+  只做剥后比较、Sort.badChar 只有保留字符——`--place "Boston."` 过闸，落位名
+  被 Win32 剥点，handleIsAt 后验必败（响亮失败，但该在计划前拒）。修：
+  `Op.winNameOk`（非空/无保留字符控制符/不以点空格结尾），Sort 两入口走它。
+- **R4 用户键入路径未绝对化入库**：`pm config set --vault rel` 直写配置，
+  相对路径按进程 cwd 解析，`pm ui` 拉起的 serve 与终端 pm 各有各的 cwd。修在
+  汇点 Config：writeConfig 写前 makeAbsolute 四个路径字段、loadConfig 出口
+  checkAbsolute 拒手编相对路径——init/config set/serve PATCH 一次收齐。
+- **R5 `.pm` 子目录先 mkdir 后限域**：savePlan/appendManifest 先
+  `createDirectoryIfMissing` 再 resolveUnder，`.pm` 是库外 junction 时拒绝
+  前已在库外建出 plans/、trash/（拒绝对、副作用不该有；writeSideCache 早已
+  是对的次序）。修：`Config.ensurePmSubdir` 先限域再建，两处收齐。
+- **R6 resolveUnder 缺失层后余段裸拼**：下降循环只查**当前**分量，NameMissing
+  后余段 `foldl (</>)` 原样拼上——`..` 能在缺失层之后越级；带盘符（`c:x`）或
+  分隔符起头的分量让 `</>` **整体替换**逃出 base（filepath 实测语义）。修：
+  下降前对整段 splitDirectories 过 badComp 预检（词法层 relPathOk 之外的
+  纵深第二道）。
+- **R7 部分写窗口与重复定义**：Journal.jAppend / Trash.appendManifest 两次
+  hPut（行体与 `\n` 之间可被崩溃切开）→ 单 hPut 一次成行；Dedupe.foldPath
+  本地重定义 → 收编 Pm.Import.foldPath。
+- **R8 backup init 收 UNC 路径**：登记只记盘内相对路径、发现只枚举本机盘符
+  卷——UNC 登记得上、永远发现不了。修：canonicalize **之前**盘符词法闸
+  （不探网络）。
+
+### 收敛证据
+
+**330 tests（325+5：caseFirstPartySweep / caseProbeUnknownFailClosed /
+caseVaultCommands / caseConfigAbsolutePaths / caseEnsurePmSubdirNoSideEffect；
+另 caseGitSteps 重写、SortTests/GuardTests/ServeTests 各扩位）**，GHC 警告 0。
+变异逐个恰好配对转红后还原（邻近用例全绿，判别力核过）：
+
+```
+m-R1h whenPresent ProbeUnknown→Right Nothing → 2 红（三态钉 / listFlatPhotos 钉）
+m-R1p listPlans 吞 Left                      → 1 红（plans 是文件 → errors 必非空）
+m-R2  gitStepsLines 退回硬打 cd/origin main   → 1 红（与上线命令同一生成点钉）
+m-R3  winNameOk 丢尾点/空格判定               → 2 红（eventNameFor / resolveEvent）
+m-R4a writeConfig 去绝对化                   → 1 红   m-R4b loadConfig 去拒 → 1 红
+m-R5  ensurePmSubdir 退回先建后限域           → 1 红（库外零目录副作用钉）
+m-R6  resolveUnder 拆整段预检                → 1 红（缺失层后 ../盘符分量钉）
+m-R8  盘符闸拆除                             → 1 红（UNC 拒绝钉）
+```
+
+无从判红、代码级核查登记：R7 两处单 hPut 与 Dedupe.foldPath 收编——判别
+试针需要能观测「两次 hPut 之间」的崩溃点或语义差异，不存在；Ingest.crossCat
+的 ProbeUnknown 分支需 ACL 夹具（分类函数本身已被 caseClassifyGitProbe 判定
+表钉住）。接受不修（方向安全）：Doctor.staleTmpFiles 查不出→不删（no-delete
+方向）、Names 成片枚举塌 False→少提议 rename（只读）、Trash.listTrashFiles
+base 塌缩（既有注释登记）。

@@ -15,12 +15,12 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.Wai.Test
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile)
-import System.FilePath ((</>))
+import System.FilePath (isAbsolute, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Config (configFilePath, loadConfig, withConfigLock, writeConfig)
+import Pm.Config (Config (..), configFilePath, loadConfig, withConfigLock, writeConfig)
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan)
 import Pm.Serve (listPlans, serveApp)
@@ -47,6 +47,7 @@ serveWriteTests =
         , testCase "POST /api/config：配置锁被别的 pm 占着 → 409，配置零改动" caseServeConfigLock
         , testCase "writeConfig：config.toml.tmp 被 hardlink 占名 → 不穿透写，库外文件零改动" caseConfigTmpHardlink
         , testCase "loadConfig：正文缺失而残留 .tmp → 指出这是中断的写入并给恢复动作，不当\"配置不存在\"" caseConfigOrphanTmp
+        , testCase "第一方自审 R4：配置路径须绝对——writeConfig 写前绝对化；手编相对路径 loadConfig 拒" caseConfigAbsolutePaths
         ]
     ]
 
@@ -373,4 +374,26 @@ caseConfigOrphanTmp = withSystemTempDirectory "pm-serve" $ \dir -> do
   case r of
     Right _ -> assertFailure "正文缺失时不应当读成功"
     Left m -> assertBool ("应指出残留 .tmp 与恢复动作: " <> m) (".tmp" `isInfixOf` m)
+
+-- | 第一方自审 R4：相对路径按进程 cwd 解析，`pm ui` 拉起的 serve 与终端里的
+-- pm 各有各的 cwd——同一份配置会指向两个地方。写侧入库前绝对化（`pm init
+-- --main .` 这类键入不落成相对路径）；读侧拒手编的相对路径。
+caseConfigAbsolutePaths :: IO ()
+caseConfigAbsolutePaths = do
+  fp <- configFilePath
+  had <- doesFileExist fp
+  before <- if had then Just <$> BS.readFile fp else pure Nothing
+  -- 写侧：相对 main 路径 → 盘上是绝对路径，读回不被绝对路径闸拒
+  _ <- writeConfig (mkCfg "relmain")
+  ec <- loadConfig
+  -- 读侧：手编相对路径 → Left（不猜 cwd）
+  writeFile fp "[main]\npath = 'rel\\dir'\n"
+  ec2 <- loadConfig
+  maybe (removeFile fp) (BS.writeFile fp) before -- 先恢复现场再断言（同 caseConfigOrphanTmp）
+  case ec of
+    Left m -> assertFailure ("写侧绝对化后应能读回: " <> m)
+    Right c -> assertBool ("main.path 应已绝对化: " <> cfgMainPath c) (isAbsolute (cfgMainPath c))
+  case ec2 of
+    Right c -> assertFailure ("手编相对路径应拒: " <> cfgMainPath c)
+    Left m -> assertBool m ("绝对路径" `isInfixOf` m)
 

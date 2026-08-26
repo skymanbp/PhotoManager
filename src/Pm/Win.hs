@@ -34,6 +34,7 @@ module Pm.Win
   , NameKind (..)
   , probeName
   , resolveUnder
+  , whenPresent
   , openExclusiveBinary
   , openFreshBinary
   , openStateAppend
@@ -63,7 +64,7 @@ import Foreign.Marshal.Alloc (alloca, allocaBytes)
 import Foreign.Ptr (Ptr, intPtrToPtr, nullPtr)
 import Foreign.Storable (peek, peekByteOff)
 import System.Directory (canonicalizePath, doesPathExist)
-import System.FilePath (splitDirectories, (</>))
+import System.FilePath (hasDrive, isPathSeparator, splitDirectories, (</>))
 import System.IO
 import qualified System.Win32.Console as Win32Console
 import qualified System.Win32.File as Win32File
@@ -203,6 +204,24 @@ probeName p = do
               if tag .&. ioReparseTagNameSurrogate /= 0 then NameSurrogate else NamePlain
  where
   invalidFileAttributes = 0xFFFFFFFF :: Word32
+
+-- | 「名字在就做、不在就当没有、**查不出就说查不出**」（第一方自审 R1）。
+--
+-- 只读报告路径此前用 @doesDirectoryExist@ \/ @doesFileExist@ 探存在性，而这
+-- 两者把 ACL 拒绝、介质错误统统塌成 False；False 的去向又是「当作空 \/ 未被
+-- 引用」——vault 类目被拒时整类照片伪报 NEW、photos.json 读不到答「未被引用」、
+-- 已有事件夹枚举不出就提议新建一个重名的。三十六\/三十九轮的三态化只扫了写
+-- 路径守卫，这是读侧的同一形状。动作本身的 IOException 也收进 Left（探测与
+-- 动作之间目录可被挪走\/占住）。
+whenPresent :: FilePath -> IO a -> IO (Either String (Maybe a))
+whenPresent p act = do
+  k <- probeName p
+  case k of
+    NameMissing -> pure (Right Nothing)
+    ProbeUnknown -> pure (Left (p <> " 存在性查不出（ACL/介质错误？）——核不了 = 不猜"))
+    _ -> do
+      r <- try act
+      pure (either (\(e :: IOException) -> Left (p <> " 读取失败（" <> show e <> "）")) (Right . Just) r)
 
 -- | 便捷谓词：仅当明确判定为 name surrogate 时为 True。'ProbeUnknown' 在这里
 -- 是 False —— 调用方若要 fail-closed 必须直接用 'probeName'（'resolveUnder'
@@ -441,23 +460,27 @@ resolveUnder base rel = do
   eb <- try (canonicalizePath base) :: IO (Either IOException FilePath)
   case eb of
     Left _ -> pure Nothing
-    Right b -> go b (splitDirectories rel)
+    Right b
+      -- 词法层（'Pm.Op.relPathOk'）已挡，这里对**整段**再兜一次：下降算法本身
+      -- 不接受任何能改变层级的分量。第一方自审：此前只查当前分量，缺失层之后
+      -- 的余段原样 @foldl (\<\/\>)@ 拼上——@..@ 能在缺失层之后越级；带盘符
+      -- （@c:x@）或以分隔符起头的分量更会让 @\<\/\>@ **整体替换**而不是拼接
+      -- （filepath 实测语义），逃出 base。
+      | any badComp (splitDirectories rel) -> pure Nothing
+      | otherwise -> go b (splitDirectories rel)
  where
+  badComp c = c `elem` [".", "..", ""] || hasDrive c || any isPathSeparator c
   go cur [] = pure (Just cur)
-  go cur (c : cs)
-    -- 词法层（'Pm.Op.relPathOk'）已挡，这里再兜一次：下降算法本身不接受
-    -- 任何能改变层级的分量。
-    | c `elem` [".", "..", ""] = pure Nothing
-    | otherwise = do
-        let nxt = cur </> c
-        k <- probeName nxt
-        case k of
-          NameSurrogate -> pure Nothing
-          -- P3b-13（十轮复审）：查不出这一层是什么就不往下走，也不当作"缺失"
-          -- 放行 —— 答不上来即拒（fail-closed）。
-          ProbeUnknown -> pure Nothing
-          NameMissing -> pure (Just (foldl (</>) nxt cs))
-          NamePlain -> go nxt cs
+  go cur (c : cs) = do
+    let nxt = cur </> c
+    k <- probeName nxt
+    case k of
+      NameSurrogate -> pure Nothing
+      -- P3b-13（十轮复审）：查不出这一层是什么就不往下走，也不当作"缺失"
+      -- 放行 —— 答不上来即拒（fail-closed）。
+      ProbeUnknown -> pure Nothing
+      NameMissing -> pure (Just (foldl (</>) nxt cs))
+      NamePlain -> go nxt cs
 
 -- | 独占创建（@CREATE_NEW@）的二进制写句柄：目标已存在即抛 IOException。
 --

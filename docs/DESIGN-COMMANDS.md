@@ -303,8 +303,12 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   引用检查（路径入 Config），被引用的项标 `BLOCKED(photos.json:<行>)`，
   未被引用且用户确认的才生成 Rename。
 - MISSING：只报告（可能是有意撤下，决定权在用户）。
-- 结束打印**显式路径**的 git 步骤：`git add landscape portrait urban`（明确
-  禁止 `git add -A`/`git add .`，防把 `.pm/` 等误提交）；pm 不执行 git（I9）。
+- 结束打印**显式路径**的 git 步骤：`git -C "<vault>" add -- landscape portrait
+  urban`（明确禁止 `git add -A`/`git add .`，防把 `.pm/` 等误提交；操作数前
+  必有 `--`）；push 目标取自 `vault.push` 设置。命令文本与上线命令
+  （DESIGN.md §11 `GET /api/publish-commands`）**同一生成点**
+  （`Publish.vaultCommands`，解析-重渲染，第一方自审 R2）——生成不了（路径
+  嵌不进命令行等）打印原因 + 手动指引；pm 不执行 git（I9）。
 - **photos.json 不在 pm 写域**：类别判定/坐标是 AI 视觉判断，属 `/photo-inbox`。
 - **第九态 HELD「暂不同步」（P4-7，用户 2026-08-24 裁定）**：相册里有、但用户
   决定**先不放进展示集**的照片。它**不是 vault 的第四个类目**——vault 的类目
@@ -358,9 +362,9 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P7 / pm 0.6.0 / 325 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **P7 / pm 0.6.0 / 330 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁 37/38 轮 GO 收敛，P7 送审 39/40 轮各 NO-GO 已收口，发布前第一方全量
-  自审 + 最后一轮聚焦门禁）。
+  自审 P7-I 簇修 R1–R8 + 最后一轮聚焦门禁）。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 

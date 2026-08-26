@@ -29,15 +29,16 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime)
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (bracket)
 import Control.Monad (when)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
+import Data.Maybe (fromMaybe)
+import System.Directory (doesFileExist, listDirectory)
 import System.FilePath (dropExtension, takeExtension, (</>))
 import System.IO (hClose)
 import Text.Printf (printf)
 
-import Pm.Config (pmDir, pmSubPlans, readPmState, requirePmTrusted, untrustedMsg)
-import Pm.Win (deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary, resolveUnder)
+import Pm.Config (ensurePmSubdir, pmDir, pmSubPlans, readPmState, requirePmTrusted, untrustedMsg)
+import Pm.Win (deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary, resolveUnder, whenPresent)
 import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
 
 data ItemStatus
@@ -158,8 +159,10 @@ savePlan :: Plan -> IO FilePath
 savePlan p = do
   let root = plRootPath p
       pid = plId p
-  createDirectoryIfMissing True (plansDir root)
-  m <- resolveUnder root (".pm" </> pmSubPlans </> (T.unpack pid <> ".json"))
+  -- 第一方自审 R5：子目录先限域再建（'ensurePmSubdir'），不在被劫持的 .pm 后面
+  -- 留下一个库外 plans 目录。
+  ed <- ensurePmSubdir root pmSubPlans
+  m <- either (const (pure Nothing)) (const (resolveUnder root (".pm" </> pmSubPlans </> (T.unpack pid <> ".json")))) ed
   case m of
     Nothing -> ioError (userError (untrustedMsg (planPath root pid)))
     Just fp -> do
@@ -224,11 +227,13 @@ listPlans root = do
       case m of
         Nothing -> pure ([], [("", untrustedMsg (root </> ".pm" </> pmSubPlans))])
         Just d -> do
-          ex <- doesDirectoryExist d
-          namesE <- try (if ex then listDirectory d else pure []) :: IO (Either IOException [FilePath])
+          -- 第一方自审 R1：存在性三态——@doesDirectoryExist@ 把 ACL 拒绝塌成
+          -- 「没有计划」，页面安静地空着；查不出 = errors 一条。
+          namesE <- whenPresent d (listDirectory d)
           case namesE of
-            Left e -> pure ([], [("", "计划目录枚举失败（被占/介质错误？）: " <> show e)])
-            Right names -> do
+            Left e -> pure ([], [("", "计划目录枚举失败（被占/介质错误？）: " <> e)])
+            Right names0 -> do
+              let names = fromMaybe [] names0
               let pids = [T.pack (dropExtension n) | n <- names, takeExtension n == ".json", isValidPlanId (T.pack (dropExtension n))]
               rs <- mapM (\pid -> fmap ((,) (T.unpack pid)) (loadPlan root pid)) pids
               pure ([p | (_, Right p) <- rs], [(n, e) | (n, Left e) <- rs])

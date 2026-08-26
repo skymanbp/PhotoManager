@@ -80,10 +80,11 @@ withJournal root act = do
   createDirectoryIfMissing True (pmDir root)
   withPmStateAppend root "journal.ndjson" (act . Journal)
 
+-- 条目与换行合成**一次** hPut（第一方自审）：两次写之间缓冲恰好满时会落半行，
+-- 下一条接在同一行上成为 CORRUPT-JOURNAL——响亮，但本可不发生。
 jAppend :: Journal -> Sync -> JEntry -> IO ()
 jAppend (Journal h) sync e = do
-  BSL.hPut h (encode e)
-  BSL.hPut h "\n"
+  BSL.hPut h (encode e <> "\n")
   case sync of
     Barrier -> flushHandleToDisk h
     Buffered -> hFlush h

@@ -38,7 +38,7 @@ import Pm.Plan
 import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, manifestPath, readManifest, trashDir)
 import Pm.Types (Catalog (..), Entry (..), RootInfo (..), RootRole (..))
 import Pm.Undo (buildUndoPlan)
-import Pm.Win (openExclusiveBinary, pathAtOrUnder, pathUnder, resolveUnder)
+import Pm.Win (openExclusiveBinary, pathAtOrUnder, pathUnder, resolveUnder, whenPresent)
 import TestUtil
 
 pathGuardTests :: TestTree
@@ -66,7 +66,31 @@ pathGuardTests =
     , testCase "P3b-13 .pm/vault-cache 是 junction → 枚举式可信闸抓到，侧缓存一个字节都不写" caseSideCacheJunction
     , testCase "P3b-13 闸下沉到 loader：loadCatalog/readJournal/readManifest/loadPlan 全部拒绝不可信 root" caseLoaderLevelGate
     , testCase "P3b-13 两次限域之间注入 junction → 第二次检查拦下（钉住建目录后的复检）" caseExecTmpSecondCheck
+    , testCase "第一方自审：whenPresent 三态；resolveUnder 拒缺失层后的 .. 与盘符/分隔符分量" caseFirstPartySweep
     ]
+
+-- | 第一方自审（0.6.0 发布前）：R1 的共用三态助手与 resolveUnder 的整段分量
+-- 预检。非法名（@<@，GetFileAttributes 报 123）是 ProbeUnknown 的确定性注入。
+caseFirstPartySweep :: IO ()
+caseFirstPartySweep = withSystemTempDirectory "pm-guard" $ \dir -> do
+  -- whenPresent：缺席 → Right Nothing；在 → Right (Just …)；查不出 → Left；
+  -- 动作抛 IO 异常（探测与动作之间被挪走/占住）→ Left
+  whenPresent (dir </> "absent") (pure ()) >>= (@?= Right Nothing)
+  writeFile (dir </> "f.txt") "X"
+  whenPresent (dir </> "f.txt") (readFile (dir </> "f.txt")) >>= (@?= Right (Just "X"))
+  wl <- whenPresent (dir </> "ill<egal") (pure ())
+  either (const (pure ())) (const (assertFailure "非法名（查不出）应 Left")) wl
+  we <- whenPresent (dir </> "f.txt") (ioError (userError "boom") :: IO ())
+  either (const (pure ())) (const (assertFailure "动作 IO 异常应收进 Left")) we
+  -- resolveUnder：缺失层之后的 .. 此前会被 foldl (</>) 原样拼上；带盘符的
+  -- 分量（c:x）会让 </> 整体替换逃出 base——整段预检后一律 Nothing
+  let root = dir </> "root"
+  createDirectoryIfMissing True root
+  resolveUnder root ("missing" </> ".." </> "x") >>= (@?= Nothing)
+  resolveUnder root ("a" </> "c:x") >>= (@?= Nothing)
+  resolveUnder root "\\evil" >>= (@?= Nothing)
+  r <- resolveUnder root ("a" </> "b.jpg")
+  assertBool "正常缺失形态仍放行（pm 自己会创建）" (r /= Nothing)
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
 mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing Nothing Nothing Nothing

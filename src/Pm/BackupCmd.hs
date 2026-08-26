@@ -13,7 +13,7 @@ module Pm.BackupCmd
   ) where
 
 import Control.Monad (forM_, unless, when)
-import Data.Char (toLower)
+import Data.Char (isAlpha, toLower)
 import Data.List (isPrefixOf)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -46,15 +46,23 @@ data BackupCmd
 -- Right = 规范化绝对路径。
 backupInitPreflight :: Config -> FilePath -> IO (Either String FilePath)
 backupInitPreflight cfg path = do
-  abs' <- canonicalizePath =<< makeAbsolute path
-  mainC <- canonicalizePath (cfgMainPath cfg)
-  let canonParts p = map (map toLower) (splitDirectories (normalise p))
-      nested a b = canonParts a `isPrefixOf` canonParts b
-  if nested mainC abs' || nested abs' mainC
-    then pure (Left ("备份路径与主库嵌套（" <> abs' <> " vs " <> mainC <> "），拒绝"))
-    else do
-      g <- pmIgnoreGuard RoleBackup abs'
-      pure (either Left (const (Right abs')) g)
+  abs0 <- makeAbsolute path
+  -- 第一方自审 R8：登记只记「盘内相对路径」，发现只枚举本机盘符卷——UNC 或
+  -- 无盘符的路径登记得上、却永远发现不了（`splitDrive` 会把 `\\server\share`
+  -- 整段丢掉）。词法判在 canonicalize 之前：对不可达的网络路径 canonicalize
+  -- 会去探网络。
+  case splitDrive abs0 of
+    (c : ':' : _, _) | isAlpha c -> do
+      abs' <- canonicalizePath abs0
+      mainC <- canonicalizePath (cfgMainPath cfg)
+      let canonParts p = map (map toLower) (splitDirectories (normalise p))
+          nested a b = canonParts a `isPrefixOf` canonParts b
+      if nested mainC abs' || nested abs' mainC
+        then pure (Left ("备份路径与主库嵌套（" <> abs' <> " vs " <> mainC <> "），拒绝"))
+        else do
+          g <- pmIgnoreGuard RoleBackup abs'
+          pure (either Left (const (Right abs')) g)
+    _ -> pure (Left ("备份路径须为盘符路径（如 E:\\Photography）：按 UUID 发现只枚举本机卷，UNC/网络路径登记后永远找不到——" <> abs0))
 
 -- | `pm backup init` 的**结果**（P4-8 拆分：`POST /api/backup-init` 要的是
 -- 结果，不能去捕 stdout；所有守卫留在这里，CLI 只负责渲染）。

@@ -69,7 +69,7 @@ import Data.Time
   , getCurrentTime
   , toGregorian
   )
-import System.Directory (doesDirectoryExist, listDirectory)
+import System.Directory (listDirectory)
 import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
 import Text.Printf (printf)
 
@@ -78,10 +78,11 @@ import Pm.Config (Config (..), requireRole)
 import Pm.Hash (ContentProbe (..), StatSnap (..), probeConfined)
 import Pm.Import (foldPath, stagingTop)
 import Pm.Names (canonProcessedEvent, canonRawEvent)
-import Pm.Op (Op (..))
+import Pm.Op (Op (..), winNameOk)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), newPlanId)
 import Pm.SortSource
 import Pm.Types
+import Pm.Win (whenPresent)
 
 -- ─── 纯核心 ─────────────────────────────────────────────────────────────────
 
@@ -98,21 +99,17 @@ segmentBy gap xs = go (sortOn snd xs)
     | diffLocalTime t prev <= gap = grow (z : acc) zs
   grow acc rest = (acc, rest)
 
--- | 会让目标路径逃出事件夹的字符。@--place@ 与 @--event@ **两条路都要过**：
--- 'canonRawEvent' 只约束前 6 个字符（@dd-dd-@）并要求其后非空，地点部分它
--- 不设字符限制，所以只在 @--place@ 上设闸等于给 @--event@ 留了一个绕行口。
-badChar :: Char -> Bool
-badChar c = c `elem` ("\\/:*?\"<>|" :: String)
-
 -- | 事件夹名 @YY-MM-地点@。年月取自该段**起始日**；地点只能由用户给
 -- （实测相机档零 GPS，本库 94 张相册抽测 0 张有 GPS）。
 --
--- 地点做最小合法性约束：非空、不含路径分隔符与 Windows 保留字符。真正的
--- 权威校验是 'canonRawEvent'——调用方拿到名字后必须再过它一次。
+-- 地点走 'Pm.Op.winNameOk'（非空、无保留字符\/控制符、不以点\/空格结尾）。
+-- @--place@ 与 @--event@ **两条路都要过**：'canonRawEvent' 只约束前 6 个字符
+-- （@dd-dd-@）并要求其后非空，地点部分它不设字符限制，所以只在 @--place@ 上
+-- 设闸等于给 @--event@ 留了一个绕行口。真正的权威校验是 'canonRawEvent'——
+-- 调用方拿到名字后必须再过它一次。
 eventNameFor :: Day -> String -> Maybe String
 eventNameFor d place
-  | null place = Nothing
-  | any badChar place = Nothing
+  | not (winNameOk place) = Nothing
   -- Scheme A 的年份只有两位，而 'Pm.Names.yearFolder' 无条件补 "20"——
   -- 2000-2099 之外的拍摄年份会被**静默**折到错误世纪（1999 → 2099，
   -- 2101 → 2001）。这里拒了它，让用户用 --event 显式指定，而不是默默归错年。
@@ -455,9 +452,10 @@ existingEvents root = do
     Left e -> Left ("已有事件夹枚举失败（被占/介质错误？）: " <> show e)
     Right evs -> Right evs
  where
-  lsDir d = do
-    ok <- doesDirectoryExist d
-    if ok then sort <$> listDirectory d else pure []
+  -- 第一方自审 R1：存在性三态（'whenPresent'）——@doesDirectoryExist@ 把 ACL
+  -- 拒绝塌成「没有事件夹」，提议就会让用户新建一个重名的。查不出 → 抛进外层
+  -- try，与枚举失败同一出口（survey 整体 Left）。
+  lsDir d = whenPresent d (listDirectory d) >>= either (ioError . userError) (pure . sort . fromMaybe [])
   -- 反向映射复用 'Pm.Names.canonProcessedEvent'（它就是"剥掉 -Raw 后缀，返回
   -- YY-MM-地点"），而不是本地再写一个大小写敏感的 strip——两个方向用同一份
   -- 定义，归档层的 @26-04-X-raw@ 才折得到暂存区的 @26-04-X@ 上。
@@ -544,11 +542,11 @@ resolveEvent :: Day -> Either String String -> Either String String
 resolveEvent d poe = do
   name <- case poe of
     Right ev
-      | any badChar ev -> Left ("事件名含非法字符（\\/:*?\"<>|）: " <> ev)
+      | not (winNameOk ev) -> Left ("事件名不是可创建的 Windows 名字（空、含 \\/:*?\"<>| 或控制符、或以点/空格结尾）: " <> ev)
       | otherwise -> Right ev
     Left place ->
       maybe
-        (Left ("地点不合法（空、含 \\/:*?\"<>| 、或拍摄年份不在 2000-2099）: " <> place))
+        (Left ("地点不合法（空、含 \\/:*?\"<>| 或控制符、以点/空格结尾、或拍摄年份不在 2000-2099）: " <> place))
         Right
         (eventNameFor d place)
   case canonRawEvent name of

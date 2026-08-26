@@ -25,7 +25,7 @@ import Test.Tasty.HUnit
 
 import Pm.Config (Config (..), loadConfig, writeConfig)
 import Pm.ConfigEdit (ConfigPatch (..), checkPatch, emptyPatch)
-import Pm.Publish (cmdPath, pathArgOk, publishCommands, pushTarget, pushTargetOk, renderCmdPath)
+import Pm.Publish (cmdPath, pathArgOk, publishCommands, pushTarget, pushTargetOk, renderCmdPath, vaultCommands)
 import Pm.Serve (serveApp)
 import ServeTests (decodeBody, field, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvA, tok, withVault)
 
@@ -37,6 +37,7 @@ publishTests =
     , testCase "cmdPath：盘符绝对路径 + 白名单分量 → '/' 重渲染；UNC/相对/../空分量/尾随点/引号终结符拒" caseCmdPath
     , testCase "publishCommands：显式类目 add --、photos.json 仓内相对路径 add --、缺配/仓外拒绝生成、push -- 目标" casePublishCommands
     , testCase "汇点复验（39/40 轮）：手编配置绕过 checkPatch 的路径/push 目标/选项注入在生成处再拒，整体不出" casePublishSinkGuards
+    , testCase "vaultCommands（第一方自审 R2）：push 收尾与上线命令同一生成点——push 目标取自设置、类目白名单、坏值拒" caseVaultCommands
     , testCase "配置 round-trip：发布字段 + 含单引号路径写盘后逐字段读回（39 轮 #3 tomlStr）" caseConfigRoundTrip
     , testCase "checkPatch：portfolio 仓路径须存在且可嵌命令；坏 push 目标拒；JSON 三态（null = 清空）" casePublishPatch
     , testCase "serve：ping 带 allowApply（与授权级一致）；config 带 publish 对象" caseServePingConfig
@@ -151,6 +152,31 @@ casePublishSinkGuards = do
   refuse "photos.json 选项注入" base {cfgPortfolioDir = Just "D:\\pf", cfgPhotosJson = Just "-A"}
   -- 一侧坏则整体不出：portfolio 合法也不能带出半块
   refuse "一侧坏整体拒" base {cfgVaultPath = Just "D:\\a$b", cfgPortfolioDir = Just "D:\\pf", cfgPhotosJson = Just "D:\\pf\\p.json"}
+
+-- | R2：'Pm.Vault.gitStepsLines' 与「复制上线命令」都走这一个生成器——push
+-- 目标取自设置（旧第二生成器硬打 origin main）、路径解析后重渲染、操作数前
+-- @--@、类目按固定名单验、commit 信息按白名单验。
+caseVaultCommands :: IO ()
+caseVaultCommands = do
+  let base = (mkCfg "D:\\Photography") {cfgVaultPath = Just "D:\\v"}
+  vaultCommands base "D:\\v" ["landscape"] "photos: pm vault push p1"
+    @?= Right
+      [ "git -C \"D:/v\" add -- landscape"
+      , "git -C \"D:/v\" commit -m \"photos: pm vault push p1\""
+      , "git -C \"D:/v\" push"
+      ]
+  vaultCommands base {cfgVaultPush = Just "origin main"} "D:\\v" ["urban"] "m1"
+    @?= Right
+      [ "git -C \"D:/v\" add -- urban"
+      , "git -C \"D:/v\" commit -m \"m1\""
+      , "git -C \"D:/v\" push -- origin main"
+      ]
+  let refuse lbl r = either (const (pure ())) (\v -> assertFailure (lbl <> " 应拒: " <> show v)) r
+  refuse "空类目（add -- 空表 = commit 空）" (vaultCommands base "D:\\v" [] "m")
+  refuse "白名单外类目（-A 形态）" (vaultCommands base "D:\\v" ["-A"] "m")
+  refuse "嵌不进命令的路径" (vaultCommands base "D:\\v;x" ["landscape"] "m")
+  refuse "坏 push 目标" (vaultCommands base {cfgVaultPush = Just "--mirror origin"} "D:\\v" ["landscape"] "m")
+  refuse "commit 信息含引号" (vaultCommands base "D:\\v" ["landscape"] "a\"b")
 
 caseConfigRoundTrip :: IO ()
 caseConfigRoundTrip = do

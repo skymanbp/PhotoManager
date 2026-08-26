@@ -302,6 +302,11 @@ caseBackupInitPreflight = withSystemTempDirectory "pm-guard" $ \tmp -> do
   case r3 of
     Right p -> assertBool p ("bak" `isInfixOf` p)
     Left e -> assertFailure e
+  -- 第一方自审 R8：UNC/无盘符路径登记得上、却永远发现不了（发现只枚举本机
+  -- 盘符卷；splitDrive 会把 \\server\share 整段丢出 subpath）——词法预检即拒，
+  -- 且不去 canonicalize 碰网络。
+  r4 <- backupInitPreflight cfg "\\\\server\\share\\pf"
+  assertBool "UNC 路径应拒（按盘符卷发现）" (either ("盘符" `isInfixOf`) (const False) r4)
 
 casePickRootMain :: IO ()
 casePickRootMain = withSystemTempDirectory "pm-guard" $ \tmp -> do

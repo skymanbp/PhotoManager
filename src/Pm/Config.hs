@@ -37,6 +37,7 @@ module Pm.Config
   , pmSubBackupCache
   , pmSubVaultCache
   , untrustedMsg
+  , ensurePmSubdir
   , readPmState
   , withPmStateAppend
   , resolvePmPath
@@ -54,6 +55,7 @@ import Data.Char (isControl)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
+import Data.List (intercalate)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -68,7 +70,7 @@ import System.Directory
   )
 import System.Environment (lookupEnv)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hTryLock)
-import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FilePath (isAbsolute, takeDirectory, takeFileName, (</>))
 import System.IO (Handle, hClose)
 import System.IO.Error (isAlreadyInUseError, isDoesNotExistError)
 import Text.Printf (printf)
@@ -176,7 +178,35 @@ loadConfig = do
           Left e -> pure (Left ("配置不是 UTF-8: " <> show e))
           Right txt -> case TOML.decode txt of
             Left e -> pure (Left (T.unpack (TOML.renderTOMLError e)))
-            Right c -> pure (Right c)
+            Right c -> pure (checkAbsolute c)
+
+-- | 配置里的路径字段一律须为绝对路径（第一方自审 R4）：相对路径按进程 cwd
+-- 解析，`pm ui` 拉起的 serve 与终端里的 pm 各有各的 cwd，同一份配置会指向
+-- 两个地方，而 checkPatch 只查过「此刻从这个 cwd 看存在」。写侧 'writeConfig'
+-- 先绝对化，这里挡的是手编。
+checkAbsolute :: Config -> Either String Config
+checkAbsolute c =
+  case [k <> " = " <> v | (k, Just v) <- fields, not (isAbsolute v)] of
+    [] -> Right c
+    bad -> Left ("配置里的路径须为绝对路径（" <> intercalate "；" bad <> "）——改成完整盘符路径后重试")
+ where
+  fields =
+    [ ("main.path", Just (cfgMainPath c))
+    , ("vault.path", cfgVaultPath c)
+    , ("portfolio.photos-json", cfgPhotosJson c)
+    , ("portfolio.dir", cfgPortfolioDir c)
+    ]
+
+-- | 'writeConfig' 的入口归一：三条写入口（init / config set / 登记备份盘）都
+-- 可能拿到用户键入的相对路径，统一在这一处绝对化，'checkAbsolute' 才不会把
+-- pm 自己写出的配置拒掉。
+absolutizeConfig :: Config -> IO Config
+absolutizeConfig c = do
+  m <- makeAbsolute (cfgMainPath c)
+  v <- traverse makeAbsolute (cfgVaultPath c)
+  j <- traverse makeAbsolute (cfgPhotosJson c)
+  d <- traverse makeAbsolute (cfgPortfolioDir c)
+  pure c {cfgMainPath = m, cfgVaultPath = v, cfgPhotosJson = j, cfgPortfolioDir = d}
 
 -- | TOML 字符串值编码（39 轮 #3）。此前所有字符串值裸拼 literal 单引号：
 -- 值本身含 @'@（如 @D:\\O'Brien@，能过 checkPatch 的合法目录名）就写出
@@ -237,8 +267,9 @@ renderConfig c =
 -- 那里只会剩下内容完整的 @<fp>.tmp@，'loadConfig' 认得出并指明怎么恢复。
 -- 并发那一侧由 'withConfigLock' 兜（同一个固定 tmp 名也只有一个写者）。
 writeConfig :: Config -> IO FilePath
-writeConfig c = do
+writeConfig c0 = do
   fp <- configFilePath
+  c <- absolutizeConfig c0
   -- 目录取自 fp 本身（PM_CONFIG 可以指到任意位置，不能再假定是 XDG 目录）
   createDirectoryIfMissing True (takeDirectory fp)
   let tmp = fp <> ".tmp"
@@ -546,6 +577,18 @@ createRootInfo' root info = do
       -- §6.1 脚注：pm 自建、从未落位的 tmp 是唯一允许 unlink 的东西
       deleteBoundAt tmp
       pure (Left (final <> " 已存在或不可创建（不覆盖既有身份）: " <> show e))
+
+-- | 建 @.pm@ 的**子目录**（plans \/ trash）：先逐级限域，再在返回的路径上
+-- mkdir（第一方自审 R5）。顺序反过来——先 mkdir 再 resolveUnder——在 @.pm@
+-- 是指向库外的 junction 时会先在库外建出目录、再被拒：拒绝是对的，副作用
+-- 不该有。'writeSideCache' 早已是这个次序，此处把另外两处（'Pm.Plan.savePlan'
+-- 与 'Pm.Trash.appendManifest'）收齐。
+ensurePmSubdir :: FilePath -> FilePath -> IO (Either String FilePath)
+ensurePmSubdir root sub = do
+  m <- resolveUnder root (".pm" </> sub)
+  case m of
+    Nothing -> pure (Left (untrustedMsg (pmDir root </> sub)))
+    Just d -> createDirectoryIfMissing True d >> pure (Right d)
 
 -- | 覆盖写标识——仅供测试 fixture 与显式重写场景；生产建 root 一律走
 -- 'createRootInfo'。

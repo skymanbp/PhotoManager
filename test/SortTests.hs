@@ -135,6 +135,11 @@ caseEventName = do
   eventNameFor (d 2100 1 1) "X" @?= Nothing
   eventNameFor (d 2000 1 1) "X" @?= Just "00-01-X" -- 下边界含
   eventNameFor (d 2099 12 31) "X" @?= Just "99-12-X" -- 上边界含
+  -- 第一方自审 R3（Op.winNameOk）：尾随点/空格 Win32 创建目录时会剥掉——
+  -- 落位名≠计划名，执行期句柄后验必败；控制符同拒。都在计划前拒。
+  eventNameFor (d 2026 8 25) "Boston." @?= Nothing
+  eventNameFor (d 2026 8 25) "Boston " @?= Nothing
+  eventNameFor (d 2026 8 25) "a\tb" @?= Nothing
 
 casePick :: IO ()
 casePick = do
@@ -224,10 +229,11 @@ caseResolve = do
   -- --event 必须**另过**同一道字符闸：canonRawEvent 只约束前 6 个字符，
   -- 地点部分它不设限，所以只在 --place 上设闸等于给 --event 留了绕行口。
   -- "26-04-a\..\..\x" 合 Scheme A 的形状，却能让目标逃出事件夹。
-  forM_ ["26-04-a/b", "26-04-a\\b", "26-04-a:b", "26-04-a*b", "26-04-a|b"] $ \ev ->
+  -- 尾随点/空格与控制符（第一方自审 R3，winNameOk）与保留字符同拒。
+  forM_ ["26-04-a/b", "26-04-a\\b", "26-04-a:b", "26-04-a*b", "26-04-a|b", "26-04-X.", "26-04-X ", "26-04-a\tb"] $ \ev ->
     case resolveEvent (d 2026 8 25) (Right ev) of
       Left _ -> pure ()
-      Right e -> assertFailure ("含非法字符的 --event 应被拒: " <> e)
+      Right e -> assertFailure ("含非法字符/尾随点空格的 --event 应被拒: " <> e)
 
 -- ─── 合成夹具（端序参数化） ────────────────────────────────────────────────
 

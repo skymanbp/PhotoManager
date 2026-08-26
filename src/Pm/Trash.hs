@@ -27,11 +27,11 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, listDirectory, pathIsSymbolicLink)
+import System.Directory (doesDirectoryExist, listDirectory, pathIsSymbolicLink)
 import System.FilePath ((</>))
 import System.IO.Error (isDoesNotExistError)
 
-import Pm.Config (pmDir, pmSubTrash, readPmState, requirePmTrusted, withPmStateAppend)
+import Pm.Config (ensurePmSubdir, pmDir, pmSubTrash, readPmState, requirePmTrusted, withPmStateAppend)
 import Pm.Op (OpIdSuffix (..), opIdParts, relPathOk)
 import Pm.Win (flushHandleToDisk)
 
@@ -105,12 +105,16 @@ quarTrashRel oid victim = (\(pid, _, sfx) -> quarDirFor pid sfx </> victim) <$> 
 -- 'appendManifest' 把隔离记录**追加进了库外文件**。
 -- 修法是走 'withPmStateAppend'：先对完整相对路径做 resolveUnder（逐级下降会
 -- 认出末段的 symlink），再 'openStateAppend' 查 link count。两种失信各守一半。
+-- 第一方自审 R5：@trash@ 子目录先限域再建（'ensurePmSubdir'）——此前先
+-- mkdir 再 resolve，@.pm@ 是库外 junction 时会先在库外建出 trash 目录再被拒。
+-- 记录与换行合成**一次** hPut：两次写之间缓冲恰好满时会落半行，下一条接在
+-- 同一行上成为 CORRUPT（响亮但本可不发生；'Pm.Journal.jAppend' 同修）。
 appendManifest :: FilePath -> TrashRecord -> IO ()
 appendManifest root r = do
-  createDirectoryIfMissing True (trashDir root)
+  ed <- ensurePmSubdir root pmSubTrash
+  either (ioError . userError) (const (pure ())) ed
   withPmStateAppend root (pmSubTrash </> "manifest.ndjson") $ \h -> do
-    BSL.hPut h (encode r)
-    BSL.hPut h "\n"
+    BSL.hPut h (encode r <> "\n")
     flushHandleToDisk h
 
 readManifest :: FilePath -> IO ([TrashRecord], [String])

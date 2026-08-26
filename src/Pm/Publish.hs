@@ -2,8 +2,8 @@
 -- 路径与 push 目标都可在设置页自定义，pm 只负责把命令拼好）。
 --
 -- 边界（不变量 I9）：pm **绝不执行 git**。这里只生成命令文本；复制、粘贴、
--- 执行都发生在用户自己的终端里。与 'Pm.Vault.gitStepsLines'（推送计划附带的
--- git 步骤）同一原则——命令生成在服务端一处，GUI 只渲染，不自己拼。
+-- 执行都发生在用户自己的终端里。展示集仓的三条步骤 'vaultCommands' 是**唯一**
+-- 生成点——push 收尾（'Pm.Vault.gitStepsLines'）与上线命令共用，GUI 只渲染。
 --
 -- 39/40 轮后的三条纪律：
 --
@@ -21,6 +21,7 @@
 --      仓内相对路径的 photos.json；photos.json 未配置或不在仓内就拒绝生成。
 module Pm.Publish
   ( publishCommands
+  , vaultCommands
   , CmdPath
   , cmdPath
   , renderCmdPath
@@ -29,7 +30,7 @@ module Pm.Publish
   , pushTargetOk
   ) where
 
-import Data.Char (isAlphaNum, isAscii, isAsciiLower, isAsciiUpper, toLower)
+import Data.Char (isAlphaNum, isAscii, isAsciiLower, isAsciiUpper, isControl, toLower)
 import Data.Either (isRight)
 import Data.List (dropWhileEnd, isPrefixOf)
 
@@ -101,6 +102,52 @@ pushTarget s
 pushTargetOk :: String -> Bool
 pushTargetOk = isRight . pushTarget
 
+-- ─── 渲染原语（模块内共用） ─────────────────────────────────────────────────
+
+q :: String -> String
+q s = "\"" <> s <> "\""
+
+gitC :: CmdPath -> String -> String
+gitC d args = "git -C " <> q (renderCmdPath d) <> " " <> args
+
+push :: [String] -> String
+push ts = "push" <> (if null ts then "" else " -- " <> unwords ts)
+
+checkPath :: String -> FilePath -> Either String CmdPath
+checkPath what p = case cmdPath p of
+  Right d -> Right d
+  Left why -> Left (what <> " 路径无法安全嵌入命令（" <> why <> "）：" <> p <> " ——不生成，请手动执行")
+
+checkPush :: String -> Maybe String -> Either String [String]
+checkPush what mt = case mt of
+  Nothing -> Right []
+  Just t -> case pushTarget t of
+    Right ts -> Right ts
+    Left why -> Left (what <> " 的 push 目标不合法（" <> why <> "；配置文件被手改过？）：" <> t)
+
+-- | 展示集仓的三条 git 步骤（add → commit → push），**唯一**生成点：上线命令
+-- 与 push 收尾（'Pm.Vault.gitStepsLines'）共用。第一方自审 R2：P7 之前的收尾
+-- 生成器硬打 @cd \<dir\>@（不加引号）与 @git push origin main@——无视设置里的
+-- push 目标，也不过 'cmdPath'；两个生成器出两种文本正是 25 轮 rawExts 那类
+-- 分叉。类目只认 'fixedCategories'（add 的操作数语法就是「固定类目名」，按
+-- 语法验而不是过滤）；commit 信息由 pm 自己拼（计划 id 已过 isValidPlanId），
+-- 仍按白名单验一次。
+vaultCommands :: Config -> FilePath -> [String] -> String -> Either String [String]
+vaultCommands c dir cats msg = do
+  d <- checkPath "vault 展示集" dir
+  t <- checkPush "展示集仓" (cfgVaultPush c)
+  cs <- case filter (`notElem` fixedCategories) cats of
+    _ | null cats -> Left "没有要 add 的类目"
+    [] -> Right cats
+    bad -> Left ("类目不在固定名单里: " <> unwords bad)
+  m <-
+    if not (null msg) && all msgOk msg
+      then Right msg
+      else Left "commit 信息含引号/转义/展开字符或控制符"
+  pure [gitC d ("add -- " <> unwords cs), gitC d ("commit -m " <> q m), gitC d (push t)]
+ where
+  msgOk ch = ch `notElem` ("\"\\$`!%" :: String) && not (isControl ch)
+
 -- | 生成两仓上线命令（纯函数；@GET \/api\/publish-commands@ 原样返回）。
 -- 配置了哪侧就出哪侧；两侧都没配 → Left 指路设置页；任一项复验不过 →
 -- 整体 Left（不出半块可疑文本）。
@@ -112,26 +159,9 @@ publishCommands c = case (cfgVaultPath c, cfgPortfolioDir c) of
     ps <- maybe (Right []) pfSec mp
     pure (vs <> ps)
  where
-  q s = "\"" <> s <> "\""
-  gitC d args = "git -C " <> q (renderCmdPath d) <> " " <> args
-  push ts = "push" <> (if null ts then "" else " -- " <> unwords ts)
-  checkPath what p = case cmdPath p of
-    Right d -> Right d
-    Left why -> Left (what <> " 路径无法安全嵌入命令（" <> why <> "）：" <> p <> " ——不生成，请手动执行")
-  checkPush what mt = case mt of
-    Nothing -> Right []
-    Just t -> case pushTarget t of
-      Right ts -> Right ts
-      Left why -> Left (what <> " 的 push 目标不合法（" <> why <> "；配置文件被手改过？）：" <> t)
-  vaultSec v = do
-    v' <- checkPath "vault 展示集" v
-    t <- checkPush "展示集仓" (cfgVaultPush c)
-    pure
-      [ "# ① 展示集仓（推送前建议先看 pm vault status 是否全绿；显式类目，永不整仓 add）"
-      , gitC v' ("add -- " <> unwords fixedCategories)
-      , gitC v' "commit -m \"photos: 更新展示集\""
-      , gitC v' (push t)
-      ]
+  vaultSec v =
+    ("# ① 展示集仓（推送前建议先看 pm vault status 是否全绿；显式类目，永不整仓 add）" :)
+      <$> vaultCommands c v fixedCategories "photos: 更新展示集"
   pfSec dir = do
     d <- checkPath "portfolio 仓" dir
     j <- case cfgPhotosJson c of

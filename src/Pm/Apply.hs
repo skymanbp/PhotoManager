@@ -184,7 +184,7 @@ afterApply cfg plan code = do
           _ -> pure ()
   when (plKind plan == "vault-push") $ do
     when (code == 0) $
-      mapM_ putStrLn (gitStepsLines (plRootPath plan) (plId plan) (planCategories plan))
+      mapM_ putStrLn (gitStepsLines cfg (plRootPath plan) (plId plan) (planCategories plan))
     -- 刷新 vault 缓存（computeVault 顺带写缓存，内含 requireMain；结果此处不用）
     _ <- computeVault True cfg
     pure ()

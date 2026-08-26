@@ -19,7 +19,7 @@ import Test.Tasty.HUnit
 
 import Pm.Cli (bindExecRoot, executePlanNow)
 import Pm.Commands (resolveKeep)
-import Pm.Config (writeRootInfo)
+import Pm.Config (Config (..), writeRootInfo)
 import Pm.Hash (StatSnap (..), nsToUtc, statHitStable)
 import Pm.Op
 import Pm.Plan
@@ -49,7 +49,8 @@ vaultTests =
     , testCase "P3b push：.png / 非 NEW / 缺 --category 全部拒绝 exit 2" casePushRefusals
     , testCase "P3b push：DRIFT→NEEDS-DECISION→keep src→supersede→旧字节在 vault trash" casePushDriftSupersede
     , testCase "P3b bindExecRoot：vault 计划按 UUID 绑回配置路径" caseBindVaultRoot
-    , testCase "P3b gitStepsLines/planCategories：显式类目、无 -A、隔离项不入 add" caseGitSteps
+    , testCase "P3b gitStepsLines/planCategories：显式类目、无 -A、隔离项不入 add；与上线命令同一生成点（R2）" caseGitSteps
+    , testCase "第一方自审 R1：listFlatPhotos/photosJsonRef 查不出 → Left；缺席仍是空/未引用" caseProbeUnknownFailClosed
     , testCase "P3b-4 #2 守卫：.git 文件/祖先仓/反规则 全 fail-closed" caseGuardVariants
     , testCase "P3b-4 #3 apply 执行期重检 I11：ignore 行被移除 → 整批拒绝零写入" caseApplyI11Recheck
     , testCase "P3b-4 #6 bindExecRoot：UUID 多重命中/role 不符 拒绝绑定" caseBindAmbiguity
@@ -394,12 +395,35 @@ caseGitSteps = do
       plan = Plan "pid" "vault-push" "V:\\vault" (Just "rid") t0' [quar, copy1, copy2]
       cats = planCategories plan
   cats @?= ["landscape", "urban"]
-  let ls = gitStepsLines "V:\\vault" "pid" cats
-      cmdLines = filter (isInfixOf "git ") (drop 1 ls) -- 首行是含「禁止 -A」字样的警示语，不是命令
-  assertBool "git add 行显式列类目" ("    git add landscape urban" `elem` ls)
+  -- R2（第一方自审）：收尾与「复制上线命令」同一生成点（Pm.Publish.vaultCommands）
+  -- ——git -C + 解析重渲染的 '/' 路径、显式类目前置 --、push 目标取自设置。
+  let cfg0 = mkVaultCfg "D:\\main" "V:\\vault"
+      ls = gitStepsLines cfg0 "V:\\vault" "pid" cats
+      cmdLines = drop 1 ls -- 首行是含「禁止 -A」字样的警示语，不是命令
+  assertBool ("git add 行显式列类目并带 --: " <> show ls)
+    ("    git -C \"V:/vault\" add -- landscape urban" `elem` ls)
   assertBool "命令行无 -A / 无裸 git add ." (not (any (\l -> "-A" `isInfixOf` l || "add ." `isInfixOf` l) cmdLines))
+  assertBool ("未设 push 目标 = 裸 git push: " <> show ls) ("    git -C \"V:/vault\" push" `elem` ls)
+  -- P7 的可配 push 目标必须被收尾采用（旧第二生成器硬打 origin main，无视设置）
+  let ls2 = gitStepsLines cfg0 {cfgVaultPush = Just "origin gh-pages"} "V:\\vault" "pid" cats
+  assertBool ("push 目标取自设置: " <> show ls2) ("    git -C \"V:/vault\" push -- origin gh-pages" `elem` ls2)
+  -- 嵌不进命令的路径：不出任何 git -C 行，只给手动指引
+  let ls3 = gitStepsLines cfg0 "V:\\va;ult" "pid" cats
+  assertBool ("危险路径不得出命令行: " <> show ls3) (not (any ("git -C" `isInfixOf`) ls3))
  where
   t0' = read "2026-01-01 00:00:00 UTC"
+
+-- | 第一方自审 R1：存在性探针三态化——「查不出」（非法名注入 ProbeUnknown，
+-- GetFileAttributes 报 123，确定性）必须 Left，不得塌成「空类目/未被引用」；
+-- 真缺席仍是空/未引用（行为不变的另一半）。
+caseProbeUnknownFailClosed :: IO ()
+caseProbeUnknownFailClosed = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  lf <- listFlatPhotos (tmp </> "ca<t")
+  either (const (pure ())) (\v -> assertFailure ("类目查不出应 Left，得到 " <> show v)) lf
+  pj <- photosJsonRef (Just (tmp </> "p<j.json")) "x.jpg"
+  either (const (pure ())) (\v -> assertFailure ("photos.json 查不出应 Left，得到 " <> show v)) pj
+  listFlatPhotos (tmp </> "absent") >>= (@?= Right ([], []))
+  photosJsonRef (Just (tmp </> "absent.json")) "x.jpg" >>= (@?= Right Nothing)
 
 -- ─── P3b-4（codex 评审修复） ────────────────────────────────────────────────
 

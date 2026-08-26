@@ -14,6 +14,7 @@ module Pm.Op
   , restoreOpId
   , displacedOpId
   , relPathOk
+  , winNameOk
   , userRelOk
   , isTrashSrcRel
   , opRelPaths
@@ -23,7 +24,7 @@ module Pm.Op
 
 import Control.Monad (guard)
 import Data.Aeson
-import Data.Char (isDigit, toLower)
+import Data.Char (isControl, isDigit, toLower)
 import Data.List (dropWhileEnd)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -170,6 +171,16 @@ displacedOpId pid ix n = opId pid ix <> "~d" <> T.pack (show n)
 -- 一并剥除后再判定，宁可多拒（Windows 本就无法创建以点\/空格结尾的名字）。
 normComp :: String -> String
 normComp = map toLower . dropWhileEnd (\c -> c == '.' || c == ' ')
+
+-- | 用户键入、将成为**新建目录分量**的名字（@pm sort --place\/--event@）：
+-- pm 必须能按它忠实创建。保留字符与控制符不许；尾随点\/空格 Win32 创建时会
+-- 剥掉（'normComp' 记录的实测），落位名与计划名从此不一致，执行期句柄后验
+-- 必败——那是响亮失败，但该在计划前就拒。'relPathOk' 面对的是**盘上已有**的
+-- 路径（剥后比较即可），两者问的不是同一件事（第一方自审 R3）。
+winNameOk :: String -> Bool
+winNameOk n = not (null n) && all ok n && normComp n == map toLower n
+ where
+  ok c = c `notElem` ("\\/:*?\"<>|" :: String) && not (isControl c)
 
 -- | 外部可手编输入（plan\/journal\/manifest\/catalog）里相对路径字段的
 -- fail-closed 词法校验（P3b-8 六轮复审 major，Exec\/validatePlan\/Doctor\/

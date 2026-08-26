@@ -32,7 +32,6 @@ module Pm.Dedupe
   ) where
 
 import Control.Monad (forM)
-import Data.Char (toLower)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -42,6 +41,7 @@ import System.FilePath (splitDirectories)
 import Data.Maybe (isJust)
 
 import Pm.Hash (ContentProbe (..), anyCopyAliveExcept, probeConfined)
+import Pm.Import (foldPath)
 import Pm.Win (FileId)
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..))
@@ -94,10 +94,9 @@ dedupePlanItems gs = zipWith mk [0 ..] flat
 archiveLayerRel :: FilePath -> Bool
 archiveLayerRel p = take 1 (splitDirectories p) `elem` [["Raw"], ["成片"], ["相册"]]
 
--- | case-fold 后的路径键。Windows 上只差大小写的两条路径是**同一个文件**。
-foldPath :: FilePath -> String
-foldPath = map toLower
-
+-- 路径键走 'Pm.Import.foldPath'（normalise + case-fold；第一方自审 R6）：此前
+-- 这里另抄一份只做 case-fold 的定义——与 25 轮 rawExts 同型的「同一知识两处」，
+-- 分隔符拼写不同的同一条路径会被判成两条。
 -- | 同 sha 的归档层副本里，**不在本次批准隔离名单**上的那些（即幸存者）。
 --
 -- 名单比对走 'foldPath'：把只差大小写的路径也算成受害者。方向是刻意的——

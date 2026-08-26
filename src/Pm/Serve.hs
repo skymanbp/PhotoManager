@@ -316,7 +316,8 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                                             [ "plan" .= plan
                                             , "path" .= fp
                                             , "apply" .= ("pm apply " <> T.unpack (plId plan))
-                                            , "gitSteps" .= gitStepsLines (plRootPath plan) (plId plan) (planCategories plan)
+                                            , -- 与 CLI 收尾、上线命令同一生成点（Pm.Publish.vaultCommands）
+                                              "gitSteps" .= gitStepsLines cfg (plRootPath plan) (plId plan) (planCategories plan)
                                             ]
                                         )
   -- P4-7：第二个写端点——记录/撤销「暂不同步」的决定。写域是**主库**的
