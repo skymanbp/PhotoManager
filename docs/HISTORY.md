@@ -283,3 +283,10 @@
   杀手锏用例：目标父层在 CpCopyAfterFlush 换成 junction——旧实现静默把照片
   落到库外并报 DONE，新实现后验检出、沿句柄回迁、项失败、库外零字节。
   变异 3/3（后验/落位先验/删除先验各杀恰好一条）。289 tests
+- P6-D ✅ `pm vault ingest`（路线图①，§10.3 第 1/2 项）：非交互批量入库的
+  机械层。一条命令出**两份计划**（主库 相册/ + vault 类目/，计划只属于一个
+  root；主库在前，失败即停）；I5 冲突生成时即 NEEDS-DECISION；I7 来源登记 =
+  主库 journal Intent 自带的库外 srcAbs，不新造记录；`_inbox→_done` 与
+  photos.json 由调用方收尾，pm 打印显式步骤（同 I9 处理 git）。fail-closed
+  校验全部错误一次列完。293 tests（289+4），变异 3/3（类目校验/I5 分流/
+  源缺失各杀恰好一条）

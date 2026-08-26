@@ -374,8 +374,8 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 
 | 项 | 状态 |
 |---|---|
-| 1 `/photo-inbox` 改走 `pm vault ingest` | ⏸ **未做**，见下方说明 |
-| 2 ingest 的 journal 来源登记喂 I7 | ⏸ 随 1 一并 |
+| 1 `/photo-inbox` 改走 `pm vault ingest` | ✅ pm 侧 P6-D 实现（两份计划 + 显式收尾步骤）；skill 侧指针改写随第 32 轮门禁 GO 后落地 |
+| 2 ingest 的 journal 来源登记喂 I7 | ✅ P6-D：主库 journal 的 Intent 带库外 srcAbs 即 inbox-origin 记录本体，不新造记录类型 |
 | 3 vault `.gitignore` 追加 `.pm/` | ✅ 已在展示集仓（P3b 时经用户批准，commit `2d81d36`） |
 | 4 `KB-维护速查.md` §📸 / 档案 `CLAUDE.md` / `record-structure-version.md` | ✅ 指针改写 + Change Log 补记 |
 | 5 `sync_photos.py` 去留 | ✅ **退役但保留**：加横幅 + 运行时 stderr 指针，代码冻结 |

@@ -17,6 +17,7 @@ import Pm.Cli (GoOpts (..), savePlanAndMaybeRun)
 import Pm.Commands
 import Pm.ConfigEdit (ConfigPatch (..), runConfigSet, runConfigShow)
 import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
+import Pm.Ingest (runVaultIngest)
 import Pm.Names (runNames)
 import Pm.Serve (ServeOpts (..), runServe)
 import Pm.Sort (runSortPlan, runSortSurvey)
@@ -42,7 +43,8 @@ data Cmd
   | CmdClean GoOpts -- clean staging
   | CmdVaultStatus Bool -- --json（sync_photos.py 兼容输出）
   | CmdVaultPush GoOpts (Maybe String) [FilePath] -- --category + FILES
-  | CmdVaultHold Bool [FilePath] -- 暂不同步（True）/ 恢复（False）；只写主库 .pm
+  | CmdVaultHold Bool [FilePath]
+  | CmdVaultIngest GoOpts String [FilePath] -- 暂不同步（True）/ 恢复（False）；只写主库 .pm
   | CmdConfigShow -- 打印配置与路径健康（只读）
   | CmdConfigSet ConfigPatch -- 改 vault / photos.json / 并发数（主库路径只读）
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
@@ -118,6 +120,7 @@ run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
 run (CmdVaultPush go mcat fs) =
   withCfg (\cfg -> runVaultPush (savePlanAndMaybeRun cfg go) mcat fs cfg)
 run (CmdVaultHold hold fs) = withCfg (runVaultHold hold fs)
+run (CmdVaultIngest go cat fs) = withCfg (\cfg -> runVaultIngest (savePlanAndMaybeRun cfg go) cat fs cfg)
 run CmdConfigShow = withCfg runConfigShow
 run (CmdConfigSet p) = withCfg (runConfigSet p)
 run (CmdNames go) = withCfg (\cfg -> runNames (savePlanAndMaybeRun cfg go) cfg)
@@ -272,6 +275,16 @@ parserInfo =
             ( info
                 (CmdVaultHold False <$> many (strArgument (metavar "FILES..." <> help "要恢复待同步的文件名")))
                 (progDesc "撤销「暂不同步」，文件回到 NEW")
+            )
+          <> command
+            "ingest"
+            ( info
+                ( CmdVaultIngest
+                    <$> goOpts
+                    <*> strOption (long "category" <> metavar "CAT" <> help "landscape|portrait|urban——本批成品的类目（看图分类归调用方）")
+                    <*> many (strArgument (metavar "FILES..." <> help "_inbox 里的成品 JPG（绝对路径；pm 只拷不动源）"))
+                )
+                (progDesc "批量入库：源 → 主库 相册/ + vault <类目>/ 两份计划（I5 冲突出裁决项）；_inbox→_done 与 photos.json 由调用方收尾（pm 打印显式步骤）")
             )
       )
   doctorP =

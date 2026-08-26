@@ -255,9 +255,9 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
 
 **路线图**（按需推进，不承诺时间）：
 
-- `pm vault ingest`：批量入库的机械层。`_inbox` 不在任何 pm root 内，给 pm 一条
-  "搬第三处目录"的能力等于在模型外开口子——拆分方案（pm 只拷 root 内、搬移交
-  上游）已论证，作为新写路径需先过门禁。
+- ~~`pm vault ingest`~~ ✅ P6-D：pm 只拷 root 内（相册 + vault 类目两份计划），
+  `_inbox→_done` 交调用方并打印显式步骤；作为新写路径已实现待门禁，真实使用
+  仍在门禁 GO + 用户裁定之后。
 - ~~屏障协议的类型封闭~~ ✅ P6-A：`BarrierKind` 分类器 + 屏障只返回降级清单，
   升级/改写在类型上写不出来。
 - ~~落位 rename 的句柄形态~~ ✅ P6-C：全部提交型 rename/unlink 走
