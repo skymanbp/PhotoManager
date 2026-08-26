@@ -1,5 +1,5 @@
 name: photo-manager
-version: 0.4.7
+version: 0.5.0
 synopsis: Safety-first photo library manager (pm)
 description: See docs/DESIGN.md
 license: Apache-2.0
