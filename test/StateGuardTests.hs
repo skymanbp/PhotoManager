@@ -30,13 +30,14 @@ import Pm.Catalog (loadCatalog, saveCatalog)
 import Pm.Config (Config (..), SideCacheWrite (..), pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
 import Pm.Exec (Checkpoint (..), ExecEnv (..), ItemOutcome (..), defaultExecEnv, dirFingerprint, execPlan)
+import Pm.GitGuard (classifyGitProbe, vaultIgnoreGuard)
 import Pm.Hash (sha256File)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, withJournal)
 import Pm.Lock (withRootLock)
 import Pm.Op (Fingerprint (..), Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, savePlan)
 import Pm.Trash (TrashRecord (..), appendManifest, readManifest, trashDir)
-import Pm.Win (deleteBoundAt, moveBoundNoReplace)
+import Pm.Win (NameKind (..), deleteBoundAt, moveBoundNoReplace)
 import Pm.Status (StatusOpts (..), runStatus)
 import Pm.Types (Catalog, RootInfo (..), RootRole (..))
 import TestUtil
@@ -63,6 +64,8 @@ stateGuardTests =
     , testCase "P6-C 落位先验：源经 junction 路径到达 → 拒绝，两侧原封不动" caseMoveBoundSrcViaJunction
     , testCase "P6-C 删除先验：经 junction 路径 → 拒绝目标幸存；终段 symlink → 删链接本体不删目标" caseDeleteBoundViaJunction
     , testCase "三十二轮 R1：短暂共享冲突（err 32）→ 提交型打开按 Win32 同款预算重试而非立刻失败" caseDisposeRetriesSharing
+    , testCase "三十六轮 F1 classifyGitProbe 三态穷举：查不出 ≠ 不存在（ProbeUnknown 必须 Left）" caseClassifyGitProbe
+    , testCase "三十六轮 F1 悬空 .git junction → 判 git 语境要 .gitignore（布尔探针会当「无 git」放行）" caseDanglingGitJunction
     ]
 
 -- 本模块只需要 hardlink（/H）与文件 symlink（无开关）两种形态；目录 junction
@@ -585,3 +588,32 @@ caseDisposeRetriesSharing = withSystemTempDirectory "pm-sguard" $ \dir -> do
   _ <- forkIO (threadDelay 300000 >> hClose h)
   deleteBoundAt f
   doesFileExist f >>= (@?= False)
+
+-- ─── 三十六轮 F1：I11 的 .git 存在性探测三态化 ─────────────────────────────
+
+-- | 判定表穷举。要害格是 ProbeUnknown：布尔探针把 ACL/介质错误吞成 False，
+-- 而 GitGuard 里 False 的去向是放行（自身→祖先扫描→Right ()）——查不出必须
+-- 是 Left，不许给布尔答案。Surrogate 判「有」：只会引向更严一侧，不会放行。
+caseClassifyGitProbe :: IO ()
+caseClassifyGitProbe = do
+  classifyGitProbe NameMissing @?= Right False
+  classifyGitProbe NamePlain @?= Right True
+  classifyGitProbe NameSurrogate @?= Right True
+  case classifyGitProbe ProbeUnknown of
+    Left why -> assertBool ("拒绝理由应点名核不了: " <> why) ("核不了" `isInfixOf` why)
+    Right b -> assertFailure ("ProbeUnknown 不得塌缩成布尔答案（fail-open 的形状）: " <> show b)
+
+-- | 端到端判别器：**悬空** junction 的 @.git@。旧布尔探针（doesDirectoryExist/
+-- doesFileExist）对悬空链接都答 False（GuardTests 位移槽用例同一实测），守卫
+-- 便当「无 git 语境」走祖先扫描放行；probeName 判 NameSurrogate → git 语境
+-- 成立 → 本层必须有覆盖 .pm/ 的 .gitignore，这里没有 → 拒绝。
+caseDanglingGitJunction :: IO ()
+caseDanglingGitJunction = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let v = dir </> "vault"
+  createDirectoryIfMissing True v
+  mkJunction (v </> ".git") (dir </> "no-such-target")
+  g <- vaultIgnoreGuard v
+  case g of
+    Right () -> assertFailure "悬空 .git junction 被当成「无 git 语境」放行（三十六轮 F1 的形状）"
+    Left msg -> assertBool ("应按 git 语境要求 .gitignore: " <> msg) (".gitignore" `isInfixOf` msg)
+  removeDirectoryLink (v </> ".git")

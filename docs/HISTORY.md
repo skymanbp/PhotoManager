@@ -336,3 +336,15 @@
   （I11 核不了 = 不放行）。750 行预算引发 Pm.SortSource 拆出（字节级
   搬移）。308 tests（305+3），变异 3/3 各杀恰好一条。逐条处置见
   REVIEW-LOG 第 35 轮
+- P6-I ✅ 第 36 轮门禁收口（codex 钉 SHA `49ba732`，NO-GO，minset 恰 1 条 +
+  3 DOC）：I11 的 `.git` 存在性探测用 doesDirectoryExist/doesFileExist——
+  布尔探针把 ACL/断网/介质错误吞成 False，而守卫里 False 的去向是**放行**
+  （自身→祖先扫描→Right ()），合法 git root 探测失败时 `.pm` 会写进未被
+  ignore 覆盖的工作树。修法与 P3b-13 同源：改走 `probeName` 三态，判定收进
+  纯函数 `classifyGitProbe` 穷测（Unknown = Left 核不了不放行；surrogate
+  含悬空判「有」，只引向更严一侧）；`findGitAncestor` 逐层同规则换型
+  Either；canonicalizePath 一并 try。类界写明：布尔探针只允许出现在
+  False→拒绝 的位置。3 条 DOC 当轮修（35 轮清点表补录三处已保护命中 /
+  README-DESIGN 规模数字各注采样日 / 「Exec 唯一写盘」收窄为「唯一动照片
+  字节」）。310 tests（308+2），变异 m24 恰杀穷举表、m25 设计上双杀
+  （穷举表 + 悬空 junction E2E）。逐条处置见 REVIEW-LOG 第 36 轮

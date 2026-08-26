@@ -347,7 +347,9 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   victim 进 vault 侧 `.pm/trash/`）；RENAME/MISSING 只报告。I11 守卫为
   **文本级** `.gitignore` 含 `.pm/` 行检查（pm 不跑 git，I9）+ role 校验，
   fail-closed——读不到 `.gitignore`（被占/被挪）同样拒绝，核不了 ≠ 已覆盖
-  （三十五轮 F4）；vault root 由首次生成计划时建立（用户已批准 ignore 行，
+  （三十五轮 F4）；`.git` 存在性探测走 `probeName` 三态，查不出（ACL/介质）
+  同样拒绝——布尔探针会把「查不出」塌成「不存在」而放行（三十六轮 F1）；
+  vault root 由首次生成计划时建立（用户已批准 ignore 行，
   展示集仓 commit 2d81d36）。执行绑定 bindExecRoot 序：主库 → vault
   （固定路径无发现流程）→ 备份盘；doctor/trash/undo 增 `--vault` 开关。
   真实库只读验证：RENAME 项命中 `BLOCKED(photos.json:208)`（实测该行

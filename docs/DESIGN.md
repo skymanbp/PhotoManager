@@ -25,7 +25,7 @@
 | 收藏集 | `相册\` | 94 JPG / 2.5 GiB | **扁平** | 93/94 与成片精确同名（相册 ⊂ 成片） |
 | 暂存 | `To-Be-Sync'd\` | 241 文件 / 22.2 GiB | `Processed\` `Raw\` `待修改\` | 5 个事件未归档（4 个 2026 新事件 + `23-04-EU` 返修，pm P0 首扫实测）；`Raw\2026\` 为空 |
 
-**全库合计：4635 文件 / ≈459.3 GiB**（本节四行之和；§12/§13 的规模输入统一用这组数）。
+**全库合计：4635 文件 / ≈459.3 GiB**（2026-08-22 P0 基线实测，本节四行之和；§12/§13 的规模输入统一用这组基线数。库在长大——现库数字见 README「效果」节的注日实测，两组各自为真，三十六轮 F3 注明采样日）。
 
 **Raw 事件夹命名两套并存**（38 个事件夹）：
 
@@ -159,7 +159,7 @@ src/Pm/Scan.hs              -- 增量扫描（stat 比对 → 变更集 → 并�
 src/Pm/Hash.hs              -- crypton SHA-256 流式 + 目录指纹（Handle 来自 file-io 的 OsPath API）
 src/Pm/Diff.hs              -- 两个 Catalog → 六态差异（纯函数；只认 filename+sha，不看 mtime）
 src/Pm/Plan.hs              -- Diff/规则 → Plan（规则/校验为纯函数；计划文件的存/取/枚举 IO 同在此——listPlans 三十五轮自 Serve 迁入）
-src/Pm/Exec.hs              -- ★安全内核：全项目唯一有写盘 IO 的模块（类型面在 Pm.ExecTypes，三十四轮拆出）
+src/Pm/Exec.hs              -- ★安全内核：唯一改动照片字节的模块（pm 状态文件写口在 Config/Journal/Catalog/Plan/Trash，三十六轮收窄措辞；类型面在 Pm.ExecTypes，三十四轮拆出）
 src/Pm/Sort.hs              -- 卡/收件目录 → 分段提议与归位计划（源扫描层在 Pm.SortSource，三十五轮拆出）
 src/Pm/Names.hs             -- 事件夹/文件名解析、规范化、rename 计划（目标唯一性校验）
 src/Pm/Versions.hs          -- 版本组聚合报告
@@ -175,7 +175,9 @@ test/                       -- tasty: 单元 + QuickCheck + golden + 双模故�
 1. `Diff.hs`、`Names.hs` 与 `Plan.hs` 的规则/校验核心是纯函数 → 可 QuickCheck
    穷测（Plan.hs 另持计划文件的存/取/枚举 IO——三十五轮据实更正：「无 IO」在
    savePlan/loadPlan 落进该模块时即已过时）；
-2. `Exec.hs` 是唯一写盘模块，只消费 Plan → 审计面收敛到一个文件；
+2. `Exec.hs` 是唯一改动**照片字节**的模块，只消费 Plan → 照片 mutation 的
+   审计面收敛到一个文件（三十六轮据实收窄：pm 自有状态文件的写口在
+   Config/Journal/Catalog/Plan/Trash，各有锁与 fail-closed 纪律，不经 Exec）；
    **Exec 内禁用 `directory` 的 `renameFile/renamePath/copyFile`**——三者在
    Windows 上均为「目标存在即原子替换」语义（directory-1.3.8.5 haddock 实测：
    `MOVEFILE_REPLACE_EXISTING`，且声明非原子保证），与 I5 相反；
@@ -543,7 +545,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 
 ---
 
-## 12. 性能设计（规模输入统一为 4635 文件 / 459.3 GiB；D: 为 NVMe）
+## 12. 性能设计（规模输入统一为 4635 文件 / 459.3 GiB = 2026-08-22 P0 基线；现库数字见 README「效果」节；D: 为 NVMe）
 
 | 操作 | 成本构成 | 预期 |
 |---|---|---|
@@ -662,7 +664,7 @@ REVIEW-LOG 第 28 轮。
 | exFAT 备份盘（无元数据日志、rename 原子性弱） | 矩阵不依赖原子性；FS 类型/粒度入 root-id.json；mtime 只做同 root 缓存键（§3） |
 | Lightroom / 用户并发改文件 | Plan 前提复核 + 双 stat + 落位 no-replace 三重防线；杀毒/索引器的短暂占用按 Win32 同款预算重试（100ms×20，三十二轮 R1）；读口（sha256File/目录指纹/枚举）的 IOException 一律落 fail-closed 桶而非逃顶——vault 主循环入 UNSTABLE、Exec 逐项 OFailed、生成期整批拒绝、doctor 报「读取失败」行（三十四轮全仓 grep、三十五轮按 IO 读原语全集清点补漏——目录枚举口与 config.toml/`.gitignore` 控制文件读口；执行期**写口**逃逸 = §6.4 进程死亡语义，journal 有 Intent、doctor 对账，登记为已设计行为） |
 | catalog 损坏 | journal 重建 + 快照 3 份轮换 + doctor 校验 |
-| vault 是 git 工作树（.pm 污染 / git clean 风险 / 误提交） | I11 + `.gitignore` 追加 `.pm/`（P5 confirm-first）+ git 提示显式路径禁 `-A` |
+| vault 是 git 工作树（.pm 污染 / git clean 风险 / 误提交） | I11 + `.gitignore` 追加 `.pm/`（P5 confirm-first）+ git 提示显式路径禁 `-A`；守卫自身 fail-closed：`.git` 存在性探测走 probeName 三态（查不出 ≠ 不存在，三十六轮）、`.gitignore` 读失败拒绝（三十五轮） |
 | vault 改名打断 portfolio 线上 URL | RENAME 默认只报告 + photos.json 只读引用检查标 BLOCKED（§10.2） |
 | file-io 未经上游在 GHC 9.10.3 测试 | P0 冒烟 + FilePath 降级预案（§4） |
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |

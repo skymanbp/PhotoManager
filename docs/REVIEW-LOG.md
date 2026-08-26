@@ -473,7 +473,10 @@ savePlan/loadPlan 落进该模块时就已过时（`git show` 父提交可证）
   的唯一读口——loadPlan'/readManifest'/loadCatalog'/readHolds 全部经它；
   Scan.hashOne、Sort.snapshotWith、Ingest probe/mkItem、probeConfined、
   Doctor.probePmSha/verifyFp、Exec 五口、resolveKeep、Names 指纹
-  （二十五~三十四轮逐轮上的闸）。
+  （二十五~三十四轮逐轮上的闸）；Vault.listFlatPhotos 与
+  Config.requirePmTrusted 的 .pm 枚举（各自内部 try）、Hash.dirFingerprint
+  （原语本体无 try，生产调用点 Doctor/Names/Exec 全部在调用者 try 内）——
+  后三处为**三十六轮 F2 补录**：首版清点漏列了这三处已保护命中。
 - **零直接命中**：Clean/Dedupe/Import/Versions/Diff/Status/Backup 七模块
   无任何裸读原语——读一律经 Scan/Catalog 单点（codex 镜头③与本方清点
   双向零发现）。
@@ -481,7 +484,9 @@ savePlan/loadPlan 落进该模块时就已过时（`git show` 父提交可证）
   Trash listTrashFiles + Serve(→Plan) listPlans 的枚举；Config/GitGuard
   的控制文件 BS.readFile。
 - **界外（登记不修）**：写口逃逸 = §6.4 进程死亡语义（三十四轮已登记）；
-  openExclusive 家族是写路径原语。
+  openExclusive 家族是写路径原语；存在性**布尔探针**（doesFileExist/
+  doesDirectoryExist）只允许出现在 False→拒绝 的位置——False→放行 的布尔
+  探针属修复对象而非豁免（三十六轮 F1：GitGuard 已三态化）。
 
 ### 收敛证据
 
@@ -497,3 +502,79 @@ exit 1 经 newActive 仍成立；判别 UNSTABLE-only 出口的只有新用例�
 要补它的原因。枚举口新 try（Names/Sort/Doctor/Trash/Serve）无确定性注入
 形态——openExclusiveBinary 锁的是文件，锁不住「目录被枚举」这个动作，
 登记为代码级核查（与三十四轮 R2/R9 先例同款）。
+
+## 第 36 轮（P6-H `49ba732`，codex 钉 SHA）——NO-GO，minset 1 条已修
+
+attempt 1 即真跑（204 次命令执行）。五镜头把三十五轮修复全部验干净：
+hasDiffR 合一后全仓只有 status/push 两个消费点、Names 整相位 try 对照删除侧
+仅缩进迁移、TRASH-ENUM/TMP-ENUM 为 Bad 且修复白名单只收 C2/R2/Q-DONE-LOST
+的 Warn 或 C5、staleTmpFiles 的 Left 构造 stale=[] 删除循环零次、
+trashEmptyLocked' 承接体与原体一致、/api/plans 保住 errors 数组契约、
+SortSource 逐段搬移且再导出面完整、Vault 冗余 import 零残余使用、七个
+「零直接命中」模块经原语全集 rg 复核为零、三个新用例判别力成立（Spec.hs
+全程预置 PM_CONFIG 使 finally 还原总能成立）、m21 不杀 caseUnstableOnLocked
+的登记解释静态核对成立。minset 恰一条：
+
+### F1（minset）：I11 的 .git 存在性探测把「查不出」塌成「不存在」
+
+`pmIgnoreGuard` 与 `findGitAncestor` 用 doesDirectoryExist/doesFileExist 探
+`.git`，两者把 ACL/断网/介质错误统统吞成 False——而守卫里 False 的去向是
+**放行**（自身「无」→ 祖先扫描；祖先也「无」→ Right ()）。合法 git root 的
+`.git` 属性读取遇 ACL/介质错误、root 其余位置仍可写时，I11 全链放行，随后
+`.pm` 写进未被 ignore 覆盖的工作树。三十五轮 F4 只关了 `.gitignore` 的
+**读**口，同函数上游的**存在性探针**是同一纪律（二十六轮「缺席与读不到必须
+分开」）的漏网——且 `Pm.Win.probeName`（P3b-13）当年为消灭的正是这个形状，
+仓里自己的注释就点着名（Win.hs：「ACL 拒绝读属性时该层会被当成尚不存在而
+放行」）。第一方核实三段俱成立（代码事实 / 未登记 / 模型内可达——§14 明列
+介质错误与并发良性进程）。
+
+修：探测改走 probeName 三态，判定收进纯函数 `classifyGitProbe`（Missing →
+继续/放行；Plain/Surrogate → git 语境成立，surrogate 含悬空——「当有」只会
+引向更严一侧：本层查 .gitignore、祖先层直接拒绝；Unknown → Left 核不了 =
+不放行）；`findGitAncestor` 换型 `Either String (Maybe FilePath)` 逐层同
+规则（无外部消费者，grep 证实）；`canonicalizePath` 一并 try（规范化失败
+Left，不逃顶）。**类界写明**（本卷 §35 界外行 + GitGuard 模块头）：布尔探针
+只允许出现在 False→拒绝 的位置——本模块 .gitignore 的 doesFileExist、
+requirePmTrusted 的 doesDirectoryExist 均属之，这是三十五轮清点表不含它们
+的原因，现在是显式规则而非默会假设。
+
+用例：caseClassifyGitProbe（四构造子穷举——ProbeUnknown 不许给布尔答案）+
+caseDanglingGitJunction（端到端判别器：悬空 .git junction 下旧布尔探针答
+False 放行、probeName 判 NameSurrogate 要求 .gitignore——GuardTests 位移槽
+用例早已实测悬空链接的 False 行为）。ProbeUnknown 无确定性 E2E 注入形态
+（错误码 5/53 在测试里造不出来）——这正是把判定提成纯函数的原因：要害格在
+类型层穷测，IO 接线薄到只剩一次 probeName 调用。两用例入 StateGuardTests
+（「缺席与查不出必须分开」的家，casePmIsPlainFile 同型；GuardTests 已
+711/750 行）。
+
+### F2（DOC_ONLY，当轮补录）：§35 清点表漏列三处已保护命中
+
+表声称按原语全集清点，但 Vault.listFlatPhotos（内部 try）、
+Config.requirePmTrusted 的 .pm 枚举（内部 try）、Hash.dirFingerprint
+（原语本体无 try，生产调用点 Doctor:412 / Names:283 / Exec rename 指纹全部
+在调用者 try 内——三处均经评审与第一方双向核实）没落进任何一类。无代码
+风险；表已当轮补录（§35 表内三十六轮标注）——「全集」声明必须逐命中可
+复核，否则又是一句可攻击的声明。
+
+### F3（DOC_ONLY，当轮修）：README 与 DESIGN 的库规模数字互相矛盾
+
+README「效果」节是 2026-08-25 实测（4859 / 480.9 GiB），DESIGN §1/§12 是
+2026-08-22 P0 基线（4635 / 459.3 GiB）——库在长大，两组都真，但互不注明
+采样日，读起来就是矛盾。修：DESIGN 两处标注「P0 基线 + 采样日」并指向
+README 现库数字；性能预算与验收口径仍按基线（那是它们当时的输入）。
+
+### F4（DOC_ONLY，当轮修）：「Exec 唯一写盘模块」说过头
+
+DESIGN §4 两处逐字称 Exec「全项目唯一有写盘 IO」——实际 Config/Journal/
+Catalog/Plan/Trash 都写 pm 自有状态文件。声明的本意是照片字节：已收窄为
+「唯一改动照片字节的模块」，状态文件写口显式点名。与三十五轮 Plan.hs
+「纯函数无 IO」同族：架构声明与代码事实的漂移，在有人拿它做判断之前据实
+收窄。
+
+### 收敛证据
+
+**310 tests（308+2）**，GHC 警告 0（touch 强制重编译改动文件后核实）。变异
+**m24（ProbeUnknown → Right False）恰杀 1 条**（穷举表）；**m25
+（NameSurrogate → Right False）杀 2 条**——穷举表与悬空 junction E2E 都是
+它的设计探测器，不为凑「恰好一条」缩表。运行记录在会话 scratchpad
+`mut36-results.txt`。
