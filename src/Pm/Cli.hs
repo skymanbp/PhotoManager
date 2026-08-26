@@ -43,7 +43,7 @@ import Pm.Backup
 import Pm.Catalog (loadCatalog, saveCatalog)
 import Pm.Clean (threeCopiesStillExist)
 import Pm.Hash (ContentProbe (..), probeConfined)
-import Pm.Config (Config (..), readRootInfo, requireMain, requireWritable)
+import Pm.Config (Config (..), SideCacheWrite (..), readRootInfo, requireMain, requireWritable)
 import Pm.Dedupe (recheckDedupeItems)
 import Pm.Diff (BackupDiff (..))
 import Pm.Exec (ExecEnv (..), ItemOutcome (..), defaultExecEnv, execPlan, outcomeLabel, updateCatalog)
@@ -426,4 +426,7 @@ refreshBackupCache cfg broot bakCat d = do
       , bmUpdate = length (bdUpdate d)
       , bmExtra = length (bdExtra d)
       }
-  either (\e -> putStrLn ("\9888 备份缓存未写入: " <> e)) pure wc
+  case wc of
+    CacheWritten -> pure ()
+    CacheLockBusy -> putStrLn "⚠ 备份缓存本轮未刷新（另一个 pm 正持有主库锁）——下一次命令会重建"
+    CacheRefused e -> putStrLn ("⚠ 备份缓存未写入: " <> e)

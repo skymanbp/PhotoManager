@@ -25,7 +25,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (loadCatalog, saveCatalog)
-import Pm.Config (Config (..), pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
+import Pm.Config (Config (..), SideCacheWrite (..), pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
 import Pm.Exec (Checkpoint (..), ExecEnv (..), ItemOutcome (..), defaultExecEnv, dirFingerprint, execPlan)
 import Pm.Hash (sha256File)
@@ -179,10 +179,9 @@ caseSideCacheFileLevel = withSystemTempDirectory "pm-sguard" $ \dir -> do
   -- 写侧：catalog.json 是文件级 symlink → writeCacheFile 的完整路径复检拦下
   mkFileLink (cache </> "catalog.json") (outside </> "victim.json")
   w <- writeSideCache root "vault-cache" (mkCat []) (mkCat [])
-  either
-    (\m -> assertBool m ("catalog.json" `isInfixOf` m))
-    (const (assertFailure "writeSideCache 应在文件级复检拒绝 symlink"))
-    w
+  case w of
+    CacheRefused m -> assertBool m ("catalog.json" `isInfixOf` m)
+    other -> assertFailure ("writeSideCache 应在文件级复检拒绝 symlink，实为 " <> show other)
   readFile (outside </> "victim.json") >>= (@?= "OUTSIDE-BYTES")
   doesFileExist (cache </> "meta.json") >>= (@?= False)
   -- 读侧：meta.json 被 hardlink 占名 → readSideCache 报 Left（失信保留原因）。

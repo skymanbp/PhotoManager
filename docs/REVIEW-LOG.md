@@ -1195,3 +1195,31 @@ barrierDrift 放掉元数据比对 → caseBarrierMetaFrozen。
 
 **286 tests（281 + 5 新），GHC warnings 0。**`captureStdout` 从 SortTests 移入
 TestUtil（进程级 stdout 重定向，多模块共用；套件本就 NumThreads 1）。
+
+## 第 31 轮（P5-H `92cd567`）——NO-GO 1 条，minset 1 条已修
+
+五镜头把 P5-H 的五处修复全部验干净（无死锁、降级路径口径一致、五条新用例的
+锁闸断言成立——含正确指出 caseTrashEmptyTakesLock 的"坏行警告不出现"证明只对
+本次突变成立、不是对任意未来实现的通用证明，这正是突变验证的定义），只捞出
+一条未登记同形状：
+
+**F1 侧缓存成对写未进 root 锁（已修）**。`writeSideCache`（catalog.json +
+meta.json 成对）全链无锁：两次 `pm backup`、或 backup 与 afterApply 交错，
+后写者按旧快照回写，得到 catalog 与 meta 不配对的缓存。backup-cache 未登记
+（vault-cache 的跨进程争用在二十轮登记过残余）。统一修复：成对写整段进
+I10 锁——**一处锁两类同享**，vault-cache 那条登记残余随之关闭。
+
+落地时踩到并解决了两件评审预判过的事：①`Pm.Lock` 依赖 `Pm.Config`，锁原语
+只能下沉进 Config（`Pm.Lock` 保留为再导出，全部既有调用点零改动）；
+②vault-holds 事务（二十一轮裁定的锁内整段）在锁内经 `computeVault` 走到缓存
+写——嵌套取锁必失败。**不做"已持锁变体"**（调用方会撒谎），改为三态返回
+`CacheWritten | CacheLockBusy | CacheRefused`：锁被占（含自持）降级为"缓存
+本轮不刷新"警告——缓存可由下一次命令重建，报告本身是本轮新算的；junction
+拒绝仍硬停（P3b-13 不变）。压成一个 Left 的代价在测试里当场显形：全部
+hold 用例 exit 2。
+
+突变验证：writeSideCache 去锁 → caseSideCacheTakesLock 恰好转红（1/286）。
+
+评审另列两条已登记残余（scan/backup 的 saveCatalog 固定 .tmp 竞态、
+vault-cache——后者本轮已顺带关闭），及一条覆盖边界（catalog 回写用例未压两个
+真实 writer 的合并语义）。286 tests，GHC 警告 0。

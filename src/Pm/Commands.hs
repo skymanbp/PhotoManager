@@ -56,7 +56,6 @@ import Pm.Diff
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Hash (ContentProbe (..), probeConfined, sha256File)
 import Pm.Import
-import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
 import Pm.Scan

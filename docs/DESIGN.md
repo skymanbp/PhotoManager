@@ -370,7 +370,10 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `pm trash empty` 从读 manifest 视图到唯一那次 unlink 整段在锁内；
   `pm resolve` 锁内重载计划再写回；doctor `--repair` 的「读 journal → 判定 →
   补记/删 tmp」整段在锁内（锁被占退回只读诊断）；执行后的 catalog 回写是
-  加锁 RMW（锁被占则明说放弃，pm scan 可补）；配置的全部四条读改写路径
+  加锁 RMW（锁被占则明说放弃，pm scan 可补）；侧缓存 catalog+meta 的**成对写**
+  整段在锁内（三十一轮 F1，backup-cache 与 vault-cache 共用一个入口；锁被占
+  = CacheLockBusy，降级为"本轮不刷新"，与 junction 拒绝的硬停是不同构造子）；
+  配置的全部四条读改写路径
   （config set / API config / backup init / **pm init --force**）都在
   `withConfigLock` 内。进程内互斥（serve 的 MVar）不算——它挡不住第二个 pm。
   内核对「该有屏障而调用方没给」整批拒绝，缺席不会退化成静默跳过。
