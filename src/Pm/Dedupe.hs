@@ -143,7 +143,7 @@ anyArchiveCopyAlive root cat = archiveCopyAlive root cat Set.empty
 --
 -- 读不出来（占用、ACL、介质错误）与"另一份还在"必须给出相反的结论：
 -- 'anyCopyAlive' 只在真读到期望 sha 时才算数，其余一律不算——fail-closed。
-recheckDedupeItems :: FilePath -> Catalog -> Plan -> IO Plan
+recheckDedupeItems :: FilePath -> Catalog -> Plan -> IO [(Int, Text)]
 recheckDedupeItems root cat plan = do
   let pending =
         [ (v, sha)
@@ -161,13 +161,13 @@ recheckDedupeItems root cat plan = do
   let excl = concat vids
   judged <- forM shas $ \sha -> (,) sha <$> archiveCopyAlive root cat victims excl sha
   let doomed = Set.fromList [sha | (sha, False) <- judged]
-  items' <- forM (plItems plan) $ \it -> case (piStatus it, piOp it) of
+  dems <- forM (plItems plan) $ \it -> case (piStatus it, piOp it) of
     (StPending, OpQuarantine v sha _)
       | Set.member sha doomed -> do
           putStrLn ("  ⚠ 隔离后归档层将不再有此内容的活副本，该项暂停: " <> v)
-          pure it {piStatus = StNeedsDecision lastCopyWhy}
-    _ -> pure it
-  pure plan {plItems = items'}
+          pure [(piIx it, lastCopyWhy)]
+    _ -> pure []
+  pure (concat dems)
  where
   lastCopyWhy =
     "执行期复验：批准的这些条目会把该内容在归档层的最后一份也隔离掉（或余下"

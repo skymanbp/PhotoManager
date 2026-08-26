@@ -417,10 +417,8 @@ caseMainIsBackupWitness = withSystemTempDirectory "pm-guard" $ \tmp -> do
   let qplan =
         Plan pid "clean-staging" mainP (Just "bk") now
           [PlanItem 0 (OpQuarantine ("To-Be-Sync'd" </> "x.jpg") "s" "clean-staging:test") StPending Nothing]
-  plan' <- recheckCleanPlan cfg qplan
-  case map piStatus (plItems plan') of
-    [StNeedsDecision _] -> pure ()
-    other -> assertFailure ("expected demotion, got " <> show other)
+  dem <- recheckCleanPlan cfg qplan
+  map fst dem @?= [0]
   -- trash empty：clean-staging 记录 HELD，文件仍在
   let rel = "p" </> "x.jpg"
   createDirectoryIfMissing True (trashDir mainP </> "p")

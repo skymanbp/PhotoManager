@@ -832,7 +832,7 @@ runClean go cfg = do
                   now <- getCurrentTime
                   -- P2.2（复审 cx-3 旁路封堵）：--apply 即时路径同样在
                   -- 确认后、执行前重验三副本，与 pm apply 无差别——两者现在
-                  -- 共用 'preExecFor'，不再各自记得传钩子。
+                  -- 屏障经 'Pm.Cli.runBarrier' 由内核在锁内跑，不再各自记得传钩子。
                   savePlanAndMaybeRun
                     cfg
                     go
