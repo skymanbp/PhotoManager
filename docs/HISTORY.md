@@ -360,5 +360,8 @@
   失败后递归顺利跟过去、库外文件入索引。修同 Trash.linkish 纪律（非
   ENOENT 按链接跳过入错误桶）+ 该处 SomeException 收窄 IOException；同型
   四处清点（Trash/Exec 已保守为范式、SortSource 仅诊断行登记）。无确定性
-  注入形态按 R2/R9 登记。310 tests，警告 0。按用户裁定转入释放链（每个
-  动盘步骤先摆清单 + AskUserQuestion）
+  注入形态按 R2/R9 登记。310 tests，警告 0。随后第 38 轮聚焦验证轮对
+  `6c6f049` **GO、minset 空**——修法逐格等价核对通过、同型清点无漏项、
+  仅登记一处父提交既存的 freshnessSweep 报告面小洞；门禁含 GO 后收口
+  在内全部过审。按用户裁定转入释放链（每个动盘步骤先摆清单 +
+  AskUserQuestion）
