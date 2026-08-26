@@ -25,6 +25,10 @@ module TestUtil
   , scanQuiet
   , elemSubstr
   , pad2
+  , mkVaultCfg
+  , writeF
+  , mkMain
+  , execNow
   , captureStdout
   ) where
 
@@ -40,7 +44,8 @@ import System.IO (IOMode (..), hClose, hFlush, hGetContents, hSetEncoding, openF
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty.HUnit
 
-import Pm.Config (RootIdState (..), createRootInfo, readRootState)
+import Pm.Cli (executePlanNow)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, readRootState, writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity, runDoctor)
 import Pm.Exec
 import Pm.Hash
@@ -212,3 +217,29 @@ captureStdout act = withSystemTempDirectory "pm-cap" $ \dir -> do
     t <- hGetContents rh
     length t `seq` pure t
   pure (txt, a)
+
+
+-- vault 系 IO 用例的共享 fixture（三十四轮拆分 VaultTests 时上移，逐字节搬移）。
+
+mkVaultCfg :: FilePath -> FilePath -> Config
+mkVaultCfg root vdir =
+  Config
+    { cfgMainPath = root
+    , cfgVaultPath = Just vdir
+    , cfgPhotosJson = Nothing
+    , cfgWorkers = Nothing
+    , cfgBackupId = Nothing
+    , cfgBackupSubpath = Nothing
+    }
+
+writeF :: FilePath -> String -> IO ()
+writeF fp s = createDirectoryIfMissing True (takeDirectory fp) >> writeFile fp s
+
+-- | 主库 root 标识（P3b-6 复审 B1：computeVault 以主库身份读 相册/写 vault-cache，
+-- 缺 RoleMain 标识 → exit 2；IO 用例先建标识）。
+mkMain :: FilePath -> IO ()
+mkMain root = writeRootInfo root (RootInfo "main-rid" RoleMain t0 Nothing)
+
+-- | 立即执行的 runPlan（测试用：跳过交互确认，仍走完整 Exec 内核）。
+execNow :: Config -> Plan -> IO Int
+execNow cfg p = savePlan p >> executePlanNow cfg p

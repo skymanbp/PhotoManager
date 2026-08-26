@@ -27,10 +27,12 @@ module Pm.Names
   , runNames
   ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (forM, forM_)
 import Data.Char (isDigit, toLower)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
+import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath ((</>))
@@ -263,20 +265,31 @@ runNames runPlan cfg = do
           case er of
             Left msg -> putStrLn msg >> pure 2
             Right info -> do
-              items <- forM (zip [0 ..] finalRenames) $ \(i, (yd, old, new)) -> do
-                fp <- dirFingerprint (rawTop </> yd </> old)
-                pure (PlanItem i (OpRename ("Raw" </> yd </> old) ("Raw" </> yd </> new) (FpDir fp)) StPending Nothing)
-              pid <- newPlanId
-              now <- getCurrentTime
-              runPlan
-                Plan
-                  { plId = pid
-                  , plKind = "names"
-                  , plRootPath = root
-                  , plRootId = Just (riId info)
-                  , plCreated = now
-                  , plItems = items
-                  }
+              -- 三十四轮（同型扫尽，与 Ingest 生成期同纪律）：Raw 事件夹动辄
+              -- 数十 GB，指纹遍历窗口内 Lightroom 正写入/文件被独占都会抛——
+              -- 逐项 try、错误一次列完、整批拒绝（exit 2，零计划），不逃顶。
+              itemsE <- forM (zip [0 ..] finalRenames) $ \(i, (yd, old, new)) -> do
+                fpE <- try (dirFingerprint (rawTop </> yd </> old)) :: IO (Either IOException T.Text)
+                pure $ case fpE of
+                  Left e -> Left (yd </> old <> " 指纹读取失败（" <> show e <> "）")
+                  Right fp -> Right (PlanItem i (OpRename ("Raw" </> yd </> old) ("Raw" </> yd </> new) (FpDir fp)) StPending Nothing)
+              case [e | Left e <- itemsE] of
+                errs@(_ : _) -> do
+                  mapM_ (\e -> putStrLn ("  ✗ " <> e)) errs
+                  putStrLn "生成期读取失败（被占/介质错误？）：整批拒绝，未生成计划——解除占用后重跑"
+                  pure 2
+                [] -> do
+                  pid <- newPlanId
+                  now <- getCurrentTime
+                  runPlan
+                    Plan
+                      { plId = pid
+                      , plKind = "names"
+                      , plRootPath = root
+                      , plRootId = Just (riId info)
+                      , plCreated = now
+                      , plItems = [it | Right it <- itemsE]
+                      }
  where
   isYearName n = length n == 4 && all isDigit n && take 2 n == "20"
   span' p xs = (filter p xs, filter (not . p) xs)

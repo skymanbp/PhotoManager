@@ -1,4 +1,4 @@
-# PhotoManager 开发史（P0 – P5）
+# PhotoManager 开发史（P0 – P6）
 
 > 从 README 移出的完整阶段日志（2026-08-25，README 按九段标准重构）。
 > 逐轮评审的处置细节在 [REVIEW-LOG.md](REVIEW-LOG.md)，评审原文在
@@ -305,3 +305,21 @@
   句柄后验误拒）。文档统一修 §6 落位协议等约二十处；REVIEW-LOG 拆卷。
   298 tests（293+5），变异 11/11 各杀恰好一条（10 主循环 + HELD case-fold
   补验；三十三轮 F3 更正此前误记的 10/10）。逐条处置见 REVIEW-LOG 第 32 轮
+- P6-F ✅ 第 33 轮门禁收口（codex 恢复后首轮**钉 SHA** 评审，NO-GO，minset
+  恰 1 条）：ingest 生成期 IO 异常逃顶——probe 与 mkItem 的读口无 try，
+  `doesFileExist` 通过后源/目标被良性进程占住即让 CLI 崩溃（违反 §14 防
+  崩溃）。修法与 pm sort 二十五轮同纪律：逐文件 try、错误聚合一次列完、
+  退出 2 零计划；过深嵌套顺手拆出 `runTwoPlans`。另两条 DOC（Win.hs 重试
+  注释措辞、变异计数 10/10→11/11 统一）当轮修。299 tests（298+1），变异
+  2/2。逐条处置见 REVIEW-LOG 第 33 轮（本条目为三十四轮补记——当轮漏立）
+- P6-G ✅ 第 34 轮门禁收口（codex 又 4/4 空跑 → 独立 Workflow 三镜头 +
+  逐条对抗复核，钉 `972b049`）：minset 2 条同根——「读口 fail-closed」纪律
+  从未全仓扫。①`computeVault'` 枚举-hash 主循环无 try（全模块唯一 try 在
+  freshShaAt，二十三轮只修了那一个调用点）→ 读失败落既有 UNSTABLE 桶；
+  连带 listFlatPhotos / photosJsonRef Either 化（枚举失败整体拒绝；photos
+  引用读不出按「可能被引用」，不 fail-open）。②Exec 裸 sha256File 共 5 处
+  （复核把镜头报的 1 处扩成 5）→ 逐口 try 给 OFailed。rule-09 全仓普查
+  再扫 Doctor 6 处 / resolveKeep / Names 指纹并修。第三条 finding（c2 断言
+  不判别）被复核**证伪**，只登记取舍。750 行预算四次拆分（VaultCore /
+  ExecTypes / Apply / VaultHoldTests，字节级搬移 + 再导出）。305 tests
+  （299+6），变异 6/6 各杀恰好一条。逐条处置见 REVIEW-LOG 第 34 轮

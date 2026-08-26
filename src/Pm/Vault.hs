@@ -32,6 +32,7 @@ module Pm.Vault
   , checkAssignments
   , vaultPushItems
   , mkVaultPushPlan
+  , photosJsonRef
   ) where
 
 import Control.Exception (IOException, try)
@@ -62,142 +63,9 @@ import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
 import Pm.Plan
 import Pm.Types
+import Pm.VaultCore (VaultDiff (..), fixedCategories, photoExtFold, pushableExt, renderVaultJson, vaultDiff)
 import Pm.VaultHold (VaultHold (..), readHolds, splitHeld)
 import Pm.Win (volumeFsType)
-
--- ─── 纯核心：legacy 算法逐行复刻 ────────────────────────────────────────────
-
--- | 六态结果。字段元组形状 = sync_photos.py JSON 值形状（hash 此处存全长，
--- 16 字符截断在 JSON 渲染层做）。
-data VaultDiff = VaultDiff
-  { vdOk :: [(FilePath, String)]
-  , vdNew :: [FilePath]
-  , vdMissing :: [(FilePath, String)]
-  , vdRenamed :: [(FilePath, FilePath, String, Text)]
-    -- ^ (源名, vault 名, vault 类目, sha)
-  , vdDrift :: [(FilePath, String, Text, Text)]
-    -- ^ (名, 类目, 源 sha, vault sha)
-  , vdDuplicate :: [(FilePath, [String])]
-  }
-  deriving (Show, Eq)
-
--- | legacy CATEGORIES 元组（次序即输出次序）。其它子目录不纳入比对，但会
--- 显式告警（legacy 的静默无视是已登记缺陷，规范 §6 修复项 1）。
-fixedCategories :: [String]
-fixedCategories = ["landscape", "portrait", "urban"]
-
--- | pm 过滤集合 = legacy PHOTO_EXTS 的 case-fold 等价类（DESIGN §10.1：
--- legacy 字面六拼写会静默丢 .Jpg\/.Png 等，pm 有意修复为 case-fold）。
-photoExtFold :: FilePath -> Bool
-photoExtFold p = map toLower (takeExtension p) `elem` [".jpg", ".jpeg", ".png"]
-
--- | push 写路径只收 jpg\/jpeg（vault 硬规则 3；.png = UNPUSHABLE）。
-pushableExt :: FilePath -> Bool
-pushableExt p = map toLower (takeExtension p) `elem` [".jpg", ".jpeg"]
-
--- | 核心 diff。输入：源侧 名→sha；vault 侧按类目次序的 (类目, 名→sha)。
--- 次序契约与 legacy 逐点对应：new\/missing 候选按名字典序（Map 键序 =
--- Python sorted 的码点序）；同名多类目按类目元组序；RENAME 仅当两侧候选
--- 皆非空才做、贪心首配、每个 NEW 至多消费一个 MISSING（legacy :123-138）。
-vaultDiff :: Map FilePath Text -> [(String, Map FilePath Text)] -> VaultDiff
-vaultDiff srcShas vaultByCat =
-  VaultDiff
-    { vdOk = ok
-    , vdNew = [n | n <- newCand, n `notElem` matchedNew]
-    , vdMissing = [mc | mc <- missingCand, mc `notElem` consumedMissing]
-    , vdRenamed = renamed
-    , vdDrift = drift
-    , vdDuplicate = duplicate
-    }
- where
-  -- 名 → [(类目, sha)]；fromListWith 配 flip (<>) 保类目先入先出次序
-  vaultIdx :: Map FilePath [(String, Text)]
-  vaultIdx =
-    Map.fromListWith
-      (flip (<>))
-      [(name, [(cat, sha)]) | (cat, m) <- vaultByCat, (name, sha) <- Map.toList m]
-  newCand = Map.keys (srcShas `Map.difference` vaultIdx)
-  missingCand =
-    [ (name, cat)
-    | (name, cats) <- Map.toList (vaultIdx `Map.difference` srcShas)
-    , (cat, _) <- cats
-    ]
-  inter = Map.toList (Map.intersectionWith (,) srcShas vaultIdx)
-  duplicate = [(name, sort (map fst cats)) | (name, (_, cats)) <- inter, length cats > 1]
-  (ok, drift) = foldr classify ([], []) inter
-  classify (name, (srcH, cats)) (oks, drifts) =
-    let sameH = [(name, cat) | (cat, vh) <- cats, vh == srcH]
-        diffH = [(name, cat, srcH, vh) | (cat, vh) <- cats, vh /= srcH]
-     in (sameH <> oks, diffH <> drifts)
-  vaultShaOf (n, c) = fromMaybe "" (lookup c =<< Map.lookup n vaultIdx)
-  renamed
-    | null newCand || null missingCand = []
-    | otherwise = reverse (fst (foldl' match ([], []) newCand))
-   where
-    missingHash = [(mc, vaultShaOf mc) | mc <- missingCand]
-    match (acc, consumed) newName =
-      let h = fromMaybe "" (Map.lookup newName srcShas)
-          hit =
-            [ mc
-            | (mc, mh) <- missingHash
-            , mc `notElem` consumed
-            , mh == h
-            ]
-       in case hit of
-            ((mName, mCat) : _) ->
-              ((newName, mName, mCat, h) : acc, (mName, mCat) : consumed)
-            [] -> (acc, consumed)
-  matchedNew = [n | (n, _, _, _) <- renamed]
-  consumedMissing = [(m, c) | (_, m, c, _) <- renamed]
-
--- ─── JSON 渲染（键名、键序、值形状 = legacy；末尾追加 unpushable） ──────────
-
-renderVaultJson ::
-  FilePath ->
-  FilePath ->
-  Int ->
-  Int ->
-  VaultDiff ->
-  [(FilePath, String)] ->
-  [(FilePath, String)] ->
-  [(FilePath, Text)] ->
-  [(FilePath, String)] ->
-  BSL.ByteString
-renderVaultJson srcDir vaultDir srcCount vaultCount d unpushable unstable held heldStale =
-  AE.encodingToLazyByteString . pairs $
-    AE.pair "source_dir" (AE.string srcDir)
-      <> AE.pair "vault_dir" (AE.string vaultDir)
-      <> AE.pair "source_count" (AE.int srcCount)
-      <> AE.pair "vault_count" (AE.int vaultCount)
-      <> AE.pair "ok" (AE.list pairNC (vdOk d))
-      <> AE.pair "new" (AE.list AE.string (vdNew d))
-      <> AE.pair "missing" (AE.list pairNC (vdMissing d))
-      <> AE.pair
-        "renamed"
-        ( AE.list
-            (\(n, m, c, h) -> AE.list id [AE.string n, AE.string m, AE.string c, AE.text (T.take 16 h)])
-            (vdRenamed d)
-        )
-      <> AE.pair
-        "drift"
-        ( AE.list
-            (\(n, c, sh, vh) -> AE.list id [AE.string n, AE.string c, AE.text (T.take 16 sh), AE.text (T.take 16 vh)])
-            (vdDrift d)
-        )
-      <> AE.pair
-        "duplicate"
-        (AE.list (\(n, cats) -> AE.list id [AE.string n, AE.list AE.string cats]) (vdDuplicate d))
-      -- pm 第七态（legacy 无此键；六键的集合逐项比对不受影响）
-      <> AE.pair "unpushable" (AE.list pairNC unpushable)
-      -- pm 第八态（评审 #5）：读取不稳定的名字（已从六态整体排除）
-      <> AE.pair "unstable" (AE.list pairNC unstable)
-      -- pm 第九态（P4-7 用户裁定）：决定「暂不同步」的 NEW（仍在 new 键里，
-      -- 六态集合不受影响；held 是它的注解子集，不进 vault、不算"有事可做"）
-      <> AE.pair "held" (AE.list (\(n, h) -> AE.list id [AE.string n, AE.text (T.take 16 h)]) held)
-      -- 决定已失效（照片字节变了 / 已不在 NEW）：回到 NEW 处理，只报告
-      <> AE.pair "held_stale" (AE.list pairNC heldStale)
- where
-  pairNC (n, c) = AE.list id [AE.string n, AE.string c]
 
 -- ─── vault 侧缓存（主库 .pm\/vault-cache\/，display + sha 复用） ─────────────
 
@@ -245,16 +113,29 @@ writeVaultCache mainRoot = writeSideCache mainRoot pmSubVaultCache
 -- | 平铺列出目录内照片文件（case-fold 过滤），并报告出现的子目录名
 -- （legacy 非递归扫描让子目录内容彻底不可见——pm 保持平铺语义但把
 -- 子目录显式报出来，不静默）。
-listFlatPhotos :: FilePath -> IO ([FilePath], [FilePath])
+--
+-- 三十四轮 F1 同族：存在性判定与枚举之间目录可被并发进程挪走/删除
+-- （Explorer、用户手工整理），listDirectory 抛出会一路逃顶；而静默退化成
+-- 空列表更糟——整个另一侧会被伪报成 MISSING/NEW。枚举失败 = Left，
+-- 调用方整体拒绝本轮报告（exit 2，与 "source missing" 同级）。
+listFlatPhotos :: FilePath -> IO (Either String ([FilePath], [FilePath]))
 listFlatPhotos dir = do
   ex <- doesDirectoryExist dir
   if not ex
-    then pure ([], [])
+    then pure (Right ([], []))
     else do
-      names <- listDirectory dir
-      flagged <- mapM (\n -> (,) n <$> doesDirectoryExist (dir </> n)) names
-      let (dirs, files) = partition snd flagged
-      pure (sort (filter photoExtFold (map fst files)), sort (map fst dirs))
+      r <-
+        try
+          ( do
+              names <- listDirectory dir
+              mapM (\n -> (,) n <$> doesDirectoryExist (dir </> n)) names
+          )
+          :: IO (Either IOException [(FilePath, Bool)])
+      pure $ case r of
+        Left e -> Left (dir <> " 枚举失败（" <> show e <> "）")
+        Right flagged ->
+          let (dirs, files) = partition snd flagged
+           in Right (sort (filter photoExtFold (map fst files)), sort (map fst dirs))
 
 -- | 取一个文件的 sha：stat 与缓存条目一致（statHitStable：含 racy 余量
 -- 判据，评审 #4）→ 复用；否则真实重读，双 stat 防撕裂。三轮不稳 →
@@ -301,7 +182,8 @@ data VaultReport = VaultReport
   , vrDiff :: VaultDiff
   , vrUnpushable :: [(FilePath, String)]
   , vrUnstable :: [(FilePath, String)]
-    -- ^ (名, 位置)：任一侧三轮双 stat 仍不稳的名字（评审 #5）。该名整体
+    -- ^ (名, 位置)：任一侧三轮双 stat 仍不稳（评审 #5）**或读口 IOException
+    -- （三十四轮 F1：AV\/索引器独占、扫描窗口内被挪走）**的名字。该名整体
     -- 退出六态分类（两侧都排除，否则另一侧会伪报 NEW\/MISSING），状态
     -- 未知 → 退出码非零，fail-closed。
   , vrSrcMeta :: Map FilePath Entry
@@ -396,99 +278,115 @@ computeVault' quiet cfg vaultDir = do
             mainCache = maybe Map.empty catEntries mcat
             vaultCache =
               if cacheIdentityOk then maybe Map.empty catEntries mVCache else Map.empty
+            -- 三十四轮 F1（本轮 minset）：枚举-hash 主循环与 'freshShaAt' 同款
+            -- fail-closed——读口 IOException（AV/索引器短暂独占、分钟级扫描窗口
+            -- 内文件被 Lightroom/用户挪走）落 unstable 桶单列报告（sha 分量在
+            -- 下游处处被 Just 模式滤掉，空值安全），不再逃顶让 CLI 崩、API 500
+            -- ——那正是 'freshShaAt' 注释里点名要避免的两个后果，二十三轮只修
+            -- 了那一个调用点，主循环漏扫。
             resolve cache rel abs' n = do
-              (sha, me) <- shaViaCache cache rel abs'
-              pure (n, sha, me)
-        (srcNames, srcSubdirs) <- listFlatPhotos srcDir
-        srcTriples <- mapM (\n -> resolve mainCache ("相册" </> n) (srcDir </> n) n) srcNames
-        (_, vaultTop) <- listFlatPhotos vaultDir
-        let knownAux = ["_inbox", "_site", "scripts"]
-            unknownDirs =
-              [ dn
-              | dn <- vaultTop
-              , dn `notElem` fixedCategories
-              , dn `notElem` knownAux
-              , take 1 dn /= "."
-              ]
-        perCat <- forM fixedCategories $ \cat -> do
-          (names, subdirs) <- listFlatPhotos (vaultDir </> cat)
-          mapM_ (\dn -> warn ("  ⚠ vault 类目下有子目录（不递归）: " <> (cat </> dn))) subdirs
-          ps <- mapM (\n -> resolve vaultCache (cat </> n) (vaultDir </> cat </> n) n) names
-          pure (cat, ps)
-        mapM_ (\dn -> warn ("  ⚠ vault 未知目录（未纳入比对）: " <> dn)) unknownDirs
-        mapM_ (\dn -> warn ("  ⚠ 相册下有子目录（平铺语义，不递归）: " <> dn)) srcSubdirs
-        -- 评审 #5：任一侧读取不稳的名字整体退出六态分类（只排一侧会让
-        -- 另一侧伪报 NEW/MISSING）；单列报告 + 退出码非零。
-        let unstable =
-              [(n, "相册") | (n, _, Nothing) <- srcTriples]
-                <> [(n, cat) | (cat, ps) <- perCat, (n, _, Nothing) <- ps]
-            badNames = map fst unstable
-            srcShas = Map.fromList [(n, sha) | (n, sha, _) <- srcTriples, n `notElem` badNames]
-            vaultShas =
-              [ (cat, Map.fromList [(n, sha) | (n, sha, _) <- ps, n `notElem` badNames])
-              | (cat, ps) <- perCat
-              ]
-            d = vaultDiff srcShas vaultShas
-            vaultCount = sum [Map.size m | (_, m) <- vaultShas]
-            isPng n = map toLower (takeExtension n) == ".png"
-            unpushable =
-              [(n, "相册") | n <- srcNames, isPng n]
-                <> [(n, cat) | (cat, ps) <- perCat, (n, _, _) <- ps, isPng n]
-        mapM_
-          (\(n, loc) -> warn ("  ⚠ 读取不稳定（本轮退出六态分类，fail-closed）: " <> loc </> n))
-          unstable
-        now <- getCurrentTime
-        eholds <- readHolds root
-        case eholds of
-          Left e -> pure (Left (e, 2))
-          Right holds -> do
-            -- 决定的复核**不吃 (size,mtime) 缓存快路**：等长替换 + 还原 mtime
-            -- 时 'shaViaCache' 会复用缓存 sha，旧决定就继续压住新字节
-            -- （codex 二十一轮 major）。空缓存 → 一定走真实重读 + 双 stat。
-            -- 只对「名单里且仍是 NEW」的文件做，数量 = 用户决定不同步的张数。
-            freshHeld <-
-              mapM
-                (\n -> (,) n <$> freshShaAt srcDir n)
-                [vhName h | h <- holds, vhName h `elem` vdNew d]
-            let freshMap = Map.fromList freshHeld
-                (held, heldStale) = splitHeld holds (vdNew d) (\n -> maybe Nothing id (Map.lookup n freshMap))
-                vEntries = [e | (_, ps) <- perCat, (_, _, Just e) <- ps]
-                meta =
-                  VaultCacheMeta
-                    { vmAt = now
-                    , vmVaultPath = vaultCanon
-                    , vmRootId = riId <$> mVRoot
-                    , vmOk = length (vdOk d)
-                    , vmNew = length (vdNew d)
-                    , vmMissing = length (vdMissing d)
-                    , vmRenamed = length (vdRenamed d)
-                    , vmDrift = length (vdDrift d)
-                    , vmDuplicate = length (vdDuplicate d)
-                    , vmUnpushable = length unpushable
-                    , vmUnstable = length unstable
-                    , vmHeld = length held
-                    }
-            -- 缓存目录不可信（junction 化）是硬失败：继续下去等于把 pm 的写
-            -- 交给库外（P3b-13 十轮 critical）。锁被占则只是缓存本轮不刷新
-            -- （三十一轮 F1；vault-holds 事务在锁内走到这里就是这种情形），
-            -- 报告本身是本轮新算的，不受影响。
-            wc <- writeVaultCache root (Catalog "vault-cache" now (entryMap vEntries)) meta
-            case wc of
-              CacheRefused e -> pure (Left (e, 2))
-              _ ->
-                pure . Right $
-                  VaultReport
-                    { vrSrcDir = srcDir
-                    , vrVaultDir = vaultDir
-                    , vrSrcCount = Map.size srcShas
-                    , vrVaultCount = vaultCount
-                    , vrDiff = d
-                    , vrUnpushable = unpushable
-                    , vrUnstable = unstable
-                    , vrSrcMeta = Map.fromList [(n, e) | (n, _, Just e) <- srcTriples]
-                    , vrHeld = held
-                    , vrHeldStale = heldStale
-                    }
+              r <- try (shaViaCache cache rel abs') :: IO (Either IOException (Text, Maybe Entry))
+              pure $ case r of
+                Left _ -> (n, "", Nothing)
+                Right (sha, me) -> (n, sha, me)
+        eSrcList <- listFlatPhotos srcDir
+        eVaultTop <- listFlatPhotos vaultDir
+        eCatLists <-
+          forM fixedCategories $ \cat ->
+            fmap ((,) cat) <$> listFlatPhotos (vaultDir </> cat)
+        case (eSrcList, eVaultTop, [e | Left e <- eCatLists]) of
+          (Left e, _, _) -> pure (Left ("ERROR: " <> e, 2))
+          (_, Left e, _) -> pure (Left ("ERROR: " <> e, 2))
+          (_, _, e : _) -> pure (Left ("ERROR: " <> e, 2))
+          (Right (srcNames, srcSubdirs), Right (_, vaultTop), []) -> do
+            let catLists = [cl | Right cl <- eCatLists]
+            srcTriples <- mapM (\n -> resolve mainCache ("相册" </> n) (srcDir </> n) n) srcNames
+            let knownAux = ["_inbox", "_site", "scripts"]
+                unknownDirs =
+                  [ dn
+                  | dn <- vaultTop
+                  , dn `notElem` fixedCategories
+                  , dn `notElem` knownAux
+                  , take 1 dn /= "."
+                  ]
+            perCat <- forM catLists $ \(cat, (names, subdirs)) -> do
+              mapM_ (\dn -> warn ("  ⚠ vault 类目下有子目录（不递归）: " <> (cat </> dn))) subdirs
+              ps <- mapM (\n -> resolve vaultCache (cat </> n) (vaultDir </> cat </> n) n) names
+              pure (cat, ps)
+            mapM_ (\dn -> warn ("  ⚠ vault 未知目录（未纳入比对）: " <> dn)) unknownDirs
+            mapM_ (\dn -> warn ("  ⚠ 相册下有子目录（平铺语义，不递归）: " <> dn)) srcSubdirs
+            -- 评审 #5：任一侧读取不稳的名字整体退出六态分类（只排一侧会让
+            -- 另一侧伪报 NEW/MISSING）；单列报告 + 退出码非零。
+            let unstable =
+                  [(n, "相册") | (n, _, Nothing) <- srcTriples]
+                    <> [(n, cat) | (cat, ps) <- perCat, (n, _, Nothing) <- ps]
+                badNames = map fst unstable
+                srcShas = Map.fromList [(n, sha) | (n, sha, _) <- srcTriples, n `notElem` badNames]
+                vaultShas =
+                  [ (cat, Map.fromList [(n, sha) | (n, sha, _) <- ps, n `notElem` badNames])
+                  | (cat, ps) <- perCat
+                  ]
+                d = vaultDiff srcShas vaultShas
+                vaultCount = sum [Map.size m | (_, m) <- vaultShas]
+                isPng n = map toLower (takeExtension n) == ".png"
+                unpushable =
+                  [(n, "相册") | n <- srcNames, isPng n]
+                    <> [(n, cat) | (cat, ps) <- perCat, (n, _, _) <- ps, isPng n]
+            mapM_
+              (\(n, loc) -> warn ("  ⚠ 读取不稳定（本轮退出六态分类，fail-closed）: " <> loc </> n))
+              unstable
+            now <- getCurrentTime
+            eholds <- readHolds root
+            case eholds of
+              Left e -> pure (Left (e, 2))
+              Right holds -> do
+                -- 决定的复核**不吃 (size,mtime) 缓存快路**：等长替换 + 还原 mtime
+                -- 时 'shaViaCache' 会复用缓存 sha，旧决定就继续压住新字节
+                -- （codex 二十一轮 major）。空缓存 → 一定走真实重读 + 双 stat。
+                -- 只对「名单里且仍是 NEW」的文件做，数量 = 用户决定不同步的张数。
+                freshHeld <-
+                  mapM
+                    (\n -> (,) n <$> freshShaAt srcDir n)
+                    [vhName h | h <- holds, vhName h `elem` vdNew d]
+                let freshMap = Map.fromList freshHeld
+                    (held, heldStale) = splitHeld holds (vdNew d) (\n -> maybe Nothing id (Map.lookup n freshMap))
+                    vEntries = [e | (_, ps) <- perCat, (_, _, Just e) <- ps]
+                    meta =
+                      VaultCacheMeta
+                        { vmAt = now
+                        , vmVaultPath = vaultCanon
+                        , vmRootId = riId <$> mVRoot
+                        , vmOk = length (vdOk d)
+                        , vmNew = length (vdNew d)
+                        , vmMissing = length (vdMissing d)
+                        , vmRenamed = length (vdRenamed d)
+                        , vmDrift = length (vdDrift d)
+                        , vmDuplicate = length (vdDuplicate d)
+                        , vmUnpushable = length unpushable
+                        , vmUnstable = length unstable
+                        , vmHeld = length held
+                        }
+                -- 缓存目录不可信（junction 化）是硬失败：继续下去等于把 pm 的写
+                -- 交给库外（P3b-13 十轮 critical）。锁被占则只是缓存本轮不刷新
+                -- （三十一轮 F1；vault-holds 事务在锁内走到这里就是这种情形），
+                -- 报告本身是本轮新算的，不受影响。
+                wc <- writeVaultCache root (Catalog "vault-cache" now (entryMap vEntries)) meta
+                case wc of
+                  CacheRefused e -> pure (Left (e, 2))
+                  _ ->
+                    pure . Right $
+                      VaultReport
+                        { vrSrcDir = srcDir
+                        , vrVaultDir = vaultDir
+                        , vrSrcCount = Map.size srcShas
+                        , vrVaultCount = vaultCount
+                        , vrDiff = d
+                        , vrUnpushable = unpushable
+                        , vrUnstable = unstable
+                        , vrSrcMeta = Map.fromList [(n, e) | (n, _, Just e) <- srcTriples]
+                        , vrHeld = held
+                        , vrHeldStale = heldStale
+                        }
 
 -- ─── pm vault status [--json] ───────────────────────────────────────────────
 
@@ -604,16 +502,24 @@ planCategories plan =
 
 -- | photos.json 只读引用检查（§10.2 RENAME 策略）：vault 文件名出现在
 -- photos.json 的哪一行（它以完整 Pages URL 引用）。
-photosJsonRef :: Maybe FilePath -> FilePath -> IO (Maybe Int)
-photosJsonRef Nothing _ = pure Nothing
+--
+-- 三十四轮 F1 同族：photos.json 在另一个仓、可能正被编辑器/同步进程占住，
+-- BS.readFile 抛出会让整个 push 崩掉；而读不出也**不得**答「未被引用」——
+-- 那是 fail-open，会诱导用户改名打断已上线 URL。读失败 = Left，调用方按
+-- 「可能被引用」报告（fail-closed）。
+photosJsonRef :: Maybe FilePath -> FilePath -> IO (Either String (Maybe Int))
+photosJsonRef Nothing _ = pure (Right Nothing)
 photosJsonRef (Just fp) name = do
   ex <- doesFileExist fp
   if not ex
-    then pure Nothing
+    then pure (Right Nothing)
     else do
-      raw <- BS.readFile fp
-      let ls = zip [1 :: Int ..] (T.lines (TE.decodeUtf8Lenient raw))
-      pure (case [i | (i, l) <- ls, T.pack name `T.isInfixOf` l] of i : _ -> Just i; [] -> Nothing)
+      r <- try (BS.readFile fp) :: IO (Either IOException BS.ByteString)
+      pure $ case r of
+        Left e -> Left (show e)
+        Right raw ->
+          let ls = zip [1 :: Int ..] (T.lines (TE.decodeUtf8Lenient raw))
+           in Right (case [i | (i, l) <- ls, T.pack name `T.isInfixOf` l] of i : _ -> Just i; [] -> Nothing)
 
 -- | `pm vault push [--category C FILES...]`：
 -- NEW×已定类目 → Copy 计划项；DRIFT → NEEDS-DECISION（pm resolve --keep src
@@ -641,11 +547,13 @@ runVaultPush runPlan mCat files cfg = do
             else do
               -- 报告面：RENAME（photos.json 引用检查）与 MISSING 只报告
               forM_ (vdRenamed d) $ \(n, m, c, _) -> do
-                ref <- photosJsonRef (cfgPhotosJson cfg) m
-                case ref of
-                  Just line ->
+                eref <- photosJsonRef (cfgPhotosJson cfg) m
+                case eref of
+                  Left e ->
+                    putStrLn ("  🔁 RENAME 源 '" <> n <> "' ≡ vault '" <> c </> m <> "' → photos.json 读取失败（" <> e <> "）：无法核对引用，按可能被引用处理（fail-closed），只报告")
+                  Right (Just line) ->
                     putStrLn ("  🔁 RENAME 源 '" <> n <> "' ≡ vault '" <> c </> m <> "' → BLOCKED(photos.json:" <> show line <> ")：改名会打断已上线 URL，只报告")
-                  Nothing ->
+                  Right Nothing ->
                     putStrLn ("  🔁 RENAME 源 '" <> n <> "' ≡ vault '" <> c </> m <> "'（未被 photos.json 引用；改名功能后续增量，暂只报告）")
               forM_ (vdMissing d) $ \(n, c) ->
                 putStrLn ("  - MISSING " <> c </> n <> "（可能有意撤下，决定权在用户，只报告）")

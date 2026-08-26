@@ -319,3 +319,87 @@ probe 逐文件 try + mkItem 改回 Either，错误聚合一次列完、退出 2
 「纯搬移」措辞按实况精化。residuals 与第 32 轮登记一致，无新增。
 
 299 tests（298+1），GHC 警告 0。
+
+## 第 34 轮（P6-F `972b049`，独立 Workflow 钉 SHA）——NO-GO，minset 2 条已修
+
+codex 通道再度 4/4 空跑（工具表缺 exec、0 条命令执行，stderr 刷
+`OutputTextDelta without active item`；零 exec 判据丢弃，占位 verdict 不算
+评审），按第 32 轮先例切独立多代理 Workflow：三镜头（F1 修法完整性与同类
+扫尽 / runTwoPlans 拆分等价性 / 文档与事实）+ 逐条对抗复核，全部钉
+`972b049`。拆分等价性镜头**零 finding**（删除侧与新增侧去缩进 diff，36 行
+中 34 行逐字节相同；两组「同类型相邻可静默互换」参数位逐字核实未换；
+`null dstErrs` 的求值语义保证 zipWith 无截断）。minset 2 条，同一根因——
+**二十五/三十三轮立的「读口 fail-closed」纪律从未全仓扫**，三十三轮只扫了
+ingest 生成期：
+
+**F1 computeVault' 主循环读口无 try（已修，复核 UPHELD）**：`resolve`
+（枚举-hash 主循环）裸调 shaViaCache，而同一函数在 `freshShaAt` 里被 try
+包着、注释写明要防的正是「CLI 抛异常退出、API 变 500」——二十三轮只修了
+那一个调用点，全模块唯一的 try 就是它（复核 grep 证实），顶层无 handler，
+分钟级扫描窗口内 Lightroom/用户挪走一张即崩、Serve 侧 500。修：resolve 包
+try → 读失败落既有 unstable 桶（sha 分量下游处处被 Just 模式滤掉，空值
+安全）；同族两口一并——`listFlatPhotos` Either 化（枚举失败整体拒绝
+exit 2：静默空列表会把另一侧伪报成 MISSING，比崩溃更糟）、`photosJsonRef`
+Either 化（读不出**不得**答「未被引用」——fail-open 会诱导改名打断已上线
+URL）。用例 caseUnstableOnLocked（独占句柄 → UNSTABLE 单列 + exit 1 +
+可读文件照常分类 + 不入 vrSrcMeta）与 casePhotosJsonRefLocked。
+
+**F2 Exec 裸 sha256File ×5（已修，复核 UPHELD 且扩大战果）**：镜头报
+「:522 是唯一漏的」，复核证伪——裸口共 **5** 处（copy I5 判定 / tmp 复读 /
+rename 指纹（连带 dirFingerprint）/ quarantine 重跑判定 / quarantine
+victim），其中 3 处与三十三轮刚修的 mkItem 逐字同形。复核另更正镜头两处
+过头：「计划文件不更新」不是本次损失（savePlan 在执行前），丢的
+writeBackCatalog 按 Cli 注释属良性滞后。修：5 处逐口 try——本模块既有形态
+（moveBound/落位复核早就是 JFailed + OFailed）；读失败 ≠ 内容不符，给
+OFailed（稍后重跑）不折叠成 OConflict（人工核查）；Checkpoint 逃逸契约
+不受影响（try 只包读口，不包 eeCheckpoint）。用例 copy-dst-locked /
+rename-fp-locked / quarantine-victim-locked。
+
+**同类扫尽（rule 09，超出镜头范围的第一方普查）**：全仓 grep
+sha256File/dirFingerprint/listDirectory/BS.readFile 邻域逐处分类。已在
+try 内（不动）：Scan.hashOne、Sort.snapshotWith、Ingest（三十三轮）、
+probeConfined、Doctor.probePmSha、slotOccupied。本轮补修：Doctor 6 处
+（C2/C5 判定 → 新 Bad 行「C?」、Q2 note、verifyFp Either 化 + R2 调用点、
+C4 checkTarget、deepVerify、--repair 的 C5 计划生成跳过）——读失败
+Finding 一律不落 --repair 白名单（C2/R2/Q-DONE-LOST 的 Warn）也不落 C5
+行，不触发任何修复推导；resolveKeep --keep src 的 dst sha（读不出 →
+resolve 未执行 exit 2，不落半个改写）；Names 生成期 dirFingerprint
+（逐项 try + 一次列完 + 零计划 exit 2，与 ingest 同纪律）。用例
+doctor-deep-locked（其余见下「无确定性用例」登记）。
+
+**F3 caseIngestUnreadable c2 断言不判别（复核 REFUTED，不进修集）**：
+复核证伪其「无信号」主张——同案 c1 钉着同一平台前提的**反面**
+（doesFileExist 改判 False 会让 c1 当场红，c2 根本跑不到），守卫不会
+静默失去覆盖；「validateIngest 顺序调整可触发」亦假（重排不改变存在性
+判定）。按复核建议登记取舍：**源侧判别力由同案 c1 的反向前提兜底**；
+其原建议的 "读取失败" 断言锚与 Ingest 的「名单读取失败」共享子串，本身
+不够判别，不采纳。
+
+**DOC ×2（当轮修）**：README 三格收敛数字落后一轮（298 例/32 轮/6+1+11
+——上一次收口提交恰是在这三行上维护的，git log -L 证实）+ §具体实现第 6
+条「三十轮」漂移；HISTORY 缺 P6-F 条目且标题仍写 P0–P5（P6-A 起既存
+漂移）——两处已随本轮收口一并补齐。
+
+**新登记残余**：①执行期**写口**（copyFileHashed / setModificationTime /
+createDirectoryIfMissing / hash 失配分支的 deleteBoundAt）异常逃逸 =
+§6.4 进程死亡语义——journal 已有 Intent，doctor 对账，属已设计行为而非
+缺陷；代价是一个占用中止整批（读口本轮已修掉这个代价；写口失败本就意味着
+该项无法完成，且 moveBoundNoReplace 自带 err-32 重试预算）。②本轮新 try
+中无确定性注入形态的：Exec tmp 复读与 quarantine 重跑分支、Doctor 的
+C?/Q2/R2/C4/C5 五处、resolveKeep、Names 指纹、listFlatPhotos 枚举——注入
+需要协议中途独占或重 fixture，登记为代码级核查，与有用例的 6 道同型同修法
+（R2/R9 先例）。③SomeException 宽口（Sort/Scan/Win 约 20 处既有形态，
+与 Hash.hs「只捕 IOException」家规不一致）——非本轮引入，登记待后续轮
+裁定是否收窄。
+
+**750 行预算引发的拆分（全部字节级搬移 + 原模块再导出，行为零改动；
+下一轮 refactor-equiv 镜头素材）**：Pm.VaultCore（六态纯核心 +JSON 渲染）、
+Pm.ExecTypes（Checkpoint/ExecEnv/ItemOutcome/updateCatalog）、
+dirFingerprint → Pm.Hash、Pm.Apply（undo/apply/resolve 族 + pickRoot——
+Commands 本已超预算，resolve 读口修改无处容身）、VaultHoldTests（P4-7
+用例整族）+ 共享 fixture（mkVaultCfg/writeF/mkMain/execNow）上移 TestUtil。
+
+**收敛证据**：305 tests（299+6），GHC 警告 0；变异 **6/6 各杀恰好一个
+用例**（m15 resolve try / m16 photosJsonRef fail-closed / m17 copy-dst /
+m18 rename-fp / m19 quarantine-victim / m20 deepVerify；运行记录在会话
+scratchpad `mut34-results.txt`）。
