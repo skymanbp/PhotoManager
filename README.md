@@ -356,8 +356,9 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   每次执行前确认该内容在归档层至少还留一份**活**副本，否则整批降级回待裁决。
   幸存者名单 case-fold 比对，读不出来（占用／ACL／hardlink）一律不算「还在」。
   同一道屏障在 `pm trash empty` 永久删除前再走一次。顺带把两处一直各写一遍的
-  东西收成一处：执行期钩子表 `preExecFor`（`pm apply` 与 `--apply` 共用）、
-  「至少一份副本还活着」的循环 `anyCopyAlive`（clean 的三副本屏障与本屏障共用）。
+  东西收成一处：执行期屏障表（`pm apply` 与 `--apply` 共用；P5-G 起装配点进一步
+  收成 `executePlanNowWith` 一处、由内核在锁内跑）、「至少一份副本还活着」的
+  循环 `anyCopyAlive`（clean 的三副本屏障与本屏障共用）。
   九道新闸各自突变转红。
 - P5-D ✅ 关掉「解析路径 → 按名字打开」之间的 TOCTOU 窗口：改成「打开 → 用
   **句柄**反查它绑定的路径」，`resolveUnder` 降级为预筛。竞态做成了确定性用例

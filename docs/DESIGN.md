@@ -419,8 +419,8 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   `--writable`：后者的契约「不执行、不碰照片」写在帮助文本、本节、README 与
   GUI 四处，悄悄放宽它等于让所有按 ② 理解去用它的地方（含 `pm ui` 自己的拉起
   参数）无声地获得动照片的能力。端点不新增任何执行能力：装载／按 UUID 绑 root／
-  `--only` 组闭包走 CLI 同一个 `prepareApply`，执行期复验走同一张 `preExecFor`
-  表，执行与 catalog 回写走同一个 `executePlanNowWith`。逐项结果与提示**走 JSON
+  `--only` 组闭包走 CLI 同一个 `prepareApply`，执行、执行期屏障的装配与 catalog
+  回写全部走同一个 `executePlanNowWith`（屏障由内核在 root 锁内跑，§6.7）。逐项结果与提示**走 JSON
   响应体**，不走 stdout——`pm ui` 只读一行 announce 就丢掉 BufReader，serve 的
   stdout 此后无人排空，照着打会填满管道缓冲。
 - **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
