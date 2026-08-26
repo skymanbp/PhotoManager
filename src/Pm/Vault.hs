@@ -38,15 +38,12 @@ module Pm.Vault
 import Control.Exception (IOException, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson
-import qualified Data.Aeson.Encoding as AE
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSLC
 import Data.Char (toLower)
 import Data.List (nub, partition, sort)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -224,13 +221,19 @@ newActive r = [n | n <- vdNew (vrDiff r), n `notElem` map fst (vrHeld r)]
 
 -- | 退出码语义（legacy :237）：duplicate 与 unpushable 不算差异；NEW 用
 -- 'newActive'——用户已经决定暂不同步的照片不该让 `pm vault status` 永远
--- exit 1。这是**唯一**的"有差异"谓词：曾经并存的 'hasDiff'（按整个 vdNew
+-- exit 1。这是**唯一**的"不能报 0"谓词：曾经并存的 'hasDiff'（按整个 vdNew
 -- 判）已删除——两个同构谓词并存正是调用点用错的温床，codex 二十一轮就抓到
 -- `runVaultPush` 的无项分支还在用旧的那个。
+--
+-- 三十五轮 F1（同一无项分支的第二次同型故障）：unstable **算**——状态未知
+-- 不能报「已同步」（评审 #5 的有意偏离，规范 §6 修复项 9）。这一项此前手写
+-- 在 status 的调用点（`hasDiffR r || not (null …)`），push 的无项分支没抄到
+-- ——只有 UNSTABLE 时 push 返回 0，自动化调用方把读失败当成功。退出码语义
+-- 折进唯一谓词本身，调用点不再各拼各的。
 hasDiffR :: VaultReport -> Bool
 hasDiffR r =
   let d = vrDiff r
-   in not (null (newActive r) && null (vdMissing d) && null (vdRenamed d) && null (vdDrift d))
+   in not (null (newActive r) && null (vdMissing d) && null (vdRenamed d) && null (vdDrift d) && null (vrUnstable r))
 
 -- | Left (消息, 退出码)。quiet 抑制告警行（--json 输出面要纯净）。
 computeVault :: Bool -> Config -> IO (Either (String, Int) VaultReport)
@@ -391,8 +394,8 @@ computeVault' quiet cfg vaultDir = do
 -- ─── pm vault status [--json] ───────────────────────────────────────────────
 
 -- | 退出码与 legacy 同构：0 同步 \/ 1 有差异（duplicate、unpushable 不算；
--- unstable **算**——状态未知不能报「已同步」，评审 #5 的有意偏离，规范
--- §6 修复项 9）\/ 2 路径错误。
+-- unstable **算**——语义在 'hasDiffR' 里，status 与 push 的无项分支共用同
+-- 一谓词，三十五轮 F1 起不再各拼各的）\/ 2 路径错误。
 runVaultStatus :: Bool -> Config -> IO Int
 runVaultStatus asJson cfg = do
   er <- computeVault asJson cfg
@@ -402,7 +405,7 @@ runVaultStatus asJson cfg = do
       if asJson
         then BSLC.putStrLn (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r) (vrHeld r) (vrHeldStale r))
         else renderHuman r
-      pure (if hasDiffR r || not (null (vrUnstable r)) then 1 else 0)
+      pure (if hasDiffR r then 1 else 0)
 
 renderHuman :: VaultReport -> IO ()
 renderHuman r = do

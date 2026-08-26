@@ -30,6 +30,7 @@ module TestUtil
   , mkMain
   , execNow
   , captureStdout
+  , trashViewOK
   ) where
 
 import Control.Exception (SomeException, bracket, finally, throwIO, try)
@@ -53,7 +54,13 @@ import Pm.Journal
 import Pm.Op
 import Pm.Plan
 import Pm.Scan (ScanOpts (..), ScanResult (..), scanRoot)
+import Pm.Trash (TrashView, trashView)
 import Pm.Types
+
+-- | 'trashView' 三十五轮 Either 化（枚举 fail-closed）后的测试解包：正常
+-- fixture 里枚举失败即测试失败，各用例照旧拿 TrashView 断言。
+trashViewOK :: FilePath -> IO TrashView
+trashViewOK root = trashView root >>= either (assertFailure . ("trashView 枚举失败: " <>)) pure
 
 -- | 造一个 src 文件并生成对应的 Copy op（含真实前置条件）。
 mkCopyOp :: FilePath -> String -> FilePath -> IO Op

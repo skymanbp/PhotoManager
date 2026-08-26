@@ -158,8 +158,9 @@ src/Pm/Journal.hs           -- NDJSON append + 持久化屏障 + replay + 对账
 src/Pm/Scan.hs              -- 增量扫描（stat 比对 → 变更集 → 并行 hash，worker 数取 Root 属性）
 src/Pm/Hash.hs              -- crypton SHA-256 流式 + 目录指纹（Handle 来自 file-io 的 OsPath API）
 src/Pm/Diff.hs              -- 两个 Catalog → 六态差异（纯函数；只认 filename+sha，不看 mtime）
-src/Pm/Plan.hs              -- Diff/规则 → Plan（纯函数，无 IO）
+src/Pm/Plan.hs              -- Diff/规则 → Plan（规则/校验为纯函数；计划文件的存/取/枚举 IO 同在此——listPlans 三十五轮自 Serve 迁入）
 src/Pm/Exec.hs              -- ★安全内核：全项目唯一有写盘 IO 的模块（类型面在 Pm.ExecTypes，三十四轮拆出）
+src/Pm/Sort.hs              -- 卡/收件目录 → 分段提议与归位计划（源扫描层在 Pm.SortSource，三十五轮拆出）
 src/Pm/Names.hs             -- 事件夹/文件名解析、规范化、rename 计划（目标唯一性校验）
 src/Pm/Versions.hs          -- 版本组聚合报告
 src/Pm/Vault.hs             -- 相册↔vault 差异 + push/ingest 计划（无 git 调用；纯核心在 Pm.VaultCore，三十四轮拆出）
@@ -171,7 +172,9 @@ test/                       -- tasty: 单元 + QuickCheck + golden + 双模故�
 
 **关键结构性质**：
 
-1. `Plan.hs`、`Diff.hs`、`Names.hs` 是纯函数 → 可 QuickCheck 穷测；
+1. `Diff.hs`、`Names.hs` 与 `Plan.hs` 的规则/校验核心是纯函数 → 可 QuickCheck
+   穷测（Plan.hs 另持计划文件的存/取/枚举 IO——三十五轮据实更正：「无 IO」在
+   savePlan/loadPlan 落进该模块时即已过时）；
 2. `Exec.hs` 是唯一写盘模块，只消费 Plan → 审计面收敛到一个文件；
    **Exec 内禁用 `directory` 的 `renameFile/renamePath/copyFile`**——三者在
    Windows 上均为「目标存在即原子替换」语义（directory-1.3.8.5 haddock 实测：
@@ -657,7 +660,7 @@ REVIEW-LOG 第 28 轮。
 | 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤）；CJK 路径入 golden |
 | 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode + 只探 REMOVABLE/FIXED（§9） |
 | exFAT 备份盘（无元数据日志、rename 原子性弱） | 矩阵不依赖原子性；FS 类型/粒度入 root-id.json；mtime 只做同 root 缓存键（§3） |
-| Lightroom / 用户并发改文件 | Plan 前提复核 + 双 stat + 落位 no-replace 三重防线；杀毒/索引器的短暂占用按 Win32 同款预算重试（100ms×20，三十二轮 R1）；读口（sha256File/目录指纹/枚举）的 IOException 一律落 fail-closed 桶而非逃顶——vault 主循环入 UNSTABLE、Exec 逐项 OFailed、生成期整批拒绝、doctor 报「读取失败」行（三十四轮全仓扫；执行期**写口**逃逸 = §6.4 进程死亡语义，journal 有 Intent、doctor 对账，登记为已设计行为） |
+| Lightroom / 用户并发改文件 | Plan 前提复核 + 双 stat + 落位 no-replace 三重防线；杀毒/索引器的短暂占用按 Win32 同款预算重试（100ms×20，三十二轮 R1）；读口（sha256File/目录指纹/枚举）的 IOException 一律落 fail-closed 桶而非逃顶——vault 主循环入 UNSTABLE、Exec 逐项 OFailed、生成期整批拒绝、doctor 报「读取失败」行（三十四轮全仓 grep、三十五轮按 IO 读原语全集清点补漏——目录枚举口与 config.toml/`.gitignore` 控制文件读口；执行期**写口**逃逸 = §6.4 进程死亡语义，journal 有 Intent、doctor 对账，登记为已设计行为） |
 | catalog 损坏 | journal 重建 + 快照 3 份轮换 + doctor 校验 |
 | vault 是 git 工作树（.pm 污染 / git clean 风险 / 误提交） | I11 + `.gitignore` 追加 `.pm/`（P5 confirm-first）+ git 提示显式路径禁 `-A` |
 | vault 改名打断 portfolio 线上 URL | RENAME 默认只报告 + photos.json 只读引用检查标 BLOCKED（§10.2） |

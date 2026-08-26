@@ -238,24 +238,28 @@ runTrash cfg tc root = do
 runTrash' :: Config -> TrashCmd -> FilePath -> IO Int
 runTrash' cfg tc root = case tc of
     -- list 是只读咨询（同 pm status），不取锁；empty 的视图在锁内取（见下）。
+    -- 三十五轮 F3：枚举失败 fail-closed——不打「隔离区为空」的假报告。
     TrashList -> do
-      tv <- trashView root
-      mapM_ (\w -> putStrLn ("✗ manifest 损坏行: " <> w)) (tvWarnings tv)
-      if null (tvRegistered tv) && null (tvUnregistered tv)
-        then putStrLn "隔离区为空"
-        else do
-          forM_ (tvRegistered tv) $ \(r, present) ->
-            printf
-              "  %-8s %s  ← %s  (%s, plan %s)\n"
-              -- 「已移出」= 被 purge 或被复位/undo 移回原位（文件不在 trash）
-              (if present then "在库" :: String else "已移出")
-              (trTrashRel r)
-              (trVictimRel r)
-              (T.unpack (trReason r))
-              (T.unpack (trPlanId r))
-          forM_ (tvUnregistered tv) $ \f ->
-            putStrLn ("  UNREGISTERED " <> f <> "  （无 manifest 记录，先跑 pm doctor）")
-      pure 0
+      etv <- trashView root
+      case etv of
+       Left e -> putStrLn ("✗ " <> e) >> pure 2
+       Right tv -> do
+        mapM_ (\w -> putStrLn ("✗ manifest 损坏行: " <> w)) (tvWarnings tv)
+        if null (tvRegistered tv) && null (tvUnregistered tv)
+          then putStrLn "隔离区为空"
+          else do
+            forM_ (tvRegistered tv) $ \(r, present) ->
+              printf
+                "  %-8s %s  ← %s  (%s, plan %s)\n"
+                -- 「已移出」= 被 purge 或被复位/undo 移回原位（文件不在 trash）
+                (if present then "在库" :: String else "已移出")
+                (trTrashRel r)
+                (trVictimRel r)
+                (T.unpack (trReason r))
+                (T.unpack (trPlanId r))
+            forM_ (tvUnregistered tv) $ \f ->
+              putStrLn ("  UNREGISTERED " <> f <> "  （无 manifest 记录，先跑 pm doctor）")
+        pure 0
     -- 二十九轮 critical 的同根第二处（rule 09 统一修复）：屏障判据与 unlink
     -- 必须是**一个跨进程事务**。这是 pm 全程唯一 unlink 用户数据的路径，此前
     -- 全程不取锁——purgeBarriers 读盘判「归档层还留着一份」与 removeFile 之间，
@@ -274,9 +278,17 @@ runTrash' cfg tc root = case tc of
 
 -- | @pm trash empty@ 的锁内主体：屏障复验 → 限域判定 → 列表 → unlink。
 -- 拆出来只是为了让整段显式地位于 'withRootLock' 之内（见调用点注释）。
+-- 三十五轮 F3：视图枚举失败 fail-closed——枚举不出 = 不知道盘上有什么，
+-- 绝不按「registered 全缺席」的假视图走到 unlink，一个条目都不删。
 trashEmptyLocked :: Config -> FilePath -> Bool -> IO Int
 trashEmptyLocked cfg root yes = do
-      tv <- trashView root
+      etv <- trashView root
+      case etv of
+        Left e -> putStrLn ("✗ " <> e <> " —— 未清除任何条目，解除占用后重试") >> pure 2
+        Right tv -> trashEmptyLocked' cfg root yes tv
+
+trashEmptyLocked' :: Config -> FilePath -> Bool -> TrashView -> IO Int
+trashEmptyLocked' cfg root yes tv = do
       mapM_ (\w -> putStrLn ("✗ manifest 损坏行: " <> w)) (tvWarnings tv)
       let present = [(r, trashDir root </> trTrashRel r) | (r, True) <- tvRegistered tv]
       -- 隔离记录按 reason 前缀分流到各自的**永久删除前屏障**（评审 cx-3 终极

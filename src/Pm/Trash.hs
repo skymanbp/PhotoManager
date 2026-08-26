@@ -158,12 +158,21 @@ readManifest' root = do
 -- 文件"。'requirePmTrusted' 在写入口已把这一形态挡在门外，这里是读侧的
 -- 同一判定：不可信基准一律列空，让 doctor\/trash view 显示"隔离区为空"而不是
 -- 库外内容。
-listTrashFiles :: FilePath -> IO [FilePath]
+-- 三十五轮 F3：递归枚举包 try（Either 化）——trash 子目录被良性进程占住/
+-- 挪走时 listDirectory 抛出，doctor 与 pm trash 会当场崩掉。Left 由调用方
+-- fail-closed：doctor 报 TRASH-ENUM Bad，trash list/empty 拒绝执行（不删）。
+listTrashFiles :: FilePath -> IO (Either String [FilePath])
 listTrashFiles root = do
   let base = trashDir root
   baseLink <- linkish base
   exists <- doesDirectoryExist base
-  if baseLink || not exists then pure [] else go base ""
+  if baseLink || not exists
+    then pure (Right [])
+    else do
+      r <- try (go base "") :: IO (Either IOException [FilePath])
+      pure $ case r of
+        Left e -> Left ("trash 枚举失败（被占/介质错误？）: " <> show e)
+        Right fs -> Right fs
  where
   go base rel = do
     let dirAbs = if null rel then base else base </> rel
@@ -192,12 +201,18 @@ data TrashView = TrashView
   , tvWarnings :: [String]
   }
 
-trashView :: FilePath -> IO TrashView
+-- 三十五轮 F3：Either 化随 'listTrashFiles'——盘面枚举不出时不得给出
+-- 「registered 全部缺席 + 零 UNREGISTERED」的假视图（trash empty 会按它
+-- 报「无可清除」，doctor 的 Q1 对账会漏报孤儿）。
+trashView :: FilePath -> IO (Either String TrashView)
 trashView root = do
   (records, warns) <- readManifest root
-  files <- listTrashFiles root
-  let fileSet = Map.fromList [(f, ()) | f <- files]
-      registered = [(r, Map.member (trTrashRel r) fileSet) | r <- records]
-      known = Map.fromList [(trTrashRel r, ()) | r <- records]
-      unreg = [f | f <- files, not (Map.member f known)]
-  pure (TrashView registered unreg warns)
+  efiles <- listTrashFiles root
+  pure $ case efiles of
+    Left e -> Left e
+    Right files ->
+      let fileSet = Map.fromList [(f, ()) | f <- files]
+          registered = [(r, Map.member (trTrashRel r) fileSet) | r <- records]
+          known = Map.fromList [(trTrashRel r, ()) | r <- records]
+          unreg = [f | f <- files, not (Map.member f known)]
+       in Right (TrashView registered unreg warns)

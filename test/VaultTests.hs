@@ -57,6 +57,7 @@ vaultTests =
     , testCase "P3b-4 #4 racy 判据 statHitStable：同刻度窗口不信任缓存" caseRacyGuard
     , testCase "三十四轮 F1：相册文件被独占占住 → 入 UNSTABLE 单列报告，status 不崩、exit 1" caseUnstableOnLocked
     , testCase "三十四轮 F1 同族：photos.json 被独占占住 → Left（fail-closed，不得答「未被引用」）" casePhotosJsonRefLocked
+    , testCase "三十五轮 F1：只有 UNSTABLE 的 push 无项分支 → exit 1（与 status 同谓词，不报 0）" caseUnstablePushExit
     ]
 
 h :: Char -> Text
@@ -552,6 +553,25 @@ casePhotosJsonRefLocked = withSystemTempDirectory "pm-vault" $ \tmp -> do
   case er of
     Left _ -> pure ()
     Right v -> assertFailure ("读不出必须 Left（fail-closed），得到: " <> show v)
+
+-- | 三十五轮 F1：push 无项分支与 status 共用同一退出码谓词（'hasDiffR' 已
+-- 并入 unstable 项）——只有 UNSTABLE、无可执行项时 push 必须 exit 1 而不是
+-- 0，否则自动化调用方把「读失败、状态未知」当成「已同步、无事可做」。
+-- 二十一轮在同一个无项分支抓过 hasDiff/hasDiffR 双谓词分叉，这次是 unstable
+-- 项的同型复发；修法是把语义折进唯一谓词，本例钉住 push 侧的消费。
+caseUnstablePushExit :: IO ()
+caseUnstablePushExit = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  mkMain root
+  createDirectoryIfMissing True (root </> "相册")
+  createDirectoryIfMissing True (vdir </> "landscape")
+  hLock <- openExclusiveBinary (root </> "相册" </> "locked.jpg")
+  (out, code) <- captureStdout (runVaultPush (\_ -> assertFailure "无可执行项，不得进入计划执行" >> pure 9) Nothing [] cfg)
+  hClose hLock
+  assertBool ("应报无可执行项: " <> out) ("无可执行项" `isInfixOf` out)
+  code @?= 1 -- 状态未知不能报 0
 
 -- | 在目录树下找第一个同名文件（trash 的 <ts>/ 层名未知）。
 findFileUnder :: FilePath -> FilePath -> IO (Maybe FilePath)

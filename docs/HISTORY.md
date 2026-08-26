@@ -323,3 +323,16 @@
   不判别）被复核**证伪**，只登记取舍。750 行预算四次拆分（VaultCore /
   ExecTypes / Apply / VaultHoldTests，字节级搬移 + 再导出）。305 tests
   （299+6），变异 6/6 各杀恰好一条。逐条处置见 REVIEW-LOG 第 34 轮
+- P6-H ✅ 第 35 轮门禁收口（codex 钉 SHA `39edbb8`，NO-GO，minset 4 条 +
+  1 DOC）：根因是三十四轮的全仓 grep **命中未逐一记账**——目录枚举口与
+  控制文件读口两类整类漏网。①push 无项分支与 status 是两个出口谓词
+  （二十一轮 hasDiff/hasDiffR 分叉同型复发）：UNSTABLE-only 时 `pm vault
+  push` 报 0 → unstable 项收进 hasDiffR，出口判定只此一个谓词；
+  ②Names/Sort 生成期枚举 → try + 错误明说 + 零计划 exit 2（与二十五轮
+  sort、三十三轮 ingest 同纪律）；③Doctor（trashView/staleTmpFiles）→
+  TRASH-ENUM/TMP-ENUM Bad 行且按白名单构造绝缘于 --repair，Trash
+  list/empty 拒绝并明说，Serve `/api/plans` 结构化 errors（listPlans
+  迁入 Pm.Plan）；④config.toml/`.gitignore` 控制文件读口 → Left
+  （I11 核不了 = 不放行）。750 行预算引发 Pm.SortSource 拆出（字节级
+  搬移）。308 tests（305+3），变异 3/3 各杀恰好一条。逐条处置见
+  REVIEW-LOG 第 35 轮

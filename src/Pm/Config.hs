@@ -154,12 +154,17 @@ loadConfig = do
               <> " 即可恢复（或重跑 pm init --main <主库路径>）"
           else "配置不存在: " <> fp <> " —— 先运行 pm init --main <主库路径>"
     else do
-      raw <- BS.readFile fp
-      case TE.decodeUtf8' raw of
-        Left e -> pure (Left ("配置不是 UTF-8: " <> show e))
-        Right txt -> case TOML.decode txt of
-          Left e -> pure (Left (T.unpack (TOML.renderTOMLError e)))
-          Right c -> pure (Right c)
+      -- 三十五轮 F4：doesFileExist 与读取之间有窗口（编辑器/同步器短暂独占、
+      -- 文件被挪走），裸 BS.readFile 抛出会让**每一条** pm 命令在入口崩掉。
+      -- 读不出 = Left，withCfg 打印后 exit 2（fail-closed，不猜内容）。
+      rawE <- try (BS.readFile fp) :: IO (Either IOException BS.ByteString)
+      case rawE of
+        Left e -> pure (Left ("配置读取失败（被占/被挪？）: " <> show e <> " —— 解除占用后重试"))
+        Right raw -> case TE.decodeUtf8' raw of
+          Left e -> pure (Left ("配置不是 UTF-8: " <> show e))
+          Right txt -> case TOML.decode txt of
+            Left e -> pure (Left (T.unpack (TOML.renderTOMLError e)))
+            Right c -> pure (Right c)
 
 -- | TOML literal strings (single quotes) keep Windows backslashes verbatim.
 renderConfig :: Config -> Text

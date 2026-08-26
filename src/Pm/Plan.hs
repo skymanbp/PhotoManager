@@ -13,6 +13,7 @@ module Pm.Plan
   , planPath
   , savePlan
   , loadPlan
+  , listPlans
   , renderPlan
   , groupClosure
   , BarrierKind (..)
@@ -28,10 +29,10 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime)
-import Control.Exception (bracket)
+import Control.Exception (IOException, bracket, try)
 import Control.Monad (when)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FilePath ((</>))
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
+import System.FilePath (dropExtension, takeExtension, (</>))
 import System.IO (hClose)
 import Text.Printf (printf)
 
@@ -204,6 +205,33 @@ loadPlan' root pid = do
                   Left ("计划文件内 id（" <> T.unpack (plId p) <> "）与文件名（" <> T.unpack pid <> "）不符，拒绝装载")
               | Left e <- validatePlan p -> Left (e <> "，拒绝装载")
               | otherwise -> Right p
+
+-- | 列出 @root\/.pm\/plans@ 下装得出来的计划；装不出来的按 (文件名, 原因)
+-- 返回。目录本身经 'requirePmTrusted' + 完整路径 'resolveUnder'，每个计划经
+-- 'loadPlan'（受信取用口）；文件名只是候选 id，先过 'isValidPlanId'。
+--
+-- 三十五轮 F3：从 Pm.Serve 迁入（计划枚举与 'loadPlan' 同域；Serve 已触及
+-- 750 行预算，原处再导出）并给枚举包 try——@.pm\/plans@ 被良性进程占住/
+-- 挪走时 listDirectory 抛出，此前逃到 warp 的 500 兜底，GUI 拿不到结构化
+-- errors。枚举失败 = errors 一条、plans 空（fail-closed，原因不吞）。
+listPlans :: FilePath -> IO ([Plan], [(String, String)])
+listPlans root = do
+  tr <- requirePmTrusted root
+  case tr of
+    Left m -> pure ([], [("", m)])
+    Right () -> do
+      m <- resolveUnder root (".pm" </> pmSubPlans)
+      case m of
+        Nothing -> pure ([], [("", untrustedMsg (root </> ".pm" </> pmSubPlans))])
+        Just d -> do
+          ex <- doesDirectoryExist d
+          namesE <- try (if ex then listDirectory d else pure []) :: IO (Either IOException [FilePath])
+          case namesE of
+            Left e -> pure ([], [("", "计划目录枚举失败（被占/介质错误？）: " <> show e)])
+            Right names -> do
+              let pids = [T.pack (dropExtension n) | n <- names, takeExtension n == ".json", isValidPlanId (T.pack (dropExtension n))]
+              rs <- mapM (\pid -> fmap ((,) (T.unpack pid)) (loadPlan root pid)) pids
+              pure ([p | (_, Right p) <- rs], [(n, e) | (n, Left e) <- rs])
 
 renderPlan :: Plan -> [String]
 renderPlan p =

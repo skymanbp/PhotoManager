@@ -148,19 +148,32 @@ runDoctor' root opts = do
   c4Findings <- concat <$> mapM (verifyDone root intents restoredAfterLastDone) donesAfterClean
 
   -- Trash reconciliation (Q1 + purged records)
-  tv <- trashView root
-  let q1 =
-        [ Finding "Q1" Warn ("trash 中无 manifest 记录的文件: " <> f) ""
-        | f <- tvUnregistered tv
-        ]
-      manifestWarns = [Finding "TRASH-MANIFEST" Bad w "" | w <- tvWarnings tv]
+  -- 三十五轮 F3（同型扫尽收尾）：trash/tmp 的枚举此前裸奔——doctor 是恢复
+  -- 工具，读口异常逃顶让它在最需要的时刻崩掉。枚举失败 → 专用 Bad 行
+  -- （TRASH-ENUM/TMP-ENUM 不在 --repair 的 Warn 白名单，oid 前缀判据也
+  -- 不匹配，进不了任何修复推导）；stale 清单按空处理 = --repair 零删除。
+  etv <- trashView root
+  let (q1, manifestWarns) = case etv of
+        Left e ->
+          ([Finding "TRASH-ENUM" Bad ("trash 枚举失败——Q1 对账本轮核不了: " <> e) "解除占用后重跑 pm doctor"], [])
+        Right tv ->
+          ( [ Finding "Q1" Warn ("trash 中无 manifest 记录的文件: " <> f) ""
+            | f <- tvUnregistered tv
+            ]
+          , [Finding "TRASH-MANIFEST" Bad w "" | w <- tvWarnings tv]
+          )
 
   -- Stale tmp files not tied to any pending intent
-  stale <- staleTmpFiles root (mapMaybe (pendingTmp root) pending)
-  let staleFindings =
-        [ Finding "TMP-STALE" Warn ("孤儿临时文件: " <> f) "--repair 将删除（pm 自建 tmp，非用户数据）"
-        | f <- stale
-        ]
+  estale <- staleTmpFiles root (mapMaybe (pendingTmp root) pending)
+  let (stale, staleFindings) = case estale of
+        Left e ->
+          ([], [Finding "TMP-ENUM" Bad ("tmp 枚举失败——孤儿 tmp 本轮核不了: " <> e) "解除占用后重跑 pm doctor"])
+        Right fs ->
+          ( fs
+          , [ Finding "TMP-STALE" Warn ("孤儿临时文件: " <> f) "--repair 将删除（pm 自建 tmp，非用户数据）"
+            | f <- fs
+            ]
+          )
 
   -- Catalog verification age
   (mcat, _) <- loadCatalog root
@@ -474,29 +487,36 @@ verifyDone root intents restoredAfter (oid, msha, mtrash) =
 -- P3b-14（十一轮 #4）：判据从 'isNameSurrogate'（Unknown 算 False，会把"查不出
 -- 是什么"的名字当普通文件送去 --repair 删除）改为 'probeName' 只放行
 -- **明确的** NamePlain——不进列表 = 不删，与"链接本体不列出"同一 fail-closed。
-staleTmpFiles :: FilePath -> [FilePath] -> IO [FilePath]
+-- 三十五轮 F3：枚举包 try（Either 化）——probeName/doesDirectoryExist 守卫
+-- 与 listDirectory 之间有窗口，目录被占/被挪时异常会让整个 doctor 崩掉。
+-- Left 由调用方报 TMP-ENUM Bad 且 stale 清单按空处理（--repair 零删除）。
+staleTmpFiles :: FilePath -> [FilePath] -> IO (Either String [FilePath])
 staleTmpFiles root expected = do
   let base = pmDir root </> pmSubTmp
   basePlain <- (== NamePlain) <$> probeName base
   ex <- doesDirectoryExist base
   if not basePlain || not ex
-    then pure []
+    then pure (Right [])
     else do
-      plans <- listDirectory base
-      files <- concat <$> forM plans (\p -> do
-        let pd = base </> p
-        pk <- probeName pd
-        isD <- doesDirectoryExist pd
-        if pk /= NamePlain
-          then pure []
-          else
-            if isD
-              then do
-                inner <- listDirectory pd
-                filterM (fmap (== NamePlain) . probeName) (map (pd </>) inner)
-              else pure [pd])
-      onlyFiles <- filterM doesFileExist files
-      pure [f | f <- onlyFiles, f `notElem` expected]
+      r <- try $ do
+        plans <- listDirectory base
+        files <- concat <$> forM plans (\p -> do
+          let pd = base </> p
+          pk <- probeName pd
+          isD <- doesDirectoryExist pd
+          if pk /= NamePlain
+            then pure []
+            else
+              if isD
+                then do
+                  inner <- listDirectory pd
+                  filterM (fmap (== NamePlain) . probeName) (map (pd </>) inner)
+                else pure [pd])
+        onlyFiles <- filterM doesFileExist files
+        pure [f | f <- onlyFiles, f `notElem` expected]
+      pure $ case (r :: Either IOException [FilePath]) of
+        Left e -> Left (show e)
+        Right fs -> Right fs
 
 deepVerify :: FilePath -> Catalog -> IO [Finding]
 deepVerify root cat = do

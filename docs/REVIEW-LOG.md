@@ -403,3 +403,97 @@ Commands 本已超预算，resolve 读口修改无处容身）、VaultHoldTests�
 用例**（m15 resolve try / m16 photosJsonRef fail-closed / m17 copy-dst /
 m18 rename-fp / m19 quarantine-victim / m20 deepVerify；运行记录在会话
 scratchpad `mut34-results.txt`）。
+
+## 第 35 轮（P6-G `39edbb8`，codex 钉 SHA）——NO-GO，minset 4 条全修
+
+**执行者插曲**：attempt 1 中途被一次计算机强制重启杀死（事件流 373 KB、
+28 次命令执行、无 verdict 文件）——半程输出整体丢弃不采信；重启后先做四层
+完整性核验（工作树 porcelain 空 / HEAD=`39edbb8` / `git fsck` 静默 /
+305 例全绿且零重编译）再整轮重跑，attempt 2 真跑（318 次命令执行）出本轮
+verdict。
+
+五镜头先把三十四轮修复全部验干净：resolve/listFlatPhotos/photosJsonRef 的
+try 作用域与失败方向、Exec 五口读失败 OFailed 与内容不符 OConflict 的区分、
+Doctor 读失败行不进 --repair 白名单、四个 750 行拆分无语义漂移、305=299+6
+的叶子数推演成立。minset 4 条聚成一根 + 一条独立：
+
+### 根（F2+F3+F4，minset）：三十四轮的全仓 grep 命中没有逐一记账
+
+三十四轮确实 grep 了 listDirectory/BS.readFile（本卷 34 轮节可证），但
+**命中没有逐一记账**——处置清单只落了 hash 家族与 Doctor 六口，目录枚举口
+与控制文件读口的命中无分类、无清单，静默掉队。扫而不记账等于没扫：本轮
+按 IO 读原语全集清点（listDirectory / BS.readFile / readFile /
+hGetContents / withBinaryFile / openBoundTo / statSnap）逐命中分类成表
+（见下节），下一轮评审有表可核对，而不是有一句声明可攻击（二十九轮根 B
+的教训在读口清单上的重演）。修法沿用既有桶，逐处：
+
+- **F2 Names/Sort 生成期枚举**：`pm names` 的年层/事件层/成片三处
+  listDirectory 与 `pm sort` 的 existingEvents 无 try，doesDirectoryExist
+  通过后目录被挪走/独占即逃顶。修：与二十五轮 sort、三十三轮 ingest 同
+  纪律——枚举整段 try，失败明说 + 零计划 exit 2（Names 整相位一个 try：
+  生成期没有「部分成功」，半张清单比崩溃更糟）。
+- **F3 Doctor/Trash/Serve 枚举**：`staleTmpFiles`/`trashView` Either 化——
+  doctor 读失败落新 Bad 行 TMP-ENUM/TRASH-ENUM（「本轮核不了」如实说；
+  绝缘按构造：repairDone 白名单只收 C2/R2/Q-DONE-LOST 的 Warn + oid 前缀，
+  Bad 行不触发任何修复，stale 删除清单 = staleTmpFiles 返回值，Left→[] =
+  零删除）；`pm trash list/empty` 拒绝并明说（empty 拆 trashEmptyLocked'
+  承接原体，Left 不清任何条目）；Serve `/api/plans` 的 listPlans 迁入
+  Pm.Plan（loadPlan 旁边，领域归位 + 超预算的 Serve 净减行）并 try——
+  此前 warp defaultSettings 把逃逸兜成 500，服务不死但违背 errors 数组
+  契约。
+- **F4 Config/GitGuard 控制文件读口**：loadConfig 与 pmIgnoreGuard 的裸
+  BS.readFile 各包 try 落 Left。方向都是 fail-closed：配置读不出 = 拒绝
+  （不猜内容）；`.gitignore` 读不出 = I11 拒绝——核不了 ≠ 已覆盖，与
+  「无 .gitignore」同向。
+
+### F1（minset，独立根）：push 无项分支与 status 是两个出口谓词
+
+`hasDiffR` 只看 newActive/missing/renamed/drift；三十四轮把 UNSTABLE 加进
+status 出口时是在调用点手写并列，**没有合一回谓词**——push 的无项分支用的
+还是旧 hasDiffR：主库唯一一张照片被独占时 `pm vault push` 报 0，自动化
+调用方当成「无事可做」。这正是二十一轮 hasDiff/hasDiffR 双谓词分叉的同型
+复发（Vault.hs 注释里就钉着那次先例）。修：unstable 项收进 hasDiffR 定义，
+status 调用点的手写并列删除——出口判定只此一个谓词，两个消费点同源。
+
+### F5（DOC_ONLY）+ 文档侧顺带发现
+
+README「开发史（P0–P5 全程）」漂移——三十四轮 DOC 修复补了 HISTORY 标题却
+没扫 README 同句；本轮连同收敛数字三格一并推进。DESIGN §14 风险行
+「枚举…一律落 fail-closed 桶」在 F2-F4 修复前说过头，措辞更正为「三十四轮
+全仓 grep、三十五轮按读原语清点补漏」。顺带发现两处既有 drift 一并修：
+①DESIGN §4 把 `Plan.hs` 标成「纯函数，无 IO」、性质 1 把它列进纯模块——
+savePlan/loadPlan 落进该模块时就已过时（`git show` 父提交可证），据实
+改写；②Vault.hs 残留三十四轮拆分期的三个冗余 import（AE/BSL/fromMaybe）
+——增量构建的重编译规避一直掩着它们，「GHC 警告 0」的声明只在增量构建下
+成立过，本轮全量重编译显形后清除。
+
+### 读口原语清点表（本轮扫法，下轮按此核对）
+
+- **信任读闸（已 try，不动）**：`readPmState`（Config.hs）是 .pm 状态文件
+  的唯一读口——loadPlan'/readManifest'/loadCatalog'/readHolds 全部经它；
+  Scan.hashOne、Sort.snapshotWith、Ingest probe/mkItem、probeConfined、
+  Doctor.probePmSha/verifyFp、Exec 五口、resolveKeep、Names 指纹
+  （二十五~三十四轮逐轮上的闸）。
+- **零直接命中**：Clean/Dedupe/Import/Versions/Diff/Status/Backup 七模块
+  无任何裸读原语——读一律经 Scan/Catalog 单点（codex 镜头③与本方清点
+  双向零发现）。
+- **本轮修**：Names 三处 + Sort existingEvents + Doctor staleTmpFiles +
+  Trash listTrashFiles + Serve(→Plan) listPlans 的枚举；Config/GitGuard
+  的控制文件 BS.readFile。
+- **界外（登记不修）**：写口逃逸 = §6.4 进程死亡语义（三十四轮已登记）；
+  openExclusive 家族是写路径原语。
+
+### 收敛证据
+
+**308 tests（305+3：caseUnstablePushExit / caseConfigReadLocked /
+caseGitignoreReadLocked，后两个用 PM_CONFIG 临时改指 + 独占句柄造确定性
+占用；trashView Either 化连带 6 个既有用例改经 TestUtil.trashViewOK）**，
+GHC 警告 0（全量重编译下核实）。变异 **3/3 各杀恰好一条**（m21 去
+hasDiffR 的 unstable 合取 → caseUnstablePushExit；m22 去 loadConfig try →
+caseConfigReadLocked；m23 去 pmIgnoreGuard try → caseGitignoreReadLocked；
+运行记录在会话 scratchpad `mut35-results.txt`）。m21 预判过可能连带杀
+caseUnstableOnLocked，实测不杀——该用例夹具另有可读的 a.jpg 走 NEW，
+exit 1 经 newActive 仍成立；判别 UNSTABLE-only 出口的只有新用例，这正是
+要补它的原因。枚举口新 try（Names/Sort/Doctor/Trash/Serve）无确定性注入
+形态——openExclusiveBinary 锁的是文件，锁不住「目录被枚举」这个动作，
+登记为代码级核查（与三十四轮 R2/R9 先例同款）。

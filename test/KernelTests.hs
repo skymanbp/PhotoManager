@@ -324,7 +324,7 @@ execQuarantineTests =
               c @?= "VICTIM"
               origEx <- doesFileExist (root </> "相册" </> "v.jpg")
               origEx @?= False
-              tv <- trashView root
+              tv <- trashViewOK root
               length (tvRegistered tv) @?= 1
               tvUnregistered tv @?= []
             other -> assertFailure ("expected quarantine done, got " <> show (map snd other))
@@ -677,7 +677,7 @@ undoTests =
           _ <- execOk up
           dstEx <- doesFileExist (root </> "相册" </> "a.jpg")
           dstEx @?= False
-          tv <- trashView root
+          tv <- trashViewOK root
           case tvRegistered tv of
             [(r, present)] -> do
               present @?= True
