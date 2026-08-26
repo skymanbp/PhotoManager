@@ -7,30 +7,59 @@
 -- 'Pm.Vault' 建 vault root、'Pm.Commands' 的 init\/backup init 建主库\/备份
 -- root 前都走同一函数（P3b-6 复审：守卫只按 role 运行会被改写 role 绕过，
 -- 且 init 入口原先无守卫）。pm 不执行 git（I9）。
+--
+-- 三十六轮 F1：@.git@ 的存在性探测不得用 @doesDirectoryExist@\/@doesFileExist@
+-- ——两者把 ACL\/断网\/介质错误统统吞成 False，而这里 False 的去向是**放行**
+-- （自身「无」.git → 祖先扫描；祖先也「无」→ Right ()），查不出就塌缩成
+-- 不存在，正是 'Pm.Win.probeName'（P3b-13）为消灭而生的那个形状。探测改走
+-- probeName 三态，判定收进纯函数 'classifyGitProbe'（穷测）。**布尔探针只
+-- 允许出现在 False→拒绝 的位置**：本模块 .gitignore 的 @doesFileExist@
+-- （False = 「无 .gitignore」= Left）与 'Pm.Config.requirePmTrusted' 的
+-- @doesDirectoryExist@（False = 拒绝）同属该安全方向，无须三态——这是
+-- 三十五轮读原语清点未计入它们的类界，本轮把类界写明。
 module Pm.GitGuard
   ( pmIgnoreGuard
   , vaultIgnoreGuard
   , findGitAncestor
+  , classifyGitProbe
   ) where
 
 import Control.Exception (IOException, try)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist)
+import System.Directory (canonicalizePath, doesFileExist)
 import System.FilePath (takeDirectory, (</>))
 
 import Pm.Types (RootRole (..))
+import Pm.Win (NameKind (..), probeName)
+
+-- | @.git@ 名字探测的三态判定（纯函数，用例穷举全部构造子）：
+--
+--   * @Right True@ —— git 语境成立：普通目录（仓根）与普通文件（worktree\/
+--     submodule 链接）都算；**surrogate 也算**（junction\/symlink，含悬空——
+--     git 自己把悬空 @.git@ 当损坏仓而不是无仓；「当有」只会把守卫引向更严的
+--     一侧：本层查 .gitignore、祖先层直接拒绝，不会放行）。
+--   * @Right False@ —— 名字确实不存在（GetFileAttributes 错误码 2\/3）。
+--   * @Left@ —— 查不出（ACL 5\/断网 53\/介质错误……）：核不了 = 不放行，与
+--     「读不到 .gitignore」（三十五轮 F4）同向。
+classifyGitProbe :: NameKind -> Either String Bool
+classifyGitProbe NameMissing = Right False
+classifyGitProbe NamePlain = Right True
+classifyGitProbe NameSurrogate = Right True
+classifyGitProbe ProbeUnknown =
+  Left "查不出 .git 是否存在（ACL/介质错误？）——核不了 = 不放行，解除后重试"
 
 -- | 三种 git 语境全覆盖：
 --
---   * 自身有 @.git@ **目录**（普通仓根）→ 查本目录 .gitignore；
---   * 自身有 @.git@ **文件**（worktree\/submodule 链接）→ 同上；
+--   * 自身有 @.git@（目录=普通仓根，文件=worktree\/submodule 链接）→ 查本
+--     目录 .gitignore；
 --   * 自身无 .git 但**祖先**有 → 一律拒绝：.pm 的忽略状态由祖先仓的 ignore
 --     链决定，pm 不实现完整 gitignore 语义，fail-closed。
 --
 -- 路径先 'canonicalizePath'（P3b-5 复审 #2：配置路径若是 junction\/symlink
--- 别名，词法父链看不到真实目标的祖先 .git）。.gitignore 检查是文本级白名单：
+-- 别名，词法父链看不到真实目标的祖先 .git；三十六轮 F1 补：规范化失败同样
+-- Left，不逃顶）。.gitignore 检查是文本级白名单：
 -- 必须存在恰好 @.pm\/@ 的行，且 @!@ 反规则只允许**纯字面且不含 .pm** 的行
 -- （case-fold——Windows 默认 core.ignorecase）。P3b-6 复审 A2：含通配符
 -- @*@ @?@ @[@ 或转义 @\\@ 的反规则不含 @.pm@ 字面也能重新包含它（实测 git
@@ -38,53 +67,58 @@ import Pm.Types (RootRole (..))
 -- 变回未忽略），pm 不实现 wildmatch，一律拒绝。
 pmIgnoreGuard :: RootRole -> FilePath -> IO (Either String ())
 pmIgnoreGuard role dir0 = do
-  dir <- canonicalizePath dir0
-  gitDir <- doesDirectoryExist (dir </> ".git")
-  gitFile <- doesFileExist (dir </> ".git")
-  if gitDir || gitFile
-    then do
-      let igFp = dir </> ".gitignore"
-      ex <- doesFileExist igFp
-      if not ex
-        then pure (Left (i11Msg igFp "无 .gitignore"))
-        else do
-          -- 三十五轮 F4：.gitignore 被编辑器/同步器短暂独占时裸 BS.readFile
-          -- 抛出，异常逃出 init 预检与 Exec 执行前守卫。核不了 = 拒绝
-          -- （fail-closed，与「无 .gitignore」同向），绝不当「已覆盖」放行。
-          rawE <- try (BS.readFile igFp) :: IO (Either IOException BS.ByteString)
-          case rawE of
-            Left e -> pure (Left (i11Msg igFp ("读取失败（被占/被挪？）: " <> show e)))
-            Right raw -> do
-              let ls = map T.strip (T.lines (TE.decodeUtf8Lenient raw))
-                  hasRule = ".pm/" `elem` ls
-                  risky l =
-                    let f = T.toLower l
-                     in ".pm" `T.isInfixOf` f || T.any (`elem` ("*?[\\" :: String)) f
-                  negations = [l | l <- ls, "!" `T.isPrefixOf` l, risky l]
-              case (hasRule, negations) of
-                (False, _) -> pure (Left (i11Msg igFp "缺 `.pm/` 行"))
-                (True, _ : _) ->
-                  pure
-                    ( Left
-                        ( i11Msg
-                            igFp
-                            ( "存在可能重新包含 .pm 的反规则（含 .pm 或通配符 * ? [ \\）: "
-                                <> T.unpack (T.intercalate ", " negations)
+  dirE <- try (canonicalizePath dir0) :: IO (Either IOException FilePath)
+  case dirE of
+    Left e ->
+      pure (Left ("I11: " <> label <> " root 路径规范化失败（" <> show e <> "）——核不了 = 拒绝"))
+    Right dir -> do
+      k <- probeName (dir </> ".git")
+      case classifyGitProbe k of
+        Left why -> pure (Left ("I11: " <> label <> " root 的 " <> (dir </> ".git") <> " " <> why))
+        Right True -> do
+          let igFp = dir </> ".gitignore"
+          ex <- doesFileExist igFp
+          if not ex
+            then pure (Left (i11Msg igFp "无 .gitignore"))
+            else do
+              -- 三十五轮 F4：.gitignore 被编辑器/同步器短暂独占时裸 BS.readFile
+              -- 抛出，异常逃出 init 预检与 Exec 执行前守卫。核不了 = 拒绝
+              -- （fail-closed，与「无 .gitignore」同向），绝不当「已覆盖」放行。
+              rawE <- try (BS.readFile igFp) :: IO (Either IOException BS.ByteString)
+              case rawE of
+                Left e -> pure (Left (i11Msg igFp ("读取失败（被占/被挪？）: " <> show e)))
+                Right raw -> do
+                  let ls = map T.strip (T.lines (TE.decodeUtf8Lenient raw))
+                      hasRule = ".pm/" `elem` ls
+                      risky l =
+                        let f = T.toLower l
+                         in ".pm" `T.isInfixOf` f || T.any (`elem` ("*?[\\" :: String)) f
+                      negations = [l | l <- ls, "!" `T.isPrefixOf` l, risky l]
+                  case (hasRule, negations) of
+                    (False, _) -> pure (Left (i11Msg igFp "缺 `.pm/` 行"))
+                    (True, _ : _) ->
+                      pure
+                        ( Left
+                            ( i11Msg
+                                igFp
+                                ( "存在可能重新包含 .pm 的反规则（含 .pm 或通配符 * ? [ \\）: "
+                                    <> T.unpack (T.intercalate ", " negations)
+                                )
                             )
                         )
+                    (True, []) -> pure (Right ())
+        Right False -> do
+          manc <- findGitAncestor dir
+          case manc of
+            Left why -> pure (Left ("I11: " <> label <> " root 的祖先链上 " <> why))
+            Right (Just anc) ->
+              pure
+                ( Left
+                    ( "I11: " <> label <> " root 位于上层 git 仓库内部（" <> anc
+                        <> "）且自身不是仓根——.pm 的忽略状态由祖先 ignore 链决定，pm 不解析完整 gitignore 语义，拒绝（fail-closed）"
                     )
-                (True, []) -> pure (Right ())
-    else do
-      manc <- findGitAncestor dir
-      case manc of
-        Just anc ->
-          pure
-            ( Left
-                ( "I11: " <> label <> " root 位于上层 git 仓库内部（" <> anc
-                    <> "）且自身不是仓根——.pm 的忽略状态由祖先 ignore 链决定，pm 不解析完整 gitignore 语义，拒绝（fail-closed）"
                 )
-            )
-        Nothing -> pure (Right ())
+            Right Nothing -> pure (Right ())
  where
   label = case role of
     RoleMain -> "主库"
@@ -99,14 +133,16 @@ vaultIgnoreGuard :: FilePath -> IO (Either String ())
 vaultIgnoreGuard = pmIgnoreGuard RoleVault
 
 -- | 从 start 的父目录向上找持有 .git（目录或文件）的祖先（start 须已规范化）。
-findGitAncestor :: FilePath -> IO (Maybe FilePath)
+-- 三十六轮 F1：逐层探测同走 'classifyGitProbe' 三态——某层查不出即 Left；
+-- 这里 False 的去向是「继续向上、最终放行」，塌缩不得。
+findGitAncestor :: FilePath -> IO (Either String (Maybe FilePath))
 findGitAncestor start = go (takeDirectory start)
  where
   go dir = do
-    d <- doesDirectoryExist (dir </> ".git")
-    f <- doesFileExist (dir </> ".git")
-    if d || f
-      then pure (Just dir)
-      else
+    k <- probeName (dir </> ".git")
+    case classifyGitProbe k of
+      Left why -> pure (Left ((dir </> ".git") <> " " <> why))
+      Right True -> pure (Right (Just dir))
+      Right False ->
         let up = takeDirectory dir
-         in if up == dir then pure Nothing else go up
+         in if up == dir then pure (Right Nothing) else go up
