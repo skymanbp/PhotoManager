@@ -17,7 +17,7 @@ import qualified Data.ByteString.Lazy as BSL
 import Data.List (isInfixOf)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist, removeDirectory, removeDirectoryLink)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, removeDirectory, removeDirectoryLink)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
@@ -34,6 +34,7 @@ import Pm.Lock (withRootLock)
 import Pm.Op (Fingerprint (..), Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, savePlan)
 import Pm.Trash (TrashRecord (..), appendManifest, readManifest, trashDir)
+import Pm.Win (deleteBoundAt, moveBoundNoReplace)
 import Pm.Status (StatusOpts (..), runStatus)
 import Pm.Types (Catalog, RootInfo (..), RootRole (..))
 import TestUtil
@@ -56,6 +57,9 @@ stateGuardTests =
     , testCase "P3b-17 FpDir 复位源是真实目录 → 必须落 R3（收窄成 doesFileExist 会错报 R2 并补假 Done）" caseRestoreSrcFpDir
     , testCase "P3b-17 FpFileSha + 目录占住载荷名 → 同样必须落 R3（触发不需要 FpDir）" caseRestoreSrcFpFile
     , testCase "P3b-18 root 是 junction、落位前改指诱饵库 → Copy 只用解析返回的 dst 路径，落在原库" caseCopyDstUsesResolvedPath
+    , testCase "P6-C 落位后验：目标父层在窗口内被换成 junction → 检出、沿句柄回迁、项失败，库外零字节" caseMoveBoundDetectsDestSwap
+    , testCase "P6-C 落位先验：源经 junction 路径到达 → 拒绝，两侧原封不动" caseMoveBoundSrcViaJunction
+    , testCase "P6-C 删除先验：经 junction 路径 → 拒绝目标幸存；终段 symlink → 删链接本体不删目标" caseDeleteBoundViaJunction
     ]
 
 -- 本模块只需要 hardlink（/H）与文件 symlink（无开关）两种形态；目录 junction
@@ -483,3 +487,82 @@ caseCopyDstUsesResolvedPath = withSystemTempDirectory "pm-sguard" $ \dir -> do
 
 mkSCfg :: FilePath -> Config
 mkSCfg root = Config root Nothing Nothing Nothing Nothing Nothing
+
+-- ─── P6-C（路线图③）：提交型操作的句柄形态 ────────────────────────────────
+
+-- | 杀手锏：'Pm.Win.moveBoundNoReplace' 的**后验**。dstAbs 已由限域解析成
+-- 真实路径，但名字口的 rename 在提交那一刻仍会沿"窗口里刚换上的 junction"
+-- 走——旧实现（MoveFileExW）在这个用例里会把照片**静默**落到库外并报 ODone。
+-- 新实现：rename 之后问同一个句柄"对象现在在哪"，不符 → 沿句柄改回 tmp →
+-- 项失败。断言三件事：项不是 ODone、库外目录零字节、tmp 已回迁（doctor 可对账）。
+caseMoveBoundDetectsDestSwap :: IO ()
+caseMoveBoundDetectsDestSwap = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let root = dir </> "lib"
+      evil = dir </> "evil"
+      dstRel = "相册" </> "x.jpg"
+  createDirectoryIfMissing True (pmDir root)
+  createDirectoryIfMissing True evil
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  op <- mkCopyOp (dir </> "s.jpg") "SOURCE-BYTES" dstRel
+  pid <- newPlanId
+  let plan = Plan pid "test" root (Just "m") now [PlanItem 0 op StPending Nothing]
+      env =
+        defaultExecEnv
+          { eeCheckpoint = \c ->
+              when (c == CpCopyAfterFlush) $
+                -- 相册 尚不存在：在检查点把它整层做成指向库外的 junction。
+                -- 随后的 createDirectoryIfMissing 看到"目录已在"，名字口的
+                -- rename 会顺着它把文件送出库。
+                mkJunction (root </> "相册") evil
+          }
+  r <- execPlan env plan
+  case r of
+    Right [(_, ODone {})] -> assertFailure "落位后验失效：对象落到库外却报 DONE"
+    Right [(_, _)] -> pure ()
+    other -> assertFailure ("expected one non-DONE outcome, got " <> show other)
+  -- 库外零字节
+  evilFiles <- listDirectory evil
+  evilFiles @?= []
+  -- tmp 已沿句柄回迁（字节不丢，doctor 可对账）
+  tmps <- listDirectory (pmDir root </> "tmp" </> T.unpack pid)
+  tmps @?= ["0-x.jpg"]
+  removeDirectoryLink (root </> "相册")
+
+-- | 先验：源路径经 junction 到达（J\x 的句柄绑定的是 D\x）→ 拒绝。
+caseMoveBoundSrcViaJunction :: IO ()
+caseMoveBoundSrcViaJunction = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let d = dir </> "D"
+      j = dir </> "J"
+  createDirectoryIfMissing True d
+  writeFile (d </> "x.txt") "KEEP"
+  mkJunction j d
+  r <- try (moveBoundNoReplace (j </> "x.txt") (dir </> "y.txt")) :: IO (Either SomeException ())
+  case r of
+    Left _ -> pure ()
+    Right () -> assertFailure "经 junction 的源路径应被先验拒绝"
+  readFile (d </> "x.txt") >>= (@?= "KEEP")
+  doesFileExist (dir </> "y.txt") >>= (@?= False)
+  removeDirectoryLink j
+
+-- | 删除的两个形态：经 junction 的路径拒绝（目标幸存）；终段是 symlink 时
+-- 删的是链接本体（OPEN_REPARSE_POINT），目标原封不动。
+caseDeleteBoundViaJunction :: IO ()
+caseDeleteBoundViaJunction = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let d = dir </> "D"
+      j = dir </> "J"
+  createDirectoryIfMissing True d
+  writeFile (d </> "x.txt") "KEEP"
+  mkJunction j d
+  r <- try (deleteBoundAt (j </> "x.txt")) :: IO (Either SomeException ())
+  case r of
+    Left _ -> pure ()
+    Right () -> assertFailure "经 junction 的删除路径应被先验拒绝"
+  readFile (d </> "x.txt") >>= (@?= "KEEP")
+  removeDirectoryLink j
+  -- 终段 symlink：删链接不删目标
+  writeFile (dir </> "target.txt") "TARGET"
+  mkFileLink (dir </> "ln.txt") (dir </> "target.txt")
+  deleteBoundAt (dir </> "ln.txt")
+  doesFileExist (dir </> "ln.txt") >>= (@?= False)
+  readFile (dir </> "target.txt") >>= (@?= "TARGET")

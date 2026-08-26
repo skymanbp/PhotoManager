@@ -602,18 +602,22 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
   **不含** Exec 三条 Op 里的用户数据内容读（`sha256File`）——见下。
 
 - **剩下的窗口**（逐条登记，不是"属安全软件范畴"一句带过）：
-  1. `MoveFileEx` / `RemoveDirectory` 这类只吃**名字**、没有句柄形态的 API
-     （落位 rename、`pm trash empty` 的唯一 unlink）。仍由 `resolveUnder` +
-     `pathAtOrUnder` 守。
-  2. Exec 的内容复核（`sha256File`）按名字打开，分两类（三十轮 F5 更正——
-     此前把两类混说成"读后紧跟 move"）：**Rename 的旧名复核与 Quarantine 的
-     victim 复核**，读之后紧接着就是同一路径上的 `moveFileNoReplace`，赢得下
-     读那一跳的攻击者同样赢得下 move 那一跳，后果由 move 产生，不构成独立
-     窗口；**Copy 的落点同内容判定**没有后续 move——伪造相等只会让这一次
-     Copy 被静默跳过（`OSkippedIdentical`），落点空着、旧字节仍在 trash，
-     doctor 对账可见，不是覆盖也不是丢失。两类都不值得换 `openBoundTo`：
-     那会造出"读口已关"的假象——真要关这一类，方向是落位 rename 改成句柄
-     形态（`SetFileInformationByHandle` + `FILE_RENAME_INFO`）。
+  1. ~~`MoveFileEx` / `RemoveDirectory` 名字口~~ **已关（P6-C，路线图③）**：
+     全部提交型操作改句柄形态——落位走 `Pm.Win.moveBoundNoReplace`（打开源、
+     **先验**句柄绑定、`SetFileInformationByHandle(FileRenameInfo)` no-replace、
+     **同句柄后验**对象落点，不符即沿句柄改回原名再响亮报错）；`pm trash
+     empty` 的唯一 unlink 与全部 tmp/轮转清除走 `deleteBoundAt`（先验绑定 +
+     `FileDispositionInfo`，终段不跟随）。`RemoveDirectory` 经清点在 pm 中
+     **从未被使用**。残余缩小为：目标侧做不到先验（文档明确
+     `SetFileInformationByHandle` 的 `RootDirectory` 必须为 NULL）——后验是
+     **提交后检出**而非阻止；后验不符且回迁也失败的瞬间，对象停在一条**已知
+     并被报告**的路径上，字节不丢、错误响亮，不再有任何静默错位。
+  2. Exec 的内容复核（`sha256File`）按名字打开：**Rename 的旧名复核、
+     Quarantine 的 victim 复核**读后紧跟同一路径上的落位——落位自身已有先验 +
+     后验（见 1），读口伪造的收益只剩让一次操作失败得更晚；**Copy 的落点同
+     内容判定**没有后续 move，伪造相等只会让该次 Copy 静默跳过
+     （`OSkippedIdentical`），旧字节仍在 trash，doctor 对账可见。仍不换
+     `openBoundTo`：那只是把"读到谁"绑住，动作侧的保证已在 1 里给足。
   3. `openBoundTo` 只比对**路径**，对库内 hardlink 判是。所以它关掉的是竞态
      那一半，别名那一半（同一对象两个名字）要靠 `FileId`，thumb 尚未用它。
   4. `handleIsAt` 的路径规范化是手写的（去 `\\?\` 前缀、按分隔符切、折

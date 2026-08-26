@@ -63,7 +63,6 @@ import System.Directory
   , doesFileExist
   , getXdgDirectory
   , listDirectory
-  , removeFile
   )
 import System.Environment (lookupEnv)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hTryLock)
@@ -77,8 +76,9 @@ import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Types
 import Pm.Win
   ( NameKind (..)
+  , deleteBoundAt
   , flushHandleToDisk
-  , moveFileNoReplace
+  , moveBoundNoReplace
   , openFreshBinary
   , openStateAppend
   , openStateLock
@@ -196,8 +196,8 @@ writeConfig c = do
     BS.hPut h (TE.encodeUtf8 (renderConfig c))
     flushHandleToDisk h
   old <- doesFileExist fp
-  when old (removeFile fp)
-  moveFileNoReplace tmp fp
+  when old (deleteBoundAt fp)
+  moveBoundNoReplace tmp fp
   pure fp
 
 -- | 配置的**读改写事务锁**（二十四轮 minor）。配置是全机器一份的，而编辑层有
@@ -489,12 +489,12 @@ createRootInfo' root info = do
   bracket (openFreshBinary tmp) hClose $ \h -> do
     BSL.hPut h (Aeson.encode info)
     flushHandleToDisk h
-  r <- try (moveFileNoReplace tmp final) :: IO (Either IOException ())
+  r <- try (moveBoundNoReplace tmp final) :: IO (Either IOException ())
   case r of
     Right () -> pure (Right ())
     Left e -> do
       -- §6.1 脚注：pm 自建、从未落位的 tmp 是唯一允许 unlink 的东西
-      removeFile tmp
+      deleteBoundAt tmp
       pure (Left (final <> " 已存在或不可创建（不覆盖既有身份）: " <> show e))
 
 -- | 覆盖写标识——仅供测试 fixture 与显式重写场景；生产建 root 一律走
@@ -612,8 +612,8 @@ writeJsonReplacing fp bytes = do
     BSL.hPut h bytes
     flushHandleToDisk h
   old <- doesFileExist fp
-  when old (removeFile fp)
-  moveFileNoReplace tmp fp
+  when old (deleteBoundAt fp)
+  moveBoundNoReplace tmp fp
 
 freshRootId :: IO Text
 freshRootId = do

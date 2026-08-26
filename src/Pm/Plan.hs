@@ -30,13 +30,13 @@ import qualified Data.Text as T
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime)
 import Control.Exception (bracket)
 import Control.Monad (when)
-import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
 import System.IO (hClose)
 import Text.Printf (printf)
 
 import Pm.Config (pmDir, pmSubPlans, readPmState, requirePmTrusted, untrustedMsg)
-import Pm.Win (flushHandleToDisk, moveFileNoReplace, openFreshBinary, resolveUnder)
+import Pm.Win (deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary, resolveUnder)
 import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
 
 data ItemStatus
@@ -167,8 +167,8 @@ savePlan p = do
         BSL.hPut h (encode p)
         flushHandleToDisk h
       old <- doesFileExist fp
-      when old (removeFile fp)
-      moveFileNoReplace tmp fp
+      when old (deleteBoundAt fp)
+      moveBoundNoReplace tmp fp
       pure fp
 
 -- | 装载前先验 id 格式（也挡住 @..\\x@ 之类拼进 'planPath' 的路径穿越），装载

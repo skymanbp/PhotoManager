@@ -43,7 +43,6 @@ import System.Directory
   , doesPathExist
   , listDirectory
   , pathIsSymbolicLink
-  , removeFile
   , setModificationTime
   )
 -- isRelative 不再引入：P3b-8 六轮复审——execItem 的路径自查改用 Pm.Op.opPathsOk
@@ -62,7 +61,7 @@ import Pm.Trash
 import Pm.Types
 -- P3b-10 七轮：canonical 限域挡 junction 别名。P3b-11 八轮：改用逐级下降的
 -- resolveUnder（基准自身也可能被劫持），pathAtOrUnder 负责 .pm 语义排除。
-import Pm.Win (moveFileNoReplace, pathAtOrUnder, resolveUnder)
+import Pm.Win (deleteBoundAt, moveBoundNoReplace, pathAtOrUnder, resolveUnder)
 
 -- | Protocol step markers, one between every pair of externally visible
 -- effects (§13 P3 fault injection).
@@ -561,7 +560,7 @@ execCopyTmp env j oid op tmp dstAbs = do
     then do
       -- §6.1 footnote: the one permitted unlink — our own tmp
       -- file that never got renamed into place.
-      removeFile tmp
+      deleteBoundAt tmp
       tf <- getCurrentTime
       jAppend j Barrier (JFailed oid ("hash 失配 write=" <> wsha <> " reread=" <> rsha) tf)
       pure (OFailed "hash 失配（写入逻辑或介质问题），该项中止")
@@ -569,7 +568,7 @@ execCopyTmp env j oid op tmp dstAbs = do
       setModificationTime tmp (nsToUtc (opSrcMtimeNs op))
       eeCheckpoint env CpCopyAfterFlush
       createDirectoryIfMissing True (takeDirectory dstAbs)
-      mvE <- try (moveFileNoReplace tmp dstAbs) :: IO (Either IOException ())
+      mvE <- try (moveBoundNoReplace tmp dstAbs) :: IO (Either IOException ())
       case mvE of
         Left e -> do
           raced <- doesFileExist dstAbs
@@ -648,7 +647,7 @@ execRename' env j oid op oldAbs newAbs = do
               -- the old name exists only in this journal (I1).
               jAppend j Barrier (JIntent oid op t1)
               eeCheckpoint env CpRenAfterIntent
-              mvE <- try (moveFileNoReplace oldAbs newAbs) :: IO (Either IOException ())
+              mvE <- try (moveBoundNoReplace oldAbs newAbs) :: IO (Either IOException ())
               case mvE of
                 Left e -> do
                   tf <- getCurrentTime
@@ -714,7 +713,7 @@ execQuarantine' env root j oid trashRel op victimAbs trashAbs = do
           jAppend j Barrier (JIntent oid op t1)
           eeCheckpoint env CpQuarAfterIntent
           createDirectoryIfMissing True (takeDirectory trashAbs)
-          mvE <- try (moveFileNoReplace victimAbs trashAbs) :: IO (Either IOException ())
+          mvE <- try (moveBoundNoReplace victimAbs trashAbs) :: IO (Either IOException ())
           case mvE of
             Left e -> do
               tf <- getCurrentTime
