@@ -7,7 +7,9 @@
 -- reparse point、损坏 root-id（含测试 fixture 不覆盖）、I11 覆盖全部 .pm 写入口。
 module GuardTests (guardTests) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, finally, try)
+import Data.IORef (modifyIORef, newIORef, readIORef, writeIORef)
+import System.Environment (lookupEnv, setEnv)
 import Control.Monad (forM_, when)
 import Data.List (isInfixOf)
 import qualified Data.Text as T
@@ -20,9 +22,11 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (saveCatalog)
-import Pm.Cli (GoOpts (..), recheckCleanPlan, savePlanAndMaybeRun)
-import Pm.Commands (RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runClean, runImport, runTrash)
-import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootInfo, readRootState, requireRole, requireWritable, writeRootInfo)
+import Pm.Catalog (loadCatalog)
+import Pm.Cli (GoOpts (..), recheckCleanPlan, savePlanAndMaybeRun, writeBackCatalog)
+import Pm.Commands (InitOpts (..), ResolveOpts (..), RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runClean, runImport, runInit, runResolve, runTrash)
+import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootInfo, readRootState, requireRole, requireWritable, withConfigLock, writeRootInfo)
+import Pm.Lock (withRootLock)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec
 import Pm.GitGuard (vaultIgnoreGuard)
@@ -62,6 +66,10 @@ guardTests =
     , testCase "P3b-8 A1 slotOccupied：非法名等探测异常按占用；文件当目录用 → 空槽" caseSlotOccupiedProbe
     , testCase "P3b-8 B1 runClean / runImport：主库身份校验先于索引读取与三副本判定" caseCleanImportGuardFirst
     , testCase "P3b-8 minor ensureTestRoot：损坏标识不覆盖；缺席则 no-replace 建立且不改 role" caseFixtureKeepsCorrupt
+    , testCase "三十轮 F2 resolve：装载→改→写回整段在 I10 锁内（锁被占 → 裁决不写入）" caseResolveTakesLock
+    , testCase "三十轮 F2 doctor --repair：读→判→修整段在 I10 锁内（锁被占 → 只诊断，tmp 不删）" caseDoctorRepairTakesLock
+    , testCase "三十轮 F2 catalog 回写：读→并→写是加锁 RMW（锁被占 → 明说放弃，不静默覆盖）" caseCatalogWriteBackTakesLock
+    , testCase "三十轮 F3 init：配置的查在→读旧→写回进 withConfigLock（锁被占 → 不写入）" caseInitTakesConfigLock
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -539,3 +547,90 @@ caseFixtureKeepsCorrupt = withSystemTempDirectory "pm-guard" $ \tmp -> do
 -- P3b-9\/P3b-10 的路径类用例（relPathOk\/opPathsOk\/canonical 限域\/manifest\/
 -- catalog\/undo）在 PathGuardTests——本文件触及 750 行预算（同 P3b-6 把备份命令
 -- 拆到 Pm.BackupCmd 的先例）。
+
+-- ─── 三十轮 F2/F3：读证据 → 判定 → 写，整段一把锁 ──────────────────────────
+
+-- | resolve 是「装载 → 改 → 写回」的 RMW。锁被占时必须整体拒绝——否则两个
+-- resolve 各批不同条目，后写者整份抹掉先写者的裁决。
+caseResolveTakesLock :: IO ()
+caseResolveTakesLock = withSystemTempDirectory "pm-rlock" $ \tmp -> do
+  let root = tmp </> "main"
+  createDirectoryIfMissing True root
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "rm" RoleMain now Nothing)
+  op <- mkCopyOp (tmp </> "src.jpg") "S" ("Raw" </> "a.jpg")
+  pid <- newPlanId
+  let plan = Plan pid "sort" root (Just "rm") t0 [PlanItem 0 op StPending Nothing]
+      cfg = mkCfg root Nothing
+      ropts = ResolveOpts pid 0 True Nothing -- skip 条目 0
+  _ <- savePlan plan
+  -- 锁被占：裁决不落盘，盘上状态原封不动
+  mc <- withRootLock root (runResolve ropts cfg)
+  mc @?= Just 2
+  eheld <- loadPlan root pid
+  fmap (map piStatus . plItems) eheld @?= Right [StPending]
+  -- 锁空闲：同一条命令生效
+  c2 <- runResolve ropts cfg
+  c2 @?= 0
+  eafter <- loadPlan root pid
+  fmap (map piStatus . plItems) eafter @?= Right [StSkippedByUser]
+
+-- | doctor --repair 的判定视图（journal/tmp 枚举）也在锁内取。锁被占 →
+-- 退回只读诊断 + I10 Bad，孤儿 tmp 一个不删。
+caseDoctorRepairTakesLock :: IO ()
+caseDoctorRepairTakesLock = withSystemTempDirectory "pm-dlock" $ \tmp -> do
+  let root = tmp </> "main"
+      orphan = root </> ".pm" </> "tmp" </> "20260101-000000-abcdef" </> "0-x.jpg"
+  createDirectoryIfMissing True (takeDirectory orphan)
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "rd" RoleMain now Nothing)
+  writeFile orphan "junk"
+  mfs <- withRootLock root (runDoctor root (DoctorOpts False True))
+  case mfs of
+    Nothing -> assertFailure "外层锁竟然没拿到"
+    Just (fs, _) -> do
+      assertBool ("应报 I10 Bad: " <> show [(fRow f, fSeverity f) | f <- fs]) (("I10", Bad) `elem` [(fRow f, fSeverity f) | f <- fs])
+      doesFileExist orphan >>= (@?= True)
+  -- 锁空闲：同一次 --repair 把孤儿 tmp 清掉
+  _ <- runDoctor root (DoctorOpts False True)
+  doesFileExist orphan >>= (@?= False)
+
+-- | catalog 回写是「读 → 并 → 写」。锁被占 → 放弃并**明说**（滞后可接受，
+-- 静默基于旧快照覆盖不可接受）。
+caseCatalogWriteBackTakesLock :: IO ()
+caseCatalogWriteBackTakesLock = withSystemTempDirectory "pm-clock" $ \tmp -> do
+  let root = tmp </> "main"
+  createDirectoryIfMissing True root
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "rc" RoleMain now Nothing)
+  saveCatalog root (mkCat [])
+  ref <- newIORef ([] :: [String])
+  let sink l = modifyIORef ref (l :)
+  _ <- withRootLock root (writeBackCatalog sink root [])
+  held <- readIORef ref
+  assertBool ("锁被占应明说放弃: " <> show held) (any ("回写未完成" `isInfixOf`) held)
+  writeIORef ref []
+  writeBackCatalog sink root []
+  free <- readIORef ref
+  free @?= []
+  -- 回写真的发生了（catalog 仍可装载）
+  (mcat, _) <- loadCatalog root
+  maybe (assertFailure "catalog 应仍可装载") (const (pure ())) mcat
+
+-- | init 的「查存在 → 读旧配置 → 写回」在 withConfigLock 内。锁被占 →
+-- 配置不写入（否则 --force 会用锁外读到的旧配置抹掉别人锁内的登记）。
+caseInitTakesConfigLock :: IO ()
+caseInitTakesConfigLock = withSystemTempDirectory "pm-ilock" $ \tmp -> do
+  mold <- lookupEnv "PM_CONFIG"
+  let cfgFp = tmp </> "cfg" </> "config.toml"
+      mainP = tmp </> "main"
+  createDirectoryIfMissing True mainP
+  setEnv "PM_CONFIG" cfgFp
+  flip finally (maybe (pure ()) (setEnv "PM_CONFIG") mold) $ do
+    let o = InitOpts mainP Nothing Nothing Nothing False
+    mc <- withConfigLock (runInit o)
+    mc @?= Just 2
+    doesFileExist cfgFp >>= (@?= False)
+    c2 <- runInit o
+    c2 @?= 0
+    doesFileExist cfgFp >>= (@?= True)

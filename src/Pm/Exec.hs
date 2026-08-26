@@ -277,8 +277,15 @@ execBarrier env plan
           Nothing -> Right planB
 
 -- | 屏障允许改的只有 'piStatus'，且只能从 'StPending' 往下降。
+--
+-- 三十轮 F4：元数据也要冻结——@plId@ 参与 opId/tmp/trash 路径推导，被屏障
+-- 改写会让 journal 的 opId 与旧计划碰撞；root 换了等于换库。第一方屏障只碰
+-- @plItems@，这里冻结的是**协议**而不是对某个实现的信任。
 barrierDrift :: Plan -> Plan -> Maybe String
 barrierDrift a b
+  | (plId a, plKind a, plRootPath a, plRootId a, plCreated a)
+      /= (plId b, plKind b, plRootPath b, plRootId b, plCreated b) =
+      Just "计划元数据（id/kind/root/rootId/created）变了"
   | length ia /= length ib = Just "条目数变了"
   | map piIx ia /= map piIx ib = Just "序号变了"
   | map piGroup ia /= map piGroup ib = Just "组变了"

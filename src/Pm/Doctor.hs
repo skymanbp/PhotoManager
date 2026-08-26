@@ -31,6 +31,7 @@ import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
 import Pm.Hash (sha256File, sha256Handle)
 import Pm.Journal
+import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
 import Pm.Trash
@@ -66,8 +67,35 @@ renderFinding f =
   sevTag Bad = "  ✗"
 
 -- | Returns (findings, exit code). Repairs (when requested) happen inside.
+--
+-- 三十轮 F2：@--repair@ 的「读 journal → 判定 → 补记 Done/删 tmp」是一次
+-- 跨进程 RMW——判定用的视图若在锁外取，另一份已批准计划可以在判定与补记之间
+-- 把世界改掉，doctor 随后补写的就是过时 Done。整段进 I10 锁。次序与
+-- 'Pm.Exec.execPlan' 相同（P3b-6）：先零写入预检，root 不可写连锁文件都不落；
+-- 锁内 runDoctor' 里的 requireWritable 复检保留（预检与取锁之间被改仍拒绝）。
+-- 取不到锁 → 退回只读诊断 + 一条 I10 Bad，不做任何修复。
 runDoctor :: FilePath -> DoctorOpts -> IO ([Finding], Int)
-runDoctor root opts = do
+runDoctor root opts
+  | doRepair opts = do
+      w <- requireWritable root
+      case w of
+        Left m -> diagnoseOnly (Finding "I11" Bad ("--repair 拒绝执行（root 不可写）: " <> m) "")
+        Right _ -> do
+          r <- withRootLock root (runDoctor' root opts)
+          case r of
+            Just x -> pure x
+            Nothing ->
+              diagnoseOnly
+                (Finding "I10" Bad "--repair 需要 root 独占锁，另一个 pm 实例正持有——本轮只诊断，未做任何修复" "")
+  | otherwise = runDoctor' root opts
+ where
+  diagnoseOnly f = do
+    (fs, _) <- runDoctor' root opts {doRepair = False}
+    let all' = fs <> [f]
+    pure (all', if maximum (Info : map fSeverity all') >= Warn then 1 else 0)
+
+runDoctor' :: FilePath -> DoctorOpts -> IO ([Finding], Int)
+runDoctor' root opts = do
   (entries, jwarns) <- readJournal root
   let journalFindings =
         [ Finding

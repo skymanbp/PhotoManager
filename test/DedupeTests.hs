@@ -34,10 +34,10 @@ import Pm.Dedupe
 import Pm.Hash (sha256File)
 import Pm.Op
 import Pm.Plan
-import Pm.Trash (TrashRecord (..), appendManifest, trashDir)
+import Pm.Trash (TrashRecord (..), appendManifest, manifestPath, trashDir)
 import Pm.Types
 
-import TestUtil (mkCat, t0)
+import TestUtil (captureStdout, mkCat, t0)
 
 dedupeTests :: TestTree
 dedupeTests =
@@ -57,7 +57,8 @@ dedupeTests =
     , testCase "屏障在 root 锁**内**跑（屏障里再取同一把锁必须失败）" caseBarrierRunsInsideLock
     , testCase "内核 fail-closed：dedupe 计划没装屏障 → 整批拒绝，不是静默跳过" caseKernelRefusesMissingBarrier
     , testCase "内核不信屏障：把条目升级回 pending → 整批拒绝" caseBarrierMayNotPromote
-    , testCase "trash empty 也在 I10 锁内：锁被占 → 退出，一个文件不删" caseTrashEmptyTakesLock
+    , testCase "trash empty 也在 I10 锁内：锁被占 → 退出，一个文件不删、manifest 一行不读" caseTrashEmptyTakesLock
+    , testCase "内核冻结屏障返回值的计划元数据：改写 plId → 整批拒绝" caseBarrierMetaFrozen
     ]
 
 -- ─── 纯核心 ────────────────────────────────────────────────────────────────
@@ -288,10 +289,30 @@ caseTrashEmptyTakesLock = withDup $ \root sha a b -> do
   writeFile (trashDir root </> rel) dupBody
   appendManifest root (TrashRecord b rel (T.pack sha) "dedupe:同 sha 2 份之一" "p" now)
   saveCatalog root (dupCat sha a b)
-  -- a 还在盘上，无锁时这一批本来会被永久删除（见 caseTrashEmptyBarrier 的后半段）
-  mc <- withRootLock root (runTrash cfg (TrashEmpty True) root)
+  -- a 还在盘上，无锁时这一批本来会被永久删除（见 caseTrashEmptyBarrier 的后半段）。
+  -- 三十轮 F1 的直接断言：**视图也是证据**——锁被占时连 manifest 都不该读。
+  -- 先塞一行坏记录：坏行警告若被打印，说明视图取在锁外。
+  appendFile (manifestPath root) "not-json\n"
+  (out, mc) <- captureStdout (withRootLock root (runTrash cfg (TrashEmpty True) root))
   mc @?= Just 2
+  assertBool "锁被占时不得读 manifest（坏行警告不应出现）" (not ("manifest 损坏行" `isInfixOf` out))
   doesFileExist (trashDir root </> rel) >>= (@?= True)
+
+-- | 三十轮 F4：屏障是命令层传进来的函数，内核冻结它能改的范围——不止状态
+-- 只许降级（caseBarrierMayNotPromote），**计划元数据也不许动**：plId 参与
+-- opId/tmp/trash 路径推导，被改写会让 journal 的 opId 与旧计划碰撞。
+caseBarrierMetaFrozen :: IO ()
+caseBarrierMetaFrozen = withDup $ \root sha a b -> do
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
+  saveCatalog root (dupCat sha a b)
+  plan <- (\p -> p {plRootPath = root}) <$> planOf [(a, sha)]
+  let evil p = pure p {plId = "20260101-000000-ffffff"}
+  r <- execPlan defaultExecEnv {eeBarrier = Just evil} plan
+  case r of
+    Right _ -> assertFailure "内核接受了改写 plId 的屏障"
+    Left m -> assertBool ("应因元数据改写被拒，实为: " <> m) ("元数据" `isInfixOf` m)
+  doesFileExist (root </> a) >>= (@?= True)
 
 -- ─── fixtures ──────────────────────────────────────────────────────────────
 

@@ -25,15 +25,19 @@ module TestUtil
   , scanQuiet
   , elemSubstr
   , pad2
+  , captureStdout
   ) where
 
-import Control.Exception (SomeException, throwIO, try)
+import Control.Exception (SomeException, bracket, finally, throwIO, try)
 import Control.Monad (forM_, when)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime (..), fromGregorian, getCurrentTime)
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist)
-import System.FilePath (takeDirectory)
+import System.FilePath (takeDirectory, (</>))
+import System.IO (IOMode (..), hClose, hFlush, hGetContents, hSetEncoding, openFile, stdout, utf8)
+import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty.HUnit
 
 import Pm.Config (RootIdState (..), createRootInfo, readRootState)
@@ -183,3 +187,27 @@ elemSubstr needle hay = any (\i -> take (length needle) (drop i hay) == needle) 
 
 pad2 :: Int -> String
 pad2 n = if n < 10 then '0' : show n else show n
+
+-- | 进程级 stdout 重定向（原在 SortTests，三十轮起多个模块要用，移到这里）。
+--
+-- **两端都必须显式 UTF-8**：本机 locale 是 GBK，而 pm 的输出里有 U+26A0(⚠)
+-- 与 U+2717(✗)，临时文件句柄按 locale 编码会直接抛 commitBuffer。tasty 已由
+-- Spec.hs 钉成 NumThreads 1——重定向的是**进程级** stdout，并行会互相污染。
+captureStdout :: IO a -> IO (String, a)
+captureStdout act = withSystemTempDirectory "pm-cap" $ \dir -> do
+  let fp = dir </> "out.txt"
+  h <- openFile fp WriteMode
+  hSetEncoding h utf8
+  old <- hDuplicate stdout
+  hDuplicateTo h stdout
+  -- hDuplicate/hDuplicateTo 造出的句柄用的是 **locale** 编码，会把
+  -- setupConsole 设好的 utf8 抹掉——替换后和还原后都要显式钉回去，
+  -- 否则 pm 输出里的 ✗/⚠ 在这里、以及**后续用例**里都会炸。
+  hSetEncoding stdout utf8
+  a <- act `finally` (hFlush stdout >> hDuplicateTo old stdout >> hSetEncoding stdout utf8 >> hClose old)
+  hClose h -- 必须先关：GHC 句柄锁不许「已开写」的文件同时被开读
+  txt <- bracket (openFile fp ReadMode) hClose $ \rh -> do
+    hSetEncoding rh utf8
+    t <- hGetContents rh
+    length t `seq` pure t
+  pure (txt, a)

@@ -364,11 +364,15 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 - mutation 前打开 `.pm/lock` 句柄 `hTryLock`（内核锁，崩溃自动释放，I10）；
 - Plan 带 (size,mtime) 前提，Exec 逐项复核（防 Lightroom 并发改动）；
 - scan 对每文件 hash 前后双 stat，不一致 → 标 volatile 本轮不入索引。
-- **判据与动盘是同一个跨进程事务**：凡是「读证据 → 判定 → 动盘」的整段，
-  必须整段在 I10 锁内完成。执行期组屏障（dedupe 的"至少留一份"、clean-staging
-  的三副本）由内核在 `withRootLock` **内**调用，`pm trash empty` 的屏障与
-  唯一那次 unlink 同样整段在锁内（二十九轮 critical；与二十一轮 vault-holds
-  名单同一裁定）。进程内互斥（serve 的 MVar）不算——它挡不住第二个 pm。
+- **判据与动盘是同一个跨进程事务**：凡是「读证据 → 判定 → 动盘/写回」的
+  整段，必须整段在一把锁内完成，且**证据在锁内取**。落实清单（二十九轮 +
+  三十轮 F1-F3）：执行期组屏障由内核在 `withRootLock` **内**调用；
+  `pm trash empty` 从读 manifest 视图到唯一那次 unlink 整段在锁内；
+  `pm resolve` 锁内重载计划再写回；doctor `--repair` 的「读 journal → 判定 →
+  补记/删 tmp」整段在锁内（锁被占退回只读诊断）；执行后的 catalog 回写是
+  加锁 RMW（锁被占则明说放弃，pm scan 可补）；配置的全部四条读改写路径
+  （config set / API config / backup init / **pm init --force**）都在
+  `withConfigLock` 内。进程内互斥（serve 的 MVar）不算——它挡不住第二个 pm。
   内核对「该有屏障而调用方没给」整批拒绝，缺席不会退化成静默跳过。
 
 ---
@@ -598,12 +602,15 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
   1. `MoveFileEx` / `RemoveDirectory` 这类只吃**名字**、没有句柄形态的 API
      （落位 rename、`pm trash empty` 的唯一 unlink）。仍由 `resolveUnder` +
      `pathAtOrUnder` 守。
-  2. Exec 三条 Op 的内容复核（`sha256File`：Copy 的落点同内容判定、Rename 的
-     旧名复核、Quarantine 的 victim 复核）按名字打开。**这不是独立窗口**：每
-     一条读之后紧接着就是同一路径上的 `moveFileNoReplace`，赢得下读那一跳的
-     攻击者同样赢得下 move 那一跳，后果由 move 产生。把读口换成 `openBoundTo`
-     会造出"读口已关"的假象而实际什么都没关——真要关这一类，方向是落位
-     rename 改成句柄形态（`SetFileInformationByHandle` + `FILE_RENAME_INFO`）。
+  2. Exec 的内容复核（`sha256File`）按名字打开，分两类（三十轮 F5 更正——
+     此前把两类混说成"读后紧跟 move"）：**Rename 的旧名复核与 Quarantine 的
+     victim 复核**，读之后紧接着就是同一路径上的 `moveFileNoReplace`，赢得下
+     读那一跳的攻击者同样赢得下 move 那一跳，后果由 move 产生，不构成独立
+     窗口；**Copy 的落点同内容判定**没有后续 move——伪造相等只会让这一次
+     Copy 被静默跳过（`OSkippedIdentical`），落点空着、旧字节仍在 trash，
+     doctor 对账可见，不是覆盖也不是丢失。两类都不值得换 `openBoundTo`：
+     那会造出"读口已关"的假象——真要关这一类，方向是落位 rename 改成句柄
+     形态（`SetFileInformationByHandle` + `FILE_RENAME_INFO`）。
   3. `openBoundTo` 只比对**路径**，对库内 hardlink 判是。所以它关掉的是竞态
      那一半，别名那一半（同一对象两个名字）要靠 `FileId`，thumb 尚未用它。
   4. `handleIsAt` 的路径规范化是手写的（去 `\\?\` 前缀、按分隔符切、折
