@@ -51,12 +51,11 @@ import Control.Concurrent.Async (race)
 import Control.Monad (when)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
-import Control.Exception (IOException, SomeException, bracket, catch, try)
-import Crypto.Random (getRandomBytes)
+import Control.Exception (IOException, bracket, try)
+
+import Pm.ServeGuard
 import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
 import qualified Data.Aeson as Aeson
-import qualified Data.ByteArray as BA
-import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BSL
@@ -75,8 +74,7 @@ import Network.Wai
 import Network.Wai.Handler.Warp (defaultSettings, runSettingsSocket)
 import System.Directory (doesDirectoryExist, doesFileExist)
 import System.FilePath (takeExtension)
-import GHC.IO.Handle (hDuplicateTo)
-import System.IO (IOMode (ReadMode, WriteMode), hClose, hFlush, hIsEOF, openFile, stdin, stdout)
+import System.IO (IOMode (ReadMode), hClose, hFlush, stdout)
 
 import Pm.Catalog (loadCatalog)
 import Pm.Cli (GoOpts (..), executePlanNowWith)
@@ -131,11 +129,6 @@ newServeEnv cfg tok writable allowApply = do
   ref <- newIORef cfg
   ServeEnv ref tok (writable || allowApply) allowApply <$> newMVar () <*> newMVar ()
 
--- | POST 请求体上限（十八轮：warp 默认无总 body 上限，写端点须自设）。一次
--- 分类指派最多几十条 name/category，64 KiB 绰绰有余。
-maxBodyBytes :: Int
-maxBodyBytes = 64 * 1024
-
 -- | 启动时打印给调用方的一行 JSON。
 data Announce = Announce
   { anPort :: Int
@@ -145,29 +138,6 @@ data Announce = Announce
 instance ToJSON Announce where
   toJSON a = object ["port" .= anPort a, "token" .= anToken a]
 
--- | 16 字节熵 → 32 位 hex。
-newToken :: IO BS.ByteString
-newToken = do
-  raw <- getRandomBytes 16 :: IO BS.ByteString
-  pure (convertToBase Base16 raw)
-
-portOk :: Int -> Bool
-portOk p = p >= 0 && p <= 65535
-
--- | 把进程的 stdout 换成空设备。失败即忽略：这是防管道堵塞的加固，
--- 换不成最坏也只是回到"可能堵"的旧状态，不该因此让 serve 起不来。
-muteStdout :: IO ()
-muteStdout =
-  ( do
-      h <- openFile nulDevice WriteMode
-      hDuplicateTo h stdout
-      hClose h
-  )
-    `catch` \(_ :: SomeException) -> pure ()
- where
-  -- 设备命名空间：裸 "NUL" 走 GHC 的普通路径打开会 does not exist（实测）
-  nulDevice = [bsl, bsl, '.', bsl] <> "NUL"
-  bsl = toEnum 92
 
 -- | 只听 127.0.0.1；端口 0 = 随机，绑定后再从 socket 读回真实端口。
 runServe :: Config -> ServeOpts -> IO Int
@@ -203,39 +173,9 @@ runServe cfg o = case soPort o of
       Left e -> putStrLn ("pm serve: " <> show e) >> pure 1
       Right () -> pure 0
 
--- | 阻塞直到 stdin 关闭（EOF）；读到内容就丢弃继续等。
-waitStdinEof :: IO ()
-waitStdinEof = do
-  eof <- try (hIsEOF stdin) :: IO (Either IOException Bool)
-  case eof of
-    Right False -> BC.hGetLine stdin >> waitStdinEof
-    _ -> pure ()
-
-bindLoopback :: Int -> IO Socket
-bindLoopback port = do
-  sock <- socket AF_INET Stream defaultProtocol
-  bind sock (SockAddrInet (fromIntegral port) (tupleToHostAddress (127, 0, 0, 1)))
-  listen sock 64
-  pure sock
-
 -- ─── WAI application ────────────────────────────────────────────────────────
-
-allowedOrigins :: [BS.ByteString]
-allowedOrigins = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]
-
-allowedOrigin :: BS.ByteString -> Bool
-allowedOrigin = (`elem` allowedOrigins)
-
--- | @Host@ 头须为 @127.0.0.1@ 或 @127.0.0.1:<1-5 位十进制端口>@——精确解析，
--- 不做前缀判定（十八轮：前缀判定会放过 @127.0.0.1:1@evil@ 之类的尾巴；就
--- DNS rebinding 而言那不可利用，但闸的语义应当是"恰好是这个 Host"）。
-hostOk :: BS.ByteString -> Bool
-hostOk h = case BS.stripPrefix "127.0.0.1" h of
-  Just "" -> True
-  Just rest
-    | Just port <- BS.stripPrefix ":" rest ->
-        not (BS.null port) && BS.length port <= 5 && BC.all (\c -> c >= '0' && c <= '9') port
-  _ -> False
+-- （传输/守卫原语在 "Pm.ServeGuard"：newToken/hostOk/allowedOrigin/authorized/
+--   readBodyCapped/muteStdout/waitStdinEof/bindLoopback，P7 拆出，逐字搬移。）
 
 serveApp :: ServeEnv -> Application
 serveApp env req respond = do
@@ -260,13 +200,6 @@ serveApp env req respond = do
           respond (responseLBS status204 corsHdrs "")
       | not (authorized (seToken env) hdrs) -> err status401 "缺少或错误的 Bearer token"
       | otherwise -> route env req jsonR err corsHdrs respond
-
-authorized :: BS.ByteString -> RequestHeaders -> Bool
-authorized tok hdrs = case lookup hAuthorization hdrs of
-  Just v
-    | Just given <- BS.stripPrefix "Bearer " v ->
-        BS.length given == BS.length tok && BA.constEq given tok
-  _ -> False
 
 type Reply = Status -> ResponseHeaders -> Value -> IO ResponseReceived
 
@@ -632,18 +565,6 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
  where
   -- vault 缓存刷新串行化（十八轮 minor）：两个并发 GET 会争用固定 tmp 名。
   vaultReport = withMVar (seVaultLock env) (const (computeVault True cfg))
-
--- | 读请求体，超过 'maxBodyBytes' 即放弃（不把剩余读完，直接 413）。
-readBodyCapped :: Request -> IO (Maybe BS.ByteString)
-readBodyCapped req = go [] 0
- where
-  go acc n = do
-    chunk <- getRequestBodyChunk req
-    if BS.null chunk
-      then pure (Just (BS.concat (reverse acc)))
-      else
-        let n' = n + BS.length chunk
-         in if n' > maxBodyBytes then pure Nothing else go (chunk : acc) n'
 
 -- | @{"assignments":[{"name":"a.jpg","category":"landscape"},…]}@
 -- | @{"src","place"|"event","from","to"}@ —— 与 CLI 的 @pm sort … --place …

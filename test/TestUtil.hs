@@ -31,10 +31,13 @@ module TestUtil
   , execNow
   , captureStdout
   , trashViewOK
+  , withDenyAll
   ) where
 
-import Control.Exception (SomeException, bracket, finally, throwIO, try)
+import Control.Exception (SomeException, bracket, bracket_, finally, throwIO, try)
 import Control.Monad (forM_, when)
+import System.Environment (getEnv)
+import System.Process (readCreateProcess, shell)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime (..), fromGregorian, getCurrentTime)
@@ -56,6 +59,18 @@ import Pm.Plan
 import Pm.Scan (ScanOpts (..), ScanResult (..), scanRoot)
 import Pm.Trash (TrashView, trashView)
 import Pm.Types
+
+-- | 对路径挂「当前用户全拒 (F)」ACE 跑动作，结束必解除（bracket_；文件
+-- 所有者恒可改回自己文件的 DACL，不会被自己锁死）。三十九轮（P7）实验：
+-- 拒 (RA)/(RD,RA) 都不影响 GetFileAttributesEx 类探针（目录元数据兜底），
+-- 全拒 (F) 才让 CreateFile 类探针（pathIsSymbolicLink/getFileSize/
+-- getModificationTime）确定性 permission denied——这是「非 ENOENT 探针
+-- 失败」目前唯一的确定性注入形态。
+withDenyAll :: FilePath -> IO a -> IO a
+withDenyAll p act = do
+  user <- getEnv "USERNAME"
+  let icacls args = () <$ readCreateProcess (shell ("icacls \"" <> p <> "\" " <> args <> " >nul")) ""
+  bracket_ (icacls ("/deny \"" <> user <> "\":(F)")) (icacls ("/remove:d \"" <> user <> "\"")) act
 
 -- | 'trashView' 三十五轮 Either 化（枚举 fail-closed）后的测试解包：正常
 -- fixture 里枚举失败即测试失败，各用例照旧拿 TrashView 断言。

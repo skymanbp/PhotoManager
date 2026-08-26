@@ -15,7 +15,7 @@ module Pm.SortSource
   , withSource
   ) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (IOException, try)
 import Control.Monad (forM)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
@@ -24,6 +24,7 @@ import Data.Text (Text)
 import Data.Time (LocalTime)
 import System.Directory (canonicalizePath, doesDirectoryExist, makeAbsolute, pathIsSymbolicLink)
 import System.FilePath (takeBaseName, takeDirectory, takeExtension, (</>))
+import System.IO.Error (isDoesNotExistError)
 
 import Pm.Exif (readCaptureTime)
 import Pm.Hash (StatSnap, sha256File, statSnap)
@@ -72,7 +73,18 @@ listSource dir = do
       -- 显式指定（与 root 放在 junction 上一样是合法用法，见 'resolveUnder'
       -- 的说明），所以**不拒绝**，但必须告诉用户他实际在整理哪个目录
       -- （codex 二十六轮 #5）。
-      rootLink <- either (const False) id <$> tryIO (pathIsSymbolicLink dir)
+      -- 三十九轮（P7 探针类清扫）：探测异常不再塌成「非链接」。这行只产
+      -- 说明（不改枚举/分类/计划），但塌 False 意味着源根恰是 junction 而
+      -- 属性读瞬时失败时，说明行消失、用户以为整理的就是指定目录——
+      -- 「查不出」就说查不出。「不存在」交给上层 doesDirectoryExist 的
+      -- 判定，不在这里出声。
+      rootLinkE <- tryIO (pathIsSymbolicLink dir)
+      let rootLink = either (const False) id rootLinkE
+          probeNotes =
+            [ "源根的链接属性查不出（" <> show e <> "）——若它其实是 junction/symlink，实际整理的目录可能与指定的不同"
+            | Left e <- [rootLinkE]
+            , not (isDoesNotExistError e)
+            ]
       real <-
         if rootLink
           then either (const Nothing) Just <$> tryIO (canonicalizePath dir)
@@ -86,12 +98,15 @@ listSource dir = do
           , sfUnknown = pick KindMeta
           , sfErrors = [(dir </> r, e) | (r, e) <- errs]
           , sfNotes =
-              [ "源根本身是 symlink/junction，实际整理的是 " <> fromMaybe "（解析失败）" real
-              | rootLink
-              ]
+              probeNotes
+                <> [ "源根本身是 symlink/junction，实际整理的是 " <> fromMaybe "（解析失败）" real
+                   | rootLink
+                   ]
           }
  where
-  tryIO :: IO a -> IO (Either SomeException a)
+  -- 只捕 IOException（三十九轮类清扫；Hash.hs 家规）：SomeException 会把
+  -- UserInterrupt/ThreadKilled 一起吞掉。
+  tryIO :: IO a -> IO (Either IOException a)
   tryIO = try
 
 -- | (源目录, 折叠后的 stem) → 该 stem 的侧车。按目录分键：不同目录下同名的
@@ -145,7 +160,11 @@ snapshotWith stat hash p = do
       if pre == post
         then Right (sha, post)
         else Left "hash 期间被修改（源仍在写入）"
-  pure (either (\(e :: SomeException) -> Left (show e)) id r)
+  -- 三十九轮（P7 类清扫）：SomeException→IOException。生产注入
+  -- （statSnap/sha256File）只抛 IO 异常，行为不变；测试注入的断言失败
+  -- （HUnitFailure）此前会被洗成 Left 再被调用方吞掉——收窄后照常传播，
+  -- 这是修复不是收紧。
+  pure (either (\(e :: IOException) -> Left (show e)) id r)
 
 -- | 两种形态共用的源目录入口：解析成绝对路径、确认存在、分三摞列出。
 -- **静默**——不打印任何东西，因为提议形态要把诊断当**数据**交回

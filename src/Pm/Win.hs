@@ -52,7 +52,7 @@ module Pm.Win
   ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (SomeException, catch, finally, mask, onException, try)
+import Control.Exception (IOException, SomeException, catch, finally, mask, onException, try)
 import Control.Monad (unless, when)
 import Data.Bits (testBit, (.&.))
 import Data.Char (toLower)
@@ -98,7 +98,7 @@ setupConsole = do
       -- Swallowed because: only reachable on exotic console hosts where the
       -- call itself fails; the sole consequence is garbled glyph display,
       -- never data corruption, and aborting pm over it would be worse.
-      `catch` \(_ :: SomeException) -> pure ()
+      `catch` \(_ :: IOException) -> pure ()
 
 -- | hFlush + FlushFileBuffers: contents durable on media when this returns
 -- (modulo hardware that lies; see doctor matrix row C4).
@@ -121,8 +121,8 @@ flushHandleToDisk h = do
 -- fail-closed：调用点用它守卫**删除\/写入**，答不上来就不动。
 pathUnder :: FilePath -> FilePath -> IO Bool
 pathUnder base p = do
-  eb <- try (canonicalizePath base) :: IO (Either SomeException FilePath)
-  ep <- try (canonicalizePath p) :: IO (Either SomeException FilePath)
+  eb <- try (canonicalizePath base) :: IO (Either IOException FilePath)
+  ep <- try (canonicalizePath p) :: IO (Either IOException FilePath)
   pure $ case (eb, ep) of
     (Right b, Right q) ->
       let bs = comps b
@@ -143,8 +143,8 @@ pathUnder base p = do
 -- @Just False@（P3b-17：Bool 版 @confinedUser@ 已删除，用户侧只剩这一个口）。
 pathAtOrUnder :: FilePath -> FilePath -> IO (Maybe Bool)
 pathAtOrUnder base p = do
-  eb <- try (canonicalizePath base) :: IO (Either SomeException FilePath)
-  ep <- try (canonicalizePath p) :: IO (Either SomeException FilePath)
+  eb <- try (canonicalizePath base) :: IO (Either IOException FilePath)
+  ep <- try (canonicalizePath p) :: IO (Either IOException FilePath)
   pure $ case (eb, ep) of
     (Right b, Right q) ->
       let bs = comps b
@@ -244,7 +244,7 @@ ioReparseTagNameSurrogate = 0x20000000
 -- 守不住这些必须复用既有名字的状态文件——那条路径靠这里的 link count 守。
 handleIsSingleLink :: Handle -> IO Bool
 handleIsSingleLink h = do
-  r <- try (withHandleToHANDLE h Win32File.getFileInformationByHandle) :: IO (Either SomeException Win32File.BY_HANDLE_FILE_INFORMATION)
+  r <- try (withHandleToHANDLE h Win32File.getFileInformationByHandle) :: IO (Either IOException Win32File.BY_HANDLE_FILE_INFORMATION)
   pure $ case r of
     Right i -> Win32File.bhfiNumberOfLinks i <= 1
     Left _ -> False -- 查不出就不写（fail-closed）
@@ -269,7 +269,7 @@ data FileId = FileId {fidVolume :: Word32, fidIndex :: Word64}
 -- 取不到就是 Nothing，调用方一律 fail-closed（不得当作"身份不同"）。
 handleFileId :: Handle -> IO (Maybe FileId)
 handleFileId h = do
-  r <- try (withHandleToHANDLE h Win32File.getFileInformationByHandle) :: IO (Either SomeException Win32File.BY_HANDLE_FILE_INFORMATION)
+  r <- try (withHandleToHANDLE h Win32File.getFileInformationByHandle) :: IO (Either IOException Win32File.BY_HANDLE_FILE_INFORMATION)
   pure $ case r of
     Right i ->
       Just
@@ -438,7 +438,7 @@ openStateLock fp = do
 -- （P3b-12：九轮指出 P3b-11 的文档把这点写成了"含基准自身"，措辞已更正）。
 resolveUnder :: FilePath -> FilePath -> IO (Maybe FilePath)
 resolveUnder base rel = do
-  eb <- try (canonicalizePath base) :: IO (Either SomeException FilePath)
+  eb <- try (canonicalizePath base) :: IO (Either IOException FilePath)
   case eb of
     Left _ -> pure Nothing
     Right b -> go b (splitDirectories rel)
@@ -552,6 +552,11 @@ listCandidateDrives = do
 -- rename atomicity).
 volumeFsType :: Char -> IO (Maybe Text)
 volumeFsType c =
+  -- 有意保留 SomeException（三十九轮类清扫时逐处裁定）：query 里没有会抛
+  -- IOException 的操作——c_GetVolumeInformationW 以返回 0 表失败、已显式
+  -- 处理，可能逃出的只有 withTString/peekTString 的编解码异常；收窄成
+  -- IOException 等于把 catch 改成死代码、让这些异常直接炸掉 status。
+  -- 本函数纯 informational（无协议依赖），任何失败 -> Nothing 是对的。
   query `catch` \(_ :: SomeException) -> pure Nothing
  where
   query =

@@ -11,14 +11,16 @@ module Pm.Scan
   , listTreeWith
   , DotDirs (..)
   , freshnessSweep
+  , sweepCounts
   , maxPathLen
   ) where
 
 import Control.Concurrent.Async (replicateConcurrently_)
-import Control.Exception (IOException, SomeException, try)
+import Control.Exception (IOException, try)
 import Control.Monad (forM)
 import Data.IORef
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, pathIsSymbolicLink)
@@ -92,7 +94,7 @@ listTreeWith dots root = go ""
     -- 探针跑的是加 try 之前的代码）。重新构建后有无该 seq 结果完全相同
     -- （@files=[] errs=["."]@），突变也证明它不承重，已删除：**没有依据的
     -- 防御性代码加上一条假注释，比不加更糟**。
-    er <- try (listDirectory dirAbs) :: IO (Either SomeException [FilePath])
+    er <- try (listDirectory dirAbs) :: IO (Either IOException [FilePath])
     case er of
       Left e -> pure ([], [(here, "目录列举失败: " <> show e)])
       Right names -> do
@@ -153,27 +155,43 @@ freshnessSweep root relPrefix catSlice = do
   let base = if null relPrefix then root else root </> relPrefix
   ex <- doesDirectoryExist base
   (files, errs) <- if ex then listTree base else pure ([], [])
+  let pfx rel = if null relPrefix then rel else relPrefix </> rel
   snaps <- forM files $ \rel -> do
-    r <- try (statSnap (base </> rel)) :: IO (Either SomeException StatSnap)
-    pure (if null relPrefix then rel else relPrefix </> rel, r)
-  let disk = Map.fromList [(rel, s) | (rel, Right s) <- snaps]
-      newN = Map.size (disk `Map.difference` catSlice)
-      goneN = Map.size (catSlice `Map.difference` disk)
-      changedN =
-        length
-          [ ()
-          | (rel, s) <- Map.toList disk
-          , Just e <- [Map.lookup rel catSlice]
-          , enSize e /= ssSize s || enMtimeNs e /= ssMtimeNs s
-          ]
-  pure (newN, changedN, goneN, length errs)
+    r <- try (statSnap (base </> rel)) :: IO (Either IOException StatSnap)
+    pure (pfx rel, r)
+  pure (sweepCounts snaps (map (pfx . fst) errs) catSlice)
+
+-- | 'freshnessSweep' 的纯分类核心（拆出顶层穷测——同 'classifyGitProbe' 的
+-- 先例：注入形态难做时，把判定做成纯函数钉死）。出错的路径（stat 失败，或
+-- 遍历层就没走进去——目录列举失败、链接属性查不出被跳过）是「查不出」，
+-- fail-closed 的去向是**错误数**而不是消失：三十九轮（P7）前 Left 直接从
+-- disk 集合掉出去——NEW 文件 stat 失败即隐身（暂存区守卫照样放行），
+-- catalog 内文件 stat 失败被误报「消失」，而错误数只数遍历错。「消失」
+-- 要求确认不在盘上；出错的文件只是核不了，因此从 gone 剔除，只走错误口
+-- ——两类调用方（stagingFresh 按 errN 拒绝、pm status 依它出「一致」结论）
+-- 由此都拿到真话。
+sweepCounts :: [(FilePath, Either IOException StatSnap)] -> [FilePath] -> Map.Map FilePath Entry -> (Int, Int, Int, Int)
+sweepCounts snaps walkErrPaths catSlice = (newN, changedN, goneN, errN)
+ where
+  disk = Map.fromList [(rel, s) | (rel, Right s) <- snaps]
+  fails = Set.fromList ([rel | (rel, Left _) <- snaps] <> walkErrPaths)
+  newN = Map.size (disk `Map.difference` catSlice)
+  goneN = Map.size (Map.withoutKeys (catSlice `Map.difference` disk) fails)
+  changedN =
+    length
+      [ ()
+      | (rel, s) <- Map.toList disk
+      , Just e <- [Map.lookup rel catSlice]
+      , enSize e /= ssSize s || enMtimeNs e /= ssMtimeNs s
+      ]
+  errN = length walkErrPaths + length [() | (_, Left _) <- snaps]
 
 scanRoot :: ScanOpts -> Maybe Catalog -> Text -> FilePath -> IO ScanResult
 scanRoot opts oldCat rootId root = do
   (files, walkErrs) <- listTree root
   -- Stat pass
   statted <- forM files $ \rel -> do
-    r <- try (statSnap (root </> rel)) :: IO (Either SomeException StatSnap)
+    r <- try (statSnap (root </> rel)) :: IO (Either IOException StatSnap)
     pure (rel, r)
   let stats = [StatEntry rel s | (rel, Right s) <- statted]
       statErrs = [(rel, show e) | (rel, Left e) <- statted]
@@ -211,7 +229,11 @@ scanRoot opts oldCat rootId root = do
         case item of
           Nothing -> pure ()
           Just (StatEntry rel preSnap) -> do
-            r <- try (hashOne rel preSnap) :: IO (Either SomeException (Either FilePath Entry))
+            -- 三十九轮（P7 类清扫）：SomeException→IOException。宽口在这里
+            -- 最有害：worker 捕获后**继续循环取队列**，异步取消（ThreadKilled/
+            -- UserInterrupt）会被洗成一条「读文件错误」而 worker 照跑不误——
+            -- 正是 Hash.hs「只捕 IOException」家规要防的形态。
+            r <- try (hashOne rel preSnap) :: IO (Either IOException (Either FilePath Entry))
             atomicModifyIORef' out $ \(es, vs, errs) -> case r of
               Right (Right e) -> ((e : es, vs, errs), ())
               Right (Left v) -> ((es, v : vs, errs), ())

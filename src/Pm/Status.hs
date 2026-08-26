@@ -73,7 +73,10 @@ data IndexSummary = IndexSummary
   , isBackup :: CacheState BackupCacheMeta
   , isVault :: Maybe (CacheState VaultCacheMeta)
     -- ^ Nothing = 配置里没有 vault
-  , isFreshness :: Maybe (Int, Int, Int)
+  , isFreshness :: Maybe (Int, Int, Int, Int)
+    -- ^ (new, changed, missing, readErrors)。第四位是三十九轮（P7）补上的：
+    -- freshnessSweep 一直返回错误数，这里此前把它丢弃——stat 失败的文件
+    -- 既不进任何差异桶也不进退出码，「✓ 索引与磁盘一致」会在核对受阻时照说。
     -- ^ (新增, 变更, 消失)；Nothing = --cached 未核对
   }
   deriving (Show, Eq)
@@ -111,7 +114,7 @@ instance ToJSON StatusReport where
         , "stagingArchived" .= isStagingArchived i
         , "backup" .= isBackup i
         , "vault" .= isVault i
-        , "freshness" .= fmap (\(n, c, m) -> object ["new" .= n, "changed" .= c, "missing" .= m]) (isFreshness i)
+        , "freshness" .= fmap (\(n, c, m, e) -> object ["new" .= n, "changed" .= c, "missing" .= m, "errors" .= e]) (isFreshness i)
         ]
 
 -- | 采集（含可选的 stat 级新鲜度核对），不打印。
@@ -157,9 +160,9 @@ statusReport cfg opts = do
         if stCached opts
           then pure Nothing
           else do
-            (newN, changedN, missingN, _errN) <- freshnessSweep root "" (catEntries cat)
-            pure (Just (newN, changedN, missingN))
-      let pending = maybe 0 (\(n, c, m) -> n + c + m) fresh
+            (newN, changedN, missingN, errN) <- freshnessSweep root "" (catEntries cat)
+            pure (Just (newN, changedN, missingN, errN))
+      let pending = maybe 0 (\(n, c, m, e) -> n + c + m + e) fresh
           bkBad = case bk of CacheBad _ -> True; _ -> False
           vBad = case vlt of Just (CacheBad _) -> True; _ -> False
           -- 失信缓存与差异同权计入退出码（P3b-15）
@@ -250,11 +253,11 @@ renderStatus opts r = do
         Nothing
           | stCached opts -> putStrLn "  （--cached: 未做新鲜度核对）"
           | otherwise -> pure ()
-        Just (newN, changedN, missingN)
-          | newN + missingN + changedN == 0 -> putStrLn "  ✓ 索引与磁盘一致"
+        Just (newN, changedN, missingN, errN)
+          | newN + missingN + changedN + errN == 0 -> putStrLn "  ✓ 索引与磁盘一致"
           | otherwise -> do
-              printf "  ⚠ 索引已过期: 新增 %d / 变更 %d / 消失 %d\n" newN changedN missingN
-              putStrLn "      → pm scan"
+              printf "  ⚠ 索引已过期或核对受阻: 新增 %d / 变更 %d / 消失 %d / 读取错误 %d\n" newN changedN missingN errN
+              putStrLn "      → pm scan（有读取错误则先排除占用/权限再扫）"
 
 -- | Returns the process exit code: 0 = nothing pending, 1 = something needs
 -- attention, 2 = not usable yet (no index).

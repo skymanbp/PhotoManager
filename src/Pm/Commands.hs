@@ -40,7 +40,7 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Data.Time (diffUTCTime, getCurrentTime)
 import GHC.Conc (getNumProcessors)
-import System.Directory (doesDirectoryExist, doesFileExist, makeAbsolute)
+import System.Directory (doesDirectoryExist, makeAbsolute)
 import System.FilePath ((</>))
 import Text.Printf (printf)
 
