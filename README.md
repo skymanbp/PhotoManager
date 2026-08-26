@@ -17,8 +17,8 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 >
 > 但"个人项目"不是安全上打折的理由，照片是不可再生数据：pm **没有删除原语**，
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（至今
-> **三十轮**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉它
-> 就转红"的突变验证用例（286 例，GHC 警告 0）。
+> **三十二轮**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉
+> 它就转红"的突变验证用例（298 例，GHC 警告 0）。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
 命令细节：[docs/DESIGN-COMMANDS.md](docs/DESIGN-COMMANDS.md)。
@@ -195,10 +195,10 @@ pm · 索引 2026-08-25 20:48（0 分钟前）· 4859 文件 / 480.9 GiB
 |---|---|---|
 | 增量扫描（4859 文件，其中 126 新 hash / 14.3 GiB，workers=16） | 22.3 s | `pm scan` 2026-08-25 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（286 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
+| 测试套件（298 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
-| 对抗评审门禁 | 30 轮（NO-GO 的每条 finding 逐条第一方核实后处置） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
-| 突变验证 | 每道承重闸一个突变、恰好一个用例转红（近三轮 4+6+6 道全数通过） | REVIEW-LOG 各轮收敛证据 |
+| 对抗评审门禁 | 32 轮（NO-GO 的每条 finding 逐条第一方核实后处置） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
+| 突变验证 | 每道承重闸一个突变、恰好一个用例转红（近三轮 6+1+11 道全数通过） | REVIEW-LOG 各轮收敛证据 |
 
 ## 三层库拓扑与「设计内冗余」
 
@@ -256,8 +256,9 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
 **路线图**（按需推进，不承诺时间）：
 
 - ~~`pm vault ingest`~~ ✅ P6-D：pm 只拷 root 内（相册 + vault 类目两份计划），
-  `_inbox→_done` 交调用方并打印显式步骤；作为新写路径已实现待门禁，真实使用
-  仍在门禁 GO + 用户裁定之后。
+  `_inbox→_done` 交调用方并打印显式步骤；第 32 轮门禁的 9 条 ingest finding
+  已全修（执行次序闸收紧，见 REVIEW-LOG），真实 `_inbox` 首次使用仍在门禁
+  收敛确认 + 用户裁定之后。
 - ~~屏障协议的类型封闭~~ ✅ P6-A：`BarrierKind` 分类器 + 屏障只返回降级清单，
   升级/改写在类型上写不出来。
 - ~~落位 rename 的句柄形态~~ ✅ P6-C：全部提交型 rename/unlink 走

@@ -13,7 +13,7 @@ import Paths_photo_manager (version)
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import Text.Read (readMaybe)
 
-import Pm.Cli (GoOpts (..), savePlanAndMaybeRun)
+import Pm.Cli (GoOpts (..), savePlanAndMaybeRun, savePlanAndMaybeRun')
 import Pm.Commands
 import Pm.ConfigEdit (ConfigPatch (..), runConfigSet, runConfigShow)
 import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
@@ -43,8 +43,8 @@ data Cmd
   | CmdClean GoOpts -- clean staging
   | CmdVaultStatus Bool -- --json（sync_photos.py 兼容输出）
   | CmdVaultPush GoOpts (Maybe String) [FilePath] -- --category + FILES
-  | CmdVaultHold Bool [FilePath]
-  | CmdVaultIngest GoOpts String [FilePath] -- 暂不同步（True）/ 恢复（False）；只写主库 .pm
+  | CmdVaultHold Bool [FilePath] -- 暂不同步（True）/ 恢复（False）；只写主库 .pm
+  | CmdVaultIngest GoOpts String [FilePath] -- --category + FILES；两份计划（主库 相册/ + vault <类目>/）
   | CmdConfigShow -- 打印配置与路径健康（只读）
   | CmdConfigSet ConfigPatch -- 改 vault / photos.json / 并发数（主库路径只读）
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
@@ -120,7 +120,10 @@ run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
 run (CmdVaultPush go mcat fs) =
   withCfg (\cfg -> runVaultPush (savePlanAndMaybeRun cfg go) mcat fs cfg)
 run (CmdVaultHold hold fs) = withCfg (runVaultHold hold fs)
-run (CmdVaultIngest go cat fs) = withCfg (\cfg -> runVaultIngest (savePlanAndMaybeRun cfg go) cat fs cfg)
+-- ingest 走可判别的 'savePlanAndMaybeRun''：它要按「主库那份**真的全部落完**」
+-- 决定 vault 那份跑不跑，Int 退出码分不出这个（三十二轮 R4，见 Pm.Ingest）。
+run (CmdVaultIngest go cat fs) =
+  withCfg (\cfg -> runVaultIngest (savePlanAndMaybeRun' cfg go) (goApply go) cat fs cfg)
 run CmdConfigShow = withCfg runConfigShow
 run (CmdConfigSet p) = withCfg (runConfigSet p)
 run (CmdNames go) = withCfg (\cfg -> runNames (savePlanAndMaybeRun cfg go) cfg)

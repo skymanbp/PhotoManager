@@ -183,10 +183,13 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
     `StPending`，而 `--only` 把未选中项改写成 `StSkippedByUser`，双方各自看见
     对方那份还活着，双双放行，两份副本一起进隔离区。修法是把屏障装进
     `ExecEnv.eeBarrier`、由内核在 `withRootLock` 内调用；哪些种类需要屏障由
-    `Pm.Plan.kindNeedsBarrier` 说了算，**该有而没有 = 整批拒绝**，不会退化成
-    静默跳过（P3b-5/A3 的教训在这里的落法：闸算不进内核，就让缺席可见）。
-    内核还核对屏障的返回值只做了降级——屏障是命令层传进来的函数，把条目
-    升级回 `pending` 等于绕过用户的 skip 决定去动盘，一律整批拒绝。
+    `Pm.Plan.kindBarrier`（P6-A：`BarrierKind` 分类器，`Pm.Cli.runBarrier`
+    对构造子 total 匹配）说了算，**该有而没有 = 整批拒绝**，不会退化成静默
+    跳过（P3b-5/A3 的教训在这里的落法：闸算不进内核，就让缺席可见）。
+    屏障只能返回**降级清单** `[(piIx, 原因)]`，新计划由内核
+    `Pm.Exec.applyDemotions` 构造——「升级回 `pending` / 改写 Op / 改写元
+    数据」在类型上写不出来（旧的返回值事后核对 barrierDrift 已删）；内核仅存
+    的自卫是清单自洽：序号必须存在且指向 `StPending`，否则整批拒绝。
   - 幸存者名单按 case-fold 比对：只差大小写的两条路径在 Windows 上是同一个
     文件。方向刻意——算错成"受害者"只多拒一次，算错成"幸存者"会放行最后一份。
   - 读不出来（占用／ACL／介质错误）一律不算"还在"。hardlink 按**文件身份**
@@ -356,12 +359,13 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
-1. `/photo-inbox` SKILL.md 重写：第四阶段机械步骤改为两步调用——
+1. `/photo-inbox` SKILL.md 重写：第四阶段机械步骤改走
    `pm vault ingest <files> --category <c>`（拷 相册/ + 拷 vault/ + 冲突检测 +
-   journal 登记 inbox-origin，**不动 _inbox**）；skill 完成 photos.json 写入并
-   `json.tool` 校验通过后，再调 `pm vault ingest --finalize` 移 `_inbox→_done`。
-   顺序保证与 skill 现行「photos.json 成功后才移」硬约束一致；AI 部分
-   （看图分类、坐标、photos.json 内容）保持不变。
+   journal 登记 inbox-origin，**不动 _inbox**）；`_inbox→_done` 由 **skill
+   自己 move**——pm 在两份计划都落完时打印含逐条 move 命令的显式步骤（与 I9
+   处理 git 同款；设计期曾设想的 `--finalize` 子命令**不存在也不会有**，理由
+   见下方「第 1/2 项的拆分」）。顺序保证与 skill 现行「photos.json 成功后才
+   移」硬约束一致；AI 部分（看图分类、坐标、photos.json 内容）保持不变。
 2. ingest 的 journal 来源登记喂 I7：相册 ⊆ 成片 ∪ inbox-origin，doctor 把
    inbox 来的照片归为「已解释」而非违例。
 3. vault `.gitignore` 追加 `.pm/`（比照现有 `.ce/` 惯例；按档案 vault
@@ -374,8 +378,8 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 
 | 项 | 状态 |
 |---|---|
-| 1 `/photo-inbox` 改走 `pm vault ingest` | ✅ pm 侧 P6-D 实现（两份计划 + 显式收尾步骤）；skill 侧指针改写随第 32 轮门禁 GO 后落地 |
-| 2 ingest 的 journal 来源登记喂 I7 | ✅ P6-D：主库 journal 的 Intent 带库外 srcAbs 即 inbox-origin 记录本体，不新造记录类型 |
+| 1 `/photo-inbox` 改走 `pm vault ingest` | ✅ pm 侧 P6-D 实现（两份计划 + 显式收尾步骤，三十二轮收紧执行次序闸）；skill 侧指针改写随第 32 轮门禁 GO 后落地 |
+| 2 ingest 的 journal 来源登记喂 I7 | **记录侧 ✅**（P6-D：主库 journal 的 Intent 带库外 srcAbs 即 inbox-origin 记录本体，不新造记录类型）；**判定侧 ⏸ 未做**——本项正文承诺的「doctor 把 inbox 来的照片归为已解释」尚无任何代码（三十二轮核对），登记为待办 |
 | 3 vault `.gitignore` 追加 `.pm/` | ✅ 已在展示集仓（P3b 时经用户批准，commit `2d81d36`） |
 | 4 `KB-维护速查.md` §📸 / 档案 `CLAUDE.md` / `record-structure-version.md` | ✅ 指针改写 + Change Log 补记 |
 | 5 `sync_photos.py` 去留 | ✅ **退役但保留**：加横幅 + 运行时 stderr 指针，代码冻结 |
@@ -384,17 +388,14 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 （`docs/specs/sync-photos-legacy-spec.md` 逐条列出 pm 有意偏离它的地方）。
 删掉它，那条验收就失去参照。
 
-**第 1/2 项为什么没做**：`pm vault ingest --finalize` 要把 `_inbox` 里的原图移到
-`_inbox/_done/`，而 `_inbox` 在**档案 vault** 里——不在 pm 的任何 root 之内。
+**第 1/2 项的拆分（P6-D 按此实现）**：把 `_inbox` 里的原图移到 `_inbox/_done/`
+这一步 pm **不做**——`_inbox` 在**档案 vault** 里，不在 pm 的任何 root 之内。
 pm 的整个模型建立在「操作发生在某个有身份的 root 内」之上（root-id、journal、
 隔离区、undo 全挂在 root 上），给它一条"搬第三处目录里的文件"的能力，等于在
-模型外开一个口子。与 I9（pm 不执行 git，只打印显式步骤）同一处理：这一步应当
-**由 skill 自己做**，pm 只负责它 root 内的那两次拷贝。
-把 ingest 拆成「pm 拷贝 + skill 移 inbox」是可行的，但那是一条**新的写路径**，
-按项目规矩要先过 codex 门禁再请用户裁定 —— 留作下一件事，不在本轮伪装成已完成。
-
-DESIGN §5 的命令表曾把 `pm vault ingest` 列成既有命令，这是**记述超前于实现**，
-已改回"计划中"。
+模型外开一个口子。与 I9（pm 不执行 git，只打印显式步骤）同一处理：这一步
+**由 skill 自己做**，pm 只负责它 root 内的那两次拷贝，并只在两份计划都真的
+全部落完时打印 move 步骤（三十二轮 R5：源移走后未完成那半的计划就废了）。
+ingest 作为新写路径已过第 32 轮门禁；对真实 `_inbox` 的首次使用仍待用户裁定。
 
 ---
 

@@ -25,7 +25,7 @@ import Pm.Catalog (saveCatalog)
 import Pm.Catalog (loadCatalog)
 import Pm.Cli (GoOpts (..), recheckCleanPlan, savePlanAndMaybeRun, writeBackCatalog)
 import Pm.Commands (InitOpts (..), ResolveOpts (..), RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runClean, runImport, runInit, runResolve, runTrash)
-import Pm.Config (Config (..), RootIdState (..), createRootInfo, pmDir, readRootInfo, readRootState, requireRole, requireWritable, withConfigLock, writeRootInfo, writeSideCache, SideCacheWrite (..))
+import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), createRootInfo, loadConfig, pmDir, readRootInfo, readRootState, requireRole, requireWritable, withConfigLock, writeConfig, writeRootInfo, writeSideCache)
 import Pm.Lock (withRootLock)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec
@@ -71,6 +71,7 @@ guardTests =
     , testCase "三十轮 F2 catalog 回写：读→并→写是加锁 RMW（锁被占 → 明说放弃，不静默覆盖）" caseCatalogWriteBackTakesLock
     , testCase "三十轮 F3 init：配置的查在→读旧→写回进 withConfigLock（锁被占 → 不写入）" caseInitTakesConfigLock
     , testCase "三十一轮 F1 侧缓存成对写在 I10 锁内：锁被占 → 两个文件都不写" caseSideCacheTakesLock
+    , testCase "三十二轮 R3 PM_CONFIG 正斜杠拼写 → configFilePath 归一，配置写不被句柄后验误拒" caseConfigPathForwardSlash
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -653,3 +654,22 @@ caseSideCacheTakesLock = withSystemTempDirectory "pm-sclock" $ \tmp -> do
   r2 @?= CacheWritten
   doesFileExist (cacheF "catalog.json") >>= (@?= True)
   doesFileExist (cacheF "meta.json") >>= (@?= True)
+
+-- | 三十二轮 R3：PM_CONFIG 用正斜杠拼写（用户与本仓文档的常见写法）时，
+-- 'configFilePath' 必须归一（makeAbsolute）。P6-C 起配置落位走句柄后验，
+-- 对比基准是 GetFinalPathNameByHandleW 的反斜杠规范形——不归一的原样字符串
+-- 会被当成「打开前已被换成别名/链接」拒绝（首写即失败），且残留 .tmp 卡死
+-- 后续所有配置写。第二次 writeConfig 额外走「删旧 → 落位」的完整删除路。
+caseConfigPathForwardSlash :: IO ()
+caseConfigPathForwardSlash = withSystemTempDirectory "pm-cfgslash" $ \tmp -> do
+  mold <- lookupEnv "PM_CONFIG"
+  let fwd = map (\c -> if c == '\\' then '/' else c) (tmp </> "cfg" </> "config.toml")
+  setEnv "PM_CONFIG" fwd
+  flip finally (maybe (pure ()) (setEnv "PM_CONFIG") mold) $ do
+    _ <- writeConfig (mkCfg (tmp </> "main") Nothing)
+    _ <- writeConfig (mkCfg (tmp </> "main") Nothing)
+    ec <- loadConfig
+    either
+      (assertFailure . ("配置应可读回: " <>))
+      (\c -> cfgMainPath c @?= (tmp </> "main"))
+      ec

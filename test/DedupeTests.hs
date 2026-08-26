@@ -200,6 +200,15 @@ casePreExecRow = withDup $ \root sha a b -> do
   pd <- planOf [(a, sha), (b, sha)]
   dem <- runBarrier cfg BarrierDedupe pd {plRootPath = root}
   map fst dem @?= [0, 1]
+  -- 三十二轮（p6a#0 残余关闭）：构造子 → 实现的**对应关系**按降级理由区分。
+  -- 只比序号时两行 RHS 对调仍绿——本 fixture 备份未登记，clean 屏障会以
+  -- 「备份盘不在线」把同样的 [0,1] 全量降级；理由文本才分得出接的是哪个。
+  assertBool ("dedupe 屏障的理由应指归档层余量: " <> show dem)
+    (all (T.isInfixOf "归档层" . snd) dem)
+  demC <- runBarrier cfg BarrierClean pd {plRootPath = root}
+  map fst demC @?= [0, 1]
+  assertBool ("clean 屏障的理由应指三副本复验: " <> show demC)
+    (all (T.isInfixOf "复验三副本" . snd) demC)
 
 -- | @pm trash empty@ 的永久删除前分流：reason 带 dedupe 前缀的记录要走
 -- 「归档层还留着一份活副本吗」这道屏障。归档层没有 → HELD，文件仍在；
@@ -250,7 +259,7 @@ caseBarrierRunsInsideLock = withDup $ \root sha a b -> do
   m @?= Just Nothing
 
 -- | 用 'defaultExecEnv' 执行一个 dedupe 计划——即库层调用者忘了装屏障。
--- 内核必须整批拒绝：'Pm.Plan.kindNeedsBarrier' 说这种计划要屏障，缺席本身
+-- 内核必须整批拒绝：'Pm.Plan.kindBarrier' 说这种计划要屏障，缺席本身
 -- 就是硬失败。P3b-5/A3 的教训（承重闸不能只挂在可覆盖的钩子上）在这里的
 -- 落法不是把闸搬进内核（内核算不出「归档层还剩几份」），而是让缺席可见。
 caseKernelRefusesMissingBarrier :: IO ()

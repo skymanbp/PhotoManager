@@ -78,7 +78,7 @@ manifestPath root = trashDir root </> "manifest.ndjson"
 -- 普通隔离落 @\<planId\>\/\<victim\>@；组回滚的占位者位移隔离（opId 带
 -- @~d\<N\>@ 后缀，N = 本次尝试序号）落 @\<planId\>~displaced-\<N\>\/\<victim\>@
 -- —— 同一计划里 victim 本体已占用前者；带序号是因为同计划重跑可能再次
--- 位移（P3b-5 复审 #1：固定目录会与上次位移残留撞车，moveFileNoReplace
+-- 位移（P3b-5 复审 #1：固定目录会与上次位移残留撞车，no-replace 落位
 -- 失败后复位再被挡住）。两侧不共用此函数就会各推各的。
 -- P3b-6 复审 A1：后缀由 'opIdParts' 严格解析（不再 @splitOn "~d"@——planId
 -- 含 @~d@ 时会把普通隔离推到位移目录）。

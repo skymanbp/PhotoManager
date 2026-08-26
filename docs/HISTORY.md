@@ -270,7 +270,9 @@
 - P6-A ✅ 屏障协议类型封闭（路线图②，三十轮 F4 上游修法）：屏障从「返回新
   Plan」改「返回降级清单」，新 Plan 由内核构造——升级/改写 Op/改写元数据在
   类型上写不出来，barrierDrift 删除；两张表收成一个 BarrierKind（total 匹配，
-  漏写编译不过）。内核仅存自卫 = 清单自洽（序号存在且 StPending）。变异 2/2
+  漏写 = -Wall 警告 + 运行期锁内硬崩；三十二轮更正此前「编译不过」的过强
+  措辞——项目无 -Werror）。内核仅存自卫 = 清单自洽（序号存在且 StPending）。
+  变异 2/2
 - P6-B ✅ 第 31 轮 F1：侧缓存 catalog+meta 成对写进 I10 锁（backup-cache 与
   vault-cache 一处锁两类，二十轮登记的 vault-cache 争用残余随之关闭）；
   Pm.Lock 原语下沉进 Pm.Config（依赖方向），三态返回区分锁被占与 junction
@@ -278,8 +280,10 @@
   hold 用例 exit 2，实测显形后改三态）。变异 1/1
 - P6-C ✅ 提交型操作句柄化（路线图③）：moveBoundNoReplace（先验源绑定 +
   no-replace + 同句柄后验落点 + 不符回迁）与 deleteBoundAt（先验绑定 +
-  FileDispositionInfo，终段不跟随）替换全部 9 处 moveFileNoReplace 与 7 处
-  提交时 removeFile；moveFileNoReplace 删除。RemoveDirectory 清点为零使用。
+  FileDispositionInfo，终段不跟随）替换全部 9 处 moveFileNoReplace 与 **9** 处
+  提交时 removeFile（1 处用户数据 unlink = trash empty + 8 处 pm 自有 tmp/
+  轮转；三十二轮实数更正，此前误记 7）；moveFileNoReplace 删除。
+  RemoveDirectory 清点为零使用。
   杀手锏用例：目标父层在 CpCopyAfterFlush 换成 junction——旧实现静默把照片
   落到库外并报 DONE，新实现后验检出、沿句柄回迁、项失败、库外零字节。
   变异 3/3（后验/落位先验/删除先验各杀恰好一条）。289 tests
@@ -290,3 +294,13 @@
   photos.json 由调用方收尾，pm 打印显式步骤（同 I9 处理 git）。fail-closed
   校验全部错误一次列完。293 tests（289+4），变异 3/3（类目校验/I5 分流/
   源缺失各杀恰好一条）
+- P6-E ✅ 第 32 轮门禁收口（执行者切换：codex 通道 4/4 空跑 → 独立多代理
+  Workflow 五镜头 + 对抗复核；复核撞限额的 9 条由主线第一手补做）：29 条
+  finding 聚 4 根全修——①ingest 完成判据一码三义（`PlanRun` 三态 +
+  `fullyExecuted` 闸 + 预览两份都存盘 + I7 生成期耦合 + 收尾步骤闸）；
+  ②ingest 补齐与 push 对齐的闸（requireMain / case-fold 重名 / 跨类目占名 /
+  HELD 名单 / 源双 stat）；③句柄化找回名字口原语内建的鲁棒性
+  （withDisposeHandle 补 err-32 100ms×20 重试 + mask 关句柄泄漏窗）；
+  ④PM_CONFIG 在 configFilePath 源头 makeAbsolute（正斜杠/相对拼写不再被
+  句柄后验误拒）。文档统一修 §6 落位协议等约二十处；REVIEW-LOG 拆卷。
+  298 tests（293+5），变异 10/10 各杀恰好一条。逐条处置见 REVIEW-LOG 第 32 轮

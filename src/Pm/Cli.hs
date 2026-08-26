@@ -10,7 +10,9 @@ module Pm.Cli
   , renderPlanBrief
   , executePlanNow
   , executePlanNowWith
+  , PlanRun (..)
   , savePlanAndMaybeRun
+  , savePlanAndMaybeRun'
   , bindExecRoot
   , runBarrier
   , writeBackCatalog
@@ -137,8 +139,11 @@ executePlanNow' cfg sink plan = do
   isBad _ = False
 
 -- | 'Pm.Plan.BarrierKind' → 屏障实现。对构造子做 **total** 模式匹配：内核那半
--- （「要不要屏障」）与这半（「是哪个」）由同一个类型钉死，新加一种屏障漏写
--- 这里直接编译不过（三十轮 F4 的类型封闭；此前是两张表靠一条测试钉一致）。
+-- （「要不要屏障」）与这半（「是哪个」）由同一个类型钉死。新加一种屏障漏写
+-- 这里 = @-Wall@ 的 incomplete-patterns 警告（本项目纪律 warnings 0，非
+-- @-Werror@ 硬失败——三十二轮更正此前「直接编译不过」的过强措辞）；真漏进
+-- 运行期则在锁内、journal 之前 PatternMatchFail 硬崩，不会静默放行。构造子
+-- 与实现的**对应关系**由 DedupeTests 的 casePreExecRow 按降级理由区分钉住。
 --
 -- 返回**降级清单** @[(piIx, 原因)]@，新计划由内核构造（'Pm.Exec.applyDemotions'）
 -- ——屏障在类型上就写不出「升级/改写 Op/改写元数据」。
@@ -146,18 +151,40 @@ runBarrier :: Config -> BarrierKind -> Plan -> IO [(Int, T.Text)]
 runBarrier cfg BarrierClean = recheckCleanPlan cfg
 runBarrier cfg BarrierDedupe = recheckDedupePlan cfg
 
+-- | 'savePlanAndMaybeRun' 的可判别结局（三十二轮 R4/R5 的根因修法）。此前
+-- 调用方只拿到一个 Int，而 1 同时表示「计划已存盘未执行（预览/用户答 n）」与
+-- 「执行过但有 CONFLICT\/FAILED」，0 也不区分「全部真执行完」与「有
+-- NEEDS-DECISION 项根本没执行（ONotExecuted 不计入退出码）」——ingest 这类
+-- 要按「上一份**真的全部落完**」才继续的调用方在 Int 上做不出这个判断。
+data PlanRun
+  = PrRefused String
+    -- ^ root 不可写，计划**未**保存（消息已打印）
+  | PrSaved
+    -- ^ 计划已存盘、未执行（无 --apply，或用户在 y/N 答了 n）
+  | PrRun Int [(PlanItem, ItemOutcome)]
+    -- ^ 已执行：退出码 + 逐项结局
+
 -- | 存盘 → 展示 → 确认 → 执行。执行期屏障由 'executePlanNowWith' 装进
 -- ExecEnv、由内核在锁内跑，这里既不必也不能选择跳过它。
 --
 -- 二十九轮之前这里还有一个 @savePlanAndMaybeRunWith@ 收 @preExec@ 钩子的变体，
 -- 现已删除：屏障装配点收成一处之后，"传哪个钩子"不再是调用方的决定。
 savePlanAndMaybeRun :: Config -> GoOpts -> Plan -> IO Int
-savePlanAndMaybeRun cfg go plan = do
+savePlanAndMaybeRun cfg go plan = planRunCode <$> savePlanAndMaybeRun' cfg go plan
+
+-- | 与旧 Int 契约的换算（行为逐位保持：不可写=2、存而未执=1、执行=其退出码）。
+planRunCode :: PlanRun -> Int
+planRunCode (PrRefused _) = 2
+planRunCode PrSaved = 1
+planRunCode (PrRun c _) = c
+
+savePlanAndMaybeRun' :: Config -> GoOpts -> Plan -> IO PlanRun
+savePlanAndMaybeRun' cfg go plan = do
   -- P3b-7 复审新 major：savePlan 写 <root>/.pm/plans/，是 .pm 写入口——root
   -- 须有可解析身份且过 I11，否则不落盘。
   w <- requireWritable (plRootPath plan)
   case w of
-    Left m -> putStrLn ("计划未保存（root 不可写）: " <> m) >> pure 2
+    Left m -> putStrLn ("计划未保存（root 不可写）: " <> m) >> pure (PrRefused m)
     Right _ -> do
       fp <- savePlan plan
       renderPlanBrief plan
@@ -165,8 +192,8 @@ savePlanAndMaybeRun cfg go plan = do
       putStrLn ("执行: pm apply " <> T.unpack (plId plan))
       ok <- confirm go
       if ok
-        then executePlanNow cfg plan
-        else pure 1
+        then uncurry PrRun <$> executePlanNowWith cfg putStrLn plan
+        else pure PrSaved
 
 -- | 执行后的 catalog 回写是一次「读 → 并 → 写」——execPlan 已释放锁，两次
 -- 先后完成的 apply 若都在锁外回写，后写者会基于旧快照整份覆盖先写者的更新

@@ -63,6 +63,7 @@ import System.Directory
   , doesFileExist
   , getXdgDirectory
   , listDirectory
+  , makeAbsolute
   )
 import System.Environment (lookupEnv)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hTryLock)
@@ -116,11 +117,18 @@ instance TOML.DecodeTOML Config where
 --    踩到：一次突变让 POST 通过，真实配置当场被 fixture 的临时路径覆盖。
 --    整个测试进程在 `Spec.hs` 里把 `PM_CONFIG` 指到临时文件，这条路就断了。
 -- ② 顺带支持一台机器上多个库：不同 `PM_CONFIG` 指不同配置。
+--
+-- 三十二轮 R3：环境变量的值必须过 'makeAbsolute' 归一（正斜杠 → 反斜杠、
+-- 相对 → 绝对）。P6-C 起 'writeConfig' 的落位走 'Pm.Win.rawBoundTo' 的句柄
+-- 后验，比较基准是 GetFinalPathNameByHandleW 的反斜杠规范形——`D:/…` 拼写或
+-- 相对路径原样传下去会被当成「句柄绑定的不是这条路径」拒绝，且首次失败残留的
+-- @.tmp@ 会卡死后续所有配置写。这里是全部提交路里唯一不经 canonicalize 的
+-- 路径入口，归一在源头做一次，别处不再各自兜。
 configFilePath :: IO FilePath
 configFilePath = do
   mo <- lookupEnv "PM_CONFIG"
   case mo of
-    Just p | not (null p) -> pure p
+    Just p | not (null p) -> makeAbsolute p
     _ -> do
       dir <- getXdgDirectory XdgConfig "pm"
       pure (dir </> "config.toml")
@@ -183,7 +191,7 @@ renderConfig c =
 -- （@.pm@ 的**限域**（'resolveUnder'）依然不适用：配置本来就不在 root 里。）
 --
 -- 删旧与改名之间仍有一个**窗口**——Windows 这边没有暴露"no-replace 语义的
--- 原子 replace"（见 'Pm.Win.moveFileNoReplace'），而 pm 不要覆盖原语。崩在
+-- 原子 replace"（见 'Pm.Win.moveBoundNoReplace'），而 pm 不要覆盖原语。崩在
 -- 那里只会剩下内容完整的 @<fp>.tmp@，'loadConfig' 认得出并指明怎么恢复。
 -- 并发那一侧由 'withConfigLock' 兜（同一个固定 tmp 名也只有一个写者）。
 writeConfig :: Config -> IO FilePath
@@ -465,7 +473,7 @@ requireRole role root = do
 requireMain :: Config -> IO (Either String RootInfo)
 requireMain = requireRole RoleMain . cfgMainPath
 
--- | 首次建立 root 标识：**原子 no-replace**（写 tmp → 'moveFileNoReplace'；
+-- | 首次建立 root 标识：**原子 no-replace**（写 tmp → 'moveBoundNoReplace'；
 -- 目标已存在——并发创建、或 'readRootState' 之后有人放了文件——即拒绝，
 -- 绝不覆盖）。P3b-7 复审 major：此前覆盖写让损坏\/竞态 marker 可被改写身份。
 createRootInfo :: FilePath -> RootInfo -> IO (Either String ())
@@ -563,7 +571,8 @@ writeSideCache root sub cat meta = do
   -- 两个 pm（两次 pm backup、或 backup 与 afterApply）交错写会得到 catalog 与
   -- meta 不配对的缓存。成对写整段进 I10 锁；拿不到锁 = 有人（可能是本进程的
   -- 外层事务）正持有该 root，本轮放弃。统一修复：backup-cache 与 vault-cache
-  -- 共用本函数，二十轮登记的 vault-cache 跨进程争用残余随本条一并关闭。
+  -- 共用本函数，十九轮登记的 vault-cache 跨进程争用残余随本条一并关闭
+  -- （三十二轮更正：此前误记为二十轮；登记原文在 REVIEW-LOG 十九轮 bullet）。
   m <- withRootLock root $ do
     let dir = pmDir root </> sub
     pre <- resolveUnder root (".pm" </> sub)

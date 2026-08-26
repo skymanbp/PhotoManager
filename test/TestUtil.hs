@@ -138,8 +138,9 @@ execOk :: Plan -> IO [(PlanItem, ItemOutcome)]
 execOk = execOkWith defaultExecEnv
 
 -- | 同上，但由调用方给 'ExecEnv'。需要它的是**要屏障的计划种类**
--- （'Pm.Plan.kindNeedsBarrier'）：内核对缺席的屏障整批拒绝，所以考 Op 机制
--- 而非考屏障的用例必须显式挂一个放行屏障 @Just pure@，写出来而不是默认得到。
+-- （'Pm.Plan.kindBarrier' 给 Just 的那些）：内核对缺席的屏障整批拒绝，所以考
+-- Op 机制而非考屏障的用例必须显式挂一个放行屏障 @Just (\\_ _ -> pure [])@，
+-- 写出来而不是默认得到。
 execOkWith :: ExecEnv -> Plan -> IO [(PlanItem, ItemOutcome)]
 execOkWith env plan = do
   r <- execPlan env plan
