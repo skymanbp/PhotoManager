@@ -381,7 +381,13 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   unlink 用户数据的路径）同根一并搬进锁内。四道新闸各自突变转红。
   同轮的另外 4 条 finding 塌缩成同一个根因：DESIGN §14 一句**无限定**的
   「取用口都走 openBoundTo」——改写成带作用域的保证 + 六条逐项登记的残余，
-  代码只动 thumb 一行
+  代码只动 thumb 一行
+- P5-H ✅ 第 30 轮门禁（换了跑法：五镜头 + 四段式逐字引用 + 聚类，命中率
+  5/5）：同一根因——「读证据 → 判定 → 写」的事务边界由调用点手工拼装——
+  再扫出四处证据在锁外的路径，一次修完：trash empty 的 manifest 视图、
+  resolve 的锁内重载写回、catalog 回写的加锁 RMW、doctor --repair 整段
+  进锁（锁被占退回只读诊断）；`pm init --force` 补进 withConfigLock（配置
+  第四条读改写路径）；barrierDrift 冻结计划元数据。六道新闸各自突变转红
 
 ## License
 

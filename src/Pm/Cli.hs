@@ -13,6 +13,7 @@ module Pm.Cli
   , savePlanAndMaybeRun
   , bindExecRoot
   , preExecFor
+  , writeBackCatalog
   , recheckCleanPlan
   , recheckCleanItems
   , recheckDedupePlan
@@ -48,6 +49,7 @@ import Pm.Diff (BackupDiff (..))
 import Pm.Exec (ExecEnv (..), ItemOutcome (..), defaultExecEnv, execPlan, outcomeLabel, updateCatalog)
 import Pm.Import (stagingTop)
 import Pm.Journal (Sync (..))
+import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
 import Pm.Scan (ScanResult (..), freshnessSweep)
@@ -124,12 +126,7 @@ executePlanNow' cfg sink plan = do
     Right results -> do
       forM_ results $ \(it, out) ->
         sink (printf "  %3d → %s" (piIx it) (outcomeLabel out))
-      (mcat, _) <- loadCatalog root
-      case mcat of
-        Nothing -> sink "（root 尚无索引，跳过 catalog 回写；之后 pm scan 会补齐）"
-        Just cat -> do
-          now <- getCurrentTime
-          saveCatalog root (updateCatalog now results cat)
+      writeBackCatalog sink root results
       let bad = [() | (_, out) <- results, isBad out]
       unless (null bad) $
         sink (printf "⚠ %d 项 CONFLICT/FAILED（其余不受影响；详见逐项结果）" (length bad))
@@ -177,6 +174,23 @@ savePlanAndMaybeRun cfg go plan = do
       if ok
         then executePlanNow cfg plan
         else pure 1
+
+-- | 执行后的 catalog 回写是一次「读 → 并 → 写」——execPlan 已释放锁，两次
+-- 先后完成的 apply 若都在锁外回写，后写者会基于旧快照整份覆盖先写者的更新
+-- （三十轮 F2）。回写因此自己取锁做完整 RMW；取不到锁就明说并放弃——catalog
+-- 是可由 pm scan 重建的缓存，滞后可以接受，静默丢更新不可以。
+writeBackCatalog :: (String -> IO ()) -> FilePath -> [(PlanItem, ItemOutcome)] -> IO ()
+writeBackCatalog sink root results = do
+  m <- withRootLock root $ do
+    (mcat, _) <- loadCatalog root
+    case mcat of
+      Nothing -> sink "（root 尚无索引，跳过 catalog 回写；之后 pm scan 会补齐）"
+      Just cat -> do
+        now <- getCurrentTime
+        saveCatalog root (updateCatalog now results cat)
+  case m of
+    Nothing -> sink "⚠ catalog 回写未完成（另一个 pm 实例正持有该 root 的锁）——索引暂时滞后，pm scan 会补齐"
+    Just () -> pure ()
 
 -- | 评审 cx-1：执行 root 由 UUID 重新发现并绑定，绝不信计划里存的盘符路径
 -- （备份盘可能换盘符重挂，旧盘符可能已属于别的卷）。

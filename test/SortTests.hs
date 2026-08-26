@@ -10,7 +10,7 @@
 -- 抄第二份就是第二套 fixture，迟早与被测的解析器分叉。
 module SortTests (sortTests, photoAt) where
 
-import Control.Exception (SomeException, bracket, finally, try)
+import Control.Exception (SomeException, try)
 import Control.Monad (forM_)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import qualified Data.ByteString as BS
@@ -29,19 +29,7 @@ import System.Directory
   , setModificationTime
   )
 import System.FilePath (takeDirectory, takeFileName, (</>))
-import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import System.IO
-  ( Handle
-  , IOMode (ReadMode, ReadWriteMode, WriteMode)
-  , hClose
-  , hFlush
-  , hGetContents
-  , hSetEncoding
-  , openBinaryFile
-  , openFile
-  , stdout
-  , utf8
-  )
+import System.IO (Handle, IOMode (ReadWriteMode), hClose, openBinaryFile)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
@@ -72,7 +60,7 @@ import Pm.Sort
   , snapshotWith
   )
 import Pm.Types (FileKind (..), RootRole (..), classifyExt, rawExts)
-import TestUtil (ensureTestRoot, scanQuiet)
+import TestUtil (captureStdout, ensureTestRoot, scanQuiet)
 
 sortTests :: TestTree
 sortTests =
@@ -891,36 +879,9 @@ caseProbeLocked = withSystemTempDirectory "pm-lock" $ \tmp -> do
         CpUnreadable _ -> pure ()
         v -> assertFailure ("被占用的目标应为 CpUnreadable，得到 " <> show v)
 
--- | 捕获 stdout。用 base 的 hDuplicate/hDuplicateTo，不引新依赖。
 -- | 子串判定。多条用例共用，不各写一份。
 elemSub :: String -> String -> Bool
 elemSub needle hay = any (\i -> take (length needle) (drop i hay) == needle) [0 .. length hay]
-
--- | 捕获 stdout。用 base 的 hDuplicate/hDuplicateTo，不引新依赖。
---
--- **两端都必须显式 UTF-8**：本机 locale 是 GBK，而 pm 的输出里有 U+26A0(⚠)
--- 与 U+2717(✗)，临时文件句柄按 locale 编码会直接抛 commitBuffer。而且 tasty
--- 缺省并行，重定向的是**进程级** stdout——并行跑的别的用例也写进这个句柄，
--- 它们的 ⚠ 同样得编得出来，否则**它们**会炸（实测三条用例一起红）。断言只
--- 匹配本用例独有的子串，别的用例的输出混进来不影响判定。
-captureStdout :: IO a -> IO (String, a)
-captureStdout act = withSystemTempDirectory "pm-cap" $ \dir -> do
-  let fp = dir </> "out.txt"
-  h <- openFile fp WriteMode
-  hSetEncoding h utf8
-  old <- hDuplicate stdout
-  hDuplicateTo h stdout
-  -- hDuplicate/hDuplicateTo 造出的句柄用的是 **locale** 编码，会把
-  -- setupConsole 设好的 utf8 抹掉——替换后和还原后都要显式钉回去，
-  -- 否则 pm 输出里的 ✗/⚠ 在这里、以及**后续用例**里都会炸。
-  hSetEncoding stdout utf8
-  a <- act `finally` (hFlush stdout >> hDuplicateTo old stdout >> hSetEncoding stdout utf8 >> hClose old)
-  hClose h -- 必须先关：GHC 句柄锁不许「已开写」的文件同时被开读
-  txt <- bracket (openFile fp ReadMode) hClose $ \rh -> do
-    hSetEncoding rh utf8
-    t <- hGetContents rh
-    length t `seq` pure t
-  pure (txt, a)
 
 -- | 撞名 → 整批拒绝。此时被选中的**其余**照片、以及跟着它们的侧车同样一个
 -- 都没搬走，却既不在 spCollide（只有撞名的那个 basename）也不在

@@ -1125,3 +1125,73 @@ FFI」钉在 DESIGN-COMMANDS §8.1 原地。
 2. `pm trash empty` 不取锁 —— 已随根 A 一并修（见上）。
 
 **281 tests（277 + 4 新），GHC warnings 0。**
+
+## 第 30 轮（P5-G `c978d88`）——NO-GO 5 条，minset 3 条全修，聚类 4 根
+
+本轮换了评审跑法（五镜头逐个走 + 每条 finding 强制四段式带逐字引用 + 按根因
+聚类 + minset 判据"代码事实成立 ∧ 未登记 ∧ 模型内可达"三条同时成立）。效果
+立竿见影：五条全部第一方核实成立，行号零偏差，无一条为凑数——与第 29 轮
+（7 条里行号系统性不准、5 条不该进 minset）对比鲜明。评审自陈沙箱写不了
+`C:\sr\pantry`，`stack test` 没跑成，静态核验。
+
+### 聚类根 1（F1+F2，minset）：root 事务边界由调用点手工拼装，证据落在锁外
+
+P5-G 把屏障搬进锁，但只搬了它点名的那两处——同形状的还有四处，本轮一次扫完
+（rule 09 统一修复）。共同修法：**证据在锁内取**。
+
+- **F1** `pm trash empty`：manifest 视图（`trashView`）还在锁外——我在第 29 轮
+  处置里写的「整段（判定 → 列表 → unlink）搬进 withRootLock」**言过其实**，
+  实际搬的是视图**之后**的整段。A 锁外取旧视图、B 锁内清掉某项、A 拿到锁按
+  旧视图走到 `removeFile` 在缺失项上炸。修：`trashEmptyLocked` 自己在锁内读
+  视图；`pm trash list` 保持只读咨询不取锁（同 `pm status`）。
+- **F2a** `pm resolve`：「装载 → 改 → 写回」全程无锁——两个 resolve 各批不同
+  条目，后保存者整份抹掉先保存者的裁决（与二十一轮 vault-holds 名单同形）。
+  修：`resolveOn` 整段进 I10 锁并**锁内重载**盘上计划；锁外那份只用于按 UUID
+  发现 root（线索不是证据）。
+- **F2b** catalog 回写：execPlan 释放锁后 `load → update → save` 无锁，两次
+  apply 的后写者基于旧快照整份覆盖先写者。修：`writeBackCatalog` 自己取锁做
+  完整 RMW；锁被占则**明说**放弃（catalog 是 pm scan 可重建的缓存，滞后可
+  接受，静默丢更新不可以）。
+- **F2c** doctor `--repair`：判定视图（journal/tmp 枚举）在锁外取，另一份已
+  批准计划可在判定与补记之间把世界改掉，doctor 随后补写过时 Done。修：整段
+  进锁，次序与 execPlan 相同（先零写入预检、root 不可写连锁文件都不落；锁内
+  requireWritable 复检保留）；锁被占退回只读诊断 + 一条 I10 Bad，不做任何修复。
+
+### 聚类根 2（F3，minset）：配置模块仍允许裸 writeConfig
+
+`pm init --force` 是配置的第四条读改写路径，唯独它没进 `withConfigLock`——
+A 锁外读旧配置、B 锁内登记备份盘、A 无锁写回，登记被静默抹掉。修：init 的
+「查存在 → 读旧配置(mold) → 写回」整段进配置锁、锁内重读；root 标识创建
+不动配置文件，拆成 `initMarker` 留在锁外。P4-8 写的「三条读改写路径」穷尽
+声明由此更正为四条。
+
+### 聚类根 3（F4，residual → 本轮顺手关掉一半）：屏障协议未由类型封闭
+
+`barrierDrift` 此前不比对计划元数据，屏障改写 `plId` 会让 journal 的 opId 与
+旧计划碰撞（plId 参与 opId/tmp/trash 路径推导）。当前第一方屏障只碰
+`plItems`，模型内不可达——但协议该冻结的是**能改什么**而不是对实现的信任。
+修：元数据五元组（id/kind/root/rootId/created）一并冻结，改写即整批拒绝。
+两半表（`kindNeedsBarrier` ⟺ `preExecFor`）的一致性已由 casePreExecRow 逐
+kind 钉住。残余登记：更彻底的形态是单一 BarrierKind 分类器 + 屏障只返回
+「状态降级映射」而非完整 Plan——留作下一次触碰这段代码时的方向，不为它
+单开一轮。
+
+### 聚类根 4（F5，DOC_ONLY）：文档从旧实现复制了错误概括
+
+两处**处置有误**，都出自我第 29 轮写的文档，本轮更正：①§14 残余第 2 条把
+Copy 的落点读混进"读后紧跟 move"——Copy 的同内容判定没有后续 move，伪造相等
+只会让该次 Copy 静默跳过（落点空着、旧字节在 trash，doctor 可见）；②§8.1
+还写着"hardlink 被 openStateRead 的 link count 判定拒掉"，那是二十八轮 #2
+**之前**的行为，现行判据是 FileId 身份排除，合法 hardlink 见证算数。
+
+### 收敛证据
+
+**六道新闸各自突变转红（6/6，每次恰好一个用例）**：视图搬回锁外 →
+caseTrashEmptyTakesLock（坏行警告在锁被占时被打印）；resolve 去锁 →
+caseResolveTakesLock（裁决在锁被占时落盘）；catalog 回写去锁 →
+caseCatalogWriteBackTakesLock；doctor 去锁 → caseDoctorRepairTakesLock
+（孤儿 tmp 在锁被占时被删）；init 去配置锁 → caseInitTakesConfigLock；
+barrierDrift 放掉元数据比对 → caseBarrierMetaFrozen。
+
+**286 tests（281 + 5 新），GHC warnings 0。**`captureStdout` 从 SortTests 移入
+TestUtil（进程级 stdout 重定向，多模块共用；套件本就 NumThreads 1）。

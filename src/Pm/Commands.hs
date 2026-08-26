@@ -177,58 +177,68 @@ runInit o = do
     Left msg -> putStrLn msg >> pure 2
     Right () -> do
       cfgFp <- configFilePath
-      exists <- doesFileExist cfgFp
-      if exists && not (ioForce o)
-        then do
-          putStrLn ("配置已存在: " <> cfgFp <> "（--force 覆盖）")
-          pure 2
-        else do
-          -- --force 重建时保留既有备份盘登记（那是 backup init 的产物）
-          mold <- if exists then either (const Nothing) Just <$> loadConfig else pure Nothing
-          vaultOk <- mapM doesDirectoryExist (ioVault o)
-          case (ioVault o, vaultOk) of
-            (Just vp, Just False) -> putStrLn ("vault 路径不存在: " <> vp) >> pure 2
-            _ -> do
-              fp <-
-                writeConfig
-                  Config
-                    { cfgMainPath = mainPath
-                    , cfgVaultPath = ioVault o
-                    , cfgPhotosJson = ioPhotosJson o
-                    , cfgWorkers = ioWorkers o
-                    , cfgBackupId = maybe Nothing cfgBackupId mold
-                    , cfgBackupSubpath = maybe Nothing cfgBackupSubpath mold
-                    }
-              putStrLn ("✓ 配置已写入 " <> fp)
-              st <- readRootState mainPath
-              emarker <- case st of
-                RootPresent prior -> do
-                  putStrLn ("✓ 主库 root 标识已存在（沿用）: " <> T.unpack (riId prior))
-                  pure (Right ())
-                RootCorrupt e ->
-                  pure (Left (mainPath <> " 的 .pm/root-id.json 在预检后变为不可解析（" <> e <> "），不改写"))
-                -- P3b-12（九轮复审 major）：pm init 建立身份，走不了
-                -- requireWritable —— .pm 若是 junction，标识会写到库外。
-                RootUntrusted m -> pure (Left m)
-                RootAbsent -> do
-                  rid <- freshRootId
-                  now <- getCurrentTime
-                  fs <- case mainPath of
-                    (c : _) -> volumeFsType c
-                    _ -> pure Nothing
-                  -- 原子 no-replace（P3b-7）：预检与此刻之间有人放了文件 → 拒绝
-                  er <- createRootInfo mainPath (RootInfo rid RoleMain now fs)
-                  forM_ er $ \() -> putStrLn ("✓ 主库 root 标识已创建: " <> T.unpack rid)
-                  pure er
-              case emarker of
-                Left m -> putStrLn m >> pure 2
-                Right () -> do
-                  -- vault root 标识在 P3 建（vault 是 git 工作树，I11 要求先走
-                  -- .gitignore 确认流程），此处只登记路径。
-                  forM_ (ioVault o) $ \vp ->
-                    putStrLn ("· vault 路径已登记（root 标识 P3 经确认后创建）: " <> vp)
-                  putStrLn "下一步: pm scan"
-                  pure 0
+      -- 三十轮 F3：init 的「查存在 → 读旧配置(mold) → 写回」是配置的第四条
+      -- 读改写路径，此前唯独它没进 withConfigLock——A 在锁外读到旧配置，B 在
+      -- 锁内登记备份盘，A 再无锁写回，登记被静默抹掉。整段进配置锁、锁内
+      -- 重读；root 标识的创建不动配置文件，留在锁外（initMarker）。
+      mw <- withConfigLock $ do
+        exists <- doesFileExist cfgFp
+        if exists && not (ioForce o)
+          then pure (Left ("配置已存在: " <> cfgFp <> "（--force 覆盖）"))
+          else do
+            -- --force 重建时保留既有备份盘登记（那是 backup init 的产物）
+            mold <- if exists then either (const Nothing) Just <$> loadConfig else pure Nothing
+            vaultOk <- mapM doesDirectoryExist (ioVault o)
+            case (ioVault o, vaultOk) of
+              (Just vp, Just False) -> pure (Left ("vault 路径不存在: " <> vp))
+              _ ->
+                Right
+                  <$> writeConfig
+                    Config
+                      { cfgMainPath = mainPath
+                      , cfgVaultPath = ioVault o
+                      , cfgPhotosJson = ioPhotosJson o
+                      , cfgWorkers = ioWorkers o
+                      , cfgBackupId = maybe Nothing cfgBackupId mold
+                      , cfgBackupSubpath = maybe Nothing cfgBackupSubpath mold
+                      }
+      case mw of
+        Nothing -> putStrLn "另一个 pm 正在改配置（config.lock 被持有），初始化未写入，稍后重试" >> pure 2
+        Just (Left msg) -> putStrLn msg >> pure 2
+        Just (Right fp) -> putStrLn ("✓ 配置已写入 " <> fp) >> initMarker o mainPath
+
+-- | init 的第二段：主库 root 标识。不动配置文件，在配置锁外。
+initMarker :: InitOpts -> FilePath -> IO Int
+initMarker o mainPath = do
+  st <- readRootState mainPath
+  emarker <- case st of
+    RootPresent prior -> do
+      putStrLn ("✓ 主库 root 标识已存在（沿用）: " <> T.unpack (riId prior))
+      pure (Right ())
+    RootCorrupt e ->
+      pure (Left (mainPath <> " 的 .pm/root-id.json 在预检后变为不可解析（" <> e <> "），不改写"))
+    -- P3b-12（九轮复审 major）：pm init 建立身份，走不了
+    -- requireWritable —— .pm 若是 junction，标识会写到库外。
+    RootUntrusted m -> pure (Left m)
+    RootAbsent -> do
+      rid <- freshRootId
+      now <- getCurrentTime
+      fs <- case mainPath of
+        (c : _) -> volumeFsType c
+        _ -> pure Nothing
+      -- 原子 no-replace（P3b-7）：预检与此刻之间有人放了文件 → 拒绝
+      er <- createRootInfo mainPath (RootInfo rid RoleMain now fs)
+      forM_ er $ \() -> putStrLn ("✓ 主库 root 标识已创建: " <> T.unpack rid)
+      pure er
+  case emarker of
+    Left m -> putStrLn m >> pure 2
+    Right () -> do
+      -- vault root 标识在 P3 建（vault 是 git 工作树，I11 要求先走
+      -- .gitignore 确认流程），此处只登记路径。
+      forM_ (ioVault o) $ \vp ->
+        putStrLn ("· vault 路径已登记（root 标识 P3 经确认后创建）: " <> vp)
+      putStrLn "下一步: pm scan"
+      pure 0
 
 runScanCmd :: ScanCmd -> Config -> IO Int
 runScanCmd sc cfg = do
@@ -277,11 +287,11 @@ runTrash cfg tc root = do
     Right () -> runTrash' cfg tc root
 
 runTrash' :: Config -> TrashCmd -> FilePath -> IO Int
-runTrash' cfg tc root = do
-  tv <- trashView root
-  mapM_ (\w -> putStrLn ("✗ manifest 损坏行: " <> w)) (tvWarnings tv)
-  case tc of
+runTrash' cfg tc root = case tc of
+    -- list 是只读咨询（同 pm status），不取锁；empty 的视图在锁内取（见下）。
     TrashList -> do
+      tv <- trashView root
+      mapM_ (\w -> putStrLn ("✗ manifest 损坏行: " <> w)) (tvWarnings tv)
       if null (tvRegistered tv) && null (tvUnregistered tv)
         then putStrLn "隔离区为空"
         else do
@@ -301,10 +311,12 @@ runTrash' cfg tc root = do
     -- 必须是**一个跨进程事务**。这是 pm 全程唯一 unlink 用户数据的路径，此前
     -- 全程不取锁——purgeBarriers 读盘判「归档层还留着一份」与 removeFile 之间，
     -- 另一个 pm 进程完全可以把那一份也隔离掉。--yes 是命令行开关而非交互提问，
-    -- 锁内不会停下来等人，所以整段（含 trashView 之后的判定与列表打印）都在
-    -- 锁里跑。取不到锁 = 另一个 pm 正在动这个 root，直接退出而不是硬来。
+    -- 锁内不会停下来等人，所以**整段——从读 manifest 视图起**——都在锁里跑
+    -- （三十轮 F1：视图也是证据，锁外取的视图会把另一个 pm 刚清掉/复位的
+    -- 条目当成还在，走到 removeFile 才炸）。取不到锁 = 另一个 pm 正在动
+    -- 这个 root，直接退出而不是硬来。
     TrashEmpty yes -> do
-      ml <- withRootLock root (trashEmptyLocked cfg root tv yes)
+      ml <- withRootLock root (trashEmptyLocked cfg root yes)
       case ml of
         Nothing -> do
           putStrLn "另一个 pm 实例正持有该 root 的锁（I10），未清除任何条目，稍后重试"
@@ -313,8 +325,10 @@ runTrash' cfg tc root = do
 
 -- | @pm trash empty@ 的锁内主体：屏障复验 → 限域判定 → 列表 → unlink。
 -- 拆出来只是为了让整段显式地位于 'withRootLock' 之内（见调用点注释）。
-trashEmptyLocked :: Config -> FilePath -> TrashView -> Bool -> IO Int
-trashEmptyLocked cfg root tv yes = do
+trashEmptyLocked :: Config -> FilePath -> Bool -> IO Int
+trashEmptyLocked cfg root yes = do
+      tv <- trashView root
+      mapM_ (\w -> putStrLn ("✗ manifest 损坏行: " <> w)) (tvWarnings tv)
       let present = [(r, trashDir root </> trTrashRel r) | (r, True) <- tvRegistered tv]
       -- 隔离记录按 reason 前缀分流到各自的**永久删除前屏障**（评审 cx-3 终极
       -- 屏障的一般化）。前缀由写入方定（'Pm.Clean.cleanPlanItems' /
@@ -553,8 +567,23 @@ runResolve o cfg = do
         Left e -> putStrLn e >> pure 2
         Right plan -> resolveOn o plan
 
+-- | 三十轮 F2：resolve 是「装载 → 改 → 写回」的跨进程 RMW——两个 pm resolve
+-- 同一份计划、各批不同条目，后写者会整份抹掉先写者的裁决（与二十一轮
+-- vault-holds 名单同一形状）。整段进 I10 锁，且锁内**重新装载**盘上的计划：
+-- 锁外那份只用来按 UUID 发现 root（线索），不作裁决依据（证据）。
 resolveOn :: ResolveOpts -> Plan -> IO Int
 resolveOn o plan = do
+  m <- withRootLock (plRootPath plan) $ do
+    efresh <- loadPlan (plRootPath plan) (plId plan)
+    case efresh of
+      Left e -> putStrLn e >> pure 2
+      Right fresh -> resolveOn' o fresh
+  case m of
+    Nothing -> putStrLn "另一个 pm 实例正持有该 root 的锁（I10），裁决未写入，稍后重试" >> pure 2
+    Just c -> pure c
+
+resolveOn' :: ResolveOpts -> Plan -> IO Int
+resolveOn' o plan = do
       let hit = [it | it <- plItems plan, piIx it == roItem o]
       case (hit, roKeep o) of
         ([], _) -> putStrLn ("计划中无条目 " <> show (roItem o)) >> pure 2
