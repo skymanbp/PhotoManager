@@ -365,3 +365,4 @@
   仅登记一处父提交既存的 freshnessSweep 报告面小洞；门禁含 GO 后收口
   在内全部过审。按用户裁定转入释放链（每个动盘步骤先摆清单 +
   AskUserQuestion）
+- P6-K ✅ 释放链执行 + **0.5.0 发布**（2026-08-26，全部经用户 AskUserQuestion  逐步批准、每个动盘步骤先摆清单）：① /photo-inbox SKILL.md v2 落地档案 vault（commit `204b20b`，机械层改走 `pm vault ingest`，AI 部分逐字未动）；② dedupe 计划 `d24f7e` 执行——8 份同 sha 重复隔离、8 份保留侧不动，事后 16/16 独立重算 sha 复核；③ 从备份盘找回 2 张 West America ARW（`1d380a`，源/落位双侧 sha 核对）；④ 重生成备份计划 `00f28f` 并执行：1016 项 / 98.45 GiB（含 2 对 supersede 复合组，旧字节先入 E: 的 .pm/trash），按 8 GiB 分 13 段 `--only` 落盘——其中一段首跑在条目间隙被外因杀死（journal 0 条有始无终、tmp 孤儿 0、全段 77 项独立重算 sha 全中，零数据影响；教训：汇总脚本必须保留原始输出）；重生成对比归零（新增 0 · 更新 0 · 一致 4853 · EXTRA 21 只读）；⑤ clean staging `c947f5`：220 项 / 21.37 GiB 三副本确认后隔离（HELD 4 拒收待 `pm import`、待修改 21 不碰），事后 trash 落位 220/220、归档层+备份盘副本抽样深 hash 双侧全活；⑥ 版本 0.4.7→0.5.0（package.yaml / cabal 再生成 / Cargo.toml / tauri.conf.json 四处），310/310，警告 0；README 以 2026-08-26 实测刷新（4633 文件 / 459.4 GiB、增量扫描 19.4 s、真实写入台账补四条）；发布产物与公开仓快照见 README 安装节与 tag v0.5.0
