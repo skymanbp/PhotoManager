@@ -230,3 +230,46 @@ P7-R 树：390 测试、GHC 警告 0；pm-test.exe `2de4c25f0eeaae140855168f7415
 
 P7-S 树：393 测试、GHC 警告 0（仅 clang `<built-in>` 的 `-Wnonportable-include-path` 既有噪声）；
 pm-test.exe `3337e5b783077403b611a35c8ea2b4402cde9bcbc1468b7c03f12d368842deb6`、pm.exe（`.stack-work/install/…/bin` 副本）`aa3dbd70ec0cbfad1877ffee0ea3f80f451debe4f562ec05a1cabe423b9e1f3e`。
+
+## 第 48 轮（P7-S `700b26f`，Claude Opus 5 聚焦）——FINAL GO，minset 空
+
+评审亲跑 `All 393 tests passed (33.89s)`，双哈希逐字对上（`3337e5b7…deb6` / install 副本 `aa3dbd70…1f3e`），
+67 个编译输入无一新于两 exe，跑前跑后树净；哨兵沙箱核验改在 scratchpad 影子树做（仓内零改动）。F090 在
+**发布件 0.6.1** 上复核：头 `style-src 'self'`、六页 A_violations=[]、正面控制（探针主动写 style 属性）被拦；
+静态面 app.js 零 `setAttribute`、`innerHTML` 全为清空。DEEP-DONE 四种情形亲跑复现；ProbeUnknown 订正、两条新哨兵、
+公开仓拓扑（全史 92 提交逐提交脱敏零命中，`tree(v0.6.0)==tree(origin/main)`）、版本五处、750 预算、依赖/端点
+集合相等——全部 CLOSED。评审标 UNVERIFIED 一项：GHC 警告 0（禁构建）——第一方 `run19.log` 全量重编 393 绿、
+源码警告 0。原文存档 `review48-opus-result.md`。
+
+**七条 GO-note，评审已聚两根（P7-T 收口，产品代码一处措辞改动）**：
+- **α「全称声明要与实测面对齐」（N1/N2/N3/N6）**：N1 `caseGuiNoInlineStyle` 字面表放过 `style='…'`（真会被拦）
+  / `style = "…"` / `onsubmit=` / `<script type="module">`——修：判据改**词法**（属性名后任意空白与单双引号、
+  任意 on* 事件、非外链或有内容的 `<script>`；app.js 零 `setAttribute`、`innerHTML` 只赋空串、无
+  `insertAdjacentHTML`/`outerHTML`/`document.write`/`cssText`），m16–m20 红、m22 绿。N2 `DEEP-DONE` 的「N 条目
+  已全量重读」把消失/读不出的也算进去——修：`N 条目待深验：已重读重 hash M（= N − b）、不符 a、读取失败/消失 b`，
+  `caseDoctorDeepSummary` 加「删一条目 → M < N」配对（m21 红）。N3 DESIGN-COMMANDS「exit 1 共四个来源」缺
+  `--cached` 限定，默认模式第五个来源是新鲜度 pending——修：加限定语 + 第五来源。N6 README 状态写口清单漏
+  `pm serve --writable`——修：补入并注明 `--allow-apply` 仍走计划路径。
+- **β「记述必须能从产物重读」（N4/N5/N7，与 44–47 轮同根）**：N4 P7-S 节「仅两处 CSSOM 写」漏 app.js:292
+  剪贴板降级两处——修：探针观测（styleAttrs=2）与静态清点（3 行 4 处）分写。N5「68 步」的 steps.json 已被 0.6.1
+  复跑覆盖——修：P7-S 节改记「不可再从产物重读」，e2e 驱动按运行写 `logs/run-<ts>/`，本节登记发布件复跑（见下）。
+  N7 HISTORY:248 残留「第六页」且「旧编号」定性不实（引入提交 fa5ba67 起即居 nav 第二位）——修：改「第六个页面
+  （nav 第二位）」/「误编号」。评审另指两处旧卷指针错位（DESIGN-COMMANDS 指 REVIEW-LOG.md §P3b 逐轮收口、P7-J 簇修）
+  一并改指 REVIEW-LOG-1 / REVIEW-LOG-4；本卷 739/750 → 第 39–43 轮与 P7-I/J 拆出卷 4。
+
+判别突变（`mutate7.py`，主树逐个 `git checkout` 还原，m21 需重编译；m22 为**期望绿**的误伤对照）：
+
+| 突变 | 文件 | 期望 | 结果 | 基线 | 末行 |
+|---|---|---|---|---|---|
+| m16 | gui/ui/index.html | 期望红 | RED ✓ | All 1 tests passed (0.08s) | F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，app.js 零 setAttribute、innerHTML 只赋空串: FAIL (0.06s) / test\DocDriftTests.hs:176: / index.html 内联样式属性 / expected: [] / 1 out o |
+| m17 | gui/ui/index.html | 期望红 | RED ✓ | All 1 tests passed (0.13s) | F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，app.js 零 setAttribute、innerHTML 只赋空串: FAIL (0.11s) / test\DocDriftTests.hs:177: / index.html on* 事件属性 / expected: [] / 1 out |
+| m18 | gui/ui/index.html | 期望红 | RED ✓ | All 1 tests passed (0.13s) | F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，app.js 零 setAttribute、innerHTML 只赋空串: FAIL (0.16s) / test\DocDriftTests.hs:178: / index.html 内联/非外链 <script> / expected: []  |
+| m19 | gui/ui/index.html | 期望红 | RED ✓ | All 1 tests passed (0.05s) | F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，app.js 零 setAttribute、innerHTML 只赋空串: FAIL (0.11s) / test\DocDriftTests.hs:176: / index.html 内联样式属性 / expected: [] / 1 out o |
+| m20 | gui/ui/app.js | 期望红 | RED ✓ | All 1 tests passed (0.10s) | F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，app.js 零 setAttribute、innerHTML 只赋空串: FAIL (0.10s) / test\DocDriftTests.hs:181: / app.js innerHTML 只允许赋空串 / expected: [] / 1 |
+| m21 | src/Pm/Doctor.hs | 期望红 | RED ✓ | All 1 tests passed (0.31s) | P7-S doctor --deep 覆盖面汇报：干净库 Info 行报待验/已重读/不符 0 且 exit 0；翻一字节 → DEEP-CORRUPT + 不符 1 + exit 1；消失条目不算已重读: FAIL (0.37s) / test\SweepTests.hs:82: / 已重读数须扣除消失条目: ["2 \26465\30 |
+| m22 | gui/ui/index.html | 期望绿 | GREEN ✓ | All 1 tests passed (0.12s) | All 1 tests passed (0.07s) |
+
+P7-T 树：393 测试、GHC 警告 0；pm-test.exe `7f53c05ffb80e4c21e12f06d9ca8c74456fd664bbc998f164d3e90d3f090b3f7`、pm.exe（`.stack-work/install/…/bin` 副本）`18badebb3b0e5dedf722e7c77895bc85b568a5dcb2bab2dd76b28375c52fa5fd`。
+0.6.1 发布件（`release061.sh` 于 P7-T 树重建）：zip `dd5e3d7eef0592052475a7b26bcedb231575154688dcfee1306fc6bf363b3e49`、setup `d1a719b89fa825e55e987e3df382081ceb29de9bd7de10c0519538270ca1b060`，leakscan 16 模式 0 命中；GUI 探针头
+`style-src 'self'`、六页零违规、正面控制被拦；CLI e2e `logs/run-061-p7t/` 69 步 0 not ok（第 34 步
+`[DEEP-DONE] 18 条目待深验：已重读重 hash 18、不符 0、读取失败/消失 0`），真实库 4894 文件 / 516907900342 B 前后逐字段相同。
