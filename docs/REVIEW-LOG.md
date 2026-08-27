@@ -446,3 +446,39 @@ exit 0 · config exit 0 备份对完好 · vault status 15 HELD exit 0——身�
 | m3-R41-6 openStateAppendTail 恒报非撕裂 | `-p 同一句柄` | RED | RED (1/1 failed: 41 轮 #6 openStateAppendTail：查尾与追加同一句柄——半截尾/换行尾/缺失三态 + hardlink 拒绝) | 53s | ✓ |
 | m3-R41-7 README undo 提要回抄死形态 | `-p 发布字段` | RED | RED (1/2 failed: 41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托) | 56s | ✓ |
 | m3-R41-8 relUnder 回抄盲拼斜杠 | `-p publishCommands` | RED | RED (1/1 failed: publishCommands：显式类目 add --、photos.json 仓内相对路径 add --、缺配/仓外拒绝生成、push -) | 21s | ✓ |
+
+## 第 42 轮（P7-K `7a0fa83`，codex 钉 SHA，聚焦复核轮）——FINAL NO-GO，minset {1} = 运行态证据 UNVERIFIED → P7-L
+
+**执行者插曲**：中转站账户余额耗尽（`ai.aiclick.cc` 403 INSUFFICIENT_BALANCE，
+四次 attempt 全零 exec，不算评审）；用户裁定「改用 OAuth 订阅额度」——
+`~/.codex/config.toml` 去掉中转 provider 覆盖、`codex login` 走 ChatGPT，
+attempt 1 即真跑（134 次命令执行）。
+
+四镜头全部核验成立（引其原文要义）：register 锁内 `loadConfig` 后构造 c1 过
+`checkConfig`；`runInit` 无条件 `loadConfigState`；`loadCatalog` 对 root-id
+读不出/不匹配均 `CatRefused`；serve 单 `IORef (Config, 戳, Bool)` 仅双读戳一致
+才有效、写端点只作废、主库锚点保持；`openStateAppendTail` 一次 ReadWriteMode
+打开、同句柄查尾、无第二次路径解析；六个 loader 只吞 stale 代；389 = 383
+testCase + 1 testProperty + 5 参数化展开，7 新钉均经 Spec 注册；`mkCat "m"`
+夹具「先拒绝、再对齐成功，不是恒真」；F024/F098 更正「没有粉饰」。
+
+- **#1（major，UNVERIFIED）运行态放行证明**：评审沙箱是受管只读环境——
+  `stack test` 撞 `C:\sr\pantry\…pantry-write-lock: permission denied`，直接跑
+  `pm-test.exe --list-tests` 撞 `%TEMP%` 下 `pm-test-cfg-*` 目录创建被拒——
+  **不是断言失败**，但 389 例在评审方手里仍是 UNVERIFIED。处置：第 43 轮改
+  `-s workspace-write` 沙箱 + `TEMP/TMP` 指到仓内 `.stack-work/review-tmp` +
+  预编译 `pm-test.exe`（不经 Stack，绕开 pantry 锁），让评审**自己**跑全套；
+  另在钉定 SHA 的**新建 worktree**（独立 .stack-work，从零编译）跑一次完整
+  `stack test` 作第二份证据（日志见 P7-L 提交后的第 43 轮节）。
+- **#2（minor，GO-note）`openStateAppendTail` 判定/查尾期间异常不关句柄**
+  （Win.hs:368）：hardlink 判定与 `hFileSize`/读尾/`hSeek` 若抛出，刚开的句柄
+  滞留到 GC——同文件其它资源转换口已有 `onException hClose` 口径，这个新口
+  漏了。修：整段置于 `flip onException (hClose h)`。无数据丢失方向（只读判定
+  阶段），代码级核查登记，无独立钉（构造 `hFileSize` 抛出无确定性形态）。
+- **#3（minor，GO-note）README 突变覆盖绝对化**（README.md:21、:157）：
+  「每道闸都配突变」与本轮登记的两项残余（#4 交错无确定性观察点、#2 GUI
+  无 harness）矛盾。修：措辞限定为「凡有可观测自动化落点的闸」并点名残余
+  登记处——**δ 簇同一根因**（发布字段的强断言没有上游），本次是措辞而非
+  数字，`caseReadmeSync` 不扩（绝对化措辞无法机械判定，靠评审）。
+
+以上两条 GO-note 落在 P7-L；#1 由第 43 轮在可写沙箱里闭合。

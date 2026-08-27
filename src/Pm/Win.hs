@@ -367,21 +367,24 @@ normPath p =
 openStateAppendTail :: FilePath -> IO (Bool, Handle)
 openStateAppendTail fp = do
   h <- openBoundTo ReadWriteMode fp
-  ok <- handleIsSingleLink h
-  if not ok
-    then do
-      hClose h
-      ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝写入——人工核查"))
-    else do
-      n <- hFileSize h
-      torn <-
-        if n == 0
-          then pure False
-          else do
-            hSeek h AbsoluteSeek (n - 1)
-            (/= BS.singleton 10) <$> BS.hGet h 1
-      hSeek h SeekFromEnd 0
-      pure (torn, h)
+  -- 42 轮 GO-note #2：判定与查尾期间任何异常（盘拔出、权限变化、读尾 I/O
+  -- 错）都要把刚开的句柄关掉，不能滞留到 GC——同文件其它资源转换口的口径。
+  flip onException (hClose h) $ do
+    ok <- handleIsSingleLink h
+    if not ok
+      then do
+        hClose h
+        ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝写入——人工核查"))
+      else do
+        n <- hFileSize h
+        torn <-
+          if n == 0
+            then pure False
+            else do
+              hSeek h AbsoluteSeek (n - 1)
+              (/= BS.singleton 10) <$> BS.hGet h 1
+        hSeek h SeekFromEnd 0
+        pure (torn, h)
 
 -- | **P5-D 的取用口**：打开 @fp@，然后在**句柄**上确认它绑定的正是 @fp@ 这
 -- 条路径上的对象；不是就关掉并拒绝。
