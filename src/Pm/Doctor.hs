@@ -561,7 +561,9 @@ deepVerify root cat = do
   -- 打，用户分不清「深验跑了没发现」与「没跑」；Info 行汇报覆盖面，不改退出码。
   let fs = concat results
       nOf row sev = length [() | f <- fs, fRow f == row, fSeverity f == sev]
-  pure (fs <> [Finding "DEEP-DONE" Info (show (Map.size (catEntries cat)) <> " 条目已全量重读重 hash；不符 " <> show (nOf "DEEP-CORRUPT" Bad) <> "、读取失败/消失 " <> show (nOf "DEEP" Warn)) ""])
+      total = Map.size (catEntries cat)
+      unread = nOf "DEEP" Warn -- 消失/读不出：一个字节都没重读，不得算进「已重读」（48 轮）
+  pure (fs <> [Finding "DEEP-DONE" Info (show total <> " 条目待深验：已重读重 hash " <> show (total - unread) <> "、不符 " <> show (nOf "DEEP-CORRUPT" Bad) <> "、读取失败/消失 " <> show unread) ""])
 
 -- Safe closures only (journal appends / own-tmp deletion). C5 plans are
 -- emitted, not executed.

@@ -399,7 +399,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   正是 `_DSC9013_2.JPG` 的 Pages URL），15 NEW 待分类不出计划，vault
   目录零写入。
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
-  [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
+  [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
   当前实现对应 **P7 / pm 0.6.1 / 393 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
@@ -457,7 +457,7 @@ ingest 作为新写路径已过第 32 轮门禁；对真实 `_inbox` 的首次�
 ## 11. P7-J 全量自审收口的行为面变化（2026-08-27）
 
 P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，101 项发现聚成
-14 簇），逐簇根因、类级修法与突变验证在 [`REVIEW-LOG.md`](REVIEW-LOG.md)
+14 簇），逐簇根因、类级修法与突变验证在 [`REVIEW-LOG-4.md`](REVIEW-LOG-4.md)
 §「P7-J」；这里只登记**用户可见的行为变化**（命令文档正文以此为准）：
 
 | 命令/入口 | 变化 | 根因簇 |
@@ -467,7 +467,7 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm sort` | 子树列不出（ACL 拒）→ 提议/计划两形态都退出 **1** 并打「未能枚举」——不替没看过的目录担保；junction 跳过仍是 0 | B |
 | `pm trash list/empty` | manifest 整文件读不出（hardlink 占名等）→ **exit 2**、视图整体拒绝，不再显示「隔离区为空」（坏基准上 empty 会"无事可做"地成功） | A（三态加载器） |
 | `pm doctor` | 快照被拒（≠缺席）→ `CATALOG` **Bad** 行；`--deep` 无快照可深验 → `DEEP-SKIPPED` **Bad** + exit 1（此前静默跳过深验照报 0） | A |
-| `pm status` | 快照坏代回退 → ⚠ 行 + **exit 1**（`--cached` 只关掉新鲜度核对那一项；exit 1 共四个来源——快照坏代回退告警、暂存区尚有事件（含内容已全部归档、只打「冗余」不打 ⚠ 的那种）、备份缓存不可信、vault 缓存不可信（仅在配置了 vault 时），见 `Pm.Status` 的退出码判定）；核对受阻（读取错误 >0）不打「✓ 索引与磁盘一致」 | A |
+| `pm status` | 快照坏代回退 → ⚠ 行 + **exit 1**（`--cached` 只关掉新鲜度核对那一项；`--cached` 下 exit 1 共四个来源——快照坏代回退告警、暂存区尚有事件（含内容已全部归档、只打「冗余」不打 ⚠ 的那种）、备份缓存不可信、vault 缓存不可信（仅在配置了 vault 时）；不带 `--cached` 另有第五个：新鲜度核对 pending（新增/变更/消失/读取错误之和）> 0，见 `Pm.Status` 的退出码判定）；核对受阻（读取错误 >0）不打「✓ 索引与磁盘一致」 | A |
 | `pm backup` | 主库快照坏代 → ⚠「diff 基于较旧一代」；主库索引与盘面不一致 → **拒绝 exit 2** 指向 `pm scan`（mainFresh 闸）；「✓ 备份盘已与主库一致」只在零降级零差异时打（`backupVerdict` 判定表） | A |
 | `pm init --force` | 旧配置读不出 → 明说「未能保留」备份盘登记等字段（此前静默丢失还打 ✓）；整份新配置过 `checkConfig` 汇点 | A + G6 |
 | `pm config set` | `--X` 与 `--no-X` 同给 = 矛盾 → **exit 2**（此前解析器静默折成清空）；写入前整份配置过 `checkConfig`：主库/vault/备份盘两两不嵌套、备份登记成对、路径绝对——四条写路径（init / config set / POST config / backup init）同一汇点，且锁内按盘上最新配置复验 | G6 |
@@ -492,6 +492,6 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 
 | 命令/入口 | 变化 | 出处 |
 |---|---|---|
-| `pm doctor --deep` | 结束多打一行 Info `[DEEP-DONE] N 条目已全量重读重 hash；不符 a、读取失败/消失 b`（行标独立于逐条 `DEEP` Warn，与 `DEEP-SKIPPED` 配对）——此前干净库上 `--deep` 与不带 `--deep` 输出逐字相同，用户无法分辨「深验跑了没发现」与「没跑」 | e2e 观测缺口 |
+| `pm doctor --deep` | 结束多打一行 Info `[DEEP-DONE] N 条目待深验：已重读重 hash M、不符 a、读取失败/消失 b`（M = N − b：消失/读不出的没被重读；行标独立于逐条 `DEEP` Warn，与 `DEEP-SKIPPED` 配对）——此前干净库上 `--deep` 与不带 `--deep` 输出逐字相同，用户无法分辨「深验跑了没发现」与「没跑」 | e2e 观测缺口 |
 | GUI（pm-ui） | CSP `style-src` 收紧为 `'self'`（去掉 `'unsafe-inline'`，F090 实机 CDP 探针证实零违规）；`gui/ui` 新增「无内联样式/无内联脚本」常驻哨兵 | F090 |
 | `pm resolve` / `pm undo` / `pm vault ingest` / `pm trash` | 行为不变；README 提要改为与 `--help` 同形（`--unskip`、反向计划语义、ingest 入常用命令、屏障只覆盖 clean-staging/dedupe 两类记录） | 文档审计 |

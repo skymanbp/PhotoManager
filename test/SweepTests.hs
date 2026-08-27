@@ -12,7 +12,7 @@ import Data.Aeson (encode)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
@@ -49,7 +49,7 @@ sweepTests =
     , testCase "F019 --only 序号越界 → 拒绝并点名范围（不再静默全跳过 + 惰性巨列表）；范围内照常" caseOnlyOutOfRange
     , testCase "F004 目录 rename 的 catalog 重键：改写后的条目胜过目标前缀下的过期条目（左偏），不由字节序决定" caseRekeyLeftBiased
     , testCase "F018 bindExecRoot 零候选：槽位身份损坏/读不出时如实列出原因，不宣称「均不符」" caseBindRootReportsUnreadable
-    , testCase "P7-S doctor --deep 覆盖面汇报：干净库 Info 行报条目数/不符 0 且 exit 0；翻一字节 → DEEP-CORRUPT + 不符 1 + exit 1" caseDoctorDeepSummary
+    , testCase "P7-S doctor --deep 覆盖面汇报：干净库 Info 行报待验/已重读/不符 0 且 exit 0；翻一字节 → DEEP-CORRUPT + 不符 1 + exit 1；消失条目不算已重读" caseDoctorDeepSummary
     ]
 
 -- | 0.6.1 端到端运行时测试的观测缺口：干净库上 `pm doctor --deep` 与不带 `--deep`
@@ -66,7 +66,7 @@ caseDoctorDeepSummary = withSystemTempDirectory "pm-sweep" $ \tmp -> do
   let deepInfo fs = [fDetail f | f <- fs, fRow f == "DEEP-DONE", fSeverity f == Info]
   (fs, c) <- runDoctor root (DoctorOpts True False)
   c @?= 0
-  assertBool ("干净库应有覆盖面汇报: " <> show (deepInfo fs)) (any ("2 条目已全量重读重 hash；不符 0" `isInfixOf`) (deepInfo fs))
+  assertBool ("干净库应有覆盖面汇报: " <> show (deepInfo fs)) (any ("2 条目待深验：已重读重 hash 2、不符 0、读取失败/消失 0" `isInfixOf`) (deepInfo fs))
   -- 不带 --deep：不得冒充跑过深验
   (fs0, _) <- runDoctor root (DoctorOpts False False)
   deepInfo fs0 @?= []
@@ -76,6 +76,10 @@ caseDoctorDeepSummary = withSystemTempDirectory "pm-sweep" $ \tmp -> do
   c2 @?= 1
   assertBool ("应报 DEEP-CORRUPT: " <> show [(fRow f, fSeverity f) | f <- fs2]) (("DEEP-CORRUPT", Bad) `elem` [(fRow f, fSeverity f) | f <- fs2])
   assertBool ("汇总应记不符 1: " <> show (deepInfo fs2)) (any ("不符 1" `isInfixOf`) (deepInfo fs2))
+  -- 48 轮：消失/读不出的条目没被重读——「已重读」须是实读数，不是索引总数
+  removeFile (root </> "相册" </> "b.jpg")
+  (fs3, _) <- runDoctor root (DoctorOpts True False)
+  assertBool ("已重读数须扣除消失条目: " <> show (deepInfo fs3)) (any ("2 条目待深验：已重读重 hash 1、不符 1、读取失败/消失 1" `isInfixOf`) (deepInfo fs3))
 
 -- | 计划文件里的 @plRootPath@ 是线索不是证据：'loadPlan' 不核对它与装载目录
 -- 一致，'bindExecRoot' 按 UUID 把它绑回真实 root（盘符变更是设计内场景）。

@@ -1,7 +1,7 @@
 # pm 评审记录·卷 3（第 35–38 轮 + P7 预审登记）
 
 > 2026-08-27 自现行卷拆出（750 行预算）。上承 [`REVIEW-LOG-2.md`](REVIEW-LOG-2.md)
-> （第 29–34 轮），下接 [`REVIEW-LOG.md`](REVIEW-LOG.md)（第 39 轮起的现行卷）。
+> （第 29–34 轮），下接 [`REVIEW-LOG-4.md`](REVIEW-LOG-4.md)（第 39–43 轮）；现行卷 [`REVIEW-LOG.md`](REVIEW-LOG.md) 自第 44 轮起。
 
 ## 第 35 轮（P6-G `39edbb8`，codex 钉 SHA）——NO-GO，minset 4 条全修
 

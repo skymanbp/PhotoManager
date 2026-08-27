@@ -145,7 +145,8 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
 `pm trash empty --yes` 一条（隔离区最终清除：逐项列出、二次确认，见下文第 1 条）。
 此外若干命令直接写 pm 自己的状态与配置，**都不碰照片字节**：`pm scan`、
 `pm init` / `pm backup init`、`pm config set`、`pm vault hold|unhold`（主库 `.pm`
-里一条「暂不同步」决定）、`pm resolve`（改计划）、`pm doctor --repair`。
+里一条「暂不同步」决定）、`pm resolve`（改计划）、`pm doctor --repair`、`pm serve --writable`
+（GUI 背后：写计划/配置/「暂不同步」名单；`--allow-apply` 执行计划仍走同一条计划路径）。
 
 ## 具体实现——为什么这个工具值得把照片交给它
 

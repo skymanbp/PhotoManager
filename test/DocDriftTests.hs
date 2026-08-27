@@ -9,8 +9,8 @@
 module DocDriftTests (docDriftTests) where
 
 import qualified Data.ByteString as BS
-import Data.Char (isDigit, isSpace)
-import Data.List (dropWhileEnd, isInfixOf, isPrefixOf, isSuffixOf, sort)
+import Data.Char (isAlpha, isDigit, isSpace, toLower)
+import Data.List (dropWhileEnd, isInfixOf, isPrefixOf, isSuffixOf, sort, tails)
 import Data.Maybe (mapMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -29,7 +29,7 @@ docDriftTests =
     , testCase "--json 清点：全 CLI 只有 vault status 一处 long \"json\"" caseJsonFlagCensus
     , testCase "GUI 页序：DESIGN ①—⑥ 的顺序与 index.html 的 nav 次序一致" caseGuiNavOrder
     , testCase "CSP 逐字：DESIGN 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）" caseCspQuoted
-    , testCase "F090 前提：gui/ui 无内联样式/内联脚本/on* 属性，app.js 不写 style 属性字符串" caseGuiNoInlineStyle
+    , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，app.js 零 setAttribute、innerHTML 只赋空串" caseGuiNoInlineStyle
     , testCase "死名清扫：opRelPaths / isPng / stemKey 不再出现在 src/app" caseNoDeadNames
     , testCase "Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记" caseHaddockMarkerHygiene
     , testCase "讹传清扫：被否证的机制解释（F048 列表脊、46 轮 openBoundTo 共享模式）不再出现在 src/app/test" caseFolkloreNotInTests
@@ -153,17 +153,32 @@ caseCspQuoted = do
   assertBool "DESIGN: style-src 收紧要讲明" ("`style-src 'self'`" `isInfixOf` design)
   assertBool "csp: script-src 只 self" ("script-src 'self'" `isInfixOf` conf)
 
--- | F090 收紧后的前提：页面与脚本不得引入 CSP 会拦的内联样式/脚本形态
--- （`<style>`、`style="…"`、`on*=` 属性、`setAttribute("style"…)`、拼字符串塞
--- `<style`）。CSSOM 写（`el.style.x = …` / `setProperty`）不受 style-src 管，
--- 仍允许。任一回潮 = 发布版 GUI 在 `style-src 'self'` 下静默丢样式。
+-- | F090 收紧后的前提：页面与脚本不得引入 CSP 会拦的内联样式/脚本形态。
+-- 48 轮：判据从字面表改为**词法**——属性名后任意空白与单/双引号、任意 on* 事件、
+-- 带属性或有内容的 `<script>`；app.js 零 `setAttribute`、`innerHTML` 只赋空串、无
+-- HTML 注入口（字面表曾放过 `style='…'` / `style = "…"` / `onsubmit=` / module script）。
+-- CSSOM 写（`el.style.x = …` / `setProperty`）不受 style-src 管，仍允许。
+-- 任一回潮 = 发布版 GUI 在 `style-src 'self'` 下静默丢样式。
 caseGuiNoInlineStyle :: IO ()
 caseGuiNoInlineStyle = do
   html <- readUtf8 ("gui" </> "ui" </> "index.html")
   js <- readUtf8 ("gui" </> "ui" </> "app.js")
-  let bad s ws = [w | w <- ws, w `isInfixOf` s]
-  assertEqual "index.html 不得有内联样式/内联脚本/on* 属性" [] (bad html ["<style", " style=\"", "<script>", "onclick=", "onload=", "onchange=", "oninput="])
-  assertEqual "app.js 不得写 style 属性字符串或拼 <style" [] (bad js ["setAttribute(\"style", "setAttribute('style", "<style", "style=\\\""])
+  let lc = map toLower
+      eqAt s = take 1 (dropWhile isSpace s) == "="
+      quotedAt s = take 1 (dropWhile isSpace (drop 1 (dropWhile isSpace s))) `elem` ["\"", "'"]
+      -- 空白 + 属性名 + 空白* + '=' + 空白* + 引号（单双皆算）
+      attr name t = [take 24 r | (c : r) <- tails t, isSpace c, name `isPrefixOf` lc r, let s = drop (length name) r, eqAt s, quotedAt s]
+      events t = [take 24 r | (c : r) <- tails t, isSpace c, "on" `isPrefixOf` lc r, let nm = takeWhile isAlpha (drop 2 r), not (null nm), eqAt (drop (2 + length nm) r)]
+      -- <script …>：只允许 src= 外链且标签体为空
+      scripts t = [take 40 s | s <- tails t, "<script" `isPrefixOf` lc s, let tag = takeWhile (/= '>') s, let body = takeWhile (/= '<') (drop 1 (dropWhile (/= '>') s)), not ("src=" `isInfixOf` lc tag) || any (not . isSpace) body]
+      styleEls t = [take 12 s | s <- tails t, "<style" `isPrefixOf` lc s]
+      innerBad t = [take 30 s | s <- tails t, "innerHTML" `isPrefixOf` s, let r = dropWhile isSpace (drop 9 s), not (take 1 r == "=" && take 2 (dropWhile isSpace (drop 1 r)) == "\"\"")]
+  assertEqual "index.html 内联样式属性" [] (attr "style" html)
+  assertEqual "index.html on* 事件属性" [] (events html)
+  assertEqual "index.html 内联/非外链 <script>" [] (scripts html)
+  assertEqual "index.html/app.js <style" [] (styleEls html <> styleEls js)
+  assertEqual "app.js setAttribute/HTML 注入口" [] [w | w <- ["setAttribute(", "insertAdjacentHTML", "outerHTML", "document.write", "cssText"], w `isInfixOf` js]
+  assertEqual "app.js innerHTML 只允许赋空串" [] (innerBad js)
 
 -- | P7-J 删掉的三个名字不得回潮：opRelPaths（无调用者的导出）、isPng
 -- （与 push 门分叉的第二份谓词）、stemKey（Import/Sort 双份局部配对键）。
