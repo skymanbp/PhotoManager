@@ -639,7 +639,9 @@ sancheck37 零命中；三份发布产物 leakscan 0 命中。
   逐字执行一个产物都没扫。修：`V=$(awk '/^version:/{print $2}' ../../package.yaml)`
   + 加引号（版本不手抄）。
 - **GO-note 突变表 m4 证据质量**：只见 P3b-12 连带、没出示新钉自身的 FAIL 文案。
-  修：`mutate4.py` 捕获 FAIL 后 3 行文案，m4 改 `-p "41 轮 #6"` 单点重跑（见下）。
+  修：`mutate4.py` 捕获 FAIL 后 3 行文案，m4 改 `-p openStateAppendTail` 单点重跑
+  （见下；首次用 `-p "41 轮 #6"` 被 tasty 当表达式解析、基线与突变同为 usage 输出的
+  **假红**，识别后改用用例名里的无空格 token——`mut4b.log` 作废，`mut4c.log` 为准）。
 - **GO-note 失败文案归因**：独占打开失败也可能是第三方瞬时占用 / 文件缺失。修：
   文案列出三种来源并带原始错误文本，不一概归因「句柄未关」。
 
