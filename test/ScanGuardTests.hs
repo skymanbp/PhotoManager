@@ -71,6 +71,7 @@ scanGuardTests =
     , testCase "工作流 F042：root 自身是 junction（合法）→ 照常核对；库内子层 junction 保持「探不出 = 错误」" caseFreshnessJunctionRoot
     , testCase "import 暂存区新鲜度闸 E2E：索引落后 → runImport 整体拒绝 exit 2 并指向 pm scan" caseImportStaleRefused
     , testCase "工作流 C101 init 接线：vault 嵌在主库里 → runInit 拒绝 exit 2（checkConfig 汇点在 init 也生效）" caseInitNestedVaultRefused
+    , testCase "41 轮 #3 配置缺失 + 孤儿 <cfg>.tmp → init 拒绝并复述恢复指引，.tmp 原封不动" caseInitOrphanTmpRefused
     ]
 
 -- | init --force 的「读旧配置 → 写回」：旧配置 TOML 坏掉（整份解码失败，
@@ -395,3 +396,21 @@ caseInitNestedVaultRefused = withSystemTempDirectory "pm-initnest" $ \tmp -> do
     code @?= 2
     assertBool ("应指出嵌套: " <> out) ("嵌套" `isInfixOf` out)
     doesFileExist cfgFp >>= (@?= False)
+
+-- | 41 轮 #3：孤儿 <cfg>.tmp（writeConfig 崩在删旧与改名之间，.tmp 是完整
+-- 新配置）此前只有 'loadConfigState' 认得——init 按 exists=False 直接绕过，
+-- 在旁边新写一份，把待恢复的备份盘登记等设置永久变成死文件。
+caseInitOrphanTmpRefused :: IO ()
+caseInitOrphanTmpRefused = withSystemTempDirectory "pm-orph" $ \tmp -> do
+  mold <- lookupEnv "PM_CONFIG"
+  let cfgFp = tmp </> "config.toml"
+      mainP = tmp </> "main"
+  createDirectoryIfMissing True mainP
+  setEnv "PM_CONFIG" cfgFp
+  flip finally (maybe (pure ()) (setEnv "PM_CONFIG") mold) $ do
+    writeFile (cfgFp <> ".tmp") "main-path = \"D:/nowhere\"\n"
+    (out, code) <- captureStdout (runInit (InitOpts mainP Nothing Nothing Nothing False))
+    code @?= 2
+    assertBool ("应复述 .tmp 恢复指引: " <> out) (".tmp" `isInfixOf` out)
+    doesFileExist cfgFp >>= (@?= False)
+    doesFileExist (cfgFp <> ".tmp") >>= (@?= True)

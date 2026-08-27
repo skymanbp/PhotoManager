@@ -26,6 +26,7 @@ import Pm.Catalog (catalogMaybe, loadCatalog)
 import Pm.Cli (GoOpts (..), recheckCleanPlan, savePlanAndMaybeRun, writeBackCatalog)
 import Pm.Commands (InitOpts (..), ResolveOpts (..), RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runClean, runImport, runInit, runResolve, runTrash)
 import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), createRootInfo, loadConfig, pmDir, readRootInfo, readRootState, requireRole, requireWritable, withConfigLock, writeConfig, writeRootInfo, writeSideCache)
+import Pm.BackupCmd (backupInitRun)
 import Pm.Lock (withRootLock)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec
@@ -77,6 +78,7 @@ guardTests =
     , testCase "三十二轮 R3 PM_CONFIG 正斜杠拼写 → configFilePath 归一，配置写不被句柄后验误拒" caseConfigPathForwardSlash
     , testCase "三十五轮 F4 config.toml 被独占占住 → loadConfig Left（不崩、不猜内容）" caseConfigReadLocked
     , testCase "三十五轮 F4 .gitignore 被独占占住 → I11 守卫拒绝（核不了=不放行）" caseGitignoreReadLocked
+    , testCase "41 轮 #1 backup init 登记：锁内按盘上最新配置复验嵌套/checkConfig，参数快照过期 → 拒绝且不落盘" caseBackupRegisterRevalidates
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
@@ -612,7 +614,7 @@ caseCatalogWriteBackTakesLock = withSystemTempDirectory "pm-clock" $ \tmp -> do
   let root = tmp </> "main"
   createDirectoryIfMissing True root
   now <- getCurrentTime
-  writeRootInfo root (RootInfo "rc" RoleMain now Nothing)
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (mkCat [])
   ref <- newIORef ([] :: [String])
   let sink l = modifyIORef ref (l :)
@@ -714,3 +716,25 @@ caseConfigPathForwardSlash = withSystemTempDirectory "pm-cfgslash" $ \tmp -> do
       (assertFailure . ("配置应可读回: " <>))
       (\c -> cfgMainPath c @?= (tmp </> "main"))
       ec
+
+-- | 41 轮 #1：backup init 的预检（嵌套判定）用的是**进锁前**的配置快照；
+-- 锁内此前只写不验——与并发 `pm config set --vault` 交错时，嵌套配置被静默
+-- 写成。用「参数快照 vs 盘上配置」模拟交错：参数无 vault（预检放行），盘上
+-- 已登记 vault 且镜像路径落在其内 → 锁内复验必须拒绝、登记不得落盘。
+caseBackupRegisterRevalidates :: IO ()
+caseBackupRegisterRevalidates = withSystemTempDirectory "pm-breg" $ \dir -> do
+  mold <- lookupEnv "PM_CONFIG"
+  setEnv "PM_CONFIG" (dir </> "config.toml")
+  flip finally (maybe (pure ()) (setEnv "PM_CONFIG") mold) $ do
+    let mainP = dir </> "main"
+        vaultP = dir </> "vault"
+        onDisk = Config mainP (Just vaultP) Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+        staleArg = Config mainP Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+    createDirectoryIfMissing True mainP
+    createDirectoryIfMissing True vaultP
+    _ <- writeConfig onDisk
+    r <- backupInitRun (vaultP </> "mirror") staleArg
+    case r of
+      Left m -> assertBool ("应点名锁内复验与嵌套: " <> m) ("锁内" `isInfixOf` m && "嵌套" `isInfixOf` m)
+      Right _ -> assertFailure "过期快照的登记竟被放行（锁内复验缺位）"
+    loadConfig >>= either assertFailure (\c -> (cfgBackupId c, cfgBackupSubpath c) @?= (Nothing, Nothing))

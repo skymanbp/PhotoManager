@@ -33,7 +33,7 @@ module Pm.Publish
 
 import Data.Char (isAlphaNum, isAscii, isAsciiLower, isAsciiUpper, isControl, toLower)
 import Data.Either (isRight)
-import Data.List (dropWhileEnd, isPrefixOf)
+import Data.List (dropWhileEnd, isPrefixOf, isSuffixOf)
 import System.FilePath (takeDirectory, (</>))
 
 import Pm.Config (Config (..))
@@ -193,6 +193,10 @@ publishCommands c = case (cfgVaultPath c, cfgPortfolioDir c) of
       , gitC d (push t)
       ]
   -- 仓内相对路径（Windows 路径不分大小写，按折叠后比较）；不在仓内 → Nothing。
+  -- 41 轮 GO-note #8：盘根形态的 base 本身带尾斜杠（"D:/"），再拼 "/" 会变
+  -- 成永不匹配的 "D://"——先归一成恰一个尾斜杠再比。
   relUnder (CmdPath base) (CmdPath full)
-    | map toLower (base <> "/") `isPrefixOf` map toLower full = Just (drop (length base + 1) full)
+    | map toLower baseSlash `isPrefixOf` map toLower full = Just (drop (length baseSlash) full)
     | otherwise = Nothing
+   where
+    baseSlash = if "/" `isSuffixOf` base then base else base <> "/"

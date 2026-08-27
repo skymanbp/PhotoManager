@@ -10,14 +10,15 @@ import System.FilePath ((</>))
 import Control.Exception (SomeException, bracket, try)
 import Data.List (isInfixOf)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import System.IO (IOMode (ReadMode), hClose, hGetContents', openBinaryFile, stdin, withBinaryFile)
+import qualified Data.ByteString.Char8 as BC
+import System.IO (Handle, IOMode (ReadMode), hClose, hGetContents', openBinaryFile, stdin, withBinaryFile)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Cli (GoOpts (..), confirm)
-import Pm.Win (handleFinalPath, handleIsAt, openBoundTo, resolveUnder)
+import Pm.Win (handleFinalPath, handleIsAt, openBoundTo, openStateAppendTail, resolveUnder)
 import TestUtil (captureStdout)
 
 handleGuardTests :: TestTree
@@ -27,6 +28,7 @@ handleGuardTests =
     [ testCase "P5-D 句柄反查路径：中途 junction / 末级 symlink 判否；普通文件、库内 hardlink、root 经 junction 判是" caseHandleIsAt
     , testCase "P5-D 解析之后、打开之前把中途一层换成 junction → openBoundTo 拒绝，裸 open 会读到库外（窗口已关）" caseResolveThenSwap
     , testCase "工作流 F020：确认口 stdin 是 EOF（NUL 设备）→ 按「否」返回 False，不抛 isEOFError" caseConfirmEofIsNo
+    , testCase "41 轮 #6 openStateAppendTail：查尾与追加同一句柄——半截尾/换行尾/缺失三态 + hardlink 拒绝" caseAppendTailSameHandle
     ]
 
 -- | 设备命名空间的写法；裸 "NUL" 走的是 GHC 的普通路径打开，会 does not exist。
@@ -146,3 +148,36 @@ caseResolveThenSwap = withSystemTempDirectory "pm-swap" $ \tmp -> do
   case r of
     Left e -> assertBool ("错误应说明句柄绑定不符: " <> show e) ("句柄绑定" `isInfixOf` show e)
     Right c -> assertFailure ("openBoundTo 不应读出任何内容，却得到 " <> show c)
+
+-- | 41 轮 #6：追加前的尾部状态此前由 'Pm.Win' 里两次**独立打开**回答（读口
+-- 查尾、再按名字开追加句柄）——两步之间整个文件可被替换，尾判属于旧对象、
+-- 补换行落到新对象上。合成后的 primitive 契约：半截尾 → (True, h) 且游标在
+-- 文件尾；换行尾/空/缺失 → (False, h)（缺失即创建）；hardlink 占名 → 拒绝。
+caseAppendTailSameHandle :: IO ()
+caseAppendTailSameHandle = withSystemTempDirectory "pm-tail" $ \tmp -> do
+  let torn = tmp </> "torn.ndjson"
+      clean = tmp </> "clean.ndjson"
+      fresh = tmp </> "fresh.ndjson"
+      q p = [dq] <> p <> [dq]
+      dq = toEnum 34 :: Char
+  writeFile torn "abc"
+  (t1, h1) <- openStateAppendTail torn
+  t1 @?= True
+  BC.hPut h1 "\nX\n"
+  hClose h1
+  readFile torn >>= (@?= "abc\nX\n")
+  writeFile clean "abc\n"
+  (t2, h2) <- openStateAppendTail clean
+  t2 @?= False
+  hClose h2
+  (t3, h3) <- openStateAppendTail fresh
+  t3 @?= False
+  BC.hPut h3 "first\n"
+  hClose h3
+  readFile fresh >>= (@?= "first\n")
+  writeFile (tmp </> "target.bin") "t"
+  _ <- readCreateProcess (shell ("mklink /H " <> q (tmp </> "hl.ndjson") <> " " <> q (tmp </> "target.bin"))) ""
+  r <- try (openStateAppendTail (tmp </> "hl.ndjson")) :: IO (Either SomeException (Bool, Handle))
+  case r of
+    Left e -> assertBool ("应点名 hardlink: " <> show e) ("hardlink" `isInfixOf` show e)
+    Right (_, h) -> hClose h >> assertFailure "hardlink 占名必须拒绝"

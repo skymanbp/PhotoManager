@@ -5,6 +5,15 @@ description: See docs/DESIGN.md
 license: Apache-2.0
 language: GHC2021
 
+# 41 轮 GO-note #9：DocDriftTests 按仓库根相对路径读这些非源码文件——
+# 登记进 sdist，契约从「碰巧在」变成「声明在」。
+extra-source-files:
+- README.md
+- docs/DESIGN.md
+- docs/DESIGN-COMMANDS.md
+- gui/ui/index.html
+- gui/src-tauri/tauri.conf.json
+
 ghc-options:
 - -Wall
 - -Wcompat

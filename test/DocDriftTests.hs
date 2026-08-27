@@ -9,13 +9,13 @@
 module DocDriftTests (docDriftTests) where
 
 import qualified Data.ByteString as BS
-import Data.Char (isSpace)
+import Data.Char (isDigit, isSpace)
 import Data.List (dropWhileEnd, isInfixOf, isPrefixOf, isSuffixOf, sort)
 import Data.Maybe (mapMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
-import System.Directory (listDirectory)
+import System.Directory (doesFileExist, listDirectory)
 import System.FilePath ((</>))
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -33,6 +33,8 @@ docDriftTests =
     , testCase "Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记" caseHaddockMarkerHygiene
     , testCase "讹传清扫：F048 被否证的机制解释不再出现在 test/" caseFolkloreNotInTests
     , testCase "命名同步：DESIGN-COMMANDS 讲的是 freshStagingCatalog（F025 收尾）" caseFreshGateName
+    , testCase "41 轮 GO-note #9 运行契约：cwd = 仓库根（本套件按根相对路径读仓库文件）" caseRepoRootCwd
+    , testCase "41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托 REVIEW-LOG" caseReadmeSync
     ]
 
 -- ─── 基础设施 ────────────────────────────────────────────────────────────────
@@ -183,3 +185,39 @@ caseFreshGateName :: IO ()
 caseFreshGateName = do
   dc <- readUtf8 ("docs" </> "DESIGN-COMMANDS.md")
   assertBool "DESIGN-COMMANDS 应指向 freshStagingCatalog" ("`freshStagingCatalog`" `isInfixOf` dc)
+
+-- | 41 轮 GO-note #9：本套件全部按仓库根相对路径读文件——契约明说并自证，
+-- 换 cwd 的运行方式会在这里得到一句人话而不是九个 does-not-exist。
+caseRepoRootCwd :: IO ()
+caseRepoRootCwd = do
+  ok <- doesFileExist "package.yaml"
+  assertBool "DocDriftTests 须从仓库根运行（stack test 的默认 cwd）——package.yaml 不在当前目录" ok
+
+-- | 41 轮 #7（δ 簇「发布字段手抄」）：README 的测试计数曾同页 310/382 两说、
+-- undo 提要写着不存在的 `pm undo <planId>`、收敛叙事停在 37/38 轮。数字只
+-- 允许一个上游（DESIGN-COMMANDS 状态行），提要必须是真 CLI 形态，轮次收敛
+-- 判定整段委托 REVIEW-LOG——README 不再手抄「第 N 轮 GO」。
+caseReadmeSync :: IO ()
+caseReadmeSync = do
+  readme <- readUtf8 "README.md"
+  dc <- readUtf8 ("docs" </> "DESIGN-COMMANDS.md")
+  dcCount <- case countsBefore " 测试**" dc of
+    [n] -> pure n
+    other -> assertFailure ("DESIGN-COMMANDS 状态行应恰有一个「N 测试」: " <> show other) >> pure 0
+  let rCounts = countsBefore " 例" readme
+  assertBool "README 至少报一次测试计数（N 例）" (not (null rCounts))
+  assertEqual ("README 全部「N 例」须等于 DESIGN-COMMANDS 状态行的 " <> show dcCount) [] (filter (/= dcCount) rCounts)
+  assertBool "README 的 undo 提要须是真 CLI 形态 pm undo --last" ("pm undo --last" `isInfixOf` readme)
+  assertBool "README 不得出现 pm undo <planId>（CLI 无此形态）" (not ("pm undo <planId>" `isInfixOf` readme))
+  assertBool "README 不手抄「…轮 GO」收敛判定（委托 REVIEW-LOG）" (not ("轮 GO" `isInfixOf` readme))
+
+-- | @countsBefore suf s@：s 里所有「数字串 + suf」形态的数字。
+countsBefore :: String -> String -> [Int]
+countsBefore suf = go
+ where
+  go [] = []
+  go xs@(c : _)
+    | isDigit c =
+        let (ds, r) = span isDigit xs
+         in if suf `isPrefixOf` r then read ds : go r else go r
+    | otherwise = go (drop 1 xs)

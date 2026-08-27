@@ -215,8 +215,10 @@ t0 = UTCTime (fromGregorian 2026 1 1) 0
 mkE :: FilePath -> String -> Entry
 mkE p sha = Entry p 1 0 (T.pack sha) KindPhoto Nothing
 
+-- | 41 轮 #5 后 catalog 身份必须与 root-id 对账：夹具主流写
+-- @RootInfo "m"@，这里同号；显式 id 的夹具自己写配对的 root-id。
 mkCat :: [Entry] -> Catalog
-mkCat es = Catalog "test-root" t0 (entryMap es)
+mkCat es = Catalog "m" t0 (entryMap es)
 
 scanQuiet :: String -> FilePath -> IO Catalog
 scanQuiet rid root = srCatalog <$> scanRoot (ScanOpts 1 False) Nothing (T.pack rid) root

@@ -23,8 +23,11 @@ import Network.Wai.Test (assertStatus, runSession)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Config (Config (..), loadConfig, writeConfig)
-import Pm.ConfigEdit (ConfigPatch (..), ConfigSetOpts (..), checkPatch, emptyPatch, mkPatch, tri)
+import Data.Time (getCurrentTime)
+import System.FilePath (splitDrive)
+import Pm.Config (Config (..), loadConfig, writeConfig, writeRootInfo)
+import Pm.Types (RootInfo (..), RootRole (..))
+import Pm.ConfigEdit (ConfigPatch (..), ConfigSetOpts (..), checkConfig, checkPatch, emptyPatch, mkPatch, tri)
 import Pm.Publish (cmdPath, inboxDoneCommand, pathArgOk, publishCommands, pushTarget, pushTargetOk, renderCmdPath, vaultCommands)
 import Pm.Serve (serveApp)
 import ServeTests (decodeBody, field, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvA, tok, withVault)
@@ -46,6 +49,7 @@ publishTests =
     , testCase "工作流 F082 tri/mkPatch：--X 与 --no-X 同给 → Left「只能给一个」；三态其余三格照旧" caseTriState
     , testCase "serve：ping 带 allowApply（与授权级一致）；config 带 publish 对象" caseServePingConfig
     , testCase "GET /api/publish-commands：未配置 → 409；配置 vault 后 → 200 + 命令行数组" caseServePublishCommands
+    , testCase "41 轮 #1 对称向：备份盘在场（可发现）→ checkConfig 判嵌套；库外镜像放行" caseBackupDriveNested
     ]
 
 casePushTarget :: IO ()
@@ -111,6 +115,13 @@ casePublishCommands = do
     Right ls -> do
       assertBool ("photos.json 必须按仓内相对路径 add --: " <> show ls) ("git -C \"D:/proj/pf\" add -- \"data/photos.json\"" `elem` ls)
       assertBool "未设 push 目标 → 裸 git push" ("git -C \"D:/proj/pf\" push" `elem` ls)
+      structural ls
+  -- 41 轮 GO-note #8：仓在盘根——cmdPath 渲染成 "D:/"（自带尾斜杠），拼
+  -- "/" 再比会得到 "D://" 永不匹配，photos.json 被误判「仓外」拒绝生成
+  case publishCommands cv {cfgPortfolioDir = Just "D:\\", cfgPhotosJson = Just "D:\\photos.json", cfgPortfolioPush = Nothing} of
+    Left m -> assertFailure ("盘根仓被误判仓外: " <> m)
+    Right ls -> do
+      assertBool ("盘根仓的 photos.json 应按根相对路径 add --: " <> show ls) ("git -C \"D:/\" add -- \"photos.json\"" `elem` ls)
       structural ls
   -- 只配 portfolio、未配 photos.json：拒绝生成（不退化成整仓 add）
   case publishCommands base {cfgPortfolioDir = Just "D:\\proj\\pf"} of
@@ -335,3 +346,25 @@ caseTriState = do
   case mkPatch o {csWorkers = (Nothing, False)} of
     Right p -> p @?= emptyPatch
     Left m -> assertFailure m
+
+-- | 41 轮 #1（对称向）：备份盘按 UUID+盘内相对路径登记，绝对路径要现场发现
+-- （'Pm.Backup.discoverBackupRoots'）。盘在场 → checkConfig 把每个命中与
+-- 主库/vault 各判一次嵌套（此前 config set 对「vault 套住既有备份镜像」全
+-- 放行）；盘不在场无从核（登记时点已在锁内验过——GuardTests 的配对钉）。
+caseBackupDriveNested :: IO ()
+caseBackupDriveNested = withSystemTempDirectory "pm-bkdisc" $ \dir -> do
+  let mainP = dir </> "main"
+      vaultP = dir </> "v"
+      mirror = vaultP </> "bk-mirror"
+  createDirectoryIfMissing True mainP
+  createDirectoryIfMissing True mirror
+  now <- getCurrentTime
+  writeRootInfo mirror (RootInfo "bk-uuid-nested-41" RoleBackup now Nothing)
+  let cfg = (mkCfg mainP) {cfgVaultPath = Just vaultP, cfgBackupId = Just "bk-uuid-nested-41", cfgBackupSubpath = Just (snd (splitDrive mirror))}
+  es <- checkConfig cfg
+  assertBool ("盘在场的嵌套镜像应拒: " <> show es) (any ("备份盘与 vault 嵌套" `isInfixOf`) es)
+  let ok = dir </> "bk-ok"
+  createDirectoryIfMissing True ok
+  writeRootInfo ok (RootInfo "bk-uuid-ok-41" RoleBackup now Nothing)
+  let cfg2 = (mkCfg mainP) {cfgVaultPath = Just vaultP, cfgBackupId = Just "bk-uuid-ok-41", cfgBackupSubpath = Just (snd (splitDrive ok))}
+  checkConfig cfg2 >>= (@?= [])

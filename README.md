@@ -16,9 +16,10 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 兼容承诺，也不打算适配别的目录结构。Issue/PR 可能长期没人看。
 >
 > 但"个人项目"不是安全上打折的理由，照片是不可再生数据：pm **没有删除原语**，
-> 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（至今
-> **三十八轮，第 37 轮 GO、minset 空、第 38 轮聚焦复核亦 GO——已收敛**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉
-> 它就转红"的突变验证用例（310 例，GHC 警告 0）。
+> 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
+> 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
+> 为准，不在这里手抄**），每道闸都配"删掉它就转红"的突变验证用例（389 例，
+> GHC 警告 0）。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
 命令细节：[docs/DESIGN-COMMANDS.md](docs/DESIGN-COMMANDS.md)。
@@ -120,7 +121,7 @@ pm dedupe                        # 精确重复 → 逐份可裁决的隔离计�
 pm apply <planId>                # 执行计划（--dry 全量预览 / --only 1,3-5 部分执行）
 pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先隔离）
 pm doctor                        # 崩溃恢复对账 + 完整性体检（默认只读）
-pm undo <planId>                 # 整体回滚已执行的计划
+pm undo --last [N]               # 回滚最近 N 个已执行计划（默认 1；--backup/--vault 选侧）
 pm config                        # 打印配置与每条路径的健康状态（只读）
 pm config set --vault <目录>     # 改 vault / --photos-json / --workers /
                                  # --portfolio-dir / --vault-push / --portfolio-push
@@ -152,7 +153,7 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
 5. **判据与动盘是同一个跨进程事务**。凡「读证据 → 判定 → 写」整段进 I10 锁且
    证据在锁内取：执行屏障、trash empty、resolve、doctor --repair、catalog 回写、
    配置的全部四条读改写路径。两个 pm 进程并发也互相抹不掉对方的决定。
-6. **三十八轮对抗评审门禁 + 突变验证（第 37 轮 GO 收敛、38 轮聚焦复核 GO）**。每条写路径合并前过独立评审（NO-GO 逐条
+6. **对抗评审门禁 + 突变验证（轮次与收敛判定见 REVIEW-LOG，不在此手抄）**。每条写路径合并前过独立评审（NO-GO 逐条
    第一方核实——证实的修、证伪的公开记录在 [REVIEW-LOG](docs/REVIEW-LOG.md)，
    包括评审对了我错了的、和我此前文档言过其实的）；每道承重闸配一个"删掉它
    恰好一个用例转红"的突变——绿灯证明闸在承重，不是测试恰好路过。
@@ -212,10 +213,10 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 |---|---|---|
 | 增量扫描（4633 文件，其中 122 新 hash / 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（382 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
+| 测试套件（389 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
-| 对抗评审门禁 | 38 轮（NO-GO 逐条第一方核实后处置；第 37 轮 GO、minset 空，38 轮聚焦复核 GO——收敛） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
-| 突变验证 | 每道承重闸一个突变、配对用例转红（34–36 轮 6+3+2 道全数通过；37/38 轮 GO 无新增闸） | REVIEW-LOG 各轮收敛证据 |
+| 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
+| 突变验证 | 每道承重闸一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过） | REVIEW-LOG 各轮收敛证据 |
 
 ## 三层库拓扑与「设计内冗余」
 
@@ -275,7 +276,7 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
 - ~~`pm vault ingest`~~ ✅ P6-D：pm 只拷 root 内（相册 + vault 类目两份计划），
   `_inbox→_done` 交调用方并打印显式步骤；第 32 轮门禁的 9 条 ingest finding
   已全修（执行次序闸收紧，见 REVIEW-LOG；33–37 轮连续收口「读口
-  fail-closed」漏网：35 轮按 IO 读原语全集清点扫尽、36 轮关掉 I11 存在性布尔探针、37 轮关掉链接属性探针的塌 False），门禁已于第 37 轮收敛（GO、minset 空，38 轮聚焦复核 GO），真实 `_inbox` 首次使用只待用户裁定。
+  fail-closed」漏网：35 轮按 IO 读原语全集清点扫尽、36 轮关掉 I11 存在性布尔探针、37 轮关掉链接属性探针的塌 False），门禁收敛状态见 REVIEW-LOG 末节，真实 `_inbox` 首次使用只待用户裁定。
 - ~~屏障协议的类型封闭~~ ✅ P6-A：`BarrierKind` 分类器 + 屏障只返回降级清单，
   升级/改写在类型上写不出来。
 - ~~落位 rename 的句柄形态~~ ✅ P6-C：全部提交型 rename/unlink 走

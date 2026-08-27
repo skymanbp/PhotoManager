@@ -83,12 +83,12 @@ import qualified TOML
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Types
 import Pm.Win
-  ( tailUnterminated, NameKind (..)
+  ( NameKind (..)
   , deleteBoundAt
   , flushHandleToDisk
   , moveBoundNoReplace
   , openFreshBinary
-  , openStateAppend
+  , openStateAppendTail
   , openStateLock
   , openStateRead
   , probeName
@@ -181,7 +181,7 @@ loadConfigState = do
             "配置缺失，但发现 " <> fp <> ".tmp —— 上次写入崩在删旧与改名之间。"
               <> "那份内容是完整的新配置：核对后改名成 "
               <> takeFileName fp
-              <> " 即可恢复（或重跑 pm init --main <主库路径>）"
+              <> " 即可恢复（或删除该 .tmp 后重跑 pm init --main <主库路径>）"
           else "配置不存在: " <> fp <> " —— 先运行 pm init --main <主库路径>"
     else do
       -- 三十五轮 F4：doesFileExist 与读取之间有窗口（编辑器/同步器短暂独占、
@@ -441,11 +441,11 @@ readPmState root rel = do
           | otherwise ->
               Left ((pmDir root </> rel) <> " 无法可信读取（" <> show e <> "）——人工核查")
 
--- | 'readPmState' 的追加写对偶：完整路径 'resolveUnder' → 'openStateAppend'
--- （打开后立刻查 link count）→ 在该句柄上执行 @act@。journal 与 manifest 是
+-- | 'readPmState' 的追加写对偶：完整路径 'resolveUnder' → 'openStateAppendTail'
+-- （打开后立刻查 link count、同句柄判尾）→ 在该句柄上执行 @act@。journal 与 manifest 是
 -- pm 仅有的两个「必须复用既有名字」的追加目标，都走这里。
 --
--- 两种拒绝都以 IOException 抛出（与 'openStateAppend' 的既有契约一致）：
+-- 两种拒绝都以 IOException 抛出（与 'openStateAppendTail' 的既有契约一致）：
 -- 调用点在 Exec 的崩溃处理之内，写不成必须整项中止而不是继续。
 withPmStateAppend :: FilePath -> FilePath -> (Handle -> IO a) -> IO a
 withPmStateAppend root rel act = withPmStateAppend' root rel (const act)
@@ -463,9 +463,10 @@ withPmStateAppend' root rel act = do
   m <- resolveUnder root (".pm" </> rel)
   case m of
     Nothing -> ioError (userError (untrustedMsg (pmDir root </> rel)))
-    Just fp -> do
-      torn <- tailUnterminated fp
-      bracket (openStateAppend fp) hClose $ \h -> do
+    Just fp ->
+      -- 41 轮 #6：查尾与追加在**同一次打开**里（'openStateAppendTail'）——
+      -- 两次打开之间文件可被整体替换，尾判属于旧对象、补换行落到新对象。
+      bracket (openStateAppendTail fp) (hClose . snd) $ \(torn, h) -> do
         when torn (BS.hPut h (BS.singleton 10))
         act torn h
 

@@ -23,7 +23,9 @@ import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.FilePath ((</>))
 import System.IO (hClose)
 
-import Pm.Config (pmDir, readPmState, requirePmTrusted, resolvePmPath)
+import qualified Data.Text as T
+
+import Pm.Config (pmDir, readPmState, readRootInfo, requirePmTrusted, resolvePmPath)
 import Pm.Op (userRelOk)
 import Pm.Types
 import Pm.Win (deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary)
@@ -66,7 +68,27 @@ loadCatalog root = do
   tr <- requirePmTrusted root
   case tr of
     Left m -> pure (CatRefused [m])
-    Right () -> classify <$> loadCatalog' root
+    Right () -> do
+      cl <- classify <$> loadCatalog' root
+      case cl of
+        -- 41 轮 #5：catRootId 落盘后此前无人读——快照整目录拷贝/恢复错位到
+        -- 别的库时零告警载入，而快照决定 backup/import/undo 去读写哪些文件、
+        -- scan 拿谁当 sha 复用种子。载入时与 .pm/root-id.json 对账，对不上 =
+        -- 不是这个库的索引，整条链拒绝（种子随之作废，scan 全量重建）。
+        CatLoaded c _ -> do
+          mi <- readRootInfo root
+          pure $ case mi of
+            Nothing ->
+              CatRefused [(pmDir root </> "root-id.json") <> " 读不出——catalog 身份核不了，拒绝载入；人工核查后 pm scan 重建"]
+            Just info
+              | riId info == catRootId c -> cl
+              | otherwise ->
+                  CatRefused
+                    [ "catalog 身份不符：快照属于 root " <> T.unpack (catRootId c)
+                        <> "，本库标识是 " <> T.unpack (riId info)
+                        <> "——像是整目录拷贝/恢复错位，拒绝使用；确认后 pm scan 重建"
+                    ]
+        _ -> pure cl
  where
   classify (Just c, ws) = CatLoaded c ws
   classify (Nothing, []) = CatAbsent

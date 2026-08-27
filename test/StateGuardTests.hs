@@ -26,7 +26,7 @@ import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Catalog (catalogMaybe, loadCatalog, saveCatalog)
+import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog, saveCatalog)
 import Pm.Commands (TrashCmd (..), runTrash)
 import Pm.Config (Config (..), SideCacheWrite (..), ensurePmSubdir, pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
@@ -40,7 +40,7 @@ import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, 
 import Pm.Trash (TrashRecord (..), appendManifest, manifestMaybe, readManifest, trashDir)
 import Pm.Win (NameKind (..), deleteBoundAt, moveBoundNoReplace)
 import Pm.Status (StatusOpts (..), runStatus)
-import Pm.Types (Catalog, RootInfo (..), RootRole (..))
+import Pm.Types (Catalog (..), RootInfo (..), RootRole (..))
 import TestUtil
 
 stateGuardTests :: TestTree
@@ -71,6 +71,7 @@ stateGuardTests =
     , testCase "三十六轮 F1 classifyGitProbe 三态穷举：查不出 ≠ 不存在（ProbeUnknown 必须 Left）" caseClassifyGitProbe
     , testCase "三十六轮 F1 悬空 .git junction → 判 git 语境要 .gitignore（布尔探针会当「无 git」放行）" caseDanglingGitJunction
     , testCase "第一方自审 R5：.pm 是 junction → ensurePmSubdir/savePlan/appendManifest 拒绝且库外零目录副作用" caseEnsurePmSubdirNoSideEffect
+    , testCase "41 轮 #5 catalog 身份闸：catRootId ≠ root-id.json → CatRefused（拷贝/恢复错位快照不当种子）；相符照常载入" caseCatalogIdentityMismatch
     ]
 
 -- 本模块只需要 hardlink（/H）与文件 symlink（无开关）两种形态；目录 junction
@@ -709,3 +710,26 @@ caseEnsurePmSubdirNoSideEffect = withSystemTempDirectory "pm-sguard" $ \dir -> d
   either (const (pure ())) (const (assertFailure "appendManifest 应拒绝 junction 化的 .pm")) ra
   doesDirectoryExist (outside </> "trash") >>= (@?= False)
   removeDirectoryLink (pmDir root)
+
+-- | 41 轮 #5：catRootId 是身份字段，落盘后此前**无人读**——把 A 库的 .pm
+-- 整目录拷去 B 库（迁移/恢复错位）后 loadCatalog 零告警载入，而快照决定
+-- backup/import/undo 去读写哪些文件、scan 拿谁当 sha 复用种子。loader 汇点
+-- 与 .pm/root-id.json 对账，对不上整链拒绝（同 P3b-13 的闸下沉纪律）。
+caseCatalogIdentityMismatch :: IO ()
+caseCatalogIdentityMismatch = withSystemTempDirectory "pm-catid" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True root
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "real-rid" RoleMain now Nothing)
+  saveCatalog root (mkCat [])
+  cl <- loadCatalog root
+  case cl of
+    CatRefused ws -> assertBool ("应点名身份不符: " <> show ws) (any ("身份不符" `isInfixOf`) ws)
+    _ -> assertFailure "错位快照竟被载入（或被当成缺席）"
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  cl2 <- loadCatalog root
+  case cl2 of
+    CatLoaded c ws -> do
+      catRootId c @?= "m"
+      ws @?= []
+    _ -> assertFailure "身份相符的快照必须照常载入"

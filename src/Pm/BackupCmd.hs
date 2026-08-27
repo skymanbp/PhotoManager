@@ -28,7 +28,7 @@ import Pm.Backup (discoverBackupRoot)
 import Pm.Catalog (CatalogLoad (..), catalogMaybe, catalogOr, loadCatalog, loadNote, saveCatalog)
 import Pm.Cli (GoOpts (..), mainFresh, refreshBackupCache, reportScanIssues, savePlanAndMaybeRun)
 import Pm.Config
-import Pm.ConfigEdit (rootsNested)
+import Pm.ConfigEdit (checkConfig, rootsNested)
 import Pm.Diff (BackupDiff (..), backupDiff, backupPlanItems)
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Plan
@@ -140,8 +140,23 @@ backupInitRun path cfg = do
       case fresh of
         Left e -> pure (Left ("配置无法重新读入: " <> e))
         Right c0 -> do
-          _ <- writeConfig c0 {cfgBackupId = Just rid, cfgBackupSubpath = Just sub}
-          pure (Right ())
+          -- 41 轮 #1：预检用的是**进锁前**的配置快照——锁内按盘上最新配置把
+          -- 嵌套判定重跑一遍，并把将写入的整份记录过 'checkConfig'（四条配置
+          -- 写路径的汇点纪律；此前唯独这条锁内只写不验，与并发的
+          -- `pm config set --vault` 交错时嵌套配置被静默写成）。
+          nMain <- rootsNested (cfgMainPath c0) abs'
+          nVault <- maybe (pure False) (rootsNested abs') (cfgVaultPath c0)
+          let c1 = c0 {cfgBackupId = Just rid, cfgBackupSubpath = Just sub}
+          errs <- checkConfig c1
+          let bad =
+                ["备份路径与主库嵌套（" <> abs' <> "）" | nMain]
+                  <> ["备份路径与 vault 嵌套（" <> abs' <> "）" | nVault]
+                  <> errs
+          if null bad
+            then do
+              _ <- writeConfig c1
+              pure (Right ())
+            else pure (Left ("登记被拒（锁内按盘上最新配置复验）: " <> intercalate "；" bad))
     pure (fromMaybe (Left "另一个 pm 正在改配置（配置锁被占），备份盘没登记进配置") m)
 
 -- | CLI 渲染层：把 'backupInitRun' 的结果印成人读输出并给退出码。

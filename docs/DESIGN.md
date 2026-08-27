@@ -662,7 +662,7 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
   新写法拒绝了，不证明它拒绝的是真实存在的危险。
 
   **作用域**（二十九轮：此处此前无限定，是四条 finding 的共同来源）：
-  `.pm` 状态文件的三个打开口（`openStateRead` / `openStateAppend` /
+  `.pm` 状态文件的三个打开口（`openStateRead` / `openStateAppendTail` /
   `openStateLock`）、内容探测 `probeConfined`、以及 GUI 的 `GET /api/thumb`。
   **不含** Exec 三条 Op 里的用户数据内容读（`sha256File`）——见下。
 

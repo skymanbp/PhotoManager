@@ -41,7 +41,7 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Data.Time (diffUTCTime, getCurrentTime)
 import GHC.Conc (getNumProcessors)
-import System.Directory (doesDirectoryExist, makeAbsolute)
+import System.Directory (doesDirectoryExist, doesFileExist, makeAbsolute)
 import System.FilePath ((</>))
 import Text.Printf (printf)
 
@@ -149,36 +149,48 @@ runInit o = do
                 -- 设置没保留（TOML 坏了 / 非 UTF-8 / 相对路径……整份解码失败，
                 -- cfgBackupId 随之丢失）。硬拒绝不可取：pm init 是唯一不经
                 -- withCfg 的入口，是从坏配置里逃出来的唯一通路；先说再写。
-                st <- if exists then loadConfigState else pure (CfgAbsent "")
-                let (mold, lost) = case st of
-                      CfgOk c -> (Just c, Nothing)
-                      CfgUnreadable why -> (Nothing, Just why)
-                      CfgAbsent _ -> (Nothing, Nothing)
-                vaultOk <- mapM doesDirectoryExist (ioVault o)
-                let newCfg =
-                      Config
-                          { cfgMainPath = mainPath
-                          , cfgVaultPath = ioVault o
-                          , cfgPhotosJson = ioPhotosJson o
-                          , cfgWorkers = ioWorkers o
-                          , cfgBackupId = maybe Nothing cfgBackupId mold
-                          , cfgBackupSubpath = maybe Nothing cfgBackupSubpath mold
-                          , -- P7：发布路径/push 目标与备份盘登记同类——它们是
-                            -- config set / GUI 设置页的产物，init 没有对应旗标，
-                            -- --force 重建时不保留就是静默丢设置。
-                            cfgPortfolioDir = maybe Nothing cfgPortfolioDir mold
-                          , cfgVaultPush = maybe Nothing cfgVaultPush mold
-                          , cfgPortfolioPush = maybe Nothing cfgPortfolioPush mold
-                          }
-                case (ioVault o, vaultOk) of
-                  (Just vp, Just False) -> pure (Left ("vault 路径不存在: " <> vp))
-                  _ -> do
-                    -- 工作流 C101：整份配置过同一个汇点校验（主库/vault 不嵌套、
-                    -- 备份登记成对、路径绝对）——init 是四条写路径之一
-                    errs <- checkConfig newCfg
-                    if null errs
-                      then (\fp -> Right (fp, lost)) <$> writeConfig newCfg
-                      else pure (Left (intercalate "\n" errs))
+                -- 41 轮 #3：exists=False 也要问 'loadConfigState'——「配置缺失
+                -- 但躺着孤儿 <cfg>.tmp」的知识在它那里（上次 writeConfig 崩在
+                -- 删旧与改名之间，.tmp 是完整的新配置）。此前 init 按 exists
+                -- 直接绕过，会在旁边再写一份全新配置，把待恢复的备份盘登记等
+                -- 设置永久变成死文件。拒绝并复述恢复指引，核完再跑。
+                st <- loadConfigState
+                orphan <- doesFileExist (cfgFp <> ".tmp")
+                if not exists && orphan
+                  then
+                    pure . Left $ case st of
+                      CfgAbsent m -> m
+                      _ -> cfgFp <> ".tmp 存在（上次配置写入中断）——先人工核查（改名采用或删除），再重跑 pm init"
+                  else do
+                    let (mold, lost) = case st of
+                          CfgOk c -> (Just c, Nothing)
+                          CfgUnreadable why -> (Nothing, Just why)
+                          CfgAbsent _ -> (Nothing, Nothing)
+                    vaultOk <- mapM doesDirectoryExist (ioVault o)
+                    let newCfg =
+                          Config
+                              { cfgMainPath = mainPath
+                              , cfgVaultPath = ioVault o
+                              , cfgPhotosJson = ioPhotosJson o
+                              , cfgWorkers = ioWorkers o
+                              , cfgBackupId = maybe Nothing cfgBackupId mold
+                              , cfgBackupSubpath = maybe Nothing cfgBackupSubpath mold
+                              , -- P7：发布路径/push 目标与备份盘登记同类——它们是
+                                -- config set / GUI 设置页的产物，init 没有对应旗标，
+                                -- --force 重建时不保留就是静默丢设置。
+                                cfgPortfolioDir = maybe Nothing cfgPortfolioDir mold
+                              , cfgVaultPush = maybe Nothing cfgVaultPush mold
+                              , cfgPortfolioPush = maybe Nothing cfgPortfolioPush mold
+                              }
+                    case (ioVault o, vaultOk) of
+                      (Just vp, Just False) -> pure (Left ("vault 路径不存在: " <> vp))
+                      _ -> do
+                        -- 工作流 C101：整份配置过同一个汇点校验（主库/vault 不
+                        -- 嵌套、备份登记成对、路径绝对）——init 是四条写路径之一
+                        errs <- checkConfig newCfg
+                        if null errs
+                          then (\fp -> Right (fp, lost)) <$> writeConfig newCfg
+                          else pure (Left (intercalate "\n" errs))
       case mw of
         Nothing -> putStrLn "另一个 pm 正在改配置（config.lock 被持有），初始化未写入，稍后重试" >> pure 2
         Just (Left msg) -> putStrLn msg >> pure 2

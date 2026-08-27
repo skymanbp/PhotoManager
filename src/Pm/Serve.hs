@@ -112,11 +112,11 @@ data ServeOpts = ServeOpts
 
 -- | 一次 serve 会话的状态：配置、token、可写开关、vault 缓存刷新的进程内互斥。
 data ServeEnv = ServeEnv
-  { seCfgRef :: IORef Config
-    -- ^ 配置**每次请求**读一次：`POST /api/config` 改完之后同一个 serve 进程
-    -- 必须立刻按新配置回答，否则用户改完路径还要重启 GUI（P4-8）。
-  , seCfgStamp :: IORef (Maybe (UTCTime, Integer))
-    -- ^ 快照对应的 config.toml 变更戳（C105：终端带外改动也要被看见）。
+  { seCfgSnap :: IORef (Config, Maybe (UTCTime, Integer), Bool)
+    -- ^ 配置快照、其 config.toml 变更戳、有效位——**一个** IORef 成组存取
+    -- （41 轮 #4：拆两个 ref 时两个写端点可交错成〈旧配置, 新戳〉且永不
+    -- 自愈）。有效位 False = 作废，下一请求必从盘上重读（C105/P4-8）；
+    -- 作废与「配置文件不存在（戳 Nothing）」是两个状态，不共用编码。
   , seToken :: BS.ByteString
   , seWritable :: Bool
   , seAllowApply :: Bool
@@ -129,9 +129,9 @@ data ServeEnv = ServeEnv
 -- | @allowApply@ 蕴含 writable：见模块头的三级授权。
 newServeEnv :: Config -> BS.ByteString -> Bool -> Bool -> IO ServeEnv
 newServeEnv cfg tok writable allowApply = do
-  ref <- newIORef cfg
-  st <- configFilePath >>= configStamp >>= newIORef
-  ServeEnv ref st tok (writable || allowApply) allowApply <$> newMVar () <*> newMVar ()
+  -- 〈配置, 戳〉一次配对写入（装载与读戳之间的毫秒级启动窗口沿旧例登记）。
+  snap <- configFilePath >>= configStamp >>= \st -> newIORef (cfg, st, True)
+  ServeEnv snap tok (writable || allowApply) allowApply <$> newMVar () <*> newMVar ()
 
 -- | 本次请求应答所依据的配置。第一方自审工作流 C105：此前快照只在本进程的
 -- POST 之后刷新，终端里 `pm config set` / `pm backup init` 改了 config.toml
@@ -144,9 +144,8 @@ currentConfig :: ServeEnv -> IO (Either String Config)
 currentConfig env = do
   fp <- configFilePath
   now <- configStamp fp
-  seen <- readIORef (seCfgStamp env)
-  boot <- readIORef (seCfgRef env)
-  if now == seen
+  (boot, seen, ok) <- readIORef (seCfgSnap env)
+  if ok && now == seen
     then pure (Right boot)
     else do
       r <- loadConfig
@@ -154,14 +153,20 @@ currentConfig env = do
         Left m -> pure (Left ("配置文件已在外部改动但无法重新载入（" <> m <> "）——修正后重试"))
         Right fresh -> do
           let merged = fresh {cfgMainPath = cfgMainPath boot}
-          setServeConfig env merged
+          -- 41 轮 #4：载入后**再读一次戳**，与载入前一致才可与配置成对入册；
+          -- 载入期间又被改（戳不同）→ 有效位 False，下一请求必然重读。
+          now2 <- configStamp fp
+          writeIORef (seCfgSnap env) (merged, now2, now2 == now)
           pure (Right merged)
 
--- | 写端点改完配置后刷新快照与戳（'currentConfig' 由此不再重读一次）。
+-- | 写端点改完配置后**作废**快照。41 轮 #4：此前这里「写配置引用」与「读
+-- 盘上变更戳」是两步独立动作，两个写端点并发可交错成〈旧配置, 新戳〉——
+-- 〈配置, 戳〉配对只允许发生在 'currentConfig' 的双读戳路径上；这里只作废
+-- （主库锚点随快照保持），下一请求必然从盘上重读到刚写入的值。
 setServeConfig :: ServeEnv -> Config -> IO ()
-setServeConfig env c = do
-  writeIORef (seCfgRef env) c
-  configFilePath >>= configStamp >>= writeIORef (seCfgStamp env)
+setServeConfig env _ = do
+  (boot, seen, _) <- readIORef (seCfgSnap env)
+  writeIORef (seCfgSnap env) (boot, seen, False)
 
 -- | 启动时打印给调用方的一行 JSON。
 data Announce = Announce

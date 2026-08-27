@@ -244,7 +244,7 @@ caseTrashEmptyBarrier = withDup $ \root sha a b -> do
 caseBarrierRunsInsideLock :: IO ()
 caseBarrierRunsInsideLock = withDup $ \root sha a b -> do
   now <- getCurrentTime
-  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
   plan <- (\p -> p {plRootPath = root}) <$> planOf [(a, sha)]
   seen <- newIORef Nothing
@@ -265,7 +265,7 @@ caseBarrierRunsInsideLock = withDup $ \root sha a b -> do
 caseKernelRefusesMissingBarrier :: IO ()
 caseKernelRefusesMissingBarrier = withDup $ \root sha a b -> do
   now <- getCurrentTime
-  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
   plan <- (\p -> p {plRootPath = root}) <$> planOf [(a, sha)]
   r <- execPlan defaultExecEnv plan
@@ -282,7 +282,7 @@ caseKernelRefusesMissingBarrier = withDup $ \root sha a b -> do
 caseBarrierBadDemotion :: IO ()
 caseBarrierBadDemotion = withDup $ \root sha a b -> do
   now <- getCurrentTime
-  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
   p0 <- planOf [(a, sha)]
   let plan = p0 {plRootPath = root}
@@ -352,7 +352,7 @@ planOf vs =
       { plId = "20260101-000000-abcdef"
       , plKind = "dedupe"
       , plRootPath = "."
-      , plRootId = Just "r"
+      , plRootId = Just "m"
       , plCreated = t0
       , plItems =
           [ PlanItem ix (OpQuarantine v (T.pack sha) "dedupe:test") StPending Nothing

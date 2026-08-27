@@ -97,6 +97,7 @@ catalogTests =
           let e1 = Entry ("相册" </> "测试照片.JPG") 42 123456789 "aa" KindPhoto (Just now)
               e2 = Entry ("Raw" </> "2023" </> "x.ARW") 7 9 "bb" KindPhoto (Just now)
               cat = Catalog "rid-1" now (entryMap [e1, e2])
+          writeRootInfo root (RootInfo "rid-1" RoleMain now Nothing)
           saveCatalog root cat
           (loaded, warns) <- catalogMaybe <$> loadCatalog root
           warns @?= []
@@ -106,6 +107,7 @@ catalogTests =
         withSystemTempDirectory "pm-test" $ \root -> do
           now <- getCurrentTime
           let mk rid = Catalog rid now (entryMap [])
+          writeRootInfo root (RootInfo "g4" RoleMain now Nothing)
           mapM_ (saveCatalog root . mk) ["g1", "g2", "g3", "g4"]
           let base = catalogPath root
           e0 <- doesFileExist base
@@ -614,6 +616,7 @@ doctorTests =
           let root = dir </> "root"
           createDirectoryIfMissing True (root </> "相册")
           hLock <- openExclusiveBinary (root </> "相册" </> "locked.jpg")
+          writeRootInfo root (RootInfo "m" RoleMain t0 Nothing)
           saveCatalog root (mkCat [mkE ("相册" </> "locked.jpg") "aa"])
           (fs, code) <- runDoctor root (DoctorOpts True False)
           hClose hLock

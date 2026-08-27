@@ -277,6 +277,7 @@ caseCatalogPathValidation = withSystemTempDirectory "pm-guard" $ \dir -> do
   -- doctor --deep / clean 见证直接读取 → 整份拒绝载入（快照可由 scan 重建）
   let good = dir </> "good"
   createDirectoryIfMissing True good
+  writeRootInfo good (RootInfo "m" RoleMain t0 Nothing)
   saveCatalog good (mkCat [mkE ("成片" </> "ok.jpg") "aa"])
   (g, w0) <- catalogMaybe <$> loadCatalog good
   assertBool "正常快照应载入" (maybe False (const True) g)
@@ -304,6 +305,7 @@ caseCatalogGenerationSemantics = withSystemTempDirectory "pm-guard" $ \dir -> do
   -- ① 半写/损坏 JSON：可回退，这正是三代轮转要救的场景
   let torn = dir </> "torn"
   createDirectoryIfMissing True torn
+  writeRootInfo torn (RootInfo "m" RoleMain t0 Nothing)
   saveCatalog torn (mkCat [mkE ("成片" </> "gen1.jpg") "aa"])
   saveCatalog torn (mkCat [mkE ("成片" </> "gen2.jpg") "bb"])
   doesFileExist (catalogPath torn <> ".1") >>= (@?= True) -- 确有上一代可退

@@ -36,9 +36,8 @@ module Pm.Win
   , whenPresent
   , openExclusiveBinary
   , openFreshBinary
-  , openStateAppend
+  , openStateAppendTail
   , openStateRead
-  , tailUnterminated
   , openStateLock
   , handleFinalPath
   , handleIsAt
@@ -53,7 +52,7 @@ module Pm.Win
   ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (IOException, SomeException, bracket, catch, finally, mask, onException, try)
+import Control.Exception (IOException, SomeException, catch, finally, mask, onException, try)
 import Control.Monad (unless, when)
 import Data.Bits (testBit, (.&.))
 import qualified Data.ByteString as BS
@@ -67,7 +66,6 @@ import Foreign.Storable (peek, peekByteOff)
 import System.Directory (canonicalizePath, doesPathExist)
 import System.FilePath (hasDrive, isPathSeparator, splitDirectories, (</>))
 import System.IO
-import System.IO.Error (isDoesNotExistError)
 import qualified System.Win32.Console as Win32Console
 import qualified System.Win32.File as Win32File
 import System.Win32.Types (LPTSTR, hANDLEToHandle, peekTString, withHandleToHANDLE, withTString)
@@ -281,7 +279,7 @@ handleIsSingleLink h = do
 -- 就被判成不可信，@pm clean staging@ 与 @pm trash empty@ 于是长期 HELD。
 -- 方向是安全的，代价是永远清不掉（codex 二十八轮 #2）。
 --
--- nlink 判定**仍然保留**在 @.pm@ 状态文件的三个打开口（'openStateAppend' /
+-- nlink 判定**仍然保留**在 @.pm@ 状态文件的三个打开口（'openStateAppendTail' /
 -- 'openStateRead' / 'openStateLock'）——那里问的是另一件事：pm 自己的状态
 -- 不得与任何别的名字共享同一个对象，nlink == 1 正是那个问题的正解。
 data FileId = FileId {fidVolume :: Word32, fidIndex :: Word64}
@@ -356,19 +354,34 @@ normPath p =
     ('\\' : '\\' : '?' : '\\' : rest) -> rest
     _ -> q
 
--- | @.pm@ 内状态文件的受控打开：打开后**立刻**查 link count，\>1 即关闭并
--- 拒绝。@AppendMode@ 不截断，所以"先打开再判"是安全的——判定失败时尚未写入
--- 任何字节。截断语义（@WriteMode@）不得用此函数：那会在判定之前就毁掉内容，
--- 覆盖写一律走"独占创建 tmp → 'moveBoundNoReplace' 落位"。
-openStateAppend :: FilePath -> IO Handle
-openStateAppend fp = do
-  h <- openBoundTo AppendMode fp
+-- | @.pm@ 内状态文件的受控**追加**打开：打开后立刻查 link count，\>1 即关闭
+-- 并拒绝；随后在**同一句柄**上读末字节答「末行是否半截」（第一方自审工作流
+-- F028 的尾部状态），游标移回文件尾后交给调用方追加。
+--
+-- 41 轮 #6：查尾与追加此前是**两次独立打开**（'openStateRead' 读一次尾字节、
+-- 再按名字开追加句柄）——两步之间整个文件可被替换，尾判属于旧对象、补换行
+-- 落到新对象上。合成一次打开后不存在第二次名字解析。@ReadWriteMode@ 缺失即
+-- 创建、绝不截断（同锁文件口径）；判定失败时尚未写入任何字节。截断语义
+-- （@WriteMode@）不得用此函数：覆盖写一律走"独占创建 tmp →
+-- 'moveBoundNoReplace' 落位"。
+openStateAppendTail :: FilePath -> IO (Bool, Handle)
+openStateAppendTail fp = do
+  h <- openBoundTo ReadWriteMode fp
   ok <- handleIsSingleLink h
-  if ok
-    then pure h
-    else do
+  if not ok
+    then do
       hClose h
       ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝写入——人工核查"))
+    else do
+      n <- hFileSize h
+      torn <-
+        if n == 0
+          then pure False
+          else do
+            hSeek h AbsoluteSeek (n - 1)
+            (/= BS.singleton 10) <$> BS.hGet h 1
+      hSeek h SeekFromEnd 0
+      pure (torn, h)
 
 -- | **P5-D 的取用口**：打开 @fp@，然后在**句柄**上确认它绑定的正是 @fp@ 这
 -- 条路径上的对象；不是就关掉并拒绝。
@@ -712,25 +725,3 @@ deleteBoundAt fp = withDisposeHandle fp $ \h -> do
   case r of
     Just e -> ioError (userError (fp <> ": 句柄删除失败，Win32 错误码 " <> show e))
     Nothing -> pure ()
-
--- | 文件非空且末字节不是换行（第一方自审工作流 F028：追加前的尾部状态）。
--- 走同一受信读口 'openStateRead'（句柄 link count），只读末字节；不存在 =
--- 无尾部；其它读失败 → 抛（核不了 = 不追加）。
-tailUnterminated :: FilePath -> IO Bool
-tailUnterminated fp = do
-  r <-
-    try
-      ( bracket (openStateRead fp) hClose $ \h -> do
-          n <- hFileSize h
-          if n == 0
-            then pure False
-            else do
-              hSeek h AbsoluteSeek (n - 1)
-              (/= BS.singleton 10) <$> BS.hGet h 1
-      )
-      :: IO (Either IOException Bool)
-  case r of
-    Right b -> pure b
-    Left e
-      | isDoesNotExistError e -> pure False
-      | otherwise -> ioError (userError (fp <> " 追加前尾部状态查不出（" <> show e <> "）——不追加"))

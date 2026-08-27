@@ -32,6 +32,7 @@ import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist)
 import System.FilePath (normalise, splitDirectories)
 
 import qualified Data.Text as T
+import Pm.Backup (discoverBackupRoots)
 import Pm.Config (Config (..), checkAbsolute, configFilePath, loadConfig, withConfigLock, writeConfig)
 import Pm.Publish (cmdPath, pushTarget)
 
@@ -59,12 +60,30 @@ checkConfig c = do
     Just v -> do
       n <- rootsNested (cfgMainPath c) v
       pure ["vault 与主库嵌套（" <> v <> " vs " <> cfgMainPath c <> "）——展示集必须在库外，否则 scan 把它索引进主库、dedupe 把每张已推送照片报成重复" | n]
+  -- 41 轮 #1（对称向）：备份盘按 UUID+盘内相对路径登记，绝对路径要现场发现
+  -- （'discoverBackupRoots'）。盘在场 → 每个命中与主库/vault 各判一次嵌套；
+  -- 盘不在场 → 无从核（登记时点已在锁内验过，见 'Pm.BackupCmd'；这一半的
+  -- 残余登记见 REVIEW-LOG 41 轮）。
+  bkNested <- case (cfgBackupId c, cfgBackupSubpath c) of
+    (Just _, Just _) -> do
+      er <- discoverBackupRoots c
+      case er of
+        Right (_, bs) -> concat <$> mapM bkOne bs
+        Left _ -> pure []
+    _ -> pure []
   let absErr = either (: []) (const []) (checkAbsolute c)
       pairErr = case (cfgBackupId c, cfgBackupSubpath c) of
         (Just _, Nothing) -> ["备份盘登记不完整（只有 id、缺 subpath）—— 重跑 pm backup init <盘上镜像路径>"]
         (Nothing, Just _) -> ["备份盘登记不完整（只有 subpath、缺 id）—— 重跑 pm backup init <盘上镜像路径>"]
         _ -> []
-  pure (absErr <> nested <> pairErr)
+  pure (absErr <> nested <> pairErr <> bkNested)
+ where
+  bkOne b = do
+    nm <- rootsNested (cfgMainPath c) b
+    nv <- maybe (pure False) (\v -> rootsNested v b) (cfgVaultPath c)
+    pure
+      (["备份盘与主库嵌套（" <> b <> "）——镜像必须在库外" | nm]
+        <> ["备份盘与 vault 嵌套（" <> b <> "）——镜像必须在展示集之外" | nv])
 
 -- | 三态字段：'Nothing' = 本次不动；@Just Nothing@ = 清空；@Just (Just x)@ = 设成 x。
 data ConfigPatch = ConfigPatch

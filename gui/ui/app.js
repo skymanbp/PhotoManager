@@ -61,7 +61,10 @@
   // 「最新请求胜出」（40 轮 #5 的类级修法）：每个视图一个代号，await 回来时
   // 代号已变就丢弃这次响应——快速连点/切页/键盘会让旧响应晚到并覆盖新
   // 选择；计划明细乱序时「执行」按钮绑的就是旧计划。凡是会被用户重复触发、
-  // 且渲染依赖「当前选择」的加载器一律走它，不各自发明。
+  // 且渲染依赖「当前选择」的加载器一律走它，不各自发明。41 轮 #2：**失败
+  // 路径同样适用**——旧请求晚到的异常会经 catch/.catch 改写画面（连接横幅、
+  // 卡片、明细区）。每个加载器整体包一层 try/catch：stale 的异常丢弃，当前
+  // 代的异常照抛给调用方既有的兜底。
   const gens = {};
   const stamp = (k) => (gens[k] = (gens[k] || 0) + 1);
   const stale = (k, g) => g !== gens[k];
@@ -70,108 +73,114 @@
   const LAYER = { Raw: ["Raw 原片", "var(--raw)"], "成片": ["成片", "var(--proc)"], "相册": ["相册（收藏）", "var(--album)"], "To-Be-Sync'd": ["暂存区", "var(--stage)"] };
   async function loadStatus(fresh) {
     const gen = stamp("status");
-    const s = await getJson("/api/status" + (fresh ? "?fresh=1" : ""));
-    if (stale("status", gen)) return;
-    const banner = $("#status-banner"); banner.className = "banner hidden"; banner.textContent = "";
-    const steps = [];
-    if (!s.index) {
-      banner.className = "banner warn"; banner.textContent = "主库尚未索引：" + s.root + "\n→ 在终端运行 pm scan（首次全量约 10–25 分钟）";
-      $("#layer-cards").innerHTML = ""; return;
-    }
-    const i = s.index;
-    $("#index-meta").textContent = `索引于 ${when(i.scannedAt)}（${i.ageMinutes} 分钟前）· ${i.files} 文件 · ${gib(i.bytes)}`;
-    // 分层卡片
-    const cards = $("#layer-cards"); cards.innerHTML = "";
-    const order = ["Raw", "成片", "相册", "To-Be-Sync'd"];
-    const byName = Object.fromEntries(i.layers.map((l) => [l.name, l]));
-    for (const n of order.concat(i.layers.map((l) => l.name).filter((n) => !order.includes(n)))) {
-      const l = byName[n]; if (!l) continue;
-      const [label, color] = LAYER[n] || [n, "var(--accent)"];
-      const c = el("div", "card");
-      c.style.setProperty("--c", color);
-      const k = el("div", "k"); k.appendChild(el("span", null, label)); k.appendChild(el("span", null, gib(l.bytes)));
-      c.appendChild(k);
-      c.appendChild(el("div", "v", l.files.toLocaleString() + " 文件"));
-      c.appendChild(el("div", "s", (100 * l.bytes / Math.max(1, i.bytes)).toFixed(0) + "% 的容量"));
-      const bar = el("div", "bar"); const fill = el("i"); fill.style.width = (100 * l.bytes / Math.max(1, i.bytes)).toFixed(1) + "%"; bar.appendChild(fill); c.appendChild(bar);
-      cards.appendChild(c);
-    }
-    // 新鲜度（与 Pm.Status 的渲染同一口径：读取错误也计入，不隐身）
-    const fl = $("#fresh-line");
-    if (i.freshness) {
-      const f = i.freshness, errs = f.errors || 0, n = f.new + f.changed + f.missing + errs;
-      fl.textContent = n === 0 ? "✓ 索引与磁盘一致" : `⚠ 索引已过期或核对受阻：新增 ${f.new} / 变更 ${f.changed} / 消失 ${f.missing} / 读取错误 ${errs} → 在终端运行 pm scan`;
-      if (n) steps.push(["索引已过期或核对受阻", "pm scan"]);
-    } else fl.textContent = "（未核对新鲜度——点右上「核对新鲜度」做一次 stat 级比对，约 2 秒）";
-    if (i.oldestVerifiedDays != null) fl.textContent += ` · 最久未验证字节 ${i.oldestVerifiedDays} 天前`;
-    if (i.stagingEvents.length) {
-      const all = i.stagingFiles > 0 && i.stagingArchived === i.stagingFiles;
-      steps.push(all ? [`暂存区 ${i.stagingEvents.length} 个事件 ${i.stagingFiles} 文件已全部归档（冗余）`, "pm clean staging（需插备份盘）"] : [`暂存区 ${i.stagingEvents.length} 个事件未归档`, "pm import"]);
-    }
-    // 备份盘
-    const bchip = $("#backup-chip"), bsum = $("#backup-summary"), bdet = $("#backup-detail");
-    const b = i.backup;
-    if (b.state === "absent") { bchip.textContent = "未登记"; bchip.className = "chip"; bsum.textContent = "还没有登记备份盘"; bdet.textContent = "插上硬盘后在终端运行：pm backup init <盘上镜像路径>，再 pm backup。之后这里会显示上次同步时间与滞后量。"; steps.push(["备份盘未登记", "pm backup init <镜像路径> → pm backup"]); }
-    else if (b.state === "untrusted") { bchip.textContent = "缓存不可信"; bchip.className = "chip bad"; bsum.textContent = b.error; bdet.textContent = "人工核查 .pm/backup-cache"; steps.push(["备份缓存不可信", "人工核查"]); }
-    else { const m = b.meta, lag = m.add + m.update; bchip.textContent = lag === 0 ? "上次同步无滞后" : `落后 ${lag} 项`; bchip.className = "chip " + (lag === 0 ? "ok" : "warn"); bsum.textContent = `上次同步 ${when(m.at)} · ${m.path}`; bdet.textContent = `待新增 ${m.add} · 待更新 ${m.update} · 备份盘多出 ${m.extra}（EXTRA 只报告，永不删）。插盘后运行 pm backup 刷新。`; if (lag) steps.push([`备份盘落后 ${lag} 项`, "插盘后 pm backup"]); }
-    // vault（用完整差异接口，"差哪些"）
-    let vaultFailed = false;
     try {
-      const v = await getJson("/api/vault/status");
+      const s = await getJson("/api/status" + (fresh ? "?fresh=1" : ""));
       if (stale("status", gen)) return;
-      // held 是 new 的注解子集（六态集合不变）：算"还差多少"时要扣掉
-      const held = (v.held || []).length;
-      const diff = v.new.length - held + v.missing.length + v.renamed.length + v.drift.length + v.unstable.length;
-      const chip = $("#vault-chip"); chip.textContent = diff === 0 ? "已同步" : `${diff} 项差异`; chip.className = "chip " + (diff === 0 ? "ok" : "warn");
-      $("#vault-summary").textContent = `相册 ${v.source_count} 张 ↔ vault ${v.vault_count} 张 · ${v.vault_dir}`;
-      const pills = $("#vault-pills"); pills.innerHTML = "";
-      for (const [k, label] of [["ok", "一致"], ["new", "NEW 待推送"], ["held", "暂不同步"], ["missing", "vault 多出"], ["renamed", "改名"], ["drift", "内容漂移"], ["duplicate", "重复"], ["unpushable", "不可推"], ["unstable", "读取不稳"]]) {
-        const arr = v[k] || [];
-        // NEW 的数字扣掉已决定不同步的；held 自己不算"热"（它是已经做过的决定）
-        const n = k === "new" ? arr.length - held : arr.length;
-        const p = el("span", "pill" + (k !== "ok" && k !== "held" && n ? " hot" : ""), label); p.appendChild(el("b", null, String(n))); pills.appendChild(p);
+      const banner = $("#status-banner"); banner.className = "banner hidden"; banner.textContent = "";
+      const steps = [];
+      if (!s.index) {
+        banner.className = "banner warn"; banner.textContent = "主库尚未索引：" + s.root + "\n→ 在终端运行 pm scan（首次全量约 10–25 分钟）";
+        $("#layer-cards").innerHTML = ""; return;
       }
-      const lists = $("#vault-lists"); lists.innerHTML = "";
-      const mk = (title, arr, f) => { if (!arr.length) return; const d = el("details"); d.appendChild(el("summary", null, `${title}（${arr.length}）`)); const ul = el("ul"); for (const x of arr) ul.appendChild(el("li", null, f(x))); d.appendChild(ul); lists.appendChild(d); };
-      const heldNames = new Set((v.held || []).map(([n]) => n));
-      mk("NEW —— 相册有、vault 没有（去「分类推送」）", v.new.filter((n) => !heldNames.has(n)), (n) => n);
-      mk("暂不同步 —— 你决定先不放进 vault（随时可改）", v.held || [], ([n]) => n);
-      mk("暂不同步 · 决定已失效（回到 NEW）", v.held_stale || [], ([n, why]) => n + "：" + why);
-      mk("MISSING —— vault 有、相册没有（只报告，决定权在你）", v.missing, ([n, c]) => c + "/" + n);
-      mk("RENAME —— 内容相同、名字不同（只报告）", v.renamed, ([n, m, c]) => `${n} ≡ ${c}/${m}`);
-      mk("DRIFT —— 同名但内容不同（推送时出裁决计划）", v.drift, ([n, c]) => c + "/" + n);
-      mk("UNSTABLE —— 读取期间在变化，稍后重试", v.unstable, ([n, loc]) => loc + "/" + n);
-      const newActive = v.new.length - held;
-      if (newActive) steps.push([`${newActive} 张 NEW 待分类推送`, "去「分类推送」", "vault"]);
-      if ((v.held_stale || []).length) steps.push([`${v.held_stale.length} 条「暂不同步」已失效（照片换过）`, "去「分类推送」重新决定", "vault"]);
-      // 按钮名只有一个：分类推送页的 #btn-plan =「保存决定并生成推送计划」。
-      // 这里、空网格提示、上手页三处此前各叫各的，用户按名字找不到按钮。
-      if (v.drift.length) steps.push([`${v.drift.length} 张 DRIFT 待裁决`, "「保存决定并生成推送计划」后 pm resolve"]);
+      const i = s.index;
+      $("#index-meta").textContent = `索引于 ${when(i.scannedAt)}（${i.ageMinutes} 分钟前）· ${i.files} 文件 · ${gib(i.bytes)}`;
+      // 分层卡片
+      const cards = $("#layer-cards"); cards.innerHTML = "";
+      const order = ["Raw", "成片", "相册", "To-Be-Sync'd"];
+      const byName = Object.fromEntries(i.layers.map((l) => [l.name, l]));
+      for (const n of order.concat(i.layers.map((l) => l.name).filter((n) => !order.includes(n)))) {
+        const l = byName[n]; if (!l) continue;
+        const [label, color] = LAYER[n] || [n, "var(--accent)"];
+        const c = el("div", "card");
+        c.style.setProperty("--c", color);
+        const k = el("div", "k"); k.appendChild(el("span", null, label)); k.appendChild(el("span", null, gib(l.bytes)));
+        c.appendChild(k);
+        c.appendChild(el("div", "v", l.files.toLocaleString() + " 文件"));
+        c.appendChild(el("div", "s", (100 * l.bytes / Math.max(1, i.bytes)).toFixed(0) + "% 的容量"));
+        const bar = el("div", "bar"); const fill = el("i"); fill.style.width = (100 * l.bytes / Math.max(1, i.bytes)).toFixed(1) + "%"; bar.appendChild(fill); c.appendChild(bar);
+        cards.appendChild(c);
+      }
+      // 新鲜度（与 Pm.Status 的渲染同一口径：读取错误也计入，不隐身）
+      const fl = $("#fresh-line");
+      if (i.freshness) {
+        const f = i.freshness, errs = f.errors || 0, n = f.new + f.changed + f.missing + errs;
+        fl.textContent = n === 0 ? "✓ 索引与磁盘一致" : `⚠ 索引已过期或核对受阻：新增 ${f.new} / 变更 ${f.changed} / 消失 ${f.missing} / 读取错误 ${errs} → 在终端运行 pm scan`;
+        if (n) steps.push(["索引已过期或核对受阻", "pm scan"]);
+      } else fl.textContent = "（未核对新鲜度——点右上「核对新鲜度」做一次 stat 级比对，约 2 秒）";
+      if (i.oldestVerifiedDays != null) fl.textContent += ` · 最久未验证字节 ${i.oldestVerifiedDays} 天前`;
+      if (i.stagingEvents.length) {
+        const all = i.stagingFiles > 0 && i.stagingArchived === i.stagingFiles;
+        steps.push(all ? [`暂存区 ${i.stagingEvents.length} 个事件 ${i.stagingFiles} 文件已全部归档（冗余）`, "pm clean staging（需插备份盘）"] : [`暂存区 ${i.stagingEvents.length} 个事件未归档`, "pm import"]);
+      }
+      // 备份盘
+      const bchip = $("#backup-chip"), bsum = $("#backup-summary"), bdet = $("#backup-detail");
+      const b = i.backup;
+      if (b.state === "absent") { bchip.textContent = "未登记"; bchip.className = "chip"; bsum.textContent = "还没有登记备份盘"; bdet.textContent = "插上硬盘后在终端运行：pm backup init <盘上镜像路径>，再 pm backup。之后这里会显示上次同步时间与滞后量。"; steps.push(["备份盘未登记", "pm backup init <镜像路径> → pm backup"]); }
+      else if (b.state === "untrusted") { bchip.textContent = "缓存不可信"; bchip.className = "chip bad"; bsum.textContent = b.error; bdet.textContent = "人工核查 .pm/backup-cache"; steps.push(["备份缓存不可信", "人工核查"]); }
+      else { const m = b.meta, lag = m.add + m.update; bchip.textContent = lag === 0 ? "上次同步无滞后" : `落后 ${lag} 项`; bchip.className = "chip " + (lag === 0 ? "ok" : "warn"); bsum.textContent = `上次同步 ${when(m.at)} · ${m.path}`; bdet.textContent = `待新增 ${m.add} · 待更新 ${m.update} · 备份盘多出 ${m.extra}（EXTRA 只报告，永不删）。插盘后运行 pm backup 刷新。`; if (lag) steps.push([`备份盘落后 ${lag} 项`, "插盘后 pm backup"]); }
+      // vault（用完整差异接口，"差哪些"）
+      let vaultFailed = false;
+      try {
+        const v = await getJson("/api/vault/status");
+        if (stale("status", gen)) return;
+        // held 是 new 的注解子集（六态集合不变）：算"还差多少"时要扣掉
+        const held = (v.held || []).length;
+        const diff = v.new.length - held + v.missing.length + v.renamed.length + v.drift.length + v.unstable.length;
+        const chip = $("#vault-chip"); chip.textContent = diff === 0 ? "已同步" : `${diff} 项差异`; chip.className = "chip " + (diff === 0 ? "ok" : "warn");
+        $("#vault-summary").textContent = `相册 ${v.source_count} 张 ↔ vault ${v.vault_count} 张 · ${v.vault_dir}`;
+        const pills = $("#vault-pills"); pills.innerHTML = "";
+        for (const [k, label] of [["ok", "一致"], ["new", "NEW 待推送"], ["held", "暂不同步"], ["missing", "vault 多出"], ["renamed", "改名"], ["drift", "内容漂移"], ["duplicate", "重复"], ["unpushable", "不可推"], ["unstable", "读取不稳"]]) {
+          const arr = v[k] || [];
+          // NEW 的数字扣掉已决定不同步的；held 自己不算"热"（它是已经做过的决定）
+          const n = k === "new" ? arr.length - held : arr.length;
+          const p = el("span", "pill" + (k !== "ok" && k !== "held" && n ? " hot" : ""), label); p.appendChild(el("b", null, String(n))); pills.appendChild(p);
+        }
+        const lists = $("#vault-lists"); lists.innerHTML = "";
+        const mk = (title, arr, f) => { if (!arr.length) return; const d = el("details"); d.appendChild(el("summary", null, `${title}（${arr.length}）`)); const ul = el("ul"); for (const x of arr) ul.appendChild(el("li", null, f(x))); d.appendChild(ul); lists.appendChild(d); };
+        const heldNames = new Set((v.held || []).map(([n]) => n));
+        mk("NEW —— 相册有、vault 没有（去「分类推送」）", v.new.filter((n) => !heldNames.has(n)), (n) => n);
+        mk("暂不同步 —— 你决定先不放进 vault（随时可改）", v.held || [], ([n]) => n);
+        mk("暂不同步 · 决定已失效（回到 NEW）", v.held_stale || [], ([n, why]) => n + "：" + why);
+        mk("MISSING —— vault 有、相册没有（只报告，决定权在你）", v.missing, ([n, c]) => c + "/" + n);
+        mk("RENAME —— 内容相同、名字不同（只报告）", v.renamed, ([n, m, c]) => `${n} ≡ ${c}/${m}`);
+        mk("DRIFT —— 同名但内容不同（推送时出裁决计划）", v.drift, ([n, c]) => c + "/" + n);
+        mk("UNSTABLE —— 读取期间在变化，稍后重试", v.unstable, ([n, loc]) => loc + "/" + n);
+        const newActive = v.new.length - held;
+        if (newActive) steps.push([`${newActive} 张 NEW 待分类推送`, "去「分类推送」", "vault"]);
+        if ((v.held_stale || []).length) steps.push([`${v.held_stale.length} 条「暂不同步」已失效（照片换过）`, "去「分类推送」重新决定", "vault"]);
+        // 按钮名只有一个：分类推送页的 #btn-plan =「保存决定并生成推送计划」。
+        // 这里、空网格提示、上手页三处此前各叫各的，用户按名字找不到按钮。
+        if (v.drift.length) steps.push([`${v.drift.length} 张 DRIFT 待裁决`, "「保存决定并生成推送计划」后 pm resolve"]);
+      } catch (e) {
+        if (stale("status", gen)) return; // 41 轮 #2：stale 失败不许改画面
+        // 三态，别压成两态：「没配 vault」是**状态载荷**说的（i.vault === null
+        // ⇔ 配置里没有 vault 路径），不是从抛出的异常猜的。网络断了、500、
+        // root 锁被占（409）同样会走到这个 catch——那是**读取失败**，必须挂
+        // bad 并把原因写出来；此前一律显示中性的"未配置"，读不出来看着像
+        // 没配置，用户会去设置页反复填一个早就填好的路径。
+        const chip = $("#vault-chip");
+        $("#vault-pills").innerHTML = ""; $("#vault-lists").innerHTML = "";
+        if (i.vault == null) {
+          chip.textContent = "未配置"; chip.className = "chip";
+          $("#vault-summary").textContent = "配置里还没有 vault 展示集目录——在「设置」页填一个。";
+        } else {
+          vaultFailed = true;
+          chip.textContent = "读取失败"; chip.className = "chip bad";
+          $("#vault-summary").textContent = e.message;
+        }
+      }
+      // 下一步
+      const ns = $("#next-steps"); ns.innerHTML = "";
+      // 有区块没载出来就不能说"没有待办"——那是把未知说成已知（vault 差异
+      // 可能正好是待办本身）。
+      if (!steps.length && !vaultFailed && !s.warnings.length) ns.appendChild(el("li", null, "✓ 没有待办：索引、vault、备份都无需动作。"));
+      if (vaultFailed) ns.appendChild(el("li", null, "⚠ vault 状态没读出来，上面的清单可能不全——看 vault 卡片里的原因。"));
+      for (const [what, how, tab] of steps) { const li = el("li"); li.appendChild(el("span", null, what + " → ")); if (tab) { const a = el("a", null, how); a.onclick = () => showTab(tab); li.appendChild(a); } else li.appendChild(el("code", null, how)); ns.appendChild(li); }
+      for (const w of s.warnings) { const li = el("li", null, "⚠ " + w); ns.appendChild(li); }
     } catch (e) {
-      // 三态，别压成两态：「没配 vault」是**状态载荷**说的（i.vault === null
-      // ⇔ 配置里没有 vault 路径），不是从抛出的异常猜的。网络断了、500、
-      // root 锁被占（409）同样会走到这个 catch——那是**读取失败**，必须挂
-      // bad 并把原因写出来；此前一律显示中性的"未配置"，读不出来看着像
-      // 没配置，用户会去设置页反复填一个早就填好的路径。
-      const chip = $("#vault-chip");
-      $("#vault-pills").innerHTML = ""; $("#vault-lists").innerHTML = "";
-      if (i.vault == null) {
-        chip.textContent = "未配置"; chip.className = "chip";
-        $("#vault-summary").textContent = "配置里还没有 vault 展示集目录——在「设置」页填一个。";
-      } else {
-        vaultFailed = true;
-        chip.textContent = "读取失败"; chip.className = "chip bad";
-        $("#vault-summary").textContent = e.message;
-      }
+      if (stale("status", gen)) return; // stale 失败不许改画面（41 轮 #2）
+      throw e; // 当前代的失败照旧交给调用方兜底（fail 横幅等）
     }
-    // 下一步
-    const ns = $("#next-steps"); ns.innerHTML = "";
-    // 有区块没载出来就不能说"没有待办"——那是把未知说成已知（vault 差异
-    // 可能正好是待办本身）。
-    if (!steps.length && !vaultFailed && !s.warnings.length) ns.appendChild(el("li", null, "✓ 没有待办：索引、vault、备份都无需动作。"));
-    if (vaultFailed) ns.appendChild(el("li", null, "⚠ vault 状态没读出来，上面的清单可能不全——看 vault 卡片里的原因。"));
-    for (const [what, how, tab] of steps) { const li = el("li"); li.appendChild(el("span", null, what + " → ")); if (tab) { const a = el("a", null, how); a.onclick = () => showTab(tab); li.appendChild(a); } else li.appendChild(el("code", null, how)); ns.appendChild(li); }
-    for (const w of s.warnings) { const li = el("li", null, "⚠ " + w); ns.appendChild(li); }
   }
 
   // ── 分类推送 ──
@@ -212,59 +221,64 @@
     // single-flight：连按数字键 3 会并发起多轮，旧轮在新轮 revoke 之后
     // 还会继续下载原图并建 blob URL（codex 二十轮 minor）。用代号作废旧轮。
     const gen = stamp("vault");
-    const grid = $("#vault-grid"); grid.innerHTML = "";
-    for (const u of thumbUrls) URL.revokeObjectURL(u); thumbUrls = [];
-    // 这里**不**清 #plan-result：makePlan 成功后紧接着调 loadVault 刷新网格，
-    // 顺手就把刚写出来的「计划 id / 执行命令 / 计划文件路径」抹了——那是这一页
-    // 唯一一次说出计划 id 的机会。横幅只在用户**开始新一轮**时清（makePlan 开头）。
-    assign.clear(); vaultDrift = 0; heldInitial = new Set();
-    let meta;
-    try { meta = await getJson("/api/vault/new"); } catch (e) {
-      if (stale("vault", gen)) return; // 旧轮失败：别动新一轮的网格
-      grid.appendChild(el("div", "muted", "vault 未配置或不可用：" + e.message)); updateProgress(0); return;
-    }
-    if (stale("vault", gen)) return;
-    vaultDrift = (meta.drift || []).length;
-    heldInitial = new Set((meta.held || []).map((e) => e.name));
-    for (const n of heldInitial) assign.set(n, HOLD); // 回显盘上已有的决定
-    const items = (meta.new || []).concat(meta.held || []);
-    updateProgress(items.length);
-    if (!items.length) {
-      grid.appendChild(el("div", "muted", vaultDrift
-        ? `没有待推送的 NEW；但有 ${vaultDrift} 项 DRIFT（同名、内容不同）——点「保存决定并生成推送计划」出一份纯裁决计划，再在终端 pm resolve。`
-        : "没有待推送的 NEW 照片——相册与 vault 已一致。"));
-      return;
-    }
-    const cards = [];
-    for (const e of items) {
-      const card = el("div", "gcard");
-      const ph = el("div", "ph", "加载中…"); card.appendChild(ph);
-      const body = el("div", "body"); body.appendChild(el("div", "name", e.name)); body.appendChild(el("div", "meta", e.size != null ? mib(e.size) : ""));
-      const seg = el("div", "seg");
-      // 三个 vault 类目 + 第四个「暂不同步」：后者不是 vault 目录，只是主库里
-      // 的一条本地决定，随时能改回类目。
-      for (const c of meta.categories.concat([HOLD])) {
-        const b = el("button", c === HOLD ? "hold" : null, c === HOLD ? "暂不同步" : c);
-        b.onclick = () => { if (submitting) return; assign.set(e.name, c); for (const x of seg.children) x.classList.toggle("on", x === b); card.classList.add("done"); updateProgress(items.length); };
-        if (assign.get(e.name) === c) { b.classList.add("on"); card.classList.add("done"); }
-        seg.appendChild(b);
+    try {
+      const grid = $("#vault-grid"); grid.innerHTML = "";
+      for (const u of thumbUrls) URL.revokeObjectURL(u); thumbUrls = [];
+      // 这里**不**清 #plan-result：makePlan 成功后紧接着调 loadVault 刷新网格，
+      // 顺手就把刚写出来的「计划 id / 执行命令 / 计划文件路径」抹了——那是这一页
+      // 唯一一次说出计划 id 的机会。横幅只在用户**开始新一轮**时清（makePlan 开头）。
+      assign.clear(); vaultDrift = 0; heldInitial = new Set();
+      let meta;
+      try { meta = await getJson("/api/vault/new"); } catch (e) {
+        if (stale("vault", gen)) return; // 旧轮失败：别动新一轮的网格
+        grid.appendChild(el("div", "muted", "vault 未配置或不可用：" + e.message)); updateProgress(0); return;
       }
-      body.appendChild(seg); card.appendChild(body); grid.appendChild(card);
-      cards.push([e, ph]);
-    }
-    // 顺序拉图（每张原图可能几十 MB），缩小后再挂上去
-    for (const [e, ph] of cards) {
-      if (stale("vault", gen)) return; // 已被新一轮取代：不再下载、不再建 URL
-      try {
-        if (!e.sha) throw new Error("catalog 无 sha");
-        const blob = await (await get("/api/thumb/" + e.sha)).blob();
-        const small = await shrink(blob);
-        if (stale("vault", gen)) return;
-        if (!small) { ph.textContent = "缩略失败（不挂原图）"; continue; }
-        const url = URL.createObjectURL(small); thumbUrls.push(url);
-        const img = document.createElement("img"); img.alt = e.name; img.src = url;
-        ph.textContent = ""; ph.appendChild(img);
-      } catch (err) { ph.textContent = "无缩略图：" + err.message; }
+      if (stale("vault", gen)) return;
+      vaultDrift = (meta.drift || []).length;
+      heldInitial = new Set((meta.held || []).map((e) => e.name));
+      for (const n of heldInitial) assign.set(n, HOLD); // 回显盘上已有的决定
+      const items = (meta.new || []).concat(meta.held || []);
+      updateProgress(items.length);
+      if (!items.length) {
+        grid.appendChild(el("div", "muted", vaultDrift
+          ? `没有待推送的 NEW；但有 ${vaultDrift} 项 DRIFT（同名、内容不同）——点「保存决定并生成推送计划」出一份纯裁决计划，再在终端 pm resolve。`
+          : "没有待推送的 NEW 照片——相册与 vault 已一致。"));
+        return;
+      }
+      const cards = [];
+      for (const e of items) {
+        const card = el("div", "gcard");
+        const ph = el("div", "ph", "加载中…"); card.appendChild(ph);
+        const body = el("div", "body"); body.appendChild(el("div", "name", e.name)); body.appendChild(el("div", "meta", e.size != null ? mib(e.size) : ""));
+        const seg = el("div", "seg");
+        // 三个 vault 类目 + 第四个「暂不同步」：后者不是 vault 目录，只是主库里
+        // 的一条本地决定，随时能改回类目。
+        for (const c of meta.categories.concat([HOLD])) {
+          const b = el("button", c === HOLD ? "hold" : null, c === HOLD ? "暂不同步" : c);
+          b.onclick = () => { if (submitting) return; assign.set(e.name, c); for (const x of seg.children) x.classList.toggle("on", x === b); card.classList.add("done"); updateProgress(items.length); };
+          if (assign.get(e.name) === c) { b.classList.add("on"); card.classList.add("done"); }
+          seg.appendChild(b);
+        }
+        body.appendChild(seg); card.appendChild(body); grid.appendChild(card);
+        cards.push([e, ph]);
+      }
+      // 顺序拉图（每张原图可能几十 MB），缩小后再挂上去
+      for (const [e, ph] of cards) {
+        if (stale("vault", gen)) return; // 已被新一轮取代：不再下载、不再建 URL
+        try {
+          if (!e.sha) throw new Error("catalog 无 sha");
+          const blob = await (await get("/api/thumb/" + e.sha)).blob();
+          const small = await shrink(blob);
+          if (stale("vault", gen)) return;
+          if (!small) { ph.textContent = "缩略失败（不挂原图）"; continue; }
+          const url = URL.createObjectURL(small); thumbUrls.push(url);
+          const img = document.createElement("img"); img.alt = e.name; img.src = url;
+          ph.textContent = ""; ph.appendChild(img);
+        } catch (err) { ph.textContent = "无缩略图：" + err.message; }
+      }
+    } catch (e) {
+      if (stale("vault", gen)) return; // stale 失败不许改画面（41 轮 #2）
+      throw e; // 当前代的失败照旧交给调用方兜底（fail 横幅等）
     }
   }
   const post = (path, body) => req(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -342,31 +356,36 @@
   // ── 计划 ──
   async function loadPlans() {
     const gen = stamp("plans");
-    const d = await getJson("/api/plans");
-    if (stale("plans", gen)) return;
-    const tb = $("#plan-table tbody"); tb.innerHTML = "";
-    $("#plan-detail").innerHTML = ""; $("#plan-detail").appendChild(el("div", "muted", d.plans.length ? "选一个计划查看明细" : "还没有计划"));
-    const sorted = d.plans.slice().sort((a, b) => (a.created < b.created ? 1 : -1));
-    for (const p of sorted) {
-      const tr = el("tr");
-      const td0 = el("td"); td0.appendChild(el("span", "badge " + p.kind, p.kind)); tr.appendChild(td0);
-      tr.appendChild(el("td", null, p.id)); tr.appendChild(el("td", null, when(p.created)));
-      tr.appendChild(el("td", null, String(p.items))); tr.appendChild(el("td", null, String(p.pending))); tr.appendChild(el("td", null, String(p.skipped))); tr.appendChild(el("td", null, String(p.needsDecision)));
-      tr.onclick = () => {
-        for (const x of tb.children) x.classList.remove("sel"); tr.classList.add("sel");
-        // 先把明细区清成占位再去取：载失败时留在页上的会是**上一个**计划的
-        // 明细，而高亮行已经换成了刚点的这一行——看着就像点开了它。
-        const box = $("#plan-detail"); box.innerHTML = ""; box.appendChild(el("div", "muted", "载入中…"));
-        showPlan(p.id).catch((e) => {
-          box.innerHTML = ""; box.appendChild(el("div", "muted", "载不出这个计划"));
-          const b = $("#apply-result"); b.className = "banner bad"; b.textContent = "载不出计划 " + p.id + "：" + e.message;
-        });
-      };
-      tb.appendChild(tr);
+    try {
+      const d = await getJson("/api/plans");
+      if (stale("plans", gen)) return;
+      const tb = $("#plan-table tbody"); tb.innerHTML = "";
+      $("#plan-detail").innerHTML = ""; $("#plan-detail").appendChild(el("div", "muted", d.plans.length ? "选一个计划查看明细" : "还没有计划"));
+      const sorted = d.plans.slice().sort((a, b) => (a.created < b.created ? 1 : -1));
+      for (const p of sorted) {
+        const tr = el("tr");
+        const td0 = el("td"); td0.appendChild(el("span", "badge " + p.kind, p.kind)); tr.appendChild(td0);
+        tr.appendChild(el("td", null, p.id)); tr.appendChild(el("td", null, when(p.created)));
+        tr.appendChild(el("td", null, String(p.items))); tr.appendChild(el("td", null, String(p.pending))); tr.appendChild(el("td", null, String(p.skipped))); tr.appendChild(el("td", null, String(p.needsDecision)));
+        tr.onclick = () => {
+          for (const x of tb.children) x.classList.remove("sel"); tr.classList.add("sel");
+          // 先把明细区清成占位再去取：载失败时留在页上的会是**上一个**计划的
+          // 明细，而高亮行已经换成了刚点的这一行——看着就像点开了它。
+          const box = $("#plan-detail"); box.innerHTML = ""; box.appendChild(el("div", "muted", "载入中…"));
+          showPlan(p.id).catch((e) => {
+            box.innerHTML = ""; box.appendChild(el("div", "muted", "载不出这个计划"));
+            const b = $("#apply-result"); b.className = "banner bad"; b.textContent = "载不出计划 " + p.id + "：" + e.message;
+          });
+        };
+        tb.appendChild(tr);
+      }
+      if (d.errors.length) { const tr = el("tr"); const td = el("td", "muted", "⚠ 装不出来的计划：" + d.errors.map((e) => e[0] + "：" + e[1]).join("；")); td.colSpan = 7; tr.appendChild(td); tb.appendChild(tr); }
+      // 打开即显示最新计划的明细，不用先点
+      if (sorted.length) { tb.firstChild.classList.add("sel"); await showPlan(sorted[0].id); }
+    } catch (e) {
+      if (stale("plans", gen)) return; // stale 失败不许改画面（41 轮 #2）
+      throw e; // 当前代的失败照旧交给调用方兜底（fail 横幅等）
     }
-    if (d.errors.length) { const tr = el("tr"); const td = el("td", "muted", "⚠ 装不出来的计划：" + d.errors.map((e) => e[0] + "：" + e[1]).join("；")); td.colSpan = 7; tr.appendChild(td); tb.appendChild(tr); }
-    // 打开即显示最新计划的明细，不用先点
-    if (sorted.length) { tb.firstChild.classList.add("sel"); await showPlan(sorted[0].id); }
   }
   function opRow(it) {
     const op = it.op, st = it.status.s;
@@ -383,49 +402,54 @@
     // 明细与「执行」按钮绑定的是**这份响应**的计划：旧响应晚到必须丢弃，否则
     // 用户按 B 的选择意图点两下、执行的却是 A（40 轮 #5）。
     const gen = stamp("plan");
-    const plan = await getJson("/api/plan/" + id);
-    if (stale("plan", gen)) return;
-    const box = $("#plan-detail"); box.innerHTML = "";
-    box.appendChild(el("h3", null, `${plan.kind} · ${plan.id}`));
-    box.appendChild(el("div", "muted small", `root ${plan.rootPath || plan.root || ""} · 生成于 ${when(plan.created)} · 终端执行：`)).appendChild(el("code", null, "pm apply " + plan.id));
-    const t = el("table", "items"); for (const it of plan.items) t.appendChild(opRow(it)); box.appendChild(t);
-    // 执行入口（P7）：只有 serve 带第三级授权（--allow-apply，pm ui 拉起即是）
-    // 且计划里有待执行项才渲染。两次点击确认——没有弹窗原语，同一个按钮先
-    // arm 再确认，5 秒不点第二下自动解除。
-    const pending = plan.items.filter((it) => it.status && it.status.s === "pending").length;
-    if (allowApply && pending > 0) {
-      const row = el("div", "exec-row");
-      const label = `执行这个计划（${pending} 项待执行）`;
-      const btn = el("button", "btn danger", label);
-      let armed = false, timer = null, armedAt = 0;
-      const ARM_DWELL_MS = 400; // 双击/键盘连发落在这个窗口里，不算"第二下"
-      const disarm = () => { armed = false; armedAt = 0; clearTimeout(timer); btn.classList.remove("armed"); btn.textContent = label; };
-      btn.onclick = () => {
-        if (!armed) {
-          armed = true; armedAt = performance.now(); btn.classList.add("armed");
-          // 确认文案带计划 id：看清要执行的是哪一份再点第二下
-          btn.textContent = `⚠ 再点一次确认执行 ${plan.id}（5 秒内）`;
-          // 两次点击确认的前提是**两次独立的意思表示**。焦点留在按钮上时，
-          // 一次双击、或按住 Enter 的键盘连发，会在几十毫秒内送来第二个
-          // click——那和第一下是同一个动作，却足以让照片开始搬。摘掉焦点
-          // （挡住 Enter 连发）再加一段静默期（挡住双击），窗口期内的点击
-          // 一概忽略且**保持** armed，用户重新点一下仍然生效。
-          btn.blur();
-          timer = setTimeout(disarm, 5000);
-          return;
-        }
-        if (performance.now() - armedAt < ARM_DWELL_MS) return; // 太快 = 同一个动作，仍保持已确认态
-        // 确认即**消费** armed（39 轮 #5）：此前这里不复位，请求失败后按钮
-        // 恢复可点时仍处于已确认态——单击一次就能再执行。每次执行后回到
-        // 全新未确认状态，失败重试也要重新点两下。
-        disarm();
-        applyPlan(plan.id, btn, label).catch(fail);
-      };
-      row.appendChild(btn);
-      row.appendChild(el("span", "muted small", "两段式的第二段：校验写入 + 日志，事后可 pm undo。重复执行幂等（已落位的项按内容跳过）。"));
-      box.appendChild(row);
+    try {
+      const plan = await getJson("/api/plan/" + id);
+      if (stale("plan", gen)) return;
+      const box = $("#plan-detail"); box.innerHTML = "";
+      box.appendChild(el("h3", null, `${plan.kind} · ${plan.id}`));
+      box.appendChild(el("div", "muted small", `root ${plan.rootPath || plan.root || ""} · 生成于 ${when(plan.created)} · 终端执行：`)).appendChild(el("code", null, "pm apply " + plan.id));
+      const t = el("table", "items"); for (const it of plan.items) t.appendChild(opRow(it)); box.appendChild(t);
+      // 执行入口（P7）：只有 serve 带第三级授权（--allow-apply，pm ui 拉起即是）
+      // 且计划里有待执行项才渲染。两次点击确认——没有弹窗原语，同一个按钮先
+      // arm 再确认，5 秒不点第二下自动解除。
+      const pending = plan.items.filter((it) => it.status && it.status.s === "pending").length;
+      if (allowApply && pending > 0) {
+        const row = el("div", "exec-row");
+        const label = `执行这个计划（${pending} 项待执行）`;
+        const btn = el("button", "btn danger", label);
+        let armed = false, timer = null, armedAt = 0;
+        const ARM_DWELL_MS = 400; // 双击/键盘连发落在这个窗口里，不算"第二下"
+        const disarm = () => { armed = false; armedAt = 0; clearTimeout(timer); btn.classList.remove("armed"); btn.textContent = label; };
+        btn.onclick = () => {
+          if (!armed) {
+            armed = true; armedAt = performance.now(); btn.classList.add("armed");
+            // 确认文案带计划 id：看清要执行的是哪一份再点第二下
+            btn.textContent = `⚠ 再点一次确认执行 ${plan.id}（5 秒内）`;
+            // 两次点击确认的前提是**两次独立的意思表示**。焦点留在按钮上时，
+            // 一次双击、或按住 Enter 的键盘连发，会在几十毫秒内送来第二个
+            // click——那和第一下是同一个动作，却足以让照片开始搬。摘掉焦点
+            // （挡住 Enter 连发）再加一段静默期（挡住双击），窗口期内的点击
+            // 一概忽略且**保持** armed，用户重新点一下仍然生效。
+            btn.blur();
+            timer = setTimeout(disarm, 5000);
+            return;
+          }
+          if (performance.now() - armedAt < ARM_DWELL_MS) return; // 太快 = 同一个动作，仍保持已确认态
+          // 确认即**消费** armed（39 轮 #5）：此前这里不复位，请求失败后按钮
+          // 恢复可点时仍处于已确认态——单击一次就能再执行。每次执行后回到
+          // 全新未确认状态，失败重试也要重新点两下。
+          disarm();
+          applyPlan(plan.id, btn, label).catch(fail);
+        };
+        row.appendChild(btn);
+        row.appendChild(el("span", "muted small", "两段式的第二段：校验写入 + 日志，事后可 pm undo。重复执行幂等（已落位的项按内容跳过）。"));
+        box.appendChild(row);
+      }
+      const det = el("details"); det.appendChild(el("summary", "muted small", "原始 JSON")); det.appendChild(el("pre", "raw", JSON.stringify(plan, null, 2))); box.appendChild(det);
+    } catch (e) {
+      if (stale("plan", gen)) return; // stale 失败不许改画面（41 轮 #2）
+      throw e; // 当前代的失败照旧交给调用方兜底（fail 横幅等）
     }
-    const det = el("details"); det.appendChild(el("summary", "muted small", "原始 JSON")); det.appendChild(el("pre", "raw", JSON.stringify(plan, null, 2))); box.appendChild(det);
   }
 
   // 执行一个已存计划：串行（serve 侧有 seApplyLock + root 锁），结果与逐项
@@ -464,34 +488,39 @@
   const cfgTxt = (id, v) => { $(id).value = v == null ? "" : String(v); };
   async function loadConfig() {
     const gen = stamp("config");
-    const c = await getJson("/api/config");
-    if (stale("config", gen)) return;
-    $("#config-path").textContent = "配置文件：" + c.configPath;
-    const rootWord = { present: "身份就位", absent: "还没有 root 标识", corrupt: "root 标识损坏——人工核查", untrusted: "路径不可信——人工核查" };
-    $("#cfg-main").textContent = c.main.path + "（" + (rootWord[c.main.root] || c.main.root) + (c.main.exists ? "" : " · 目录不存在") + "）";
-    cfgTxt("#cfg-vault", c.vault && c.vault.path);
-    const vn = $("#cfg-vault-note");
-    if (!c.vault) vn.textContent = "未设：不设也能用，只是 vault 相关命令会提示补配置。";
-    else if (!c.vault.exists) vn.textContent = "⚠ 目录不存在";
-    else vn.textContent = "✓ 目录在" + (c.vault.i11 ? " · I11 就绪（.gitignore 已含 .pm/）" : " · ⚠ I11 未就绪：" + (c.vault.i11why || "在这个 git 工作树里建 root 会被拒"));
-    cfgTxt("#cfg-photos", c.photosJson && c.photosJson.path);
-    cfgTxt("#cfg-workers", c.workers);
-    const pub = c.publish || {};
-    cfgTxt("#cfg-portfolio-dir", pub.portfolioDir);
-    cfgTxt("#cfg-vault-push", pub.vaultPush);
-    cfgTxt("#cfg-portfolio-push", pub.portfolioPush);
-    // /api/config 的 backup 恒是对象，两个字段各自可为 null（Serve.hs:425
-    // `object ["id" .= cfgBackupId cfg, "subpath" .= cfgBackupSubpath cfg]`）。
-    // 认盘要 UUID + 盘内相对路径**两样**：只看 id 会把手改 config.toml 落下的
-    // 半登记态说成"已登记"，然后在 subpath 位置印一个 undefined。
-    const bk = c.backup || {};
-    const bkId = bk.id != null && bk.id !== "" ? bk.id : null;
-    const bkSub = bk.subpath != null && bk.subpath !== "" ? bk.subpath : null;
-    $("#cfg-backup").textContent = bkId && bkSub
-      ? "已登记：UUID " + bkId + " · 盘内路径 " + bkSub + "（按 UUID 认盘，与盘符无关）"
-      : bkId || bkSub
-        ? "登记不完整（缺 " + (bkId ? "盘内相对路径 subpath" : "盘标识 id") + "）——在下面重新登记一次这块盘"
-        : "未登记";
+    try {
+      const c = await getJson("/api/config");
+      if (stale("config", gen)) return;
+      $("#config-path").textContent = "配置文件：" + c.configPath;
+      const rootWord = { present: "身份就位", absent: "还没有 root 标识", corrupt: "root 标识损坏——人工核查", untrusted: "路径不可信——人工核查" };
+      $("#cfg-main").textContent = c.main.path + "（" + (rootWord[c.main.root] || c.main.root) + (c.main.exists ? "" : " · 目录不存在") + "）";
+      cfgTxt("#cfg-vault", c.vault && c.vault.path);
+      const vn = $("#cfg-vault-note");
+      if (!c.vault) vn.textContent = "未设：不设也能用，只是 vault 相关命令会提示补配置。";
+      else if (!c.vault.exists) vn.textContent = "⚠ 目录不存在";
+      else vn.textContent = "✓ 目录在" + (c.vault.i11 ? " · I11 就绪（.gitignore 已含 .pm/）" : " · ⚠ I11 未就绪：" + (c.vault.i11why || "在这个 git 工作树里建 root 会被拒"));
+      cfgTxt("#cfg-photos", c.photosJson && c.photosJson.path);
+      cfgTxt("#cfg-workers", c.workers);
+      const pub = c.publish || {};
+      cfgTxt("#cfg-portfolio-dir", pub.portfolioDir);
+      cfgTxt("#cfg-vault-push", pub.vaultPush);
+      cfgTxt("#cfg-portfolio-push", pub.portfolioPush);
+      // /api/config 的 backup 恒是对象，两个字段各自可为 null（Serve.hs:425
+      // `object ["id" .= cfgBackupId cfg, "subpath" .= cfgBackupSubpath cfg]`）。
+      // 认盘要 UUID + 盘内相对路径**两样**：只看 id 会把手改 config.toml 落下的
+      // 半登记态说成"已登记"，然后在 subpath 位置印一个 undefined。
+      const bk = c.backup || {};
+      const bkId = bk.id != null && bk.id !== "" ? bk.id : null;
+      const bkSub = bk.subpath != null && bk.subpath !== "" ? bk.subpath : null;
+      $("#cfg-backup").textContent = bkId && bkSub
+        ? "已登记：UUID " + bkId + " · 盘内路径 " + bkSub + "（按 UUID 认盘，与盘符无关）"
+        : bkId || bkSub
+          ? "登记不完整（缺 " + (bkId ? "盘内相对路径 subpath" : "盘标识 id") + "）——在下面重新登记一次这块盘"
+          : "未登记";
+    } catch (e) {
+      if (stale("config", gen)) return; // stale 失败不许改画面（41 轮 #2）
+      throw e; // 当前代的失败照旧交给调用方兜底（fail 横幅等）
+    }
   }
   function cfgBanner(ok, text) { const b = $("#config-result"); b.className = "banner " + (ok ? "ok" : "bad"); b.textContent = text; }
   // 提交结果与**刷新**状态分开报：写入一旦成功，后面重载页面失败也不能把横幅
@@ -542,12 +571,17 @@
     // 同一类竞态：换了源目录再点一次，旧源的提议晚到会把「生成计划」绑到
     // 旧的 sv.src 上——计划生成会落到错的目录。
     const gen = stamp("sort");
-    const r = await req("/api/sort/survey?src=" + encodeURIComponent(src) + "&gap=" + gap);
-    const body = await r.json().catch(() => ({}));
-    if (stale("sort", gen)) return;
-    if (!r.ok) { $("#sort-summary").textContent = ""; sortNote("bad", body.error || ("HTTP " + r.status)); return; }
-    lastSurvey = body;
-    renderSurvey(body);
+    try {
+      const r = await req("/api/sort/survey?src=" + encodeURIComponent(src) + "&gap=" + gap);
+      const body = await r.json().catch(() => ({}));
+      if (stale("sort", gen)) return;
+      if (!r.ok) { $("#sort-summary").textContent = ""; sortNote("bad", body.error || ("HTTP " + r.status)); return; }
+      lastSurvey = body;
+      renderSurvey(body);
+    } catch (e) {
+      if (stale("sort", gen)) return; // stale 失败不许改画面（41 轮 #2）
+      throw e; // 当前代的失败照旧交给调用方兜底（fail 横幅等）
+    }
   }
   function renderSurvey(sv) {
     $("#sort-summary").textContent =
