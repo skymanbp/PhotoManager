@@ -17,9 +17,10 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Cli (bindExecRoot, executePlanNow)
-import Pm.Commands (resolveKeep)
-import Pm.Config (writeRootInfo)
+import Pm.Cli (PlanRun (..), bindExecRoot, executePlanNow)
+import Pm.Commands (afterApply, resolveKeep)
+import Pm.Exec (ItemOutcome (..))
+import Pm.Config (Config (..), writeRootInfo)
 import Pm.Hash (StatSnap (..), nsToUtc, statHitStable)
 import Pm.Op
 import Pm.Plan
@@ -49,7 +50,9 @@ vaultTests =
     , testCase "P3b push：.png / 非 NEW / 缺 --category 全部拒绝 exit 2" casePushRefusals
     , testCase "P3b push：DRIFT→NEEDS-DECISION→keep src→supersede→旧字节在 vault trash" casePushDriftSupersede
     , testCase "P3b bindExecRoot：vault 计划按 UUID 绑回配置路径" caseBindVaultRoot
-    , testCase "P3b gitStepsLines/planCategories：显式类目、无 -A、隔离项不入 add" caseGitSteps
+    , testCase "P3b gitStepsLines/planCategories：显式类目、无 -A、隔离项不入 add；与上线命令同一生成点（R2）" caseGitSteps
+    , testCase "工作流 F029/F068：push 收尾按落位项判——全部待裁决的一跑退出码 0 却无 git 步骤；afterApply 同口" casePushFooterNeedsLanded
+    , testCase "第一方自审 R1：listFlatPhotos/photosJsonRef 查不出 → Left；缺席仍是空/未引用" caseProbeUnknownFailClosed
     , testCase "P3b-4 #2 守卫：.git 文件/祖先仓/反规则 全 fail-closed" caseGuardVariants
     , testCase "P3b-4 #3 apply 执行期重检 I11：ignore 行被移除 → 整批拒绝零写入" caseApplyI11Recheck
     , testCase "P3b-4 #6 bindExecRoot：UUID 多重命中/role 不符 拒绝绑定" caseBindAmbiguity
@@ -58,6 +61,7 @@ vaultTests =
     , testCase "三十四轮 F1：相册文件被独占占住 → 入 UNSTABLE 单列报告，status 不崩、exit 1" caseUnstableOnLocked
     , testCase "三十四轮 F1 同族：photos.json 被独占占住 → Left（fail-closed，不得答「未被引用」）" casePhotosJsonRefLocked
     , testCase "三十五轮 F1：只有 UNSTABLE 的 push 无项分支 → exit 1（与 status 同谓词，不报 0）" caseUnstablePushExit
+    , testCase "工作流 F069 unpushable 与 push 门同谓词：.png 入列、.jpg/.jpeg 不入（pushableExt 唯一定义）" caseUnpushableMatchesPushGate
     ]
 
 h :: Char -> Text
@@ -338,7 +342,7 @@ casePushDriftSupersede = withSystemTempDirectory "pm-vault" $ \tmp -> do
   writeF (root </> "相册" </> "d.jpg") "NEWBYTES"
   writeF (vdir </> "landscape" </> "d.jpg") "OLDBYTES"
   ref <- newIORef Nothing
-  let capture p = savePlan p >> writeIORef ref (Just p) >> pure 1
+  let capture p = savePlan p >> writeIORef ref (Just p) >> pure PrSaved
   _ <- runVaultPush capture Nothing [] cfg
   mplan <- readIORef ref
   plan <- maybe (assertFailure "DRIFT 应生成计划" >> undefined) pure mplan
@@ -394,12 +398,63 @@ caseGitSteps = do
       plan = Plan "pid" "vault-push" "V:\\vault" (Just "rid") t0' [quar, copy1, copy2]
       cats = planCategories plan
   cats @?= ["landscape", "urban"]
-  let ls = gitStepsLines "V:\\vault" "pid" cats
-      cmdLines = filter (isInfixOf "git ") (drop 1 ls) -- 首行是含「禁止 -A」字样的警示语，不是命令
-  assertBool "git add 行显式列类目" ("    git add landscape urban" `elem` ls)
+  -- 工作流 F029：待裁决项落不了位，生成期预告不把它的类目摆进 add 清单
+  planCategories plan {plItems = [quar, copy1, copy2 {piStatus = StNeedsDecision "drift"}]} @?= ["landscape"]
+  -- 工作流 F068：收尾的 add 清单按**执行结果**取——未落位的项不入列
+  resultCategories [(copy1, ODone Nothing Nothing Nothing), (copy2, ONotExecuted)] @?= ["landscape"]
+  resultCategories [(copy1, OSkippedIdentical), (copy2, OFailed "x")] @?= ["landscape"]
+  -- R2（第一方自审）：收尾与「复制上线命令」同一生成点（Pm.Publish.vaultCommands）
+  -- ——git -C + 解析重渲染的 '/' 路径、显式类目前置 --、push 目标取自设置。
+  let cfg0 = mkVaultCfg "D:\\main" "V:\\vault"
+      ls = gitStepsLines cfg0 "V:\\vault" "pid" cats
+      cmdLines = drop 1 ls -- 首行是含「禁止 -A」字样的警示语，不是命令
+  assertBool ("git add 行显式列类目并带 --: " <> show ls)
+    ("    git -C \"V:/vault\" add -- landscape urban" `elem` ls)
   assertBool "命令行无 -A / 无裸 git add ." (not (any (\l -> "-A" `isInfixOf` l || "add ." `isInfixOf` l) cmdLines))
+  assertBool ("未设 push 目标 = 裸 git push: " <> show ls) ("    git -C \"V:/vault\" push" `elem` ls)
+  -- P7 的可配 push 目标必须被收尾采用（旧第二生成器硬打 origin main，无视设置）
+  let ls2 = gitStepsLines cfg0 {cfgVaultPush = Just "origin gh-pages"} "V:\\vault" "pid" cats
+  assertBool ("push 目标取自设置: " <> show ls2) ("    git -C \"V:/vault\" push -- origin gh-pages" `elem` ls2)
+  -- 嵌不进命令的路径：不出任何 git -C 行，只给手动指引
+  let ls3 = gitStepsLines cfg0 "V:\\va;ult" "pid" cats
+  assertBool ("危险路径不得出命令行: " <> show ls3) (not (any ("git -C" `isInfixOf`) ls3))
  where
   t0' = read "2026-01-01 00:00:00 UTC"
+
+-- | DRIFT-only 计划（唯一一项是 NEEDS-DECISION）真跑一遍：内核对它 ONotExecuted、
+-- 退出码 0——此前 push 收尾只看 @code == 0@，于是一个字节没落也打出整套可
+-- 粘贴的 git add/commit/push 配方。收尾必须按落位项判；'afterApply'
+-- （CLI apply / serve 的同一收尾）同一判据。
+casePushFooterNeedsLanded :: IO ()
+casePushFooterNeedsLanded = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"; vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  mkMain root
+  writeF (root </> "相册" </> "d.jpg") "NEWBYTES"
+  writeF (vdir </> "landscape" </> "d.jpg") "OLDBYTES"
+  ref <- newIORef Nothing
+  (out, code) <- captureStdout (runVaultPush (\p -> writeIORef ref (Just p) >> execNow cfg p) Nothing [] cfg)
+  code @?= 0
+  assertBool ("零落位不得打印 git 步骤: " <> out) (not ("git -C" `isInfixOf` out))
+  readFile (vdir </> "landscape" </> "d.jpg") >>= (@?= "OLDBYTES")
+  plan <- readIORef ref >>= maybe (assertFailure "DRIFT 应生成计划" >> undefined) pure
+  (out2, ()) <- captureStdout (afterApply cfg putStrLn plan [(it, ONotExecuted) | it <- plItems plan])
+  assertBool ("afterApply 零落位不得打印 git 步骤: " <> out2) (not ("git -C" `isInfixOf` out2))
+  -- 反面：一项落位就要收尾，且 add 只列落位项的类目
+  (out3, ()) <- captureStdout (afterApply cfg putStrLn plan [(it, OSkippedIdentical) | it <- plItems plan])
+  assertBool ("有落位项应打印 git 步骤: " <> out3) ("git -C" `isInfixOf` out3)
+
+-- | 第一方自审 R1：存在性探针三态化——「查不出」（非法名注入 ProbeUnknown，
+-- GetFileAttributes 报 123，确定性）必须 Left，不得塌成「空类目/未被引用」；
+-- 真缺席仍是空/未引用（行为不变的另一半）。
+caseProbeUnknownFailClosed :: IO ()
+caseProbeUnknownFailClosed = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  lf <- listFlatPhotos (tmp </> "ca<t")
+  either (const (pure ())) (\v -> assertFailure ("类目查不出应 Left，得到 " <> show v)) lf
+  pj <- photosJsonRef (Just (tmp </> "p<j.json")) "x.jpg"
+  either (const (pure ())) (\v -> assertFailure ("photos.json 查不出应 Left，得到 " <> show v)) pj
+  listFlatPhotos (tmp </> "absent") >>= (@?= Right ([], []))
+  photosJsonRef (Just (tmp </> "absent.json")) "x.jpg" >>= (@?= Right Nothing)
 
 -- ─── P3b-4（codex 评审修复） ────────────────────────────────────────────────
 
@@ -446,7 +501,7 @@ caseApplyI11Recheck = withSystemTempDirectory "pm-vault" $ \tmp -> do
   createDirectoryIfMissing True (vdir </> ".git")
   writeF (vdir </> ".gitignore") ".pm/\n"
   ref <- newIORef Nothing
-  let capture p = savePlan p >> writeIORef ref (Just p) >> pure 1
+  let capture p = savePlan p >> writeIORef ref (Just p) >> pure PrSaved
   cPlan <- runVaultPush capture (Just "landscape") ["n.jpg"] cfg
   cPlan @?= 1
   mplan <- readIORef ref
@@ -568,7 +623,7 @@ caseUnstablePushExit = withSystemTempDirectory "pm-vault" $ \tmp -> do
   createDirectoryIfMissing True (root </> "相册")
   createDirectoryIfMissing True (vdir </> "landscape")
   hLock <- openExclusiveBinary (root </> "相册" </> "locked.jpg")
-  (out, code) <- captureStdout (runVaultPush (\_ -> assertFailure "无可执行项，不得进入计划执行" >> pure 9) Nothing [] cfg)
+  (out, code) <- captureStdout (runVaultPush (\_ -> assertFailure "无可执行项，不得进入计划执行" >> pure (PrRun 9 [])) Nothing [] cfg)
   hClose hLock
   assertBool ("应报无可执行项: " <> out) ("无可执行项" `isInfixOf` out)
   code @?= 1 -- 状态未知不能报 0
@@ -590,3 +645,18 @@ findFileUnder dir name = do
         case r of
           Just hit -> pure (Just hit)
           Nothing -> go es
+
+-- | 工作流 F069：UNPUSHABLE 清单与 push 拒绝门共用 'Pm.VaultCore.pushableExt'
+-- （此前 status 侧写死 @isPng@，push 门是白名单——.jpeg 之类会两边判得不同）。
+caseUnpushableMatchesPushGate :: IO ()
+caseUnpushableMatchesPushGate = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"; vdir = tmp </> "vault"
+  mkMain root
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  writeF (root </> "相册" </> "b.jpeg") "BBB"
+  writeF (root </> "相册" </> "c.png") "CCC"
+  mapM_ (createDirectoryIfMissing True . (vdir </>)) ["landscape", "portrait", "urban"]
+  r <- computeVault True (mkVaultCfg root vdir)
+  case r of
+    Left e -> assertFailure ("computeVault 应成功: " <> show e)
+    Right v -> map fst (vrUnpushable v) @?= ["c.png"]

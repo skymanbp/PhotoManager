@@ -32,7 +32,6 @@ module Pm.Dedupe
   ) where
 
 import Control.Monad (forM)
-import Data.Char (toLower)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -42,11 +41,12 @@ import System.FilePath (splitDirectories)
 import Data.Maybe (isJust)
 
 import Pm.Hash (ContentProbe (..), anyCopyAliveExcept, probeConfined)
+import Pm.Import (foldPath)
 import Pm.Win (FileId)
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..))
 import Pm.Types
-import Pm.Versions (VersionsReport (..), versionsReport)
+import Pm.Versions (VersionsReport (..), archiveLayers, versionsReport)
 
 -- | 一组同 sha 的归档层文件（≥2 份）。
 data DupGroup = DupGroup
@@ -89,15 +89,17 @@ dedupePlanItems gs = zipWith mk [0 ..] flat
           <> "pm resolve <计划 id> --item <序号> --unskip"
       )
 
--- | 归档三层——与 'Pm.Versions' 的报告范围同一套。暂存区不在 dedupe 视野内
+-- | 归档三层——直接取 'Pm.Versions.archiveLayers'，与其报告范围**定义级**
+-- 同一（P7-J：此前这里另抄一份三元素列表）。暂存区不在 dedupe 视野内
 -- （那里的冗余是**设计内**的「已归档待清理」，归 @pm clean staging@ 管）。
+-- 与 'Pm.Import.inArchiveLayer'（只认 Raw\/成片，clean\/status 的「已归档」
+-- 口径）不同义：dedupe 连相册内的重复也要报。
 archiveLayerRel :: FilePath -> Bool
-archiveLayerRel p = take 1 (splitDirectories p) `elem` [["Raw"], ["成片"], ["相册"]]
+archiveLayerRel p = take 1 (splitDirectories p) `elem` map (: []) archiveLayers
 
--- | case-fold 后的路径键。Windows 上只差大小写的两条路径是**同一个文件**。
-foldPath :: FilePath -> String
-foldPath = map toLower
-
+-- 路径键走 'Pm.Import.foldPath'（normalise + case-fold；第一方自审 R6）：此前
+-- 这里另抄一份只做 case-fold 的定义——与 25 轮 rawExts 同型的「同一知识两处」，
+-- 分隔符拼写不同的同一条路径会被判成两条。
 -- | 同 sha 的归档层副本里，**不在本次批准隔离名单**上的那些（即幸存者）。
 --
 -- 名单比对走 'foldPath'：把只差大小写的路径也算成受害者。方向是刻意的——
@@ -115,9 +117,11 @@ survivingArchiveCopies cat victims sha =
 -- | 「这个 sha 在归档层至少还留着一份**活的**副本」。
 --
 -- catalog 声称有不算数——它是快照，而这道判定的下游是把一份副本移出归档层
--- （再往下是 @pm trash empty@ 的永久删除）。读取走 'anyCopyAlive'：逐级限域、
--- 只打开一次、句柄上查 link count、同句柄读完。同一个对象出现在两个名字下
--- 不算两份，所以 hardlink 一并拒绝。
+-- （再往下是 @pm trash empty@ 的永久删除）。读取走 'Pm.Hash.anyCopyAliveExcept'：
+-- 逐级限域 → 只打开一次 → 同句柄取身份与内容（与 'Pm.Clean.witnessId' 同一
+-- 实现）。「同一个对象出现在两个名字下不算两份」按句柄上取的 'FileId' 判，
+-- **不**按 link count——合法的 hardlink 见证**算数**（三十轮 F5 / codex
+-- 二十八轮 #2；此处旧文是第一方自审工作流 F062 扫出的未同步副本）。
 -- @excl@ = 本次被批准隔离的那些**对象**的身份。路径名单挡住"同一条路径"，
 -- 身份名单挡住"受害者与幸存者其实是同一个对象的两个名字"——两道都要
 -- （codex 二十八轮 #2）。
@@ -142,9 +146,10 @@ anyArchiveCopyAlive root cat = archiveCopyAlive root cat Set.empty
 -- 理由：**catalog 是快照，不是证据**。
 --
 -- 读不出来（占用、ACL、介质错误）与"另一份还在"必须给出相反的结论：
--- 'anyCopyAlive' 只在真读到期望 sha 时才算数，其余一律不算——fail-closed。
-recheckDedupeItems :: FilePath -> Catalog -> Plan -> IO [(Int, Text)]
-recheckDedupeItems root cat plan = do
+-- 'anyCopyAliveExcept' 只在真读到期望 sha 时才算数，其余一律不算——fail-closed。
+-- 降级提示走调用方给的打印口（工作流 F022：serve 端点收进 JSON 的 log）。
+recheckDedupeItems :: (String -> IO ()) -> FilePath -> Catalog -> Plan -> IO [(Int, Text)]
+recheckDedupeItems sink root cat plan = do
   let pending =
         [ (v, sha)
         | it <- plItems plan
@@ -164,7 +169,7 @@ recheckDedupeItems root cat plan = do
   dems <- forM (plItems plan) $ \it -> case (piStatus it, piOp it) of
     (StPending, OpQuarantine v sha _)
       | Set.member sha doomed -> do
-          putStrLn ("  ⚠ 隔离后归档层将不再有此内容的活副本，该项暂停: " <> v)
+          sink ("  ⚠ 隔离后归档层将不再有此内容的活副本，该项暂停: " <> v)
           pure [(piIx it, lastCopyWhy)]
     _ -> pure []
   pure (concat dems)

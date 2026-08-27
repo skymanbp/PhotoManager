@@ -30,10 +30,10 @@ import System.FilePath (splitDirectories)
 import Text.Printf (printf)
 
 import Pm.Backup (BackupCacheMeta (..), readBackupCacheMeta)
-import Pm.Catalog (loadCatalog)
+import Pm.Catalog (catalogMaybe, loadCatalog)
 import Pm.Config (Config (..))
-import Pm.Import (stagingArchivedSummary)
-import Pm.Scan (freshnessSweep)
+import Pm.Import (stagingArchivedSummary, stagingTop)
+import Pm.Scan (freshPending, freshnessSweep)
 import Pm.Types
 import Pm.Vault (VaultCacheMeta (..), readVaultCacheMeta)
 
@@ -73,8 +73,11 @@ data IndexSummary = IndexSummary
   , isBackup :: CacheState BackupCacheMeta
   , isVault :: Maybe (CacheState VaultCacheMeta)
     -- ^ Nothing = 配置里没有 vault
-  , isFreshness :: Maybe (Int, Int, Int)
-    -- ^ (新增, 变更, 消失)；Nothing = --cached 未核对
+  , isFreshness :: Maybe (Int, Int, Int, Int)
+    -- ^ (new, changed, missing, readErrors)；Nothing = --cached 未核对。
+    -- 第四位是三十九轮（P7）补上的：freshnessSweep 一直返回错误数，这里此前
+    -- 把它丢弃——stat 失败的文件既不进任何差异桶也不进退出码，「✓ 索引与
+    -- 磁盘一致」会在核对受阻时照说。
   }
   deriving (Show, Eq)
 
@@ -111,14 +114,14 @@ instance ToJSON StatusReport where
         , "stagingArchived" .= isStagingArchived i
         , "backup" .= isBackup i
         , "vault" .= isVault i
-        , "freshness" .= fmap (\(n, c, m) -> object ["new" .= n, "changed" .= c, "missing" .= m]) (isFreshness i)
+        , "freshness" .= fmap (\(n, c, m, e) -> object ["new" .= n, "changed" .= c, "missing" .= m, "errors" .= e]) (isFreshness i)
         ]
 
 -- | 采集（含可选的 stat 级新鲜度核对），不打印。
 statusReport :: Config -> StatusOpts -> IO StatusReport
 statusReport cfg opts = do
   let root = cfgMainPath cfg
-  (mcat, warns) <- loadCatalog root
+  (mcat, warns) <- catalogMaybe <$> loadCatalog root
   case mcat of
     Nothing -> pure (StatusReport root warns Nothing 2)
     Just cat -> do
@@ -157,13 +160,14 @@ statusReport cfg opts = do
         if stCached opts
           then pure Nothing
           else do
-            (newN, changedN, missingN, _errN) <- freshnessSweep root "" (catEntries cat)
-            pure (Just (newN, changedN, missingN))
-      let pending = maybe 0 (\(n, c, m) -> n + c + m) fresh
+            (newN, changedN, missingN, errN) <- freshnessSweep root "" (catEntries cat)
+            pure (Just (newN, changedN, missingN, errN))
+      let pending = maybe 0 freshPending fresh
           bkBad = case bk of CacheBad _ -> True; _ -> False
           vBad = case vlt of Just (CacheBad _) -> True; _ -> False
-          -- 失信缓存与差异同权计入退出码（P3b-15）
-          code = if null stagingEvents && pending == 0 && not bkBad && not vBad then 0 else 1
+          -- 失信缓存与差异同权计入退出码（P3b-15）；快照回退告警同理（工作流
+          -- F046：同一函数对两个同形的降级信号此前用了相反的政策）
+          code = if null warns && null stagingEvents && pending == 0 && not bkBad && not vBad then 0 else 1
           summary =
             IndexSummary
               { isScannedAt = catScanned cat
@@ -186,9 +190,11 @@ renderStatus :: StatusOpts -> StatusReport -> IO ()
 renderStatus opts r = do
   mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) (srWarnings r)
   case srIndex r of
-    Nothing -> do
-      putStrLn ("主库尚未索引: " <> srRoot r)
-      putStrLn "  → 运行 pm scan（首次全量约 10-25 分钟）"
+    Nothing
+      | null (srWarnings r) -> do
+          putStrLn ("主库尚未索引: " <> srRoot r)
+          putStrLn "  → 运行 pm scan（首次全量约 10-25 分钟）"
+      | otherwise -> putStrLn ("主库索引读不出（见上）: " <> srRoot r <> " → 排除原因后重试，或 pm scan 重建")
     Just i -> do
       tz <- getCurrentTimeZone
       let stamp = formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz (isScannedAt i))
@@ -250,11 +256,11 @@ renderStatus opts r = do
         Nothing
           | stCached opts -> putStrLn "  （--cached: 未做新鲜度核对）"
           | otherwise -> pure ()
-        Just (newN, changedN, missingN)
-          | newN + missingN + changedN == 0 -> putStrLn "  ✓ 索引与磁盘一致"
+        Just q@(newN, changedN, missingN, errN)
+          | freshPending q == 0 -> putStrLn "  ✓ 索引与磁盘一致"
           | otherwise -> do
-              printf "  ⚠ 索引已过期: 新增 %d / 变更 %d / 消失 %d\n" newN changedN missingN
-              putStrLn "      → pm scan"
+              printf "  ⚠ 索引已过期或核对受阻: 新增 %d / 变更 %d / 消失 %d / 读取错误 %d\n" newN changedN missingN errN
+              putStrLn "      → pm scan（有读取错误则先排除占用/权限再扫）"
 
 -- | Returns the process exit code: 0 = nothing pending, 1 = something needs
 -- attention, 2 = not usable yet (no index).
@@ -272,7 +278,7 @@ topComponent rel = case splitDirectories rel of
 stagingEventOf :: FilePath -> Maybe String
 stagingEventOf rel = case splitDirectories rel of
   (top : sub : event : _ : _)
-    | top == "To-Be-Sync'd" && sub `elem` ["Raw", "Processed"] -> Just event
+    | top == stagingTop && sub `elem` ["Raw", "Processed"] -> Just event
   _ -> Nothing
 
 gib :: Integer -> Double

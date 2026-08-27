@@ -12,6 +12,7 @@ module Pm.ExecTypes
   , updateCatalog
   ) where
 
+import Data.List (partition)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Data.Time (UTCTime)
@@ -30,6 +31,8 @@ data Checkpoint
   | CpCopyAfterIntent
   | CpCopyAfterTmp
   | CpCopyAfterFlush
+  | -- | 落位 rename 已成功、落位后复核之前（第一方自审工作流 F000 的注入点）
+    CpCopyAfterLand
   | CpCopyAfterMove
   | CpRenAfterIntent
   | CpRenAfterMove
@@ -108,15 +111,17 @@ updateCatalog now results cat = foldl step cat results
               (catEntries c)
         }
     (OpRename old new _, ODone {}) ->
-      c {catEntries = Map.fromList (map (rekey old new) (Map.toList (catEntries c)))}
+      -- 第一方自审工作流 F004：两把 key 可以改写到同一目标（目标前缀下残留着
+      -- 过期条目——目录被带外挪走后没重扫；undo 反向 rename 正是这个形状）。
+      -- Map.fromList 让**字节序**决定谁活下来；改写后的条目描述的才是此刻占着
+      -- 该路径的文件（exec 的前置条件：目标在盘上不存在），必须由它胜出：
+      -- 左偏 union。丢弃本身是对的，只是不能由排序决定。
+      let (moved, kept) = partition (underPrefix old . fst) (Map.toList (catEntries c))
+       in c {catEntries = Map.fromList (map (rekey old new) moved) `Map.union` Map.fromList kept}
     (OpQuarantine victim _ _, ODone {}) ->
       c {catEntries = Map.delete victim (catEntries c)}
     _ -> c
+  underPrefix old k = take (length (splitDirectories old)) (splitDirectories k) == splitDirectories old
   rekey old new (k, e) =
-    let oldParts = splitDirectories old
-        kParts = splitDirectories k
-     in if take (length oldParts) kParts == oldParts
-          then
-            let k' = foldr1 (</>) (splitDirectories new <> drop (length oldParts) kParts)
-             in (k', e {enPath = k'})
-          else (k, e)
+    let k' = foldr1 (</>) (splitDirectories new <> drop (length (splitDirectories old)) (splitDirectories k))
+     in (k', e {enPath = k'})

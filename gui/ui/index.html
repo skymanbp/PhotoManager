@@ -40,9 +40,10 @@
 
       <h2 class="sec">vault 展示集同步 <span class="muted small">相册 ↔ 档案仓库（个人主页用）</span></h2>
       <div id="vault-card" class="card wide">
-        <div class="card-head"><span id="vault-chip" class="chip">…</span><span id="vault-summary" class="muted"></span></div>
+        <div class="card-head"><span id="vault-chip" class="chip">…</span><span id="vault-summary" class="muted"></span><button id="btn-publish-copy" class="btn ghost">复制上线命令</button></div>
         <div id="vault-pills" class="pills"></div>
         <div id="vault-lists" class="lists"></div>
+        <div id="publish-note" class="line muted small hidden"></div>
       </div>
 
       <h2 class="sec">备份硬盘同步</h2>
@@ -80,7 +81,9 @@
         <h1>分类推送 <span class="muted small">相册里还没进 vault 的照片（NEW）——也可以决定「暂不同步」</span></h1>
         <div class="actions">
           <span id="assign-progress" class="muted">…</span>
-          <button id="btn-plan" class="btn primary" disabled>保存决定</button>
+          <!-- 按钮名与上手页、空网格提示、状态页「下一步」四处一字不差：
+               这个按钮两件事一起做（落「暂不同步」决定 + 出推送计划）。 -->
+          <button id="btn-plan" class="btn primary" disabled>保存决定并生成推送计划</button>
         </div>
       </header>
       <div id="plan-result" class="banner hidden"></div>
@@ -90,7 +93,8 @@
     <!-- ── 计划 ── -->
     <section id="tab-plans" class="tab">
       <header class="page-head"><h1>计划</h1><div class="actions"><button id="btn-plans-reload" class="btn ghost">刷新</button></div></header>
-      <p class="muted small">凡是<strong>动照片字节</strong>的写盘都是两段式：先生成计划，再 <code>pm apply &lt;id&gt;</code> 执行；执行后可 <code>pm undo</code> 回滚。这里只看，不执行。（「暂不同步」是例外：它不碰照片，只在主库 <code>.pm</code> 里记一条决定，直接写、随时可撤。）</p>
+      <p class="muted small">凡是<strong>动照片字节</strong>的写盘都是两段式：先生成计划，再执行；执行后可 <code>pm undo</code> 回滚。执行可以在这里点「执行这个计划」（要点两次确认），也可以在终端 <code>pm apply &lt;id&gt;</code>——两条路走的是同一套装载/复验/日志。（「暂不同步」是例外：它不碰照片，只在主库 <code>.pm</code> 里记一条决定，直接写、随时可撤。）</p>
+      <div id="apply-result" class="banner hidden"></div>
       <div class="split">
         <table id="plan-table" class="table"><thead><tr><th>类型</th><th>计划 id</th><th>生成时间</th><th>项</th><th>待执行</th><th>跳过</th><th>待裁决</th></tr></thead><tbody></tbody></table>
         <div id="plan-detail" class="detail"><div class="muted">选一个计划查看明细</div></div>
@@ -120,15 +124,23 @@
         </div>
 
         <div class="cfg">
-          <div class="k">photos.json（可选）</div>
+          <div class="k">photos.json（可选；配置了下面的 portfolio 仓路径则必填）</div>
           <div class="row"><input id="cfg-photos" type="text" spellcheck="false" placeholder="portfolio 的 photos.json 路径"><button id="btn-cfg-photos" class="btn">保存</button><button id="btn-cfg-photos-clear" class="btn ghost">清空</button></div>
-          <div class="s">只用于 RENAME 的<strong>只读</strong>引用检查：被它引用的文件名不会被改名（会打断已上线的图片链接）。</div>
+          <div class="s">两个用途：RENAME 的<strong>只读</strong>引用检查（被它引用的文件名不会被改名，会打断已上线的图片链接）；以及上线命令里 portfolio 仓<strong>唯一</strong>会 add 的文件——它必须在 portfolio 仓内。</div>
         </div>
 
         <div class="cfg">
           <div class="k">并发数</div>
           <div class="row"><input id="cfg-workers" type="number" min="1" max="64" placeholder="默认 = CPU 核数"><button id="btn-cfg-workers" class="btn">保存</button><button id="btn-cfg-workers-clear" class="btn ghost">恢复默认</button></div>
           <div class="s"><strong>扫描</strong>的并行度，1..64。备份盘不读它——那边默认单线程防 HDD 寻道抖动，要改用终端 <code>pm backup --workers N</code>。</div>
+        </div>
+
+        <div class="cfg">
+          <div class="k">上线命令（「状态」页的复制入口用）</div>
+          <div class="row"><input id="cfg-portfolio-dir" type="text" spellcheck="false" placeholder="portfolio 仓的本地路径（可选）"><button id="btn-cfg-portfolio-dir" class="btn">保存</button><button id="btn-cfg-portfolio-dir-clear" class="btn ghost">清空</button></div>
+          <div class="row"><input id="cfg-vault-push" type="text" spellcheck="false" placeholder="展示集仓 push 目标，如 origin main（留空 = git push）"><button id="btn-cfg-vault-push" class="btn">保存</button><button id="btn-cfg-vault-push-clear" class="btn ghost">清空</button></div>
+          <div class="row"><input id="cfg-portfolio-push" type="text" spellcheck="false" placeholder="portfolio 仓 push 目标（留空 = git push）"><button id="btn-cfg-portfolio-push" class="btn">保存</button><button id="btn-cfg-portfolio-push-clear" class="btn ghost">清空</button></div>
+          <div class="s">「复制上线命令」按 vault 目录 + 这三项生成两仓的 git 提交/推送命令：展示集仓只显式 add landscape / portrait / urban 三个类目，portfolio 仓只 add 上面的 photos.json（所以填了 portfolio 仓路径就必须同时设 photos.json，否则拒绝生成——永不整仓 add）。路径只接受盘符绝对路径且只含字母数字、空格与 -_.()'+,=@~#&，push 目标形如 <code>origin main</code>。pm 从不替你执行 git（不变量 I9）——复制后自己粘进终端，看清再回车。</div>
         </div>
 
         <div class="cfg">
@@ -145,8 +157,8 @@
       <header class="page-head"><h1>三步上手</h1></header>
       <ol class="howto">
         <li><b>看状态</b>：左侧「状态」一眼看清三件事——Raw / 成片 / 相册各多少、相册与 vault 差哪些、备份盘上次什么时候同步。</li>
-        <li><b>分类推送</b>：「分类推送」里给每张 NEW 照片选 landscape / portrait / urban，点「生成推送计划」。这一步只写计划文件，不碰照片。</li>
-        <li><b>执行</b>：在终端跑页面给出的 <code>pm apply &lt;id&gt;</code>；执行是校验写入 + 日志，随时 <code>pm undo</code>。之后按提示做 git 提交（pm 从不替你执行 git）。</li>
+        <li><b>分类推送</b>：「分类推送」里给每张 NEW 照片选 landscape / portrait / urban，点「保存决定并生成推送计划」。这一步只写计划文件，不碰照片。</li>
+        <li><b>执行</b>：到「计划」页点「执行这个计划」（点两次确认），或在终端跑 <code>pm apply &lt;id&gt;</code>——同一套校验写入 + 日志，随时 <code>pm undo</code>。之后按提示做 git 提交，或用「状态」页的「复制上线命令」（pm 从不替你执行 git）。</li>
       </ol>
       <p class="muted">安全模型：GUI 是独立进程，从不直接触碰照片文件；一切经 <code>pm serve</code> 的本机 API。pm 没有删除与覆盖原语——唯一的移出机制是带清单的隔离区。</p>
     </section>

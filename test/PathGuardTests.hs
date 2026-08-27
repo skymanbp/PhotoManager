@@ -9,23 +9,24 @@
 --    也可能是 junction——逐级下降要求路上每一段都是盘上的真名。
 --  * 独占创建（'Pm.Win.openExclusiveBinary'）：hardlink 既不是 reparse point
 --    也不改变 canonical 路径，前两层都看不见它。
+-- P7 拆分：P5-D 句柄身份用例在 "HandleGuardTests"。
 module PathGuardTests (pathGuardTests) where
 
-import Control.Exception (SomeException, bracket, try)
+import Control.Exception (SomeException, try)
 import Control.Monad (forM_, when)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeDirectory, removeDirectoryLink, renameFile)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeDirectory, removeDirectoryLink)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
-import System.IO (IOMode (ReadMode), hClose, hGetContents', openBinaryFile)
+import System.IO (hClose)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Catalog (catalogPath, loadCatalog, saveCatalog)
+import Pm.Catalog (catalogMaybe, catalogPath, loadCatalog, saveCatalog)
 import Pm.Commands (TrashCmd (..), initPreflight, runTrash)
 import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), createRootInfo, pmDir, readRootState, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
@@ -34,10 +35,10 @@ import Pm.Hash (sha256File)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, readJournal, withJournal)
 import Pm.Op
 import Pm.Plan
-import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, manifestPath, readManifest, trashDir)
+import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, manifestMaybe, manifestPath, readManifest, trashDir, trashView)
 import Pm.Types (Catalog (..), Entry (..), RootInfo (..), RootRole (..))
 import Pm.Undo (buildUndoPlan)
-import Pm.Win (handleFinalPath, handleIsAt, openBoundTo, openExclusiveBinary, pathAtOrUnder, pathUnder, resolveUnder)
+import Pm.Win (openExclusiveBinary, pathAtOrUnder, pathUnder, resolveUnder, whenPresent)
 import TestUtil
 
 pathGuardTests :: TestTree
@@ -51,7 +52,7 @@ pathGuardTests =
     , testCase "P3b-10 trash 内 junction：不递归 + 删除/搬运前 canonical 限域 → 库外文件存活" caseTrashJunctionConfinement
     , testCase "P3b-10 手编 catalog 越界 enPath → 快照拒绝载入（backup/import 拿不到非法 src）" caseCatalogPathValidation
     , testCase "P3b-10 undo：journal 非法 Op/trashRel → 拒绝生成撤销计划" caseUndoRejectsBadPaths
-    , testCase "P3b-11 .pm/trash 自身是 junction（基准被劫持）→ 遍历列空、trash empty HELD、execPlan 拒绝" caseTrashBaseJunction
+    , testCase "P3b-11 .pm/trash 自身是 junction（基准被劫持）→ 视图拒绝、trash empty HELD、execPlan 拒绝" caseTrashBaseJunction
     , testCase "P3b-11 root/alias → .pm 的目录别名 → 逐级下降拒绝，root-id.json 搬不走" casePmAliasDir
     , testCase "P3b-11 预置 hardlink 占用确定性 tmp 名 → 独占创建拒绝，库外内容不被覆盖" caseTmpHardlinkClobber
     , testCase "P3b-11 .pm/tmp/<plan> 是 junction → doctor --repair 不删库外文件" caseDoctorTmpJunction
@@ -65,12 +66,34 @@ pathGuardTests =
     , testCase "P3b-13 .pm/vault-cache 是 junction → 枚举式可信闸抓到，侧缓存一个字节都不写" caseSideCacheJunction
     , testCase "P3b-13 闸下沉到 loader：loadCatalog/readJournal/readManifest/loadPlan 全部拒绝不可信 root" caseLoaderLevelGate
     , testCase "P3b-13 两次限域之间注入 junction → 第二次检查拦下（钉住建目录后的复检）" caseExecTmpSecondCheck
-    , testCase "P5-D 句柄反查路径：中途 junction / 末级 symlink 判否；普通文件、库内 hardlink、root 经 junction 判是" caseHandleIsAt
-    , testCase "P5-D 解析之后、打开之前把中途一层换成 junction → openBoundTo 拒绝，裸 open 会读到库外（窗口已关）" caseResolveThenSwap
+    , testCase "第一方自审：whenPresent 三态；resolveUnder 拒缺失层后的 .. 与盘符/分隔符分量" caseFirstPartySweep
     ]
 
+-- | 第一方自审（0.6.0 发布前）：R1 的共用三态助手与 resolveUnder 的整段分量
+-- 预检。非法名（@<@，GetFileAttributes 报 123）是 ProbeUnknown 的确定性注入。
+caseFirstPartySweep :: IO ()
+caseFirstPartySweep = withSystemTempDirectory "pm-guard" $ \dir -> do
+  -- whenPresent：缺席 → Right Nothing；在 → Right (Just …)；查不出 → Left；
+  -- 动作抛 IO 异常（探测与动作之间被挪走/占住）→ Left
+  whenPresent (dir </> "absent") (pure ()) >>= (@?= Right Nothing)
+  writeFile (dir </> "f.txt") "X"
+  whenPresent (dir </> "f.txt") (readFile (dir </> "f.txt")) >>= (@?= Right (Just "X"))
+  wl <- whenPresent (dir </> "ill<egal") (pure ())
+  either (const (pure ())) (const (assertFailure "非法名（查不出）应 Left")) wl
+  we <- whenPresent (dir </> "f.txt") (ioError (userError "boom") :: IO ())
+  either (const (pure ())) (const (assertFailure "动作 IO 异常应收进 Left")) we
+  -- resolveUnder：缺失层之后的 .. 此前会被 foldl (</>) 原样拼上；带盘符的
+  -- 分量（c:x）会让 </> 整体替换逃出 base——整段预检后一律 Nothing
+  let root = dir </> "root"
+  createDirectoryIfMissing True root
+  resolveUnder root ("missing" </> ".." </> "x") >>= (@?= Nothing)
+  resolveUnder root ("a" </> "c:x") >>= (@?= Nothing)
+  resolveUnder root "\\evil" >>= (@?= Nothing)
+  r <- resolveUnder root ("a" </> "b.jpg")
+  assertBool "正常缺失形态仍放行（pm 自己会创建）" (r /= Nothing)
+
 mkCfg :: FilePath -> Maybe FilePath -> Config
-mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing
+mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- ─── P3b-9（六轮） ──────────────────────────────────────────────────────────
 
@@ -254,15 +277,16 @@ caseCatalogPathValidation = withSystemTempDirectory "pm-guard" $ \dir -> do
   -- doctor --deep / clean 见证直接读取 → 整份拒绝载入（快照可由 scan 重建）
   let good = dir </> "good"
   createDirectoryIfMissing True good
+  writeRootInfo good (RootInfo "m" RoleMain t0 Nothing)
   saveCatalog good (mkCat [mkE ("成片" </> "ok.jpg") "aa"])
-  (g, w0) <- loadCatalog good
+  (g, w0) <- catalogMaybe <$> loadCatalog good
   assertBool "正常快照应载入" (maybe False (const True) g)
   w0 @?= []
   -- 单代 root（无 .1）：坏 base 直接判非法
   let bad = dir </> "bad"
   createDirectoryIfMissing True bad
   saveCatalog bad (mkCat [mkE ("成片" </> "ok.jpg") "aa", mkE (".." </> ".." </> "evil.jpg") "bb"])
-  (b, ws) <- loadCatalog bad
+  (b, ws) <- catalogMaybe <$> loadCatalog bad
   b @?= Nothing
   assertBool ("应报路径非法: " <> show ws) (any ("条目路径非法" `isInfixOf`) ws)
   -- P3b-11：enPath 校验从 relPathOk 收紧到 userRelOk——".pm\journal.ndjson"
@@ -270,7 +294,7 @@ caseCatalogPathValidation = withSystemTempDirectory "pm-guard" $ \dir -> do
   let inpm = dir </> "inpm"
   createDirectoryIfMissing True inpm
   saveCatalog inpm (mkCat [mkE (".pm" </> "journal.ndjson") "cc"])
-  (p, wp) <- loadCatalog inpm
+  (p, wp) <- catalogMaybe <$> loadCatalog inpm
   p @?= Nothing
   assertBool ("指向 .pm 的条目应拒绝: " <> show wp) (any ("条目路径非法" `isInfixOf`) wp)
 
@@ -281,11 +305,12 @@ caseCatalogGenerationSemantics = withSystemTempDirectory "pm-guard" $ \dir -> do
   -- ① 半写/损坏 JSON：可回退，这正是三代轮转要救的场景
   let torn = dir </> "torn"
   createDirectoryIfMissing True torn
+  writeRootInfo torn (RootInfo "m" RoleMain t0 Nothing)
   saveCatalog torn (mkCat [mkE ("成片" </> "gen1.jpg") "aa"])
   saveCatalog torn (mkCat [mkE ("成片" </> "gen2.jpg") "bb"])
   doesFileExist (catalogPath torn <> ".1") >>= (@?= True) -- 确有上一代可退
   writeFile (catalogPath torn) "{ this is not json"
-  (t, tw) <- loadCatalog torn
+  (t, tw) <- catalogMaybe <$> loadCatalog torn
   case t of
     Nothing -> assertFailure ("半写 base 应回退到 .1: " <> show tw)
     Just c -> assertBool "回退到的应是上一代内容" (any (("gen1.jpg" `isInfixOf`) . enPath) (Map.elems (catEntries c)))
@@ -296,7 +321,7 @@ caseCatalogGenerationSemantics = withSystemTempDirectory "pm-guard" $ \dir -> do
   saveCatalog tam (mkCat [mkE ("成片" </> "gen1.jpg") "aa"])
   saveCatalog tam (mkCat [mkE (".." </> ".." </> "evil.jpg") "bb"])
   doesFileExist (catalogPath tam <> ".1") >>= (@?= True) -- 合法的上一代就在那里
-  (m, mw) <- loadCatalog tam
+  (m, mw) <- catalogMaybe <$> loadCatalog tam
   m @?= Nothing -- 但绝不回退过去
   assertBool ("应报路径非法: " <> show mw) (any ("条目路径非法" `isInfixOf`) mw)
 
@@ -349,9 +374,10 @@ caseTrashBaseJunction = withSystemTempDirectory "pm-guard" $ \dir -> do
   resolveUnder root (".pm" </> "trash" </> "v.jpg") >>= (@?= Nothing)
   -- ① .pm 家族可信性闸：所有 .pm 写入口的共同前提
   requirePmTrusted root >>= either (\m -> assertBool m ("不是 root 下的真实目录" `isInfixOf` m)) (const (assertFailure "requirePmTrusted 应拒绝 junction 基准"))
-  -- ② 遍历侧：库外内容不得被列成"隔离文件"
-  tv <- trashViewOK root
-  tvUnregistered tv @?= []
+  -- ② 读侧：被劫持的基准不是「隔离区为空」——manifest 整文件读不出 = 视图
+  --   整体拒绝（工作流 F079：此前列空 + 一条"损坏行"，trash list 报空 exit 0）
+  etv <- trashView root
+  either (\m -> assertBool m ("不是 root 下的真实目录" `isInfixOf` m)) (const (assertFailure "trashView 应拒绝被劫持的 .pm/trash 基准")) etv
   -- ③ 唯一 unlink：被劫持基准 → HELD，库外文件存活。
   -- P3b-14：appendManifest 自身现在就拒绝（完整路径 resolveUnder 在 trash
   -- 这一级看到 junction）——旧用例把"穿过 junction 写出 manifest"当 setup
@@ -665,13 +691,13 @@ caseLoaderLevelGate = withSystemTempDirectory "pm-guard" $ \dir -> do
   -- 库外放一份"看起来很正常"的 catalog 与 journal
   writeFile (outside </> "journal.ndjson") ""
   mkJunction (pmDir root) outside
-  (mc, cw) <- loadCatalog root
+  (mc, cw) <- catalogMaybe <$> loadCatalog root
   mc @?= Nothing
   assertBool ("loadCatalog 应报不可信: " <> show cw) (any ("不是 root 下的真实目录项" `isInfixOf`) cw)
   (js, jw) <- readJournal root
   js @?= []
   assertBool ("readJournal 应报不可信: " <> show jw) (any ("不是 root 下的真实目录项" `isInfixOf`) jw)
-  (ms, mw) <- readManifest root
+  (ms, mw) <- manifestMaybe <$> readManifest root
   ms @?= []
   assertBool ("readManifest 应报不可信: " <> show mw) (any ("不是 root 下的真实目录项" `isInfixOf`) mw)
   lp <- loadPlan root tpid
@@ -717,100 +743,3 @@ caseExecTmpSecondCheck = withSystemTempDirectory "pm-guard" $ \dir -> do
   readFile hostage >>= (@?= "OUTSIDE-HOSTAGE")
   removeDirectoryLink pdir
 
-
--- | P5-D 的地基（codex 二十八轮 #1）：把「解析出路径 → 按名字重开」换成
--- 「打开 → 用**句柄**确认它绑定的正是那条路径」。
---
--- 这条用例钉住 @GetFinalPathNameByHandleW@ 在五种别名形态下的**实测**行为，
--- 因为整条修法的正确性全压在它身上：
---
---  * 中途一层是 junction → 句柄绑到库外，反查出来的路径与期望不符 → 判否；
---  * 末级是文件 symlink → 同上；
---  * 普通文件 → 判是；
---  * 库内 hardlink（另一个名字在库外）→ **判是**。这是对的：那条路径上确实
---    有一个可读到这些字节的对象；它算不算"另一份独立副本"由 'FileId' 回答，
---    不由路径回答（第 28 轮 #2）。
---  * root 自身是 junction → 判是。root 由用户指定，把库根放在 junction 上是
---    合法用法（'resolveUnder' 的文档一直这么写）。
-caseHandleIsAt :: IO ()
-caseHandleIsAt = withSystemTempDirectory "pm-final" $ \tmp -> do
-  let root = tmp </> "lib"
-      outside = tmp </> "outside"
-      q p = [dq] <> p <> [dq]
-      dq = toEnum 34 :: Char
-  createDirectoryIfMissing True (root </> "Raw")
-  createDirectoryIfMissing True outside
-  writeFile (root </> "Raw" </> "real.ARW") "inside"
-  writeFile (outside </> "bait.ARW") "outside-bait"
-  writeFile (outside </> "hltarget.ARW") "hl-target"
-  _ <- readCreateProcess (shell ("mklink /J " <> q (root </> "Raw" </> "jn") <> " " <> q outside)) ""
-  _ <- readCreateProcess (shell ("mklink " <> q (root </> "Raw" </> "sl.ARW") <> " " <> q (outside </> "bait.ARW"))) ""
-  _ <- readCreateProcess (shell ("mklink /H " <> q (root </> "Raw" </> "hl.ARW") <> " " <> q (outside </> "hltarget.ARW"))) ""
-  _ <- readCreateProcess (shell ("mklink /J " <> q (tmp </> "rootlink") <> " " <> q root)) ""
-  croot <- canonicalizePath root
-  let at rel = isAtVia (croot </> rel)
-  at ("Raw" </> "real.ARW") >>= (@?= True)
-  at ("Raw" </> "jn" </> "bait.ARW") >>= (@?= False)
-  at ("Raw" </> "sl.ARW") >>= (@?= False)
-  at ("Raw" </> "hl.ARW") >>= (@?= True)
-  -- root 经 junction 到达：canonicalizePath 把它折回真身，判是
-  clink <- canonicalizePath (tmp </> "rootlink")
-  isAtVia (clink </> "Raw" </> "real.ARW") >>= (@?= True)
-  -- 反查确实拿得到路径（不是靠 Nothing 一路判否蒙对的）
-  -- NUL 设备：不是文件系统里的对象，反查必然失败 → 必须判否（fail-closed）。
-  -- 这一格钉住的是 handleIsAt 的 Nothing 分支：真实场景是没有盘符的挂载卷
-  -- （VOLUME_NAME_DOS 拿不到路径），那时候放行就等于凭空信任一个句柄。
-  nulPath <- bracket (openBinaryFile nulDevice ReadMode) hClose handleFinalPath
-  nulPath @?= Nothing
-  bracket (openBinaryFile nulDevice ReadMode) hClose (\h -> handleIsAt h nulDevice) >>= (@?= False)
-  mp <- bracket (openBinaryFile (croot </> "Raw" </> "real.ARW") ReadMode) hClose handleFinalPath
-  case mp of
-    Just p -> assertBool ("反查应给出带 real.ARW 的路径: " <> p) ("real.ARW" `isInfixOf` p)
-    Nothing -> assertFailure "handleFinalPath 应能取到普通文件的路径"
- where
-  isAtVia p = bracket (openBinaryFile p ReadMode) hClose (\h -> handleIsAt h p)
-  -- 设备命名空间的写法；裸 "NUL" 走的是 GHC 的普通路径打开，会 does not exist
-  nulDevice = [bsl, bsl, toEnum 46, bsl] <> "NUL"
-  bsl = toEnum 92 :: Char
-
-
--- | 第 28 轮 #1 的正面回答：解析与打开之间的窗口。
---
--- 时序由用例控制，所以这不是片状竞态测试而是确定性事件：
---
---  1. 'resolveUnder' 给出路径——此刻库内一切合法，逐级下降全是真名；
---  2. **然后**把中途那一层换成指向库外的 junction（攻击者在窗口里做的事）；
---  3. 再打开那条路径。
---
--- 裸 'openBinaryFile' 在第 3 步读到的是**库外**的诱饵——这一半也要断言，
--- 否则用例只证明新写法拒绝了，不证明它拒绝的是一个真实存在的危险。
--- 'openBoundTo' 必须抛出：句柄反查出来的路径落在库外，与期望不符。
-caseResolveThenSwap :: IO ()
-caseResolveThenSwap = withSystemTempDirectory "pm-swap" $ \tmp -> do
-  let root = tmp </> "lib"
-      outside = tmp </> "outside"
-      stash = tmp </> "stash"
-      q p = [dq] <> p <> [dq]
-      dq = toEnum 34 :: Char
-  createDirectoryIfMissing True (root </> "Raw")
-  createDirectoryIfMissing True outside
-  createDirectoryIfMissing True stash
-  writeFile (root </> "Raw" </> "real.ARW") "INSIDE"
-  writeFile (outside </> "real.ARW") "OUTSIDE-BAIT"
-  -- ① 解析：此刻 Raw 是真目录
-  mp <- resolveUnder root ("Raw" </> "real.ARW")
-  p <- case mp of
-    Nothing -> assertFailure "解析应成功（此刻库内一切合法）" >> pure ""
-    Just p -> pure p
-  -- ② 窗口：把 Raw 换成指向库外的 junction
-  renameFile (root </> "Raw" </> "real.ARW") (stash </> "real.ARW")
-  removeDirectory (root </> "Raw")
-  _ <- readCreateProcess (shell ("mklink /J " <> q (root </> "Raw") <> " " <> q outside)) ""
-  -- ③ 裸 open 会读到库外——这就是旧写法在这一步的结果
-  naive <- bracket (openBinaryFile p ReadMode) hClose hGetContents'
-  naive @?= "OUTSIDE-BAIT"
-  -- ③' 句柄绑定判定必须拒绝
-  r <- try (bracket (openBoundTo ReadMode p) hClose hGetContents') :: IO (Either SomeException String)
-  case r of
-    Left e -> assertBool ("错误应说明句柄绑定不符: " <> show e) ("句柄绑定" `isInfixOf` show e)
-    Right c -> assertFailure ("openBoundTo 不应读出任何内容，却得到 " <> show c)

@@ -16,9 +16,11 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 兼容承诺，也不打算适配别的目录结构。Issue/PR 可能长期没人看。
 >
 > 但"个人项目"不是安全上打折的理由，照片是不可再生数据：pm **没有删除原语**，
-> 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（至今
-> **三十八轮，第 37 轮 GO、minset 空、第 38 轮聚焦复核亦 GO——已收敛**，见 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)），每道闸都配"删掉
-> 它就转红"的突变验证用例（310 例，GHC 警告 0）。
+> 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
+> 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
+> 为准，不在这里手抄**），凡有可观测自动化落点的闸都配"删掉它就转红"的突变
+> 验证用例（390 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
+> 性观察点）在 REVIEW-LOG 登记为残余，不冒充覆盖。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
 命令细节：[docs/DESIGN-COMMANDS.md](docs/DESIGN-COMMANDS.md)。
@@ -46,9 +48,13 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 - **功能八 · 暂存清理**：`pm clean staging` 只清理「归档层 + 备份盘」都有同 sha
   副本的暂存文件，执行期三副本重验。
 - **功能九 · 安全网**：`pm trash`（隔离区列表/清空，永久删除前重验副本）、
-  `pm undo`（整计划回滚）、`pm doctor`（崩溃恢复对账 + 完整性体检 + 轮转重验）。
+  `pm undo`（整计划回滚）、`pm doctor`（崩溃恢复对账 + 完整性体检：默认复验
+  「上次干净退出之后写下的那批」，`--deep` 重读重 hash **全库**索引条目）。
 - **功能十 · GUI**：六页 Tauri 桌面前端（状态 / 整理新照片 / 分类推送 / 计划 /
-  设置 / 上手）——只生成计划、记录决定与改配置，**执行永远在终端**。
+  设置 / 上手）——生成计划、记录决定、改配置；0.6.0 起计划页可**直接执行**
+  已存计划（同一按钮两次点击确认，执行链与 `pm apply` 同源，事后可 `pm undo`），
+  状态页可一键**复制上线命令**（按设置里的两仓路径/push 目标生成 git 命令文本，
+  复制后自己粘进终端——pm 不执行 git）。
 
 **明确不做的**：不适配其他目录结构；不执行 git（I9）；`photos.json` 不在写域
 （类别与坐标是看图判断，归上游工作流）；没有删除原语（I2）。
@@ -81,13 +87,17 @@ pm                               # = pm status，总览仪表盘
 pm ui                            # 桌面 GUI
 ```
 
-GUI 六页：**状态**（Raw·成片·相册·暂存四层卡 + vault 同步差异清单 + 备份盘滞后
-+ "下一步"）、**整理新照片**（填源目录 → 按拍摄时间分段 → 每段填地点/选已有事件
-→ 生成拷贝计划；源目录只读）、**分类推送**（相册里 vault 还没有的照片，缩略图
-选类目，或选第四个按钮「暂不同步」→ 保存决定 / 生成推送计划）、**计划**（逐项明细）、
-**设置**（路径与并发：vault / photos.json / 并发数可改、备份盘可登记；主库路径
-只读——它是身份锚点，改它等于换一个库，留给 `pm init`）、**上手**。GUI 只生成
-计划、记录决定与改配置，执行永远在终端。
+GUI 六页（左侧导航次序）：**状态**（Raw·成片·相册·暂存四层卡 + vault 同步差异
+清单 + 备份盘滞后 + "下一步"；vault 卡可一键**复制上线命令**——两仓 git 序列按
+设置生成，pm 不执行 git）、**整理新照片**（填源目录 → 按拍摄时间分段 → 每段填
+地点/选已有事件 → 生成拷贝计划；源目录只读）、**分类推送**（相册里 vault 还没有
+的照片，缩略图选类目，或选第四个按钮「暂不同步」→ 一个按钮「保存决定并生成推送
+计划」把两件事一起做）、**计划**（逐项明细；0.6.0 起可**直接执行**待执行计划——
+同一按钮两次点击确认，执行链与 `pm apply` 同源，事后可 `pm undo`）、**设置**
+（路径与并发：vault / photos.json / 并发数可改、备份盘可登记、上线命令的
+portfolio 仓路径与两仓 push 目标可自定义；改完立刻生效，终端里跑 `pm config set`
+改的同样立刻生效；主库路径只读——它是身份锚点，改它等于换一个库，留给
+`pm init`）、**上手**。
 
 常用命令一览：
 
@@ -98,7 +108,8 @@ pm import                        # 暂存区 → Raw\年\事件-Raw + 成片\事
 pm backup init E:\Photography    # 一次性：登记备份盘（按 UUID 认盘，不认盘符）
 pm backup                        # 主库 → 备份盘单向增量（EXTRA 只报告永不动）
 pm clean staging                 # 仅清理「归档层+备份盘」都有同 sha 副本的暂存文件
-pm vault status                  # 相册 ↔ vault 展示集六态差异（--json 兼容 sync_photos.py）
+pm vault status                  # 相册 ↔ vault 展示集九态差异（其中六态兼容 sync_photos.py，
+                                 # --json 逐字段照抄那六个；另三态 UNPUSHABLE/UNSTABLE/HELD）
 pm vault push --category landscape A.jpg …   # NEW 定类目拷入 vault；DRIFT 出裁决计划；
                                  # 结束打印显式 git 步骤（pm 不执行 git）
 pm vault hold A.jpg …            # 决定「暂不同步」：只写主库 .pm 的一条本地记录，
@@ -111,9 +122,11 @@ pm dedupe                        # 精确重复 → 逐份可裁决的隔离计�
 pm apply <planId>                # 执行计划（--dry 全量预览 / --only 1,3-5 部分执行）
 pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先隔离）
 pm doctor                        # 崩溃恢复对账 + 完整性体检（默认只读）
-pm undo <planId>                 # 整体回滚已执行的计划
+pm undo --last [N]               # 回滚最近 N 个已执行计划（默认 1；--backup/--vault 选侧）
 pm config                        # 打印配置与每条路径的健康状态（只读）
-pm config set --vault <目录>     # 改 vault / --photos-json / --workers（主库路径只读，用 pm init）
+pm config set --vault <目录>     # 改 vault / --photos-json / --workers /
+                                 # --portfolio-dir / --vault-push / --portfolio-push
+                                 # （上线命令三项；主库路径只读，用 pm init）
 pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读，见 --writable / --allow-apply）
 ```
 
@@ -141,18 +154,20 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
 5. **判据与动盘是同一个跨进程事务**。凡「读证据 → 判定 → 写」整段进 I10 锁且
    证据在锁内取：执行屏障、trash empty、resolve、doctor --repair、catalog 回写、
    配置的全部四条读改写路径。两个 pm 进程并发也互相抹不掉对方的决定。
-6. **三十八轮对抗评审门禁 + 突变验证（第 37 轮 GO 收敛、38 轮聚焦复核 GO）**。每条写路径合并前过独立评审（NO-GO 逐条
+6. **对抗评审门禁 + 突变验证（轮次与收敛判定见 REVIEW-LOG，不在此手抄）**。每条写路径合并前过独立评审（NO-GO 逐条
    第一方核实——证实的修、证伪的公开记录在 [REVIEW-LOG](docs/REVIEW-LOG.md)，
-   包括评审对了我错了的、和我此前文档言过其实的）；每道承重闸配一个"删掉它
-   恰好一个用例转红"的突变——绿灯证明闸在承重，不是测试恰好路过。
+   包括评审对了我错了的、和我此前文档言过其实的）；凡有自动化落点的承重闸配
+   一个"删掉它恰好一个用例转红"的突变——绿灯证明闸在承重，不是测试恰好路过；
+   没有落点的闸作为残余登记（REVIEW-LOG 各轮），不冒充突变覆盖。
 7. **决定照片去向的路径不引未审依赖**。EXIF 读取是第一方最小解析器：只取需要
    的标签、统一边界检查、读不到即交人判断（fail-closed），不猜文件修改时间。
 8. **GUI 永不直接碰照片**。Rust 壳层只做 spawn / 交 token / kill 三件事，一切经
    `pm serve`（127.0.0.1 + 随机端口 + Bearer token 常量时间比对 + Host/Origin
-   校验）；serve 三级授权：**缺省只读**；`--writable`（只有 GUI 拉起时置位）只开
-   四个写端点——生成推送计划（写 vault 的 `.pm/plans`）、记「暂不同步」决定
-   （写主库 `.pm/vault-holds.json`）、改配置（主库路径只读）、登记备份盘——
-   **没有一个碰照片字节**；`--allow-apply` 才能执行，GUI 从不传它。
+   校验）；serve 三级授权：**缺省只读**；`--writable` 开五个写端点——生成
+   推送计划与 sort 计划（写 `.pm/plans`）、记「暂不同步」决定、改配置（主库
+   路径只读）、登记备份盘——**没有一个碰照片字节**；`--allow-apply` 才开
+   `POST /api/apply`（唯一动照片字节的端点，0.6.0 起 GUI 拉起时传它，页面
+   两次点击确认；执行发生在 serve 进程里，走与 CLI 同一条装载/复验/journal 链）。
 
 ## 实际效果展示
 
@@ -200,10 +215,10 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 |---|---|---|
 | 增量扫描（4633 文件，其中 122 新 hash / 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（310 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
+| 测试套件（390 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
-| 对抗评审门禁 | 38 轮（NO-GO 逐条第一方核实后处置；第 37 轮 GO、minset 空，38 轮聚焦复核 GO——收敛） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
-| 突变验证 | 每道承重闸一个突变、配对用例转红（34–36 轮 6+3+2 道全数通过；37/38 轮 GO 无新增闸） | REVIEW-LOG 各轮收敛证据 |
+| 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
+| 突变验证 | 凡有可观测自动化落点的承重闸各配一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过；无落点者登记为残余） | REVIEW-LOG 各轮收敛证据 |
 
 ## 三层库拓扑与「设计内冗余」
 
@@ -254,6 +269,13 @@ cd gui/src-tauri
 RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   cargo tauri build --target x86_64-pc-windows-msvc
 # → target/x86_64-pc-windows-msvc/release/bundle/nsis/pm-ui_<版本>_x64-setup.exe
+
+# 发布前：二进制脱敏扫描（用户目录 / %APPDATA% 段 / 仓库路径，UTF-8 与 UTF-16 两种
+# 编码；模式全部运行期从环境派生；任一命中即退出 1）。0.6.0 起纳入发布链。
+V=$(awk '/^version:/{print $2}' ../../package.yaml)   # 版本单一真源，别手抄
+python ../../scripts/leakscan.py binaries/pm-x86_64-pc-windows-msvc.exe \
+  target/x86_64-pc-windows-msvc/release/pm-ui.exe \
+  "target/x86_64-pc-windows-msvc/release/bundle/nsis/pm-ui_${V}_x64-setup.exe"
 ```
 
 ## 路线图与已知限制
@@ -263,11 +285,16 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
 - ~~`pm vault ingest`~~ ✅ P6-D：pm 只拷 root 内（相册 + vault 类目两份计划），
   `_inbox→_done` 交调用方并打印显式步骤；第 32 轮门禁的 9 条 ingest finding
   已全修（执行次序闸收紧，见 REVIEW-LOG；33–37 轮连续收口「读口
-  fail-closed」漏网：35 轮按 IO 读原语全集清点扫尽、36 轮关掉 I11 存在性布尔探针、37 轮关掉链接属性探针的塌 False），门禁已于第 37 轮收敛（GO、minset 空，38 轮聚焦复核 GO），真实 `_inbox` 首次使用只待用户裁定。
+  fail-closed」漏网：35 轮按 IO 读原语全集清点扫尽、36 轮关掉 I11 存在性布尔探针、37 轮关掉链接属性探针的塌 False），门禁收敛状态见 REVIEW-LOG 末节，真实 `_inbox` 首次使用只待用户裁定。
 - ~~屏障协议的类型封闭~~ ✅ P6-A：`BarrierKind` 分类器 + 屏障只返回降级清单，
   升级/改写在类型上写不出来。
 - ~~落位 rename 的句柄形态~~ ✅ P6-C：全部提交型 rename/unlink 走
   `SetFileInformationByHandle`（先验绑定 + 同句柄后验 + 回迁），名字口清零。
+- ~~GUI 执行面~~ ✅ P7（用户裁定 2026-08-26）：`pm ui` 以 `--allow-apply`
+  拉起，计划页两次点击确认后直接执行已存计划（执行链与 CLI 同源）；上线命令
+  一键复制（`[portfolio] dir` + 两仓 push 目标可配；路径与 push 目标**解析后
+  重渲染**——白名单语法、`/` 分隔、操作数前 `--`，而不是黑名单过滤后原样拼；
+  pm 不执行 git）；档案 vault 侧新增 `/photo-publish` skill 作代执行入口。
 
 **已知限制**：
 

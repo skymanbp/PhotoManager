@@ -25,7 +25,8 @@
 将来的 AI 都只是替用户填这一格，走同一条计划路径）。落位是**拷贝不是移动**
 （源可能是相机卡，I2），目标 `To-Be-Sync'd\Raw\<事件>`，随后照常走 import。
 **sort 不自立纪律**：同一件事与 import 逐字同口径——可信索引走
-`withFreshStagingCatalog`（import/clean/sort 共用一份定义；「无索引」是**拒绝**
+`freshStagingCatalog`（import/clean/sort 共用一份定义，import/clean 经 CLI
+包装 `withFreshStagingCatalog` 取用；「无索引」是**拒绝**
 而不是"当作目标为空"，后者是默认覆盖的方向，与 I5 恰好相反）；目标唯一性走
 `foldPath`（NTFS case-fold，mj-2）；事件名过 `canonRawEvent`，且 `--place` 与
 `--event` **两条都过**字符闸（canon 只约束前 6 个字符，只拦一条等于给另一条
@@ -128,16 +129,22 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   生成计划前过暂存区新鲜度守卫（与索引不一致 → 先 pm scan）。
 - 老事件返修（如 `Processed\23-04-EU`）：逐文件走 §6.1——同 sha skip、
   不同 sha 标 `NEEDS-DECISION` 交 `pm resolve`。
-- 归档后 staging 原文件**原地不动**；`pm status` 依据**已复验的** Done 标记
-  「已归档，冗余」；清理走 `pm clean staging`（内建三副本前置条件，§5）。
+- 归档后 staging 原文件**原地不动**；`pm status` 的「已归档，冗余」标记（据实
+  更正）来自**当前 catalog 的 sha 集合**——`Pm.Import.stagingArchivedSummary` 问
+  的是「staging（`To-Be-Sync'd\`，其中 `待修改\` 不计）里某条目的 sha，是否也
+  出现在 staging 之外的某个条目上」。它**不查 journal 的 Done，也不要求那份副本
+  被复验过**：是一句"去看看 `pm clean staging`"的**快照级提示**，不是删除授权。
+  授权在下游，且两处都要真读盘：`pm clean staging` 生成期的三副本活体核对，与
+  `pm trash empty` 永久删除前的屏障重 hash（§5、§8.1）。
 - `待修改\` 散文件无事件结构：import 不碰，单列「待修改清单」报告。
 
 ### 7.1 只读提议拆成「结果 + 渲染」（P5-E）
 
 `pm sort <源>` 的提议形态拆成 `surveySort`（判定与取数）+ `renderSortSurvey`
 （打印，CLI 输出逐字不变），与 `Pm.Status.statusReport` /
-`Pm.BackupCmd.backupInitRun` 同一形态。GUI 第六页要的是**结果**不是那段文字，
-而两者必须同源——否则页面上看到的分段与终端建议的命令会各说各话。
+`Pm.BackupCmd.backupInitRun` 同一形态。GUI 的「整理新照片」页（左侧导航**第二
+页**，次序见 DESIGN.md §11）要的是**结果**不是那段文字，而两者必须同源——否则
+页面上看到的分段与终端建议的命令会各说各话。
 
 顺带把 `withSource` 泛化并分成两层：`withSourceQ` 只列举（提议形态要把诊断当
 数据交回），`withSource` 在它之上打印 `sfNotes`（计划形态）。拆 `surveySort`
@@ -152,6 +159,23 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - 跨层地点别名表（Hunan↔湖南 等）入配置，事件关联用别名闭包。
 - 文件级版本后缀**不强制统一**（信息即历史）——只做清单报告，改名需用户勾选。
 - rename 计划 + 同批目标唯一性校验 + journal 双向映射 + `pm undo` 可回滚。
+- **纯大小写改名不是「目标已存在」**（F074）：NTFS 按折大小写认路径身份，所以
+  `23-12-Turkey-raw → 23-12-Turkey-Raw` 这类只差大小写的目标，命中的是**源自身**
+  ——那不是占位。计划闸与执行闸**同一豁免**、各自用本层的路径身份比较器：
+  `Pm.Names` 的盘面校验放行 `selfOnly`（同一年份夹内两名折大小写相等，
+  `classifyRawEvent` 只会在 `-raw` 后缀的大小写上产生这种差），`Pm.Exec` 的
+  `execRename'` 放行 `normPath oldAbs == normPath newAbs`。此前这类项永久落
+  NEEDS-DECISION，报文还点名一个并不存在的占位者；no-replace 落位原语实测支持
+  纯大小写改名（§6.2）。
+- **身份闸先于任何目录枚举**（F095）：`runNames` 第一件事是
+  `requireRole RoleMain`（内含 I11 守卫），拿到 `RootInfo` 之后才去列 `Raw\`。
+  此前只在真要改名时才验身份，零改名／仅裁决的路径会在无身份下把整份报告读
+  出来再以 exit 0/1 收场。枚举本身整段 `try`：读不出 = 整批拒绝 exit 2、零计划。
+- **目录改名的 catalog 重键是左偏 union**（F004）：`updateCatalog` 把旧前缀下的
+  条目整体 rekey 到新前缀；目标前缀下若残留过期条目（目录被带外挪走后没重扫、
+  undo 反向 rename 正是这个形状），**重键后的那条必须胜出**——它描述的才是此刻
+  占着该路径的文件（exec 的前置条件是目标在盘上不存在）。`Map.fromList` 会让
+  字节序决定谁活下来；丢弃本身是对的，只是不能由排序决定。
 - **P3b-2 落锤（2026-08-23 真实库实测，42 事件夹）**：31 合规 / 6 入计划 /
   3 拒猜 / 2 个 `&` 双月名交用户——逐项经过见 REVIEW-LOG。目录改名走 §6.2
   （FpDir 指纹），catalog 前缀由 updateCatalog 重写，undo 有 E2E 测试。versions（§5）
@@ -269,6 +293,13 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 
 ### 10.1 `pm vault status` — 逐字段兼容
 
+- **六态是与 `sync_photos.py` 兼容的核心，不是 pm 的全集**：`Pm.VaultCore.VaultDiff`
+  只有 OK / NEW / MISSING / RENAME / DRIFT / DUPLICATE 六个字段，legacy 算法逐行
+  复刻；pm 在其上另加三态——`UNPUSHABLE`（.png：status 可见、push 写路径拒收）、
+  `UNSTABLE`（读取期间持续变化，已退出六态分类，fail-closed）、`HELD`（「暂不同步」
+  的本地决定，见下「第九态」），合计**九态**。CLI 汇总行打前八个计数，HELD 与
+  HELD 失效另起行；GUI 状态页的计数 pill 正是这九个。凡文中写「六态」，指的都是
+  legacy 兼容那六个。
 - 六态语义与 `sync_photos.py` 一致；`--json` **值形状逐字段照抄**：
   `ok/new/missing/duplicate` 用同形位置元组、`renamed/drift` 的 hash 截断 16 字符、
   `duplicate` 与 ok/drift 可重叠（不构成划分）、顶层键名同
@@ -303,8 +334,12 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   引用检查（路径入 Config），被引用的项标 `BLOCKED(photos.json:<行>)`，
   未被引用且用户确认的才生成 Rename。
 - MISSING：只报告（可能是有意撤下，决定权在用户）。
-- 结束打印**显式路径**的 git 步骤：`git add landscape portrait urban`（明确
-  禁止 `git add -A`/`git add .`，防把 `.pm/` 等误提交）；pm 不执行 git（I9）。
+- 结束打印**显式路径**的 git 步骤：`git -C "<vault>" add -- landscape portrait
+  urban`（明确禁止 `git add -A`/`git add .`，防把 `.pm/` 等误提交；操作数前
+  必有 `--`）；push 目标取自 `vault.push` 设置。命令文本与上线命令
+  （DESIGN.md §11 `GET /api/publish-commands`）**同一生成点**
+  （`Publish.vaultCommands`，解析-重渲染，第一方自审 R2）——生成不了（路径
+  嵌不进命令行等）打印原因 + 手动指引；pm 不执行 git（I9）。
 - **photos.json 不在 pm 写域**：类别判定/坐标是 AI 视觉判断，属 `/photo-inbox`。
 - **第九态 HELD「暂不同步」（P4-7，用户 2026-08-24 裁定）**：相册里有、但用户
   决定**先不放进展示集**的照片。它**不是 vault 的第四个类目**——vault 的类目
@@ -358,8 +393,9 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P6 / pm 0.5.0 / 310 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
-  门禁 37 轮 GO、38 轮聚焦复核 GO 后发布）。
+  当前实现对应 **P7 / pm 0.6.0 / 390 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  门禁 37/38 轮 GO 收敛，P7 送审 39/40 轮各 NO-GO 已收口，发布前第一方全量
+  自审两轮：P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修——见 §11）。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -368,7 +404,11 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
    journal 登记 inbox-origin，**不动 _inbox**）；`_inbox→_done` 由 **skill
    自己 move**——pm 在两份计划都落完时打印含逐条 move 命令的显式步骤（与 I9
    处理 git 同款；设计期曾设想的 `--finalize` 子命令**不存在也不会有**，理由
-   见下方「第 1/2 项的拆分」）。顺序保证与 skill 现行「photos.json 成功后才
+   见下方「第 1/2 项的拆分」）。move 命令与 git 命令**同一纪律：解析而非过滤**
+   （`Pm.Publish.inboxDoneCommand`）——源与 `_done/` 两条路径都过 `cmdPath`
+   （盘符绝对路径 + 白名单分量 → 以 `/` 重渲染）后才拼成 `mv -- "<源>" "<_done>/"`；
+   任一侧渲染不出来就**不拼**，改打印「无法安全生成搬移命令：<原因>」+ 手动指引，
+   而不是把原始路径原样嵌进命令行。顺序保证与 skill 现行「photos.json 成功后才
    移」硬约束一致；AI 部分（看图分类、坐标、photos.json 内容）保持不变。
 2. ingest 的 journal 来源登记喂 I7：相册 ⊆ 成片 ∪ inbox-origin，doctor 把
    inbox 来的照片归为「已解释」而非违例。
@@ -403,3 +443,36 @@ ingest 作为新写路径已过第 32 轮门禁；对真实 `_inbox` 的首次�
 
 ---
 
+---
+
+## 11. P7-J 全量自审收口的行为面变化（2026-08-27）
+
+P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，101 项发现聚成
+14 簇），逐簇根因、类级修法与突变验证在 [`REVIEW-LOG.md`](REVIEW-LOG.md)
+§「P7-J」；这里只登记**用户可见的行为变化**（命令文档正文以此为准）：
+
+| 命令/入口 | 变化 | 根因簇 |
+|---|---|---|
+| `pm undo` | 生成反向计划后退出 **1**（计划已存、未执行——与其它计划生成器同码；此前 0 把"还有事没做"读成"全部成功"） | B（`PlanRun` 三态收口） |
+| `pm vault push` / push 计划的 `pm apply` | 收尾 git 步骤按**逐项落位结果**打印：有落位项才给 `git -C … add -- <落位类目>`；全部待裁决 → 无 git 步骤 | B |
+| `pm sort` | 子树列不出（ACL 拒）→ 提议/计划两形态都退出 **1** 并打「未能枚举」——不替没看过的目录担保；junction 跳过仍是 0 | B |
+| `pm trash list/empty` | manifest 整文件读不出（hardlink 占名等）→ **exit 2**、视图整体拒绝，不再显示「隔离区为空」（坏基准上 empty 会"无事可做"地成功） | A（三态加载器） |
+| `pm doctor` | 快照被拒（≠缺席）→ `CATALOG` **Bad** 行；`--deep` 无快照可深验 → `DEEP-SKIPPED` **Bad** + exit 1（此前静默跳过深验照报 0） | A |
+| `pm status` | 快照坏代回退 → ⚠ 行 + **exit 1**（`--cached` 下唯一的 1 来源）；核对受阻（读取错误 >0）不打「✓ 索引与磁盘一致」 | A |
+| `pm backup` | 主库快照坏代 → ⚠「diff 基于较旧一代」；主库索引与盘面不一致 → **拒绝 exit 2** 指向 `pm scan`（mainFresh 闸）；「✓ 备份盘已与主库一致」只在零降级零差异时打（`backupVerdict` 判定表） | A |
+| `pm init --force` | 旧配置读不出 → 明说「未能保留」备份盘登记等字段（此前静默丢失还打 ✓）；整份新配置过 `checkConfig` 汇点 | A + G6 |
+| `pm config set` | `--X` 与 `--no-X` 同给 = 矛盾 → **exit 2**（此前解析器静默折成清空）；写入前整份配置过 `checkConfig`：主库/vault/备份盘两两不嵌套、备份登记成对、路径绝对——四条写路径（init / config set / POST config / backup init）同一汇点，且锁内按盘上最新配置复验 | G6 |
+| `pm serve` | 启动失败（端口/权限）→ **exit 2**（此前 0）；`POST /api/sort/plan` 与 `POST /api/apply` 响应含 `log`（与 CLI 同一打印流）与逐项 `status`；缩略图对「快照读不出」答 **503**（缺席仍 404） | B + A |
+| 配置渲染 | `[backup]` 表与其它表同一渲染 helper：半对登记（手编残余）忠实保全，不再被静默归零 | G6 |
+| freshness 判定 | root 自身是 junction 属合法用法：`pm status`/新鲜度闸照常核对（此前每轮报一条「基准探不出」读取错误）；库内子层 junction 保持「探不出 = 错误」 | D |
+
+### 41 轮门禁收口追加（P7-K，2026-08-27）
+
+四条 α/γ 簇修法的用户可见面（根因与突变见 REVIEW-LOG「第 41 轮」）：
+
+| 命令/入口 | 变化 | 出处 |
+|---|---|---|
+| `pm init` | 配置缺失但躺着孤儿 `<cfg>.tmp`（上次写入崩在删旧与改名之间，.tmp 是完整新配置）→ **拒绝 exit 2** 并复述恢复指引（改名采用或删除后重跑）；此前直接新写一份，把待恢复的登记变成死文件 | 41 轮 #3 |
+| `pm backup init` | 登记步在配置锁内按**盘上最新配置**复验（嵌套判定 + checkConfig 汇点）→ 与并发配置写交错时拒绝「登记被拒（锁内按盘上最新配置复验）」，而非静默写成嵌套配置 | 41 轮 #1 |
+| catalog 载入（status/backup/apply/undo/scan 种子） | `catRootId` 与 `.pm/root-id.json` 对账：不符（整目录拷贝/恢复错位）→ 整链拒绝「索引读不出（catalog 身份不符…）」，scan 丢弃种子全量重建 | 41 轮 #5 |
+| `pm config set` / GUI 设置页 | 备份盘**在场**（UUID 可发现）时 checkConfig 把其实际路径与主库/vault 各判一次嵌套；盘不在场无从核——登记时点已在锁内验过，残余登记于 REVIEW-LOG | 41 轮 #1 |

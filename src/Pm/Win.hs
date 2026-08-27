@@ -30,18 +30,18 @@ module Pm.Win
   , deleteBoundAt
   , pathUnder
   , pathAtOrUnder
-  , isNameSurrogate
   , NameKind (..)
   , probeName
   , resolveUnder
+  , whenPresent
   , openExclusiveBinary
   , openFreshBinary
-  , openStateAppend
+  , openStateAppendTail
   , openStateRead
   , openStateLock
-  , handleIsSingleLink
   , handleFinalPath
   , handleIsAt
+  , normPath
   , openBoundTo
   , FileId (..)
   , handleFileId
@@ -52,9 +52,10 @@ module Pm.Win
   ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (SomeException, catch, finally, mask, onException, try)
+import Control.Exception (IOException, SomeException, catch, finally, mask, onException, try)
 import Control.Monad (unless, when)
 import Data.Bits (testBit, (.&.))
+import qualified Data.ByteString as BS
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -63,7 +64,7 @@ import Foreign.Marshal.Alloc (alloca, allocaBytes)
 import Foreign.Ptr (Ptr, intPtrToPtr, nullPtr)
 import Foreign.Storable (peek, peekByteOff)
 import System.Directory (canonicalizePath, doesPathExist)
-import System.FilePath (splitDirectories, (</>))
+import System.FilePath (hasDrive, isPathSeparator, splitDirectories, (</>))
 import System.IO
 import qualified System.Win32.Console as Win32Console
 import qualified System.Win32.File as Win32File
@@ -98,7 +99,7 @@ setupConsole = do
       -- Swallowed because: only reachable on exotic console hosts where the
       -- call itself fails; the sole consequence is garbled glyph display,
       -- never data corruption, and aborting pm over it would be worse.
-      `catch` \(_ :: SomeException) -> pure ()
+      `catch` \(_ :: IOException) -> pure ()
 
 -- | hFlush + FlushFileBuffers: contents durable on media when this returns
 -- (modulo hardware that lies; see doctor matrix row C4).
@@ -117,12 +118,14 @@ flushHandleToDisk h = do
 -- 哪里"：跟随 reparse point、消解 @..@、补齐大小写与 8.3 短名，因此同时覆盖
 -- 大小写别名、尾随点、junction 与任何未预见的等价名。
 --
--- 任一侧解析失败（路径不存在、ACL 拒绝、名字非法）一律 False —— 这是
--- fail-closed：调用点用它守卫**删除\/写入**，答不上来就不动。
+-- 任一侧解析失败（路径不存在、ACL 拒绝、名字非法）一律 False——fail-closed。
+-- P3b-11 起真正动盘口（trash empty 的 unlink、tmp 落位）改走 'resolveUnder'
+-- 的逐级下降（基准也要受检，见其文档）；本判定保留为测试与读侧的包含性
+-- 断言，语义不变（工作流 F007：原文还写着"调用点用它守卫删除\/写入"）。
 pathUnder :: FilePath -> FilePath -> IO Bool
 pathUnder base p = do
-  eb <- try (canonicalizePath base) :: IO (Either SomeException FilePath)
-  ep <- try (canonicalizePath p) :: IO (Either SomeException FilePath)
+  eb <- try (canonicalizePath base) :: IO (Either IOException FilePath)
+  ep <- try (canonicalizePath p) :: IO (Either IOException FilePath)
   pure $ case (eb, ep) of
     (Right b, Right q) ->
       let bs = comps b
@@ -143,8 +146,8 @@ pathUnder base p = do
 -- @Just False@（P3b-17：Bool 版 @confinedUser@ 已删除，用户侧只剩这一个口）。
 pathAtOrUnder :: FilePath -> FilePath -> IO (Maybe Bool)
 pathAtOrUnder base p = do
-  eb <- try (canonicalizePath base) :: IO (Either SomeException FilePath)
-  ep <- try (canonicalizePath p) :: IO (Either SomeException FilePath)
+  eb <- try (canonicalizePath base) :: IO (Either IOException FilePath)
+  ep <- try (canonicalizePath p) :: IO (Either IOException FilePath)
   pure $ case (eb, ep) of
     (Right b, Right q) ->
       let bs = comps b
@@ -204,6 +207,24 @@ probeName p = do
  where
   invalidFileAttributes = 0xFFFFFFFF :: Word32
 
+-- | 「名字在就做、不在就当没有、**查不出就说查不出**」（第一方自审 R1）。
+--
+-- 只读报告路径此前用 @doesDirectoryExist@ \/ @doesFileExist@ 探存在性，而这
+-- 两者把 ACL 拒绝、介质错误统统塌成 False；False 的去向又是「当作空 \/ 未被
+-- 引用」——vault 类目被拒时整类照片伪报 NEW、photos.json 读不到答「未被引用」、
+-- 已有事件夹枚举不出就提议新建一个重名的。三十六\/三十九轮的三态化只扫了写
+-- 路径守卫，这是读侧的同一形状。动作本身的 IOException 也收进 Left（探测与
+-- 动作之间目录可被挪走\/占住）。
+whenPresent :: FilePath -> IO a -> IO (Either String (Maybe a))
+whenPresent p act = do
+  k <- probeName p
+  case k of
+    NameMissing -> pure (Right Nothing)
+    ProbeUnknown -> pure (Left (p <> " 存在性查不出（ACL/介质错误？）——核不了 = 不猜"))
+    _ -> do
+      r <- try act
+      pure (either (\(e :: IOException) -> Left (p <> " 读取失败（" <> show e <> "）")) (Right . Just) r)
+
 -- | 便捷谓词：仅当明确判定为 name surrogate 时为 True。'ProbeUnknown' 在这里
 -- 是 False —— 调用方若要 fail-closed 必须直接用 'probeName'（'resolveUnder'
 -- 就是这么做的）。
@@ -244,7 +265,7 @@ ioReparseTagNameSurrogate = 0x20000000
 -- 守不住这些必须复用既有名字的状态文件——那条路径靠这里的 link count 守。
 handleIsSingleLink :: Handle -> IO Bool
 handleIsSingleLink h = do
-  r <- try (withHandleToHANDLE h Win32File.getFileInformationByHandle) :: IO (Either SomeException Win32File.BY_HANDLE_FILE_INFORMATION)
+  r <- try (withHandleToHANDLE h Win32File.getFileInformationByHandle) :: IO (Either IOException Win32File.BY_HANDLE_FILE_INFORMATION)
   pure $ case r of
     Right i -> Win32File.bhfiNumberOfLinks i <= 1
     Left _ -> False -- 查不出就不写（fail-closed）
@@ -258,7 +279,7 @@ handleIsSingleLink h = do
 -- 就被判成不可信，@pm clean staging@ 与 @pm trash empty@ 于是长期 HELD。
 -- 方向是安全的，代价是永远清不掉（codex 二十八轮 #2）。
 --
--- nlink 判定**仍然保留**在 @.pm@ 状态文件的三个打开口（'openStateAppend' /
+-- nlink 判定**仍然保留**在 @.pm@ 状态文件的三个打开口（'openStateAppendTail' /
 -- 'openStateRead' / 'openStateLock'）——那里问的是另一件事：pm 自己的状态
 -- 不得与任何别的名字共享同一个对象，nlink == 1 正是那个问题的正解。
 data FileId = FileId {fidVolume :: Word32, fidIndex :: Word64}
@@ -269,7 +290,7 @@ data FileId = FileId {fidVolume :: Word32, fidIndex :: Word64}
 -- 取不到就是 Nothing，调用方一律 fail-closed（不得当作"身份不同"）。
 handleFileId :: Handle -> IO (Maybe FileId)
 handleFileId h = do
-  r <- try (withHandleToHANDLE h Win32File.getFileInformationByHandle) :: IO (Either SomeException Win32File.BY_HANDLE_FILE_INFORMATION)
+  r <- try (withHandleToHANDLE h Win32File.getFileInformationByHandle) :: IO (Either IOException Win32File.BY_HANDLE_FILE_INFORMATION)
   pure $ case r of
     Right i ->
       Just
@@ -333,19 +354,37 @@ normPath p =
     ('\\' : '\\' : '?' : '\\' : rest) -> rest
     _ -> q
 
--- | @.pm@ 内状态文件的受控打开：打开后**立刻**查 link count，\>1 即关闭并
--- 拒绝。@AppendMode@ 不截断，所以"先打开再判"是安全的——判定失败时尚未写入
--- 任何字节。截断语义（@WriteMode@）不得用此函数：那会在判定之前就毁掉内容，
--- 覆盖写一律走"独占创建 tmp → 'moveBoundNoReplace' 落位"。
-openStateAppend :: FilePath -> IO Handle
-openStateAppend fp = do
-  h <- openBoundTo AppendMode fp
-  ok <- handleIsSingleLink h
-  if ok
-    then pure h
-    else do
-      hClose h
-      ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝写入——人工核查"))
+-- | @.pm@ 内状态文件的受控**追加**打开：打开后立刻查 link count，\>1 即关闭
+-- 并拒绝；随后在**同一句柄**上读末字节答「末行是否半截」（第一方自审工作流
+-- F028 的尾部状态），游标移回文件尾后交给调用方追加。
+--
+-- 41 轮 #6：查尾与追加此前是**两次独立打开**（'openStateRead' 读一次尾字节、
+-- 再按名字开追加句柄）——两步之间整个文件可被替换，尾判属于旧对象、补换行
+-- 落到新对象上。合成一次打开后不存在第二次名字解析。@ReadWriteMode@ 缺失即
+-- 创建、绝不截断（同锁文件口径）；判定失败时尚未写入任何字节。截断语义
+-- （@WriteMode@）不得用此函数：覆盖写一律走"独占创建 tmp →
+-- 'moveBoundNoReplace' 落位"。
+openStateAppendTail :: FilePath -> IO (Bool, Handle)
+openStateAppendTail fp = do
+  h <- openBoundTo ReadWriteMode fp
+  -- 42 轮 GO-note #2：判定与查尾期间任何异常（盘拔出、权限变化、读尾 I/O
+  -- 错）都要把刚开的句柄关掉，不能滞留到 GC——同文件其它资源转换口的口径。
+  -- 44 轮 GO-note：这是**唯一**的关闭路径——hardlink 拒绝分支只抛不关，
+  -- 由这个处理器收句柄（此前分支内再关一次，双关虽幂等却像 bug）。
+  flip onException (hClose h) $ do
+    ok <- handleIsSingleLink h
+    if not ok
+      then ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝写入——人工核查"))
+      else do
+        n <- hFileSize h
+        torn <-
+          if n == 0
+            then pure False
+            else do
+              hSeek h AbsoluteSeek (n - 1)
+              (/= BS.singleton 10) <$> BS.hGet h 1
+        hSeek h SeekFromEnd 0
+        pure (torn, h)
 
 -- | **P5-D 的取用口**：打开 @fp@，然后在**句柄**上确认它绑定的正是 @fp@ 这
 -- 条路径上的对象；不是就关掉并拒绝。
@@ -438,26 +477,30 @@ openStateLock fp = do
 -- （P3b-12：九轮指出 P3b-11 的文档把这点写成了"含基准自身"，措辞已更正）。
 resolveUnder :: FilePath -> FilePath -> IO (Maybe FilePath)
 resolveUnder base rel = do
-  eb <- try (canonicalizePath base) :: IO (Either SomeException FilePath)
+  eb <- try (canonicalizePath base) :: IO (Either IOException FilePath)
   case eb of
     Left _ -> pure Nothing
-    Right b -> go b (splitDirectories rel)
+    Right b
+      -- 词法层（'Pm.Op.relPathOk'）已挡，这里对**整段**再兜一次：下降算法本身
+      -- 不接受任何能改变层级的分量。第一方自审：此前只查当前分量，缺失层之后
+      -- 的余段原样 @foldl (\<\/\>)@ 拼上——@..@ 能在缺失层之后越级；带盘符
+      -- （@c:x@）或以分隔符起头的分量更会让 @\<\/\>@ **整体替换**而不是拼接
+      -- （filepath 实测语义），逃出 base。
+      | any badComp (splitDirectories rel) -> pure Nothing
+      | otherwise -> go b (splitDirectories rel)
  where
+  badComp c = c `elem` [".", "..", ""] || hasDrive c || any isPathSeparator c
   go cur [] = pure (Just cur)
-  go cur (c : cs)
-    -- 词法层（'Pm.Op.relPathOk'）已挡，这里再兜一次：下降算法本身不接受
-    -- 任何能改变层级的分量。
-    | c `elem` [".", "..", ""] = pure Nothing
-    | otherwise = do
-        let nxt = cur </> c
-        k <- probeName nxt
-        case k of
-          NameSurrogate -> pure Nothing
-          -- P3b-13（十轮复审）：查不出这一层是什么就不往下走，也不当作"缺失"
-          -- 放行 —— 答不上来即拒（fail-closed）。
-          ProbeUnknown -> pure Nothing
-          NameMissing -> pure (Just (foldl (</>) nxt cs))
-          NamePlain -> go nxt cs
+  go cur (c : cs) = do
+    let nxt = cur </> c
+    k <- probeName nxt
+    case k of
+      NameSurrogate -> pure Nothing
+      -- P3b-13（十轮复审）：查不出这一层是什么就不往下走，也不当作"缺失"
+      -- 放行 —— 答不上来即拒（fail-closed）。
+      ProbeUnknown -> pure Nothing
+      NameMissing -> pure (Just (foldl (</>) nxt cs))
+      NamePlain -> go nxt cs
 
 -- | 独占创建（@CREATE_NEW@）的二进制写句柄：目标已存在即抛 IOException。
 --
@@ -552,6 +595,11 @@ listCandidateDrives = do
 -- rename atomicity).
 volumeFsType :: Char -> IO (Maybe Text)
 volumeFsType c =
+  -- 有意保留 SomeException（三十九轮类清扫时逐处裁定）：query 里没有会抛
+  -- IOException 的操作——c_GetVolumeInformationW 以返回 0 表失败、已显式
+  -- 处理，可能逃出的只有 withTString/peekTString 的编解码异常；收窄成
+  -- IOException 等于把 catch 改成死代码、让这些异常直接炸掉 status。
+  -- 本函数纯 informational（无协议依赖），任何失败 -> Nothing 是对的。
   query `catch` \(_ :: SomeException) -> pure Nothing
  where
   query =
@@ -638,7 +686,9 @@ rawRename h dst =
 --      存在 → 失败，绝不覆盖）；
 --   3. **后验**：问同一个句柄"对象现在在哪条路径"。目标的某一层在窗口里被换
 --      成 junction 时对象会落到别处——后验当场发现，沿同一句柄改回原名，
---      再响亮报错。字节不丢、位置已知。
+--      再响亮报错。字节不丢、位置已知。第一方自审工作流 F074：纯大小写改名
+--      时 'normPath' 折大小写，后验只能证明对象仍在期望目录、证明不了拼写已
+--      变（原语实测只在真成功时答 ok，不会静默跳过）。
 --
 -- 目标侧做不到先验（文档明确 SetFileInformationByHandle 的 RootDirectory
 -- 必须为 NULL），后验 + 回迁是句柄能给到的最强保证。

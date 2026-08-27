@@ -40,17 +40,19 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, makeAbsolute)
-import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FilePath (takeFileName, (</>))
 
-import Pm.Cli (PlanRun (..))
+import Pm.Cli (PlanRun (..), fullyExecuted)
 import Pm.Config (Config (..), requireMain)
-import Pm.Exec (ItemOutcome (..))
+import Pm.GitGuard (classifyGitProbe)
 import Pm.Hash (StatSnap (..), sha256File, statSnap)
 import Pm.Op
 import Pm.Plan
+import Pm.Publish (inboxDoneCommand)
 import Pm.Types
 import Pm.Vault (ensureVaultRoot, fixedCategories, gitStepsLines)
 import Pm.VaultHold (VaultHold (..), readHolds)
+import Pm.Win (probeName)
 
 -- | 与 'Pm.Vault.runVaultPush' 同款调用形：@runPlan@ 由命令层给
 -- （'Pm.Cli.savePlanAndMaybeRun''），本函数只负责校验、两份计划的构造与
@@ -122,12 +124,12 @@ runVaultIngest runPlan applyMode cat files0 cfg = do
                           pidV <- newPlanId
                           let mainPlan = Plan pidM "vault-ingest" (cfgMainPath cfg) (Just (riId mi)) now mainItems
                               vaultPlan = Plan pidV "vault-ingest" vaultDir (Just (riId vi)) now vaultItems
-                          runTwoPlans runPlan applyMode cat files vaultDir mainPlan vaultPlan
+                          runTwoPlans cfg runPlan applyMode cat files vaultDir mainPlan vaultPlan
 
 -- | 两份计划的次序协议（三十二轮 R4；从 'runVaultIngest' 拆出压嵌套）。
 -- 次序 = 主库（相册）在前，vault 只在主库**真的全部落完**后执行（I7 拓扑）。
-runTwoPlans :: (Plan -> IO PlanRun) -> Bool -> String -> [FilePath] -> FilePath -> Plan -> Plan -> IO Int
-runTwoPlans runPlan applyMode cat files vaultDir mainPlan vaultPlan = do
+runTwoPlans :: Config -> (Plan -> IO PlanRun) -> Bool -> String -> [FilePath] -> FilePath -> Plan -> Plan -> IO Int
+runTwoPlans cfg runPlan applyMode cat files vaultDir mainPlan vaultPlan = do
   let pidV = plId vaultPlan
   r1 <- runPlan mainPlan
   case r1 of
@@ -157,7 +159,7 @@ runTwoPlans runPlan applyMode cat files vaultDir mainPlan vaultPlan = do
               pure 1
             PrRun c2 rs2
               | c2 == 0 && fullyExecuted rs2 -> do
-                  mapM_ putStrLn (ingestSteps vaultDir pidV cat files)
+                  mapM_ putStrLn (ingestSteps cfg vaultDir pidV cat files)
                   pure 0
               | otherwise -> do
                   putStrLn "vault 那份有未完成项——收尾步骤不给：**源文件必须留在原位**（计划里的 opSrcAbs 指着它们），pm resolve / pm apply 收敛后重跑本命令"
@@ -165,15 +167,6 @@ runTwoPlans runPlan applyMode cat files vaultDir mainPlan vaultPlan = do
       | otherwise -> do
           putStrLn "主库（相册）那份有未完成项（失败/冲突/待裁决——待裁决不进退出码，也算未完成）：vault 那份不执行（I7：vault ⊆ 相册，相册在前）；pm resolve 处理后重跑本命令"
           pure (max c1 1)
-
--- | 「真的全部落完」：每一项都是 DONE 或同内容 SKIP。三十二轮 R4 的判据
--- 本体——ONotExecuted（待裁决\/用户 skip）不计入退出码，@c == 0@ 不等于它。
-fullyExecuted :: [(PlanItem, ItemOutcome)] -> Bool
-fullyExecuted rs = not (null rs) && all done rs
- where
-  done (_, ODone {}) = True
-  done (_, OSkippedIdentical) = True
-  done _ = False
 
 -- | I7 拓扑耦合（三十二轮 R4 的生成期闸）：主库那项待裁决时，vault 同名项
 -- 也压成待裁决。两份计划都会存盘、都可被单独 @pm apply@——vault 那项若保持
@@ -228,15 +221,18 @@ validateIngest cfg cat files vaultDir = do
   missing <- forM files $ \f -> do
     ex <- doesFileExist f
     pure ([f <> " 不存在（源文件必须逐个在盘上）" | not ex])
+  -- 第一方自审 R1：占名探测三态（36 轮的 'classifyGitProbe' 表）——@doesFileExist@
+  -- 把 ACL 拒绝塌成「无占名」，跨类目 DUPLICATE 就漏检；查不出 = 拒绝本批。
   crossCat <- forM files $ \f -> do
     let n = takeFileName f
-    hits <- fmap concat . forM [c | c <- fixedCategories, c /= cat] $ \c -> do
-      ex <- doesFileExist (vaultDir </> c </> n)
-      pure ([c | ex])
-    pure
+    probes <- forM [c | c <- fixedCategories, c /= cat] $ \c ->
+      (,) c . classifyGitProbe <$> probeName (vaultDir </> c </> n)
+    let hits = [c | (c, Right True) <- probes]
+    pure $
       [ n <> " 已存在于 vault 类目 " <> unwords hits <> "（跨类目同名会成 DUPLICATE）→ 先处置既有那份（或换名）"
       | not (null hits)
       ]
+        <> [n <> " 在 vault 类目 " <> c <> " 的占名" <> why | (c, Left why) <- probes]
   eholds <- readHolds (cfgMainPath cfg)
   -- HELD 比较 case-fold（三十二轮交叉复核 R8）：NTFS 不分大小写，A.JPG 与
   -- a.jpg 是同一个目标格——精确比较会让大小写变体绕过用户的「暂不同步」
@@ -288,13 +284,21 @@ ingestOrderLines pidM pidV cat =
 -- | 结束时打印的**显式步骤**——pm 不执行的那些（同 I9 的 git 步骤）：
 -- photos.json 由 skill 写并校验；@_inbox → _done@ 由 skill 移（pm 对库外目录
 -- 零操作）；vault 仓的 git 步骤沿用 push 的同一套。只在两份计划都真的全部
--- 落完时打印（三十二轮 R5，与 push 的 @when (code == 0)@ 同一道闸）。
-ingestSteps :: FilePath -> T.Text -> String -> [FilePath] -> [String]
-ingestSteps vaultDir pid cat files =
+-- 落完时打印（三十二轮 R5；判据 'Pm.Cli.fullyExecuted'——push 的收尾自
+-- 第一方自审工作流 F068 起同样按落位项判（'Pm.Cli.landedItems'），只是这里
+-- 要求**全部**落完：源文件搬走后未落完那半的计划就失效）。
+-- 搬移命令与 git 步骤同一纪律（第一方自审工作流 F072）：经
+-- 'Pm.Publish.inboxDoneCommand' 解析-重渲染，嵌不进命令行的路径给手动指引。
+ingestSteps :: Config -> FilePath -> T.Text -> String -> [FilePath] -> [String]
+ingestSteps cfg vaultDir pid cat files =
   [ ""
   , "pm 侧完成。剩余步骤由调用方执行（pm 不动库外目录、不执行 git）："
   , "  1. 写 photos.json 并用 json.tool 校验（AI 分类与坐标归 skill）"
   , "  2. 校验通过后，把以下源文件移入各自目录的 _done\\ 子目录："
   ]
-    <> [ "       move \"" <> f <> "\" \"" <> takeDirectory f </> "_done" <> "\\\"" | f <- files]
-    <> gitStepsLines vaultDir pid [cat]
+    <> concatMap moveLine files
+    <> gitStepsLines cfg vaultDir pid [cat]
+ where
+  moveLine f = case inboxDoneCommand f of
+    Right l -> ["       " <> l]
+    Left why -> ["       （无法安全生成搬移命令：" <> why <> "）请手动把 " <> takeFileName f <> " 移进同目录的 _done\\"]

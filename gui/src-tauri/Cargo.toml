@@ -1,6 +1,6 @@
 [package]
 name = "pm-ui"
-version = "0.5.0"
+version = "0.6.0"
 description = "pm desktop shell (Tauri v2) — talks to `pm serve` only"
 license = "Apache-2.0"
 edition = "2021"

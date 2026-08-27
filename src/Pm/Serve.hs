@@ -51,12 +51,11 @@ import Control.Concurrent.Async (race)
 import Control.Monad (when)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
-import Control.Exception (IOException, SomeException, bracket, catch, try)
-import Crypto.Random (getRandomBytes)
+import Control.Exception (IOException, bracket, try)
+
+import Pm.ServeGuard
 import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
 import qualified Data.Aeson as Aeson
-import qualified Data.ByteArray as BA
-import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BSL
@@ -75,10 +74,9 @@ import Network.Wai
 import Network.Wai.Handler.Warp (defaultSettings, runSettingsSocket)
 import System.Directory (doesDirectoryExist, doesFileExist)
 import System.FilePath (takeExtension)
-import GHC.IO.Handle (hDuplicateTo)
-import System.IO (IOMode (ReadMode, WriteMode), hClose, hFlush, hIsEOF, openFile, stdin, stdout)
+import System.IO (IOMode (ReadMode), hClose, hFlush, stdout)
 
-import Pm.Catalog (loadCatalog)
+import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog, loadNote)
 import Pm.Cli (GoOpts (..), executePlanNowWith)
 import Pm.Commands (afterApply, loadPlanAnyRoot, prepareApply)
 import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, requireWritable, withConfigLock)
@@ -87,7 +85,8 @@ import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
 import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, listPlans, savePlan)
-import Pm.Sort (SortSegment (..), SortSurvey (..), runSortPlan, surveySort)
+import Pm.Publish (publishCommands)
+import Pm.Sort (SortSegment (..), SortSurvey (..), runSortPlanTo, surveySort)
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
 import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newActive, planCategories, renderVaultJson, vaultPushItems)
@@ -113,9 +112,11 @@ data ServeOpts = ServeOpts
 
 -- | 一次 serve 会话的状态：配置、token、可写开关、vault 缓存刷新的进程内互斥。
 data ServeEnv = ServeEnv
-  { seCfgRef :: IORef Config
-    -- ^ 配置**每次请求**读一次：`POST /api/config` 改完之后同一个 serve 进程
-    -- 必须立刻按新配置回答，否则用户改完路径还要重启 GUI（P4-8）。
+  { seCfgSnap :: IORef (Config, Maybe (UTCTime, Integer), Bool)
+    -- ^ 配置快照、其 config.toml 变更戳、有效位——**一个** IORef 成组存取
+    -- （41 轮 #4：拆两个 ref 时两个写端点可交错成〈旧配置, 新戳〉且永不
+    -- 自愈）。有效位 False = 作废，下一请求必从盘上重读（C105/P4-8）；
+    -- 作废与「配置文件不存在（戳 Nothing）」是两个状态，不共用编码。
   , seToken :: BS.ByteString
   , seWritable :: Bool
   , seAllowApply :: Bool
@@ -128,13 +129,44 @@ data ServeEnv = ServeEnv
 -- | @allowApply@ 蕴含 writable：见模块头的三级授权。
 newServeEnv :: Config -> BS.ByteString -> Bool -> Bool -> IO ServeEnv
 newServeEnv cfg tok writable allowApply = do
-  ref <- newIORef cfg
-  ServeEnv ref tok (writable || allowApply) allowApply <$> newMVar () <*> newMVar ()
+  -- 〈配置, 戳〉一次配对写入（装载与读戳之间的毫秒级启动窗口沿旧例登记）。
+  snap <- configFilePath >>= configStamp >>= \st -> newIORef (cfg, st, True)
+  ServeEnv snap tok (writable || allowApply) allowApply <$> newMVar () <*> newMVar ()
 
--- | POST 请求体上限（十八轮：warp 默认无总 body 上限，写端点须自设）。一次
--- 分类指派最多几十条 name/category，64 KiB 绰绰有余。
-maxBodyBytes :: Int
-maxBodyBytes = 64 * 1024
+-- | 本次请求应答所依据的配置。第一方自审工作流 C105：此前快照只在本进程的
+-- POST 之后刷新，终端里 `pm config set` / `pm backup init` 改了 config.toml
+-- 之后 GET /api/config 仍答启动时的旧值——设置页「重新载入」拿到同一份旧快照，
+-- 还把旧 vault 路径预填进输入框，一点保存就把终端改动静默改回去。每次请求
+-- stat 一次配置文件（'configStamp'），戳变了才重读；只并入可变字段，主库路径
+-- 保持启动时的锚点（--allow-apply 授权的对象就是它；'Pm.ConfigEdit' 也拒改）。
+-- 重读失败 → 本次请求 500 并说明原因，快照与戳都不动（报告 fail-closed）。
+currentConfig :: ServeEnv -> IO (Either String Config)
+currentConfig env = do
+  fp <- configFilePath
+  now <- configStamp fp
+  (boot, seen, ok) <- readIORef (seCfgSnap env)
+  if ok && now == seen
+    then pure (Right boot)
+    else do
+      r <- loadConfig
+      case r of
+        Left m -> pure (Left ("配置文件已在外部改动但无法重新载入（" <> m <> "）——修正后重试"))
+        Right fresh -> do
+          let merged = fresh {cfgMainPath = cfgMainPath boot}
+          -- 41 轮 #4：载入后**再读一次戳**，与载入前一致才可与配置成对入册；
+          -- 载入期间又被改（戳不同）→ 有效位 False，下一请求必然重读。
+          now2 <- configStamp fp
+          writeIORef (seCfgSnap env) (merged, now2, now2 == now)
+          pure (Right merged)
+
+-- | 写端点改完配置后**作废**快照。41 轮 #4：此前这里「写配置引用」与「读
+-- 盘上变更戳」是两步独立动作，两个写端点并发可交错成〈旧配置, 新戳〉——
+-- 〈配置, 戳〉配对只允许发生在 'currentConfig' 的双读戳路径上；这里只作废
+-- （主库锚点随快照保持），下一请求必然从盘上重读到刚写入的值。
+setServeConfig :: ServeEnv -> Config -> IO ()
+setServeConfig env _ = do
+  (boot, seen, _) <- readIORef (seCfgSnap env)
+  writeIORef (seCfgSnap env) (boot, seen, False)
 
 -- | 启动时打印给调用方的一行 JSON。
 data Announce = Announce
@@ -145,29 +177,6 @@ data Announce = Announce
 instance ToJSON Announce where
   toJSON a = object ["port" .= anPort a, "token" .= anToken a]
 
--- | 16 字节熵 → 32 位 hex。
-newToken :: IO BS.ByteString
-newToken = do
-  raw <- getRandomBytes 16 :: IO BS.ByteString
-  pure (convertToBase Base16 raw)
-
-portOk :: Int -> Bool
-portOk p = p >= 0 && p <= 65535
-
--- | 把进程的 stdout 换成空设备。失败即忽略：这是防管道堵塞的加固，
--- 换不成最坏也只是回到"可能堵"的旧状态，不该因此让 serve 起不来。
-muteStdout :: IO ()
-muteStdout =
-  ( do
-      h <- openFile nulDevice WriteMode
-      hDuplicateTo h stdout
-      hClose h
-  )
-    `catch` \(_ :: SomeException) -> pure ()
- where
-  -- 设备命名空间：裸 "NUL" 走 GHC 的普通路径打开会 does not exist（实测）
-  nulDevice = [bsl, bsl, '.', bsl] <> "NUL"
-  bsl = toEnum 92
 
 -- | 只听 127.0.0.1；端口 0 = 随机，绑定后再从 socket 读回真实端口。
 runServe :: Config -> ServeOpts -> IO Int
@@ -200,42 +209,14 @@ runServe cfg o = case soPort o of
           pure ()
         else server) :: IO (Either IOException ())
     case r of
-      Left e -> putStrLn ("pm serve: " <> show e) >> pure 1
+      -- 工作流 F081：起不来是「错误」（2，与 --port 越界、pm ui 的启动失败同码），
+      -- 不是「有事可做」的 1。
+      Left e -> putStrLn ("pm serve: " <> show e) >> pure 2
       Right () -> pure 0
 
--- | 阻塞直到 stdin 关闭（EOF）；读到内容就丢弃继续等。
-waitStdinEof :: IO ()
-waitStdinEof = do
-  eof <- try (hIsEOF stdin) :: IO (Either IOException Bool)
-  case eof of
-    Right False -> BC.hGetLine stdin >> waitStdinEof
-    _ -> pure ()
-
-bindLoopback :: Int -> IO Socket
-bindLoopback port = do
-  sock <- socket AF_INET Stream defaultProtocol
-  bind sock (SockAddrInet (fromIntegral port) (tupleToHostAddress (127, 0, 0, 1)))
-  listen sock 64
-  pure sock
-
 -- ─── WAI application ────────────────────────────────────────────────────────
-
-allowedOrigins :: [BS.ByteString]
-allowedOrigins = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]
-
-allowedOrigin :: BS.ByteString -> Bool
-allowedOrigin = (`elem` allowedOrigins)
-
--- | @Host@ 头须为 @127.0.0.1@ 或 @127.0.0.1:<1-5 位十进制端口>@——精确解析，
--- 不做前缀判定（十八轮：前缀判定会放过 @127.0.0.1:1@evil@ 之类的尾巴；就
--- DNS rebinding 而言那不可利用，但闸的语义应当是"恰好是这个 Host"）。
-hostOk :: BS.ByteString -> Bool
-hostOk h = case BS.stripPrefix "127.0.0.1" h of
-  Just "" -> True
-  Just rest
-    | Just port <- BS.stripPrefix ":" rest ->
-        not (BS.null port) && BS.length port <= 5 && BC.all (\c -> c >= '0' && c <= '9') port
-  _ -> False
+-- （传输/守卫原语在 "Pm.ServeGuard"：newToken/hostOk/allowedOrigin/authorized/
+--   readBodyCapped/muteStdout/waitStdinEof/bindLoopback，P7 拆出，逐字搬移。）
 
 serveApp :: ServeEnv -> Application
 serveApp env req respond = do
@@ -261,26 +242,23 @@ serveApp env req respond = do
       | not (authorized (seToken env) hdrs) -> err status401 "缺少或错误的 Bearer token"
       | otherwise -> route env req jsonR err corsHdrs respond
 
-authorized :: BS.ByteString -> RequestHeaders -> Bool
-authorized tok hdrs = case lookup hAuthorization hdrs of
-  Just v
-    | Just given <- BS.stripPrefix "Bearer " v ->
-        BS.length given == BS.length tok && BA.constEq given tok
-  _ -> False
-
 type Reply = Status -> ResponseHeaders -> Value -> IO ResponseReceived
 
 route :: ServeEnv -> Request -> Reply -> (Status -> String -> IO ResponseReceived) -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 route env req jsonR err corsHdrs respond = do
   -- 配置每次请求读一次：`POST /api/config` 改完后同一个 serve 必须立刻按新
-  -- 配置回答，否则用户改完路径还得重启 GUI（P4-8）。
-  cfg <- readIORef (seCfgRef env)
-  routeWith cfg env req jsonR err corsHdrs respond
+  -- 配置回答，否则用户改完路径还得重启 GUI（P4-8）；带外改动见 'currentConfig'。
+  ec <- currentConfig env
+  case ec of
+    Left m -> err status500 m
+    Right cfg -> routeWith cfg env req jsonR err corsHdrs respond
 
 routeWith :: Config -> ServeEnv -> Request -> Reply -> (Status -> String -> IO ResponseReceived) -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req) of
   ("GET", ["api", "ping"]) ->
-    jsonR status200 [] (object ["ok" .= True, "main" .= cfgMainPath cfg, "vault" .= cfgVaultPath cfg])
+    -- allowApply：GUI 据此决定计划页要不要渲染「执行」按钮——按钮出现在
+    -- 没有第三级授权的 serve 上，点了只会收 403（P7）。
+    jsonR status200 [] (object ["ok" .= True, "main" .= cfgMainPath cfg, "vault" .= cfgVaultPath cfg, "allowApply" .= seAllowApply env])
   ("GET", ["api", "status"]) -> do
     let fresh = lookup "fresh" (queryString req) == Just (Just "1")
     r <- statusReport cfg (StatusOpts (not fresh))
@@ -380,7 +358,8 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                                             [ "plan" .= plan
                                             , "path" .= fp
                                             , "apply" .= ("pm apply " <> T.unpack (plId plan))
-                                            , "gitSteps" .= gitStepsLines (plRootPath plan) (plId plan) (planCategories plan)
+                                            , -- 与 CLI 收尾、上线命令同一生成点（Pm.Publish.vaultCommands）
+                                              "gitSteps" .= gitStepsLines cfg (plRootPath plan) (plId plan) (planCategories plan)
                                             ]
                                         )
   -- P4-7：第二个写端点——记录/撤销「暂不同步」的决定。写域是**主库**的
@@ -451,6 +430,13 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
           , "photosJson" .= photosJ
           , "workers" .= cfgWorkers cfg
           , "backup" .= object ["id" .= cfgBackupId cfg, "subpath" .= cfgBackupSubpath cfg]
+          , -- P7：上线命令的三项自定义（portfolio 仓路径 + 两个 push 目标）。
+            "publish"
+              .= object
+                [ "portfolioDir" .= cfgPortfolioDir cfg
+                , "vaultPush" .= cfgVaultPush cfg
+                , "portfolioPush" .= cfgPortfolioPush cfg
+                ]
           ]
       )
   -- P4-8：第三个写端点——改配置（vault / photos.json / 并发数）。主库路径
@@ -466,7 +452,7 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
           Just raw -> case Aeson.eitherDecodeStrict' raw of
             Left e -> err status400 ("请求体不是合法 JSON: " <> e)
             Right patch -> do
-              errs <- checkPatch patch
+              errs <- checkPatch cfg patch
               if not (null errs)
                 then jsonR status400 [] (object ["error" .= ("配置不合法" :: String), "details" .= errs])
                 else do
@@ -481,7 +467,7 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                     Right Nothing -> err status409 "另一个 pm 正在改配置（配置锁被占），本次没改"
                     Right (Just (Left m)) -> err status500 m
                     Right (Just (Right (c2, fp))) -> do
-                      writeIORef (seCfgRef env) c2
+                      setServeConfig env c2
                       jsonR status200 [] (object ["ok" .= True, "configPath" .= fp])
   -- P4-8：第四个写端点——登记备份盘。它会在**目标盘**上建立备份 root 标识
   -- （或沿用已有的）并把 UUID + 相对路径写进配置；守卫链与 CLI `pm backup
@@ -524,8 +510,11 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                 (Just _, Just _) -> err status400 "place 与 event 只能给一个"
                 _ -> do
                   let poe = maybe (Right (fromMaybe "" mevent)) Left mplace
-                  (code, mpid) <- runSortPlan (GoOpts False False) src poe from to cfg
-                  jsonR status200 [] (object ["code" .= code, "planId" .= mpid])
+                  -- 工作流 F051/F078：交代清单与中止说明随 log 回页面（stdout 已静音）
+                  logRef <- newIORef []
+                  (code, mpid) <- runSortPlanTo (\l -> modifyIORef' logRef (l :)) (GoOpts False False) src poe from to cfg
+                  logs <- reverse <$> readIORef logRef
+                  jsonR status200 [] (object ["code" .= code, "planId" .= mpid, "log" .= logs])
   ("POST", ["api", "apply"])
     | not (seAllowApply env) ->
         err status403 "serve 未以 --allow-apply 启动，拒绝执行计划（--writable 只允许生成计划，不执行）"
@@ -536,17 +525,18 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
           Just raw -> case Aeson.eitherDecodeStrict' raw of
             Left e -> err status400 ("请求体不是合法 JSON: " <> e)
             Right (ApplyReq pid only) -> withMVar (seApplyLock env) $ \_ -> do
-              prep <- prepareApply cfg pid only
+              logRef <- newIORef []
+              let sink l = modifyIORef' logRef (l :)
+              prep <- prepareApply cfg sink pid only
               case prep of
                 Left m -> err status409 m
                 Right (plan, added) -> do
-                  logRef <- newIORef []
                   -- 屏障不在这里调：它随 cfg 装进 ExecEnv，由内核在 root 锁内
                   -- 跑（二十九轮 critical）。seApplyLock 只是**进程内**互斥，
-                  -- 挡不住第二个 pm；跨进程那一半现在由 I10 锁负责。
-                  (code, results) <-
-                    executePlanNowWith cfg (\l -> modifyIORef' logRef (l :)) plan
-                  afterApply cfg plan code
+                  -- 挡不住第二个 pm；跨进程那一半现在由 I10 锁负责。屏障的
+                  -- 降级理由、收尾 git 步骤、备份缓存告警同走这个 sink（F022/C106）。
+                  (code, results) <- executePlanNowWith cfg sink plan
+                  afterApply cfg sink plan results
                   logs <- reverse <$> readIORef logRef
                   jsonR
                     status200
@@ -558,7 +548,7 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                         , "addedByGroupClosure" .= added
                         , "code" .= code
                         , "items"
-                            .= [ object ["ix" .= piIx it, "outcome" .= outcomeLabel out]
+                            .= [ object ["ix" .= piIx it, "outcome" .= outcomeLabel out, "status" .= piStatus it]
                                | (it, out) <- results
                                ]
                         , "log" .= logs
@@ -581,7 +571,7 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                   case fresh of
                     Left m -> err status500 ("登记后配置无法重新载入: " <> m)
                     Right c2 -> do
-                      writeIORef (seCfgRef env) c2
+                      setServeConfig env c2
                       jsonR
                         status200
                         []
@@ -592,6 +582,13 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                             , "id" .= case o of BiReused _ i -> i; BiCreated _ i _ _ -> i
                             ]
                         )
+  -- P7 只读端点：把配置好的两仓路径/push 目标拼成上线命令文本。pm 绝不执行
+  -- git（I9）——GUI 只把这段文本复制给用户，执行在用户终端。生成逻辑在
+  -- 'Pm.Publish.publishCommands'（纯函数，测试直打）。
+  ("GET", ["api", "publish-commands"]) ->
+    case publishCommands cfg of
+      Left m -> err status409 m
+      Right ls -> jsonR status200 [] (object ["commands" .= ls])
   ("GET", ["api", "plans"]) -> do
     (ps, errs) <- listPlans (cfgMainPath cfg)
     (vps, verrs) <- maybe (pure ([], [])) listPlans (cfgVaultPath cfg)
@@ -604,9 +601,12 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
   ("GET", ["api", "thumb", sha])
     | not (validSha sha) -> err status400 "sha 须为 64 位 hex"
     | otherwise -> do
-        (mcat, _) <- loadCatalog (cfgMainPath cfg)
-        case mcat >>= findJpeg sha of
-          Nothing -> err status404 "无此 JPEG 条目"
+        lc <- loadCatalog (cfgMainPath cfg)
+        case fst (catalogMaybe lc) >>= findJpeg sha of
+          -- 工作流 A 簇：索引读不出 ≠ 无此条目——不拿 404 蒙混
+          Nothing -> case lc of
+            CatRefused _ -> err status503 (loadNote lc)
+            _ -> err status404 "无此 JPEG 条目"
           Just rel -> do
             -- 十八轮：enPath 只过了词法闸（userRelOk）；扫描之后条目或其父目录
             -- 被换成指向库外的 symlink/junction 时，按名字 readFile 会跟随。
@@ -633,19 +633,6 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
   -- vault 缓存刷新串行化（十八轮 minor）：两个并发 GET 会争用固定 tmp 名。
   vaultReport = withMVar (seVaultLock env) (const (computeVault True cfg))
 
--- | 读请求体，超过 'maxBodyBytes' 即放弃（不把剩余读完，直接 413）。
-readBodyCapped :: Request -> IO (Maybe BS.ByteString)
-readBodyCapped req = go [] 0
- where
-  go acc n = do
-    chunk <- getRequestBodyChunk req
-    if BS.null chunk
-      then pure (Just (BS.concat (reverse acc)))
-      else
-        let n' = n + BS.length chunk
-         in if n' > maxBodyBytes then pure Nothing else go (chunk : acc) n'
-
--- | @{"assignments":[{"name":"a.jpg","category":"landscape"},…]}@
 -- | @{"src","place"|"event","from","to"}@ —— 与 CLI 的 @pm sort … --place …
 -- --from … --to …@ 同一组参数，交给**同一个** 'runSortPlan'。
 data SortPlanReq = SortPlanReq FilePath (Maybe String) (Maybe String) Day Day
@@ -699,6 +686,7 @@ instance Aeson.FromJSON ApplyReq where
   parseJSON = Aeson.withObject "apply" $ \o ->
     ApplyReq <$> o Aeson..: "planId" <*> o Aeson..:? "only"
 
+-- | @{"assignments":[{"name":"a.jpg","category":"landscape"},…]}@
 newtype PushPlanReq = PushPlanReq [PushAssign]
 
 data PushAssign = PushAssign {paName :: FilePath, paCategory :: String}

@@ -1,9 +1,18 @@
 name: photo-manager
-version: 0.5.0
+version: 0.6.0
 synopsis: Safety-first photo library manager (pm)
 description: See docs/DESIGN.md
 license: Apache-2.0
 language: GHC2021
+
+# 41 轮 GO-note #9：DocDriftTests 按仓库根相对路径读这些非源码文件——
+# 登记进 sdist，契约从「碰巧在」变成「声明在」。
+extra-source-files:
+- README.md
+- docs/DESIGN.md
+- docs/DESIGN-COMMANDS.md
+- gui/ui/index.html
+- gui/src-tauri/tauri.conf.json
 
 ghc-options:
 - -Wall
@@ -44,6 +53,10 @@ executables:
   pm:
     main: Main.hs
     source-dirs: app
+    # 显式空 other-modules 让 hpack 不再自动加 Paths_photo_manager：exe 段的
+    # Paths 对象直接进链接命令行（不经归档裁剪），会把构建机安装目录烤进
+    # pm.exe（0.6.0 发布链泄漏扫描抓出 6 处）；版本号改由 CPP 宏取（app/Main.hs）。
+    other-modules: []
     ghc-options:
     - -threaded
     - -rtsopts

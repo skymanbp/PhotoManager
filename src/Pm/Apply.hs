@@ -27,7 +27,7 @@ import System.Directory (doesFileExist)
 import System.FilePath (splitExtension, (</>))
 
 import Pm.Backup (discoverBackupRoot)
-import Pm.Catalog (loadCatalog)
+import Pm.Catalog (CatalogLoad (..), loadCatalog, loadNote)
 import Pm.Cli
 import Pm.Config
 import Pm.Diff (backupDiff)
@@ -36,7 +36,8 @@ import Pm.Op
 import Pm.Plan
 import Pm.Types
 import Pm.Undo (buildUndoPlan)
-import Pm.Vault (computeVault, gitStepsLines, planCategories)
+import Pm.Exec (ItemOutcome)
+import Pm.Vault (computeVault, gitStepsLines, resultCategories)
 
 data ApplyOpts = ApplyOpts
   { aoId :: T.Text
@@ -72,7 +73,10 @@ pickRoot cfg SelMain = do
 pickRoot cfg SelBackup = do
   er <- discoverBackupRoot cfg
   case er of
-    Left msg -> pure (Left (msg, 1))
+    -- 工作流 F031：备份盘发现不了是「错误」（DESIGN §5.1 的 2），不是
+    -- 「计划待处理」的 1——undo 改按 PlanRun 换算后，1 在这条命令族里必须
+    -- 只有一个含义。
+    Left msg -> pure (Left (msg, 2))
     Right p -> do
       rr <- requireRole RoleBackup p
       pure (either (\m -> Left (m, 2)) (const (Right p)) rr)
@@ -97,12 +101,12 @@ runUndoCmd n sel cfg = do
       r <- buildUndoPlan root n
       case r of
         Left e -> putStrLn e >> pure 2
-        Right plan -> do
-          fp <- savePlan plan
-          mapM_ putStrLn (renderPlan plan)
-          putStrLn ("计划已存 " <> fp)
-          putStrLn ("执行: pm apply " <> T.unpack (plId plan))
-          pure 0
+        Right plan ->
+          -- 第一方自审工作流 F031/F099：与其它计划生成器同一条路——存盘、
+          -- 展示、退出码 1 = 「计划已存、未执行」（DESIGN §5.1）。此前手写
+          -- savePlan + 打印 + @pure 0@，同一状态唯独在这里报 0。undo 没有
+          -- --apply，@GoOpts False False@ 走不到确认口。
+          planRunCode <$> savePlanAndMaybeRun' cfg (GoOpts False False) plan
 
 -- | 计划可能存在主库、vault 或备份 root 的 .pm/plans 下；按此序查找。
 loadPlanAnyRoot :: Config -> T.Text -> IO (Either String Plan)
@@ -136,20 +140,20 @@ loadPlanAnyRoot cfg pid = do
 -- 执行期屏障不在这里：它随 Config 装进 ExecEnv，由内核在锁内跑
 -- （'Pm.Cli.executePlanNowWith' → 'Pm.Exec.execBarrier'）。@--dry@ 因此天然
 -- 不触发任何复验副作用——它根本不进 'Pm.Exec.execPlan'。
-prepareApply :: Config -> T.Text -> Maybe String -> IO (Either String (Plan, [Int]))
-prepareApply cfg pid only = do
+prepareApply :: Config -> (String -> IO ()) -> T.Text -> Maybe String -> IO (Either String (Plan, [Int]))
+prepareApply cfg sink pid only = do
   ep <- loadPlanAnyRoot cfg pid
   case ep of
     Left e -> pure (Left e)
     Right plan0 -> case plRootId plan0 of
       Nothing -> pure (Left "计划缺 root 标识（P2.1 之前的旧格式）→ 重新生成计划后再执行（评审 cx-1）")
       Just rid -> do
-        ebound <- bindExecRoot cfg plan0 rid
+        ebound <- bindExecRootWith sink cfg plan0 rid
         pure (ebound >>= applyOnlyToPlan only)
 
 runApply :: ApplyOpts -> Config -> IO Int
 runApply o cfg = do
-  r <- prepareApply cfg (aoId o) (aoOnly o)
+  r <- prepareApply cfg putStrLn (aoId o) (aoOnly o)
   case r of
     Left e -> putStrLn e >> pure 2
     Right (plan2, added) -> do
@@ -162,29 +166,36 @@ runApply o cfg = do
           -- 执行期屏障由内核在 withRootLock 内跑（二十九轮 critical）；三条
           -- 执行路径共用 'Pm.Cli.executePlanNowWith' 这一个装配点，没有哪一处
           -- 还需要（也没有哪一处还能够）自己决定挂不挂屏障。
-          code <- executePlanNow cfg plan2
-          afterApply cfg plan2 code
+          (code, results) <- executePlanNowWith cfg putStrLn plan2
+          afterApply cfg putStrLn plan2 results
           pure code
 
 -- | apply 之后的缓存/提示收尾（可测）。P3b-7 复审 B1：备份缓存写进
 -- @\<cfgMainPath\>\/.pm\/backup-cache@，主路径必须是 RoleMain root——
 -- 否则跳过刷新并告警（计划本身已由 bindExecRoot 按 UUID 绑到备份 root）。
-afterApply :: Config -> Plan -> Int -> IO ()
-afterApply cfg plan code = do
+--
+-- 第一方自审工作流 F029/C106：收尾按**逐项结果**判，不按退出码——退出码 0
+-- 也可能是「全部待裁决、一个字节没动」（ONotExecuted 不计入退出码）。git
+-- 步骤只在真有项落位时打印，add 的类目取自落位项（'resultCategories'）而不是
+-- 计划面（@--only@ 未选中/待裁决的类目此前也进 add 清单）。打印口由调用方给：
+-- serve 端点把它收进 JSON 的 log（`pm ui` 下 stdout 是空设备）。
+afterApply :: Config -> (String -> IO ()) -> Plan -> [(PlanItem, ItemOutcome)] -> IO ()
+afterApply cfg sink plan results = do
   when (plKind plan == "backup") $ do
     emain <- requireMain cfg
     case emain of
-      Left m -> putStrLn ("⚠ 备份缓存未刷新（主库身份不符）: " <> m)
+      Left m -> sink ("⚠ 备份缓存未刷新（主库身份不符）: " <> m)
       Right _ -> do
-        (mMain, _) <- loadCatalog (cfgMainPath cfg)
-        (mBak, _) <- loadCatalog (plRootPath plan)
-        case (mMain, mBak) of
-          (Just mc, Just bc) ->
-            refreshBackupCache cfg (plRootPath plan) bc (backupDiff mc bc)
-          _ -> pure ()
+        lm <- loadCatalog (cfgMainPath cfg)
+        lb <- loadCatalog (plRootPath plan)
+        case (lm, lb) of
+          (CatLoaded mc _, CatLoaded bc _) ->
+            refreshBackupCache sink cfg (plRootPath plan) bc (backupDiff mc bc)
+          -- 工作流 A 簇：此前 @_ -> pure ()@——缓存悄悄不刷新，status 继续按旧值答
+          _ -> sink ("⚠ 备份缓存未刷新（主库" <> loadNote lm <> "；备份盘" <> loadNote lb <> "）——pm backup 会重算")
   when (plKind plan == "vault-push") $ do
-    when (code == 0) $
-      mapM_ putStrLn (gitStepsLines (plRootPath plan) (plId plan) (planCategories plan))
+    unless (null (landedItems results)) $
+      mapM_ sink (gitStepsLines cfg (plRootPath plan) (plId plan) (resultCategories results))
     -- 刷新 vault 缓存（computeVault 顺带写缓存，内含 requireMain；结果此处不用）
     _ <- computeVault True cfg
     pure ()
@@ -218,7 +229,14 @@ resolveOn o plan = do
     efresh <- loadPlan (plRootPath plan) (plId plan)
     case efresh of
       Left e -> putStrLn e >> pure 2
-      Right fresh -> resolveOn' o fresh
+      -- 第一方自审工作流 F027：盘上记录里的 plRootPath 是线索不是证据（可手编、
+      -- 盘符已变）——此前裁决的读盘（dst 探测/sha）与 savePlan 写回全用它，
+      -- UUID 绑回并过 requireWritable 的 root 只用来取锁与装载。锁内重装只取
+      -- **条目**，root 沿用绑定值；root 标识对不上即是另一份计划，拒绝。
+      Right fresh
+        | plRootId fresh /= plRootId plan ->
+            putStrLn "计划文件的 root 标识与绑定时不一致（计划被替换？），裁决未写入" >> pure 2
+        | otherwise -> resolveOn' o fresh {plRootPath = plRootPath plan}
   case m of
     Nothing -> putStrLn "另一个 pm 实例正持有该 root 的锁（I10），裁决未写入，稍后重试" >> pure 2
     Just c -> pure c

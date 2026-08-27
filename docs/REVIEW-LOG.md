@@ -1,670 +1,699 @@
-# pm 评审记录（现行卷：第 29 轮起）
+# pm 评审记录（现行卷：第 39 轮起）
 
-> 从 `docs/DESIGN.md` §16 拆出（2026-08-24）；2026-08-26 再拆一次（本文件触及
-> 750 行预算）：**v0.1→v0.2 设计评审、P3b 逐轮收口、P4 GUI、用户决策记录**
-> 在 [`REVIEW-LOG-1.md`](REVIEW-LOG-1.md)（冻结史料）；每轮评审的逐条处置表在
-> [`docs/reviews/`](reviews/)。本文件只装 P5/P6 时代（第 29 轮起）的评审段。
+> 从 `docs/DESIGN.md` §16 拆出（2026-08-24）；因 750 行预算多次分卷：
+> **v0.1→v0.2 设计评审、P3b 逐轮收口**在 [`REVIEW-LOG-1.md`](REVIEW-LOG-1.md)，
+> **P4 GUI 与用户决策记录**在 [`REVIEW-LOG-1B.md`](REVIEW-LOG-1B.md)；**第 29–34 轮（P5 后期→P6 中期）**在
+> [`REVIEW-LOG-2.md`](REVIEW-LOG-2.md)（2026-08-26 拆出）；**第 35–38 轮与
+> P7 预审登记**在 [`REVIEW-LOG-3.md`](REVIEW-LOG-3.md)（2026-08-27 拆出）；每轮评审的逐条
+> 处置表在 [`docs/reviews/`](reviews/)。本文件装第 35 轮起的评审段。
 
-## 第 29 轮（P5-B…F 六个提交）——NO-GO 7 条，**逐条独立核实后**处置
+## 第 39 轮（P7-F `76eaaa2` 送审，codex 钉 SHA）——NO-GO，minset 6 条全修（P7-G）
 
-评审自陈沙箱里跑不了 `stack test`，结论是静态源码评审。7 条因此全部送并行
-独立核实（每条一个 agent，判成 CONFIRMED 的再过一遍对抗复核 agent），核实
-提示词要求分清三件事：**代码事实成立** / **已登记残余** / **威胁模型内可达**。
-核下来行号系统性不准（#1 全错、#5 差 20 行、#6 差 28 行、#2 把
-`copyFileHashed` 的 dst 侧说反了），但其中一条是真的、且比它自己描述的更容易
-触发。
+attempt 1 即真跑（188 次命令执行，watchdog 三判据全过）。六条第一方全部
+核实成立（#2/#3 各有实证探针：PowerShell 双引号内 `$()` 确实展开、含 `'`
+路径写盘后 TOML 解码确实失败且 configTxn 已换正式文件）：
 
-**7 条塌缩成 3 个根**——这是本轮方法上的主要收获：逐条修会重复第 27/28 轮
-「同形状只扫了一半」的错误。
+1. **freshnessSweep 基准两态 + 遍历错误无子树覆盖（major）**：基准目录被拒
+   时 doesDirectoryExist 塌 False → catalog 空则全零（stagingFresh 放行，
+   fail-open）；goneN 只按精确键剔错，`sub` 枚举失败时 `sub\a.jpg` 既计
+   消失又计错误。修：基准 probeName 三态（Missing 保 ENOENT 语义；Plain
+   而非目录、或探不出 → 一条覆盖全树的遍历错误）；`walkCovered` 按路径
+   分量前缀覆盖后代、从 gone 剔除不双计。
+2. **上线命令生成无路径闸（critical）**：`$()` 在 PowerShell/bash 双引号内
+   都展开——合法 Windows 路径粘贴即执行；且手编 config.toml 绕过
+   checkPatch。修：新 `pathArgOk`（`" $ ` % !` 与控制符拒），
+   `publishCommands` 汇点对 push 目标与每条路径**再验一次**，不合格整体
+   Left——拒绝生成而非逐 shell 转义（目标 shell 由用户定，无通用安全转义）。
+3. **TOML 渲染器无字符串转义（major）**：`D:\O'Brien` 过 checkPatch 后写成
+   非法 TOML，配置当场变砖（既有字段同根，P7 新字段新增可达实例）。修：
+   新 `tomlStr`——可 literal 则 literal，含 `'`/控制符退 basic string 转义；
+   渲染器所有字符串值必经它（round-trip 用例逐字段钉）。
+4. **vault 段 `add -A`（major）**：与 DESIGN §14 及 gitStepsLines「明确禁止
+   add -A」直接冲突。修：展示集按 `fixedCategories` 显式 add；portfolio 缺
+   photos.json 配置时**拒绝生成**而非退化整仓 add。收口时生成文本的注释行
+   自身含「add -A」字样撞上「任何一行不得含 add -A」的钉——改写注释措辞，
+   钉保持全行扫描不放松。
+5. **GUI armed 未在确认时消费（major）**：失败后按钮恢复可用且仍 armed，
+   单击即再执行。修：confirm 分支先 `disarm()` 再发请求，成功/失败出口都
+   回到全新未确认按钮（label 还原）。
+6. **REVIEW-LOG-1.md 1027 行超预算（minor）**：冻结档案在无豁免口径下同样
+   违规——逐字分卷为 REVIEW-LOG-1（451，v0.1→v0.2 + P3b）与 REVIEW-LOG-1B
+   （586，P4 GUI + 用户决策记录）；1027 → 451+586 = 1037，多出的 10 行是两卷
+   卷首/指针元数据（40 轮流哈希核对正文逐字相同），指针链同步。
 
-### 根 A（#3，critical，成立且对抗复核未能驳倒）→ 已修
+GO-notes：Win.hs volumeFsType 的 SomeException 保留为已登记残余（评审建议
+后续显式重抛 AsyncException，登记不动）；测试算术 305→311→311→317 标签级
+核对成立；Serve 鉴权/执行链无旁路，DESIGN §14 token 表述诚实。
 
-**执行期组屏障跑在 root 锁外。** `preExecFor` 在 `Cli.hs` / `Commands.hs` /
-`Serve.hs` 三处都在 `execPlan` **之前**调用，而锁在 `execPlan'` 里面
-（全库 `withRootLock` 只有 `Exec.hs` 与 `VaultCmd.hs` 两处）；锁内只复核
-victim 自己的 sha，从不重算「该 sha 在归档层还留一份」。
+### 收敛证据（P7-G）
 
-对抗复核给出的触发路径比原 finding 更省：**一份计划就够**——两个终端各跑
-`pm apply <同一 id> --only 1` 与 `--only 2`。`applyOnlyToPlan` 把未选中项改写
-成 `StSkippedByUser`，而 `recheckDedupeItems` 的 victims 只取 `StPending`，
-于是双方各自看见对方那份还活着，双双放行，只需 2 份副本。
+**324 tests（322+2：caseFreshnessSweepBaseDenied / casePublishSinkGuards）**，
+GHC 警告 0。变异验证中**修正一处归因**：目录级 deny(F) 实测走的是
+NamePlain→doesDirectoryExist 塌 False 的「非目录」支（§P7-A ACL 实验早有
+记录），不是 ProbeUnknown 支——后者以非法字符名（ERROR_INVALID_NAME 123）
+确定性注入补钉，三态三支自此各有配对：
 
-后果不是字节丢失（`pm trash empty` 的 `BArchiveCopyLeft` 屏障会让三条全部
-HELD，`pm undo` 可逐条搬回），是 DESIGN-COMMANDS §8.1 的不变量被破坏 +
-照片从库里静默消失，因此判 major 而非 critical。**不是已登记残余**：§14 的
-残余段只点名 `MoveFileEx`/`RemoveDirectory`，且那一段的对手是恶意进程；本条
-的两个行为体都是良性 pm 进程，正是 §14 明写要防、I10 负责的那一类。相反，
-DESIGN-COMMANDS §10 记的二十一轮裁定（vault-holds 名单的「读→校验→写」整段
-进 I10 锁）与本条**同形**，等于反证它偏离了已确立的纪律。
+```
+m39-1  walkCovered 去前缀覆盖        → 红（sweepCounts 穷举）
+m39-2  ProbeUnknown 支塌空          → 红（基准被拒 E2E·非法名钉）
+m39-2b NamePlain 非目录支塌空        → 红（基准被拒 E2E·deny(F) 钉）
+m39-3  pathArgOk 放开               → 红（汇点复验）
+m39-4  vault add 退回 -A            → 红（publishCommands 显式类目）
+m39-5  tomlStr 恒 literal           → 红（round-trip 单引号路径）
+#5 为 JS，无 HUnit 配对——node --check + 代码级核查登记
+```
 
-**修法**：屏障装进 `ExecEnv.eeBarrier`，由内核在 `withRootLock` 内调用。
-「哪些种类要屏障」提成 `Pm.Plan.kindNeedsBarrier`（内核与命令层读同一张表），
-**该有而没有 = 整批拒绝**——P3b-5/A3 的教训在这里的落法不是把闸搬进内核
-（内核算不出「归档层还剩几份」），而是让**缺席本身**成为硬失败。内核还核对
-屏障只做了降级：把条目升级回 `pending` 或改写 Op 一律整批拒绝。
-装配点收成一处（`executePlanNowWith`），三处调用点里的 `preExecFor` 全部删除，
-`savePlanAndMaybeRunWith` 一并删除——「传哪个钩子」不再是调用方的决定。
+## 第 40 轮（P7-G `a6a0922`，codex 钉 SHA，聚焦验证轮）——NO-GO，minset {2,4,5,6} → P7-H
 
-**同根第二处（rule 09 统一修复）**：`pm trash empty` 是 pm 全程唯一 unlink
-用户数据的路径，它的屏障判据与 `removeFile` 之间同样全程不取锁。整段
-（判定 → 列表 → unlink）搬进 `withRootLock`；`--yes` 是命令行开关而非交互
-提问，锁内不会停下来等人。
+attempt 1 即真跑（204 次命令执行）。39 轮六条修法逐格核对：#1 三态与前缀
+覆盖、#3 tomlStr 全字段覆盖与 `\uXXXX` 合法性、#5 armed 消费、#6 分卷流哈希
+逐字相同——四条 GO-note。7 条 NO-GO 行**先聚类再找上游根因**（用户指令
+2026-08-26），三簇：
 
-**四道新闸各自突变转红（4/4，每次恰好一个用例）**：缺屏障改成静默放行 →
-`caseKernelRefusesMissingBarrier`；屏障搬回锁外 → `caseBarrierRunsInsideLock`
-（该用例在屏障里再取一次同一把锁，`withRootLock` 不可重入，取得到就说明在
-锁外）；去掉「不许升级回 pending」→ `caseBarrierMayNotPromote`；trash empty
-去掉取锁 → `caseTrashEmptyTakesLock`。
+### 簇 A（3 条，Publish.hs）——上游根因：黑名单过滤后原样拼接
 
-内核的 fail-closed 当场抓到第一个真实调用者：`PlannerTests` 那条端到端用例
-用 `defaultExecEnv` 执行 `clean-staging` 计划。它考的是 Quarantine 落 trash 的
-机制而非三副本屏障，改为显式挂 `Just pure`——**显式**正是这次改动要的效果。
+- #2 critical：`pathArgOk` 放行奇数个尾随 `\`——bash 双引号内 `\"` 是转义，
+  `D:\safe;whoami;\` 让引号撑到下一行，第二行的首个 `"` 才闭合，`;whoami;`
+  落在引号外执行（词法推演成立；PowerShell 无此语义）。
+- #2 major：push 字符白名单放行 `--force origin main` → `git push --force`。
+- #4 major：`git add "<photos.json>"` 无 `--`，手编 `-A` 过 pathArgOk →
+  实测 `git add "-A"` = 整仓 add（`git add -- -A` 只加名为 `-A` 的文件）。
 
-### 根 B（#1 #2 #5 #6，4 条）→ 一行代码 + 作用域文档
+三条同形：配置值被**黑名单过滤后当文本拼进 argv 位置**。黑名单要逐 shell
+枚举「能长出第二条命令」的字符类——39 轮补展开字符，40 轮补引号终结符与
+选项前缀，无法证明补全。类级修法 = **解析而非过滤**（与 P3b-16「返回解析后
+路径而非 Bool」同一原则）：`cmdPath` 把值解析成盘符 + 分量、分量按白名单
+（字母数字含 CJK、空格、`-_.()'+,=@~#&`）验证、以 `/` **重渲染**（git 在
+Windows 接受；三 shell 双引号内都无转义语义——反斜杠类整体消失）；
+`pushTarget` 按 `<remote> [<refspec>]` 解析、段首必为字母数字（选项 `-`、
+强推 `+`、删远端 `:branch` 三种形态一并出局）；操作数前一律 `--`（实测
+`git push -- --verbose main` 把 `--verbose` 当仓库名）；photos.json 改为仓内
+相对路径（不在仓内即拒）。设置入口（checkPatch：portfolioDir 只服务命令
+生成，嵌不进即拒）与生成汇点各验一次。
 
-四条攻击的是同一句**无限定**的声称：§14「取用口（读、追加、加锁、内容探测）
-走 `openBoundTo`」。事实上走它的只有 `.pm` 状态文件的三个打开口与
-`probeConfined`；Exec 三条 Op 的用户数据内容读仍是裸 `withBinaryFile`。
-一句没有限定词的绝对化保证会**每一轮生出一批 finding**，这才是根因。
+### 簇 B（1 条，app.js）——上游根因：异步响应落 DOM 无「最新请求胜出」
 
-- **#2 thumb（唯一的代码改动）**：`GET /api/thumb` 在 `resolveUnder` 之后按
-  名字 `BS.readFile`，而该端点的既定意图已被用例钉成「库外字节不外泄」。
-  改走 `openBoundTo ReadMode`。#2 里关于 EXIF 的那一半**证伪**：
-  `readCaptureTime` 的唯一调用者是 `Pm.Sort.readTimes`，入参来自库外源目录，
-  全程没有 `resolveUnder`，也没有任何限域承诺；「扫描的 EXIF 读取」更是纯错误
-  （`Pm.Scan` 不读 EXIF）。改它反而会把「源根自身是 junction」这一合法用法判死。
-- **#1 Exec 的 `sha256File`**：代码事实成立，但绑定读口**不改变可利用性**——
-  三条路径的形状都是「读 sha 当闸 → 紧接着对同一路径 `moveFileNoReplace`」，
-  赢得下读那一跳的攻击者同样赢得下 move 那一跳，后果由 move 产生。换成
-  `openBoundTo` 只会造出"读口已关"的假象。登记残余。
-- **#5 `handleIsAt` 的手写规范化**、**#6 `openFreshBinary` / trash unlink 的
-  名字口**：登记残余（#6 的后果本就已在 §14 逐字登记）。
+- #5 major：`showPlan` 无 single-flight，快速点 B 后 A 的响应晚到覆盖明细，
+  「执行」按钮绑的是 A。全仓同形清点：loadStatus / loadPlans / loadConfig /
+  sortScan（换源再扫，旧源提议晚到会把「生成计划」绑到旧 src）同样裸落；只有
+  loadVault 自带代号。类级修法：统一 `stamp/stale` 代号助手，五个加载器全部
+  走它，确认文案带计划 id。JS 无 HUnit 配对——node --check + 代码级核查登记。
 
-§14 因此改写成**带作用域的保证 + 六条逐项登记的残余**，让下一位评审有东西可
-**核对**而不是有东西可**攻击**。§6.7 并发防护同时补上「判据与动盘是同一个
-跨进程事务」这一条纪律。
+### 簇 C（3 条，文档）——上游根因：手抄数字/口径未从源再导出
 
-### 根 C（#4）→ 只改文档
+REVIEW-LOG 写 449 实为 451（分卷多出 10 行元数据）；DESIGN-COMMANDS 322 →
+当前；GUI 帮助未说明 portfolio 命令以 photos.json 为必要条件。修法之外的
+纪律：发布前所有计数字面量从命令输出再导出一遍（wc -l / 测试总数）。
 
-`FileId` 确实是 32 位卷序列号 + 64 位索引，不是 ReFS 的 128 位 `FILE_ID_INFO`
-（实测：Win32-2.14.1.0 的 `.hi` 里对 `FILE_ID_INFO` / `getFileInformationByHandleEx`
-零命中，换过去要新写 FFI）。但**风险方向反了**：窄化是一个函数，只可能把两个
-不同对象并成一个（→ 多拒一次 HELD），数学上产不出「把同一个对象拆成两个」
-因而放行最后一份。方向与 `nlink == 1` 判据相同，按同样写法把「为什么不换
-FFI」钉在 DESIGN-COMMANDS §8.1 原地。
+### 收敛证据（P7-H）
 
-### #7 证伪
+**325 tests（324+1：caseCmdPath）**，GHC 警告 0。变异逐个恰好配对转红后还原：
 
-「静音 stdout 吞掉端口冲突」不成立：`bindLoopback` 在 `bracket` 的 **acquire**
-位（`Serve.hs:181`），`muteStdout` 在 body 里（`Serve.hs:193`），端口冲突必然
-发生在静音之前。GUI 那一侧把原始行原样嵌进自己的错误消息经 stderr 报出。
+```
+m40-1  pushTarget 去段首检查        → 3 红（语法穷举 / 汇点复验 / checkPatch）
+m40-2  分量白名单放行 ';'           → 3 红（cmdPath 穷举 / 汇点复验 / checkPatch）
+m40-2b 渲染改回 '\' 分隔            → 2 红（渲染钉 / 结构钉「命令行无反斜杠」）
+m40-3  add 去 --                    → 1 红（结构钉「操作数前必有 --」）
+m40-4  photos.json 仓内检查去掉      → 1 红（仓外拒绝钉）
+m40-5  checkPatch 去 portfolioDir 可嵌检查 → 1 红
+```
 
-### 核实顺带捞出、评审没报的两条
+m40-1 首跑只红 2 条：汇点复验的选项样例 `-f origin main` 是**三段**，先被
+段数规则拒，钉不住段首规则——改成两段全白名单字符的 `--mirror origin` /
+`origin -f` 后 3 红。判别力不是写了断言就有，得让被测规则是唯一能拒它的。
 
-1. **`purgeBarriers` 与 `recheckCleanItems` 对「读不到 victim 身份」处置不
-   一致**：前者 `excl = []` 继续，后者 fail-closed 判否。**分析后判定非隐患**：
-   trash 载荷不在归档层路径上，排除集只影响「归档层某文件与载荷同身份」这一
-   种情形，而那种情形下删掉 trash 那个名字，字节仍活在归档层的名字下。
-   `excl = []` 在此是**正确**而非放松。记录在案，不改。
-2. `pm trash empty` 不取锁 —— 已随根 A 一并修（见上）。
+## P7-I 第一方全量自审（用户指令 2026-08-26：发布前亲自审一遍代码与架构）
 
-**281 tests（277 + 4 新），GHC warnings 0。**
+非 codex 轮：主线亲读全部源码——src 全模块 + cbits + gui
+（lib.rs/app.js/index.html）+ 测试语域抽查，阅读序 Win→状态层→命令层→
+serve/gui。发现**先聚类再上溯根因**（同日用户指令），归 8 簇、类级修齐：
 
-## 第 30 轮（P5-G `c978d88`）——NO-GO 5 条，minset 3 条全修，聚类 4 根
+### 簇与上游根因
 
-本轮换了评审跑法（五镜头逐个走 + 每条 finding 强制四段式带逐字引用 + 按根因
-聚类 + minset 判据"代码事实成立 ∧ 未登记 ∧ 模型内可达"三条同时成立）。效果
-立竿见影：五条全部第一方核实成立，行号零偏差，无一条为凑数——与第 29 轮
-（7 条里行号系统性不准、5 条不该进 minset）对比鲜明。评审自陈沙箱写不了
-`C:\sr\pantry`，`stack test` 没跑成，静态核验。
-
-### 聚类根 1（F1+F2，minset）：root 事务边界由调用点手工拼装，证据落在锁外
-
-P5-G 把屏障搬进锁，但只搬了它点名的那两处——同形状的还有四处，本轮一次扫完
-（rule 09 统一修复）。共同修法：**证据在锁内取**。
-
-- **F1** `pm trash empty`：manifest 视图（`trashView`）还在锁外——我在第 29 轮
-  处置里写的「整段（判定 → 列表 → unlink）搬进 withRootLock」**言过其实**，
-  实际搬的是视图**之后**的整段。A 锁外取旧视图、B 锁内清掉某项、A 拿到锁按
-  旧视图走到 `removeFile` 在缺失项上炸。修：`trashEmptyLocked` 自己在锁内读
-  视图；`pm trash list` 保持只读咨询不取锁（同 `pm status`）。
-- **F2a** `pm resolve`：「装载 → 改 → 写回」全程无锁——两个 resolve 各批不同
-  条目，后保存者整份抹掉先保存者的裁决（与二十一轮 vault-holds 名单同形）。
-  修：`resolveOn` 整段进 I10 锁并**锁内重载**盘上计划；锁外那份只用于按 UUID
-  发现 root（线索不是证据）。
-- **F2b** catalog 回写：execPlan 释放锁后 `load → update → save` 无锁，两次
-  apply 的后写者基于旧快照整份覆盖先写者。修：`writeBackCatalog` 自己取锁做
-  完整 RMW；锁被占则**明说**放弃（catalog 是 pm scan 可重建的缓存，滞后可
-  接受，静默丢更新不可以）。
-- **F2c** doctor `--repair`：判定视图（journal/tmp 枚举）在锁外取，另一份已
-  批准计划可在判定与补记之间把世界改掉，doctor 随后补写过时 Done。修：整段
-  进锁，次序与 execPlan 相同（先零写入预检、root 不可写连锁文件都不落；锁内
-  requireWritable 复检保留）；锁被占退回只读诊断 + 一条 I10 Bad，不做任何修复。
-
-### 聚类根 2（F3，minset）：配置模块仍允许裸 writeConfig
-
-`pm init --force` 是配置的第四条读改写路径，唯独它没进 `withConfigLock`——
-A 锁外读旧配置、B 锁内登记备份盘、A 无锁写回，登记被静默抹掉。修：init 的
-「查存在 → 读旧配置(mold) → 写回」整段进配置锁、锁内重读；root 标识创建
-不动配置文件，拆成 `initMarker` 留在锁外。P4-8 写的「三条读改写路径」穷尽
-声明由此更正为四条。
-
-### 聚类根 3（F4，residual → 本轮顺手关掉一半）：屏障协议未由类型封闭
-
-`barrierDrift` 此前不比对计划元数据，屏障改写 `plId` 会让 journal 的 opId 与
-旧计划碰撞（plId 参与 opId/tmp/trash 路径推导）。当前第一方屏障只碰
-`plItems`，模型内不可达——但协议该冻结的是**能改什么**而不是对实现的信任。
-修：元数据五元组（id/kind/root/rootId/created）一并冻结，改写即整批拒绝。
-两半表（`kindNeedsBarrier` ⟺ `preExecFor`）的一致性已由 casePreExecRow 逐
-kind 钉住。残余登记：更彻底的形态是单一 BarrierKind 分类器 + 屏障只返回
-「状态降级映射」而非完整 Plan——留作下一次触碰这段代码时的方向，不为它
-单开一轮。
-
-### 聚类根 4（F5，DOC_ONLY）：文档从旧实现复制了错误概括
-
-两处**处置有误**，都出自我第 29 轮写的文档，本轮更正：①§14 残余第 2 条把
-Copy 的落点读混进"读后紧跟 move"——Copy 的同内容判定没有后续 move，伪造相等
-只会让该次 Copy 静默跳过（落点空着、旧字节在 trash，doctor 可见）；②§8.1
-还写着"hardlink 被 openStateRead 的 link count 判定拒掉"，那是二十八轮 #2
-**之前**的行为，现行判据是 FileId 身份排除，合法 hardlink 见证算数。
+- **R1 布尔存在探针 False→安心继续（读路径漏网）**：36/39 轮的三态类扫只扫
+  了写路径守卫，只读报告路径上 `doesFileExist/doesDirectoryExist` 仍把
+  ProbeUnknown 塌成「没有」——Vault.listFlatPhotos（类目 ACL 拒→当空→全表
+  NEW）、Vault.photosJsonRef（读不出→答「未被引用」，与自身 34 轮注释矛盾）、
+  Sort.existingEvents（→提议重复事件夹）、Plan.listPlans（→页面安静空白）。
+  修：`Pm.Win.whenPresent`（NameMissing→Right Nothing；ProbeUnknown→Left；
+  在场才 try act）四处改用；Ingest.crossCat 走 36 轮既有的
+  `classifyGitProbe <$> probeName`，查不出=errors 一条。
+- **R2 同一命令文本两个生成器**：P7 给上线命令建了解析-重渲染
+  （Publish.cmdPath/pushTarget），CLI push 收尾 Vault.gitStepsLines 仍硬打
+  `cd <dir>`（不引号）+ `git push origin main`（无视 cfgVaultPush）。修：
+  `Publish.vaultCommands` 单生成点（类目白名单、commit 信息字符闸、路径经
+  cmdPath），四个消费口（runVaultPush / Serve push-plan / Apply.afterApply /
+  Ingest.ingestSteps）全走它，Left 时打印原因+手动指引。
+- **R3 Windows 名字合法性知识散三处**：Publish.compOk 有尾随检查、Op.normComp
+  只做剥后比较、Sort.badChar 只有保留字符——`--place "Boston."` 过闸，落位名
+  被 Win32 剥点，handleIsAt 后验必败（响亮失败，但该在计划前拒）。修：
+  `Op.winNameOk`（非空/无保留字符控制符/不以点空格结尾），Sort 两入口走它。
+- **R4 用户键入路径未绝对化入库**：`pm config set --vault rel` 直写配置，
+  相对路径按进程 cwd 解析，`pm ui` 拉起的 serve 与终端 pm 各有各的 cwd。修在
+  汇点 Config：writeConfig 写前 makeAbsolute 四个路径字段、loadConfig 出口
+  checkAbsolute 拒手编相对路径——init/config set/serve PATCH 一次收齐。
+- **R5 `.pm` 子目录先 mkdir 后限域**：savePlan/appendManifest 先
+  `createDirectoryIfMissing` 再 resolveUnder，`.pm` 是库外 junction 时拒绝
+  前已在库外建出 plans/、trash/（拒绝对、副作用不该有；writeSideCache 早已
+  是对的次序）。修：`Config.ensurePmSubdir` 先限域再建，两处收齐。
+- **R6 resolveUnder 缺失层后余段裸拼**：下降循环只查**当前**分量，NameMissing
+  后余段 `foldl (</>)` 原样拼上——`..` 能在缺失层之后越级；带盘符（`c:x`）或
+  分隔符起头的分量让 `</>` **整体替换**逃出 base（filepath 实测语义）。修：
+  下降前对整段 splitDirectories 过 badComp 预检（词法层 relPathOk 之外的
+  纵深第二道）。
+- **R7 部分写窗口与重复定义**：Journal.jAppend / Trash.appendManifest 两次
+  hPut（行体与 `\n` 之间可被崩溃切开）→ 单 hPut 一次成行；Dedupe.foldPath
+  本地重定义 → 收编 Pm.Import.foldPath。
+- **R8 backup init 收 UNC 路径**：登记只记盘内相对路径、发现只枚举本机盘符
+  卷——UNC 登记得上、永远发现不了。修：canonicalize **之前**盘符词法闸
+  （不探网络）。
 
 ### 收敛证据
 
-**六道新闸各自突变转红（6/6，每次恰好一个用例）**：视图搬回锁外 →
-caseTrashEmptyTakesLock（坏行警告在锁被占时被打印）；resolve 去锁 →
-caseResolveTakesLock（裁决在锁被占时落盘）；catalog 回写去锁 →
-caseCatalogWriteBackTakesLock；doctor 去锁 → caseDoctorRepairTakesLock
-（孤儿 tmp 在锁被占时被删）；init 去配置锁 → caseInitTakesConfigLock；
-barrierDrift 放掉元数据比对 → caseBarrierMetaFrozen。
-
-**286 tests（281 + 5 新），GHC warnings 0。**`captureStdout` 从 SortTests 移入
-TestUtil（进程级 stdout 重定向，多模块共用；套件本就 NumThreads 1）。
-
-## 第 31 轮（P5-H `92cd567`）——NO-GO 1 条，minset 1 条已修
-
-五镜头把 P5-H 的五处修复全部验干净（无死锁、降级路径口径一致、五条新用例的
-锁闸断言成立——含正确指出 caseTrashEmptyTakesLock 的"坏行警告不出现"证明只对
-本次突变成立、不是对任意未来实现的通用证明，这正是突变验证的定义），只捞出
-一条未登记同形状：
-
-**F1 侧缓存成对写未进 root 锁（已修）**。`writeSideCache`（catalog.json +
-meta.json 成对）全链无锁：两次 `pm backup`、或 backup 与 afterApply 交错，
-后写者按旧快照回写，得到 catalog 与 meta 不配对的缓存。backup-cache 未登记
-（vault-cache 的跨进程争用在**十九轮**登记过残余——三十二轮更正，此前误记
-二十轮）。统一修复：成对写整段进 I10 锁——**一处锁两类同享**，vault-cache
-那条登记残余随之关闭。
-
-落地时踩到并解决了两件评审预判过的事：①`Pm.Lock` 依赖 `Pm.Config`，锁原语
-只能下沉进 Config（`Pm.Lock` 保留为再导出，全部既有调用点零改动）；
-②vault-holds 事务（二十一轮裁定的锁内整段）在锁内经 `computeVault` 走到缓存
-写——嵌套取锁必失败。**不做"已持锁变体"**（调用方会撒谎），改为三态返回
-`CacheWritten | CacheLockBusy | CacheRefused`：锁被占（含自持）降级为"缓存
-本轮不刷新"——缓存可由下一次命令重建，报告本身是本轮新算的；junction 拒绝
-仍硬停（P3b-13 不变）。降级的可见性分工（三十二轮核对：此前这里的"警告"
-一词只兑现了一半）：backup 侧（refreshBackupCache）打 ⚠ 提示；vault 侧按
-设计**静默**——自持情形每次 hold/unhold 必然命中，逐次提示是噪声，取舍登记
-在 Vault.hs 消费点上方的注释里。压成一个 Left 的代价在测试里当场显形：全部
-hold 用例 exit 2。
-
-突变验证：writeSideCache 去锁 → caseSideCacheTakesLock 恰好转红（1/286）。
-
-评审另列两条已登记残余（scan/backup 的 saveCatalog 固定 .tmp 竞态、
-vault-cache——后者本轮已顺带关闭），及一条覆盖边界（catalog 回写用例未压两个
-真实 writer 的合并语义）。286 tests，GHC 警告 0。
-
-## 第 32 轮（P6-A/B/C/D 四提交 `1bdbe92 6e5e68c 5d8deea d5aff24`）——29 条，minset 4 根全修
-
-**门禁执行者切换（通道事故）**：codex 中转站连续 4 次空跑（第一变体：模型
-工具表缺 exec，零 command_execution，第 4 次连结果字节都没有）→ fallback 为
-独立多代理 Workflow（`wf_150b83b1-85e`）：五镜头各自真读四个提交（行号必须
-来自实际 sed 输出），每条可行动 finding 再过一个对抗复核代理。复核跑到第 8 个
-撞上月度用量限额，剩余 9 条（R1-R9）的对抗复核由主线**第一手**完成：逐行
-读码 + 探针（Win32 failIfWithRetry 装机源码逐字、makeAbsolute 归一 runghc
-实测、clang struct 布局）。codex 恢复后的交叉复核（498 次命令）读到的是已
-含修复的树——它准确认出这一点（对照 git show HEAD），逐行核验 9 处修法全部
-背书（R1-R7/R9 判「按现行树驳倒」= 修复成立），并抓到一条真实残口
-**R8-weakened：HELD 名单比较是精确大小写**——ingest 的新闸与 push 侧同病，
-大小写变体可绕过「暂不同步」决定。处置：ingest 侧立即 case-fold（非交互
-入口，绕过即静默发布；用例补 HELD.JPG 变体）；push 侧维持精确匹配并在此
-登记——那是 P4-7 的失效语义（名字变了 → 决定失效 → 照片浮回 NEW 且
-`pm vault status` 单列失效原因，重新要人裁决，不会静默发布），case-only
-rename 落进同一格是保守方向。下一轮起 codex 评审对象一律钉在提交 SHA。
-
-**产出与裁决**：五镜头 29 条（FFI 4 / 屏障协议 3 / 锁语义 4 / ingest 9 /
-文档口径 9）。对抗复核驳倒 2 条降为 DOC（p6b#0 vault 侧 CacheLockBusy 静默
-——规范文本从无"警告"承诺、消费点注释已登记取舍；docs#1 `--finalize`——拆分
-方案在 §10.3 自己的下文登记过两处）；其余成立。minset（代码事实成立 ∧ 未登记
-∧ 模型内可达）聚 **4 根、10 处修复**：
-
-- **根 A：ingest 的完成判据一码三义**（R4/R5/p6d#2，三条互相放大——R4 造出
-  未执行的裁决项、R5 把源移走、裁决从此无法执行）。上游修法：`savePlanAndMaybeRun'`
-  回 `PlanRun` 三态（未存盘/存而未执/已执行+逐项结局）；vault 那份只在主库
-  那份 `fullyExecuted`（逐项 DONE/同内容 SKIP，**不是**退出码 0——
-  ONotExecuted 不进退出码）后执行；预览两份计划**都**存盘（两段式对两份同样
-  成立，此前预览面缺一半且文案把"已存盘"说成"未完成"）；生成期把主库待裁决
-  耦合到 vault 同名项（单独 apply pidV 无法先于相册落同名字节）；收尾步骤
-  （move 进 _done）只在两份都落完时打印（与 push 的 `when (code==0)` 同闸）。
-- **根 B：ingest 缺与 push 对齐的闸**（R6/R7/p6d#5/#6）：`requireMain`（此前
-  只 readRootInfo，配置指错到 backup/vault root 照写）、批内重名 case-fold
-  （与 Names 同口径）、跨类目占名（否则造出退出码不可见的 DUPLICATE）、
-  「暂不同步」名单（push 被 HELD 挡，非交互入口不得更松）、源双 stat（§6.7，
-  与 Scan.hs hashOne 同形——_inbox 正是还在写入的目录，单 stat 会误诊成介质
-  问题）。全部进 validateIngest 一次列完；requireMain 提到 ensureVaultRoot
-  之前（身份不对的一跑不留任何写痕）。
-- **根 C：句柄化丢掉名字口原语内建的鲁棒性**（R1/R2）：被替换的
-  moveFileEx/deleteFile 在 Win32 里都经 failIfWithRetry（err 32 → 100ms×20，
-  KB 316609，杀毒/索引器短暂持有）——`withDisposeHandle` 一次就报错是未登记的
-  行为回归，重试预算按原样搬到打开步（重试重跑的是**打开**；回调含先验在
-  **最终成功句柄**上执行一次，先验校验的正是最终句柄——三十三轮 F2 更正本段
-  此前「先验逐次重跑」的措辞）；同函数的裸 HANDLE 获取补 mask（同模块第三次
-  出现的漏句柄形态，照 reparseTag 判例）。
-- **根 D：比较规范化上了提交路而路径入口未归一**（R3）：`rawBoundTo` 与
-  `handleIsAt` 共用手写 normPath，`PM_CONFIG` 是唯一不经 canonicalize 的
-  入口——正斜杠/相对拼写会被句柄后验当成链接攻击拒绝，且首败残留 .tmp 卡死
-  后续所有配置写。源头归一：`configFilePath` 对环境变量 `makeAbsolute`
-  （runghc 实测两种拼写都归一到反斜杠绝对形）。
-
-**残余处置**：p6a#0（BarrierKind→实现映射无用例，RHS 对调全绿）→ 不登记，
-直接关闭：casePreExecRow 补按**降级理由**区分两个屏障的断言；p6b#1（成对写
-的锁只串行化写者：掉电可留跨代对，换 vault 再换回时旧 meta 会放行新 catalog，
-兜底是 sha 复用前的逐条 (size,mtime)+racy 复验）→ DESIGN §6.7 登记；预览
-两段式下 pidV 可被先于 pidM apply（I7 短暂逆序，vault status 的 MISSING 可见，
-pidM 落完即收敛；打印明示次序 + 待裁决项已耦合）→ 本节登记。
-
-**文档统一修**（docs-vs-code 九条 + 各镜头 DOC 项，全部落地）：DESIGN
-§6.1/6.2/6.3 落位原语与后验/回迁终态、§4 依赖行、I7/I10 行、§5 ingest 行、
-§11 vault-cache 锁语义、§14 第 1 条措辞与第 4 条作用域、风险表三行；
-DESIGN-COMMANDS §8.1 按类型封闭改写（kindNeedsBarrier/barrierDrift 死符号
-清除）、§10.3 第 1 项 `--finalize` 改显式步骤、第 2 项 ✅ 降为「记录侧 ✅/
-判定侧 ⏸」（doctor 的 inbox-origin 判定零代码，DESIGN I7 行与风险表同步
-降级）；HISTORY 的 removeFile 实数 7→9 与 P6-A 措辞；本文件 31 轮节两处
-更正（十九轮/警告分工）；源码注释 8 处死符号或过强措辞（Win.hs 模块头与
-取用口边界、Config/Plan/Trash/Main/TestUtil/DedupeTests）。「漏写编译不过」
-统一更正为「-Wall 警告 + 运行期锁内硬崩」（项目无 -Werror）。
-
-**收敛证据**：298 tests（293+5：ingest 3 新 + R1 重试 + R3 归一），GHC 警告
-0；变异 **11/11 各杀恰好一个用例**（三十三轮 F3 更正：此前此处误记 10/10——
-主循环 10 项：R4 闸/R5 闸/requireMain/case-fold/跨类目/HELD/I7 耦合/预览
-两段式/err-32 重试/PM_CONFIG 归一，加交叉复核后补验的 HELD case-fold 共 11；
-运行记录在会话 scratchpad `mut32-results.txt` + m12 单跑输出）。R2 的 mask 与
-R9 的双 stat 无确定性触发形态、不可变异验证，如实登记为评审核验项（后者与
-Scan.hs hashOne 逐字同形）。本文件触及 750 行预算 → 拆卷：29 轮前史料移
-[`REVIEW-LOG-1.md`](REVIEW-LOG-1.md)（**正文**纯字节搬移、拼接校验等于原文；
-两卷各加数行卷首说明——三十三轮按实况精化措辞）。
-
-## 第 33 轮（P6-E `314efe6`，codex 钉 SHA）——NO-GO，minset 1 条已修
-
-codex 恢复后的首轮**钉 SHA**评审（260 次命令，attempt 1 即真跑；上一轮交叉
-复核读活树的教训落进流程）。五镜头把第 32 轮四根修复全部验干净：PlanRun
-三态穷尽、`planRunCode` 逐位保持旧 Int 契约、`fullyExecuted [] = False` 无
-协议洞、ingest 各分支退出码与次序正确、耦合只降级、重试只对 err 32、mask
-覆盖完整、configFilePath 归一不伤既有可用值、§6 新文字与 Exec 一致。minset
-恰一条：
-
-**F1 ingest 生成期 IO 异常逃顶（已修）**。probe 的 statSnap/sha256File 与
-mkItem 的目标 sha256File 都无 try——`doesFileExist` 通过后源/目标被良性
-进程移走/占住，异常直接逃到无顶层 handler 的 main，CLI 崩溃而非干净报错
-（违反 §14 防崩溃；可用性损失，无字节风险）。与 pm sort 二十五轮确立的
-「逐文件 try，读取失败整批拒绝」同一纪律——ingest 新代码漏了同款。修：
-probe 逐文件 try + mkItem 改回 Either，错误聚合一次列完、退出 2、零计划；
-过深嵌套顺手拆出 `runTwoPlans`。用例 caseIngestUnreadable 用独占句柄
-（FILE_SHARE_NONE：存在性探测按属性照常 True、ReadMode 打开必抛）造确定性
-占用，源/目标两侧各断言；变异 2/2（去 probe try / 去 mkItem try 各恰好
-转红该用例——Ingest 变异无依赖路径影响其它 F1 字样用例）。
-
-另两条 DOC 当轮修：**F2** Win.hs 重试注释「先验逐次重跑」措辞过强——真实
-语义是重试重跑**打开**、回调含先验在最终句柄上执行一次（保证不削弱），注释
-与本文件 32 轮节已同步更正；**F3** 变异计数 REVIEW-LOG/HISTORY 的 10/10 与
-提交信息的 11/11 矛盾——真值 11，两处文档已统一并注明运行记录出处；拆卷
-「纯搬移」措辞按实况精化。residuals 与第 32 轮登记一致，无新增。
-
-299 tests（298+1），GHC 警告 0。
-
-## 第 34 轮（P6-F `972b049`，独立 Workflow 钉 SHA）——NO-GO，minset 2 条已修
-
-codex 通道再度 4/4 空跑（工具表缺 exec、0 条命令执行，stderr 刷
-`OutputTextDelta without active item`；零 exec 判据丢弃，占位 verdict 不算
-评审），按第 32 轮先例切独立多代理 Workflow：三镜头（F1 修法完整性与同类
-扫尽 / runTwoPlans 拆分等价性 / 文档与事实）+ 逐条对抗复核，全部钉
-`972b049`。拆分等价性镜头**零 finding**（删除侧与新增侧去缩进 diff，36 行
-中 34 行逐字节相同；两组「同类型相邻可静默互换」参数位逐字核实未换；
-`null dstErrs` 的求值语义保证 zipWith 无截断）。minset 2 条，同一根因——
-**二十五/三十三轮立的「读口 fail-closed」纪律从未全仓扫**，三十三轮只扫了
-ingest 生成期：
-
-**F1 computeVault' 主循环读口无 try（已修，复核 UPHELD）**：`resolve`
-（枚举-hash 主循环）裸调 shaViaCache，而同一函数在 `freshShaAt` 里被 try
-包着、注释写明要防的正是「CLI 抛异常退出、API 变 500」——二十三轮只修了
-那一个调用点，全模块唯一的 try 就是它（复核 grep 证实），顶层无 handler，
-分钟级扫描窗口内 Lightroom/用户挪走一张即崩、Serve 侧 500。修：resolve 包
-try → 读失败落既有 unstable 桶（sha 分量下游处处被 Just 模式滤掉，空值
-安全）；同族两口一并——`listFlatPhotos` Either 化（枚举失败整体拒绝
-exit 2：静默空列表会把另一侧伪报成 MISSING，比崩溃更糟）、`photosJsonRef`
-Either 化（读不出**不得**答「未被引用」——fail-open 会诱导改名打断已上线
-URL）。用例 caseUnstableOnLocked（独占句柄 → UNSTABLE 单列 + exit 1 +
-可读文件照常分类 + 不入 vrSrcMeta）与 casePhotosJsonRefLocked。
-
-**F2 Exec 裸 sha256File ×5（已修，复核 UPHELD 且扩大战果）**：镜头报
-「:522 是唯一漏的」，复核证伪——裸口共 **5** 处（copy I5 判定 / tmp 复读 /
-rename 指纹（连带 dirFingerprint）/ quarantine 重跑判定 / quarantine
-victim），其中 3 处与三十三轮刚修的 mkItem 逐字同形。复核另更正镜头两处
-过头：「计划文件不更新」不是本次损失（savePlan 在执行前），丢的
-writeBackCatalog 按 Cli 注释属良性滞后。修：5 处逐口 try——本模块既有形态
-（moveBound/落位复核早就是 JFailed + OFailed）；读失败 ≠ 内容不符，给
-OFailed（稍后重跑）不折叠成 OConflict（人工核查）；Checkpoint 逃逸契约
-不受影响（try 只包读口，不包 eeCheckpoint）。用例 copy-dst-locked /
-rename-fp-locked / quarantine-victim-locked。
-
-**同类扫尽（rule 09，超出镜头范围的第一方普查）**：全仓 grep
-sha256File/dirFingerprint/listDirectory/BS.readFile 邻域逐处分类。已在
-try 内（不动）：Scan.hashOne、Sort.snapshotWith、Ingest（三十三轮）、
-probeConfined、Doctor.probePmSha、slotOccupied。本轮补修：Doctor 6 处
-（C2/C5 判定 → 新 Bad 行「C?」、Q2 note、verifyFp Either 化 + R2 调用点、
-C4 checkTarget、deepVerify、--repair 的 C5 计划生成跳过）——读失败
-Finding 一律不落 --repair 白名单（C2/R2/Q-DONE-LOST 的 Warn）也不落 C5
-行，不触发任何修复推导；resolveKeep --keep src 的 dst sha（读不出 →
-resolve 未执行 exit 2，不落半个改写）；Names 生成期 dirFingerprint
-（逐项 try + 一次列完 + 零计划 exit 2，与 ingest 同纪律）。用例
-doctor-deep-locked（其余见下「无确定性用例」登记）。
-
-**F3 caseIngestUnreadable c2 断言不判别（复核 REFUTED，不进修集）**：
-复核证伪其「无信号」主张——同案 c1 钉着同一平台前提的**反面**
-（doesFileExist 改判 False 会让 c1 当场红，c2 根本跑不到），守卫不会
-静默失去覆盖；「validateIngest 顺序调整可触发」亦假（重排不改变存在性
-判定）。按复核建议登记取舍：**源侧判别力由同案 c1 的反向前提兜底**；
-其原建议的 "读取失败" 断言锚与 Ingest 的「名单读取失败」共享子串，本身
-不够判别，不采纳。
-
-**DOC ×2（当轮修）**：README 三格收敛数字落后一轮（298 例/32 轮/6+1+11
-——上一次收口提交恰是在这三行上维护的，git log -L 证实）+ §具体实现第 6
-条「三十轮」漂移；HISTORY 缺 P6-F 条目且标题仍写 P0–P5（P6-A 起既存
-漂移）——两处已随本轮收口一并补齐。
-
-**新登记残余**：①执行期**写口**（copyFileHashed / setModificationTime /
-createDirectoryIfMissing / hash 失配分支的 deleteBoundAt）异常逃逸 =
-§6.4 进程死亡语义——journal 已有 Intent，doctor 对账，属已设计行为而非
-缺陷；代价是一个占用中止整批（读口本轮已修掉这个代价；写口失败本就意味着
-该项无法完成，且 moveBoundNoReplace 自带 err-32 重试预算）。②本轮新 try
-中无确定性注入形态的：Exec tmp 复读与 quarantine 重跑分支、Doctor 的
-C?/Q2/R2/C4/C5 五处、resolveKeep、Names 指纹、listFlatPhotos 枚举——注入
-需要协议中途独占或重 fixture，登记为代码级核查，与有用例的 6 道同型同修法
-（R2/R9 先例）。③SomeException 宽口（Sort/Scan/Win 约 20 处既有形态，
-与 Hash.hs「只捕 IOException」家规不一致）——非本轮引入，登记待后续轮
-裁定是否收窄。
-
-**750 行预算引发的拆分（全部字节级搬移 + 原模块再导出，行为零改动；
-下一轮 refactor-equiv 镜头素材）**：Pm.VaultCore（六态纯核心 +JSON 渲染）、
-Pm.ExecTypes（Checkpoint/ExecEnv/ItemOutcome/updateCatalog）、
-dirFingerprint → Pm.Hash、Pm.Apply（undo/apply/resolve 族 + pickRoot——
-Commands 本已超预算，resolve 读口修改无处容身）、VaultHoldTests（P4-7
-用例整族）+ 共享 fixture（mkVaultCfg/writeF/mkMain/execNow）上移 TestUtil。
-
-**收敛证据**：305 tests（299+6），GHC 警告 0；变异 **6/6 各杀恰好一个
-用例**（m15 resolve try / m16 photosJsonRef fail-closed / m17 copy-dst /
-m18 rename-fp / m19 quarantine-victim / m20 deepVerify；运行记录在会话
-scratchpad `mut34-results.txt`）。
-
-## 第 35 轮（P6-G `39edbb8`，codex 钉 SHA）——NO-GO，minset 4 条全修
-
-**执行者插曲**：attempt 1 中途被一次计算机强制重启杀死（事件流 373 KB、
-28 次命令执行、无 verdict 文件）——半程输出整体丢弃不采信；重启后先做四层
-完整性核验（工作树 porcelain 空 / HEAD=`39edbb8` / `git fsck` 静默 /
-305 例全绿且零重编译）再整轮重跑，attempt 2 真跑（318 次命令执行）出本轮
-verdict。
-
-五镜头先把三十四轮修复全部验干净：resolve/listFlatPhotos/photosJsonRef 的
-try 作用域与失败方向、Exec 五口读失败 OFailed 与内容不符 OConflict 的区分、
-Doctor 读失败行不进 --repair 白名单、四个 750 行拆分无语义漂移、305=299+6
-的叶子数推演成立。minset 4 条聚成一根 + 一条独立：
-
-### 根（F2+F3+F4，minset）：三十四轮的全仓 grep 命中没有逐一记账
-
-三十四轮确实 grep 了 listDirectory/BS.readFile（本卷 34 轮节可证），但
-**命中没有逐一记账**——处置清单只落了 hash 家族与 Doctor 六口，目录枚举口
-与控制文件读口的命中无分类、无清单，静默掉队。扫而不记账等于没扫：本轮
-按 IO 读原语全集清点（listDirectory / BS.readFile / readFile /
-hGetContents / withBinaryFile / openBoundTo / statSnap）逐命中分类成表
-（见下节），下一轮评审有表可核对，而不是有一句声明可攻击（二十九轮根 B
-的教训在读口清单上的重演）。修法沿用既有桶，逐处：
-
-- **F2 Names/Sort 生成期枚举**：`pm names` 的年层/事件层/成片三处
-  listDirectory 与 `pm sort` 的 existingEvents 无 try，doesDirectoryExist
-  通过后目录被挪走/独占即逃顶。修：与二十五轮 sort、三十三轮 ingest 同
-  纪律——枚举整段 try，失败明说 + 零计划 exit 2（Names 整相位一个 try：
-  生成期没有「部分成功」，半张清单比崩溃更糟）。
-- **F3 Doctor/Trash/Serve 枚举**：`staleTmpFiles`/`trashView` Either 化——
-  doctor 读失败落新 Bad 行 TMP-ENUM/TRASH-ENUM（「本轮核不了」如实说；
-  绝缘按构造：repairDone 白名单只收 C2/R2/Q-DONE-LOST 的 Warn + oid 前缀，
-  Bad 行不触发任何修复，stale 删除清单 = staleTmpFiles 返回值，Left→[] =
-  零删除）；`pm trash list/empty` 拒绝并明说（empty 拆 trashEmptyLocked'
-  承接原体，Left 不清任何条目）；Serve `/api/plans` 的 listPlans 迁入
-  Pm.Plan（loadPlan 旁边，领域归位 + 超预算的 Serve 净减行）并 try——
-  此前 warp defaultSettings 把逃逸兜成 500，服务不死但违背 errors 数组
-  契约。
-- **F4 Config/GitGuard 控制文件读口**：loadConfig 与 pmIgnoreGuard 的裸
-  BS.readFile 各包 try 落 Left。方向都是 fail-closed：配置读不出 = 拒绝
-  （不猜内容）；`.gitignore` 读不出 = I11 拒绝——核不了 ≠ 已覆盖，与
-  「无 .gitignore」同向。
-
-### F1（minset，独立根）：push 无项分支与 status 是两个出口谓词
-
-`hasDiffR` 只看 newActive/missing/renamed/drift；三十四轮把 UNSTABLE 加进
-status 出口时是在调用点手写并列，**没有合一回谓词**——push 的无项分支用的
-还是旧 hasDiffR：主库唯一一张照片被独占时 `pm vault push` 报 0，自动化
-调用方当成「无事可做」。这正是二十一轮 hasDiff/hasDiffR 双谓词分叉的同型
-复发（Vault.hs 注释里就钉着那次先例）。修：unstable 项收进 hasDiffR 定义，
-status 调用点的手写并列删除——出口判定只此一个谓词，两个消费点同源。
-
-### F5（DOC_ONLY）+ 文档侧顺带发现
-
-README「开发史（P0–P5 全程）」漂移——三十四轮 DOC 修复补了 HISTORY 标题却
-没扫 README 同句；本轮连同收敛数字三格一并推进。DESIGN §14 风险行
-「枚举…一律落 fail-closed 桶」在 F2-F4 修复前说过头，措辞更正为「三十四轮
-全仓 grep、三十五轮按读原语清点补漏」。顺带发现两处既有 drift 一并修：
-①DESIGN §4 把 `Plan.hs` 标成「纯函数，无 IO」、性质 1 把它列进纯模块——
-savePlan/loadPlan 落进该模块时就已过时（`git show` 父提交可证），据实
-改写；②Vault.hs 残留三十四轮拆分期的三个冗余 import（AE/BSL/fromMaybe）
-——增量构建的重编译规避一直掩着它们，「GHC 警告 0」的声明只在增量构建下
-成立过，本轮全量重编译显形后清除。
-
-### 读口原语清点表（本轮扫法，下轮按此核对）
-
-- **信任读闸（已 try，不动）**：`readPmState`（Config.hs）是 .pm 状态文件
-  的唯一读口——loadPlan'/readManifest'/loadCatalog'/readHolds 全部经它；
-  Scan.hashOne、Sort.snapshotWith、Ingest probe/mkItem、probeConfined、
-  Doctor.probePmSha/verifyFp、Exec 五口、resolveKeep、Names 指纹
-  （二十五~三十四轮逐轮上的闸）；Vault.listFlatPhotos 与
-  Config.requirePmTrusted 的 .pm 枚举（各自内部 try）、Hash.dirFingerprint
-  （原语本体无 try，生产调用点 Doctor/Names/Exec 全部在调用者 try 内）——
-  后三处为**三十六轮 F2 补录**：首版清点漏列了这三处已保护命中。
-- **零直接命中**：Clean/Dedupe/Import/Versions/Diff/Status/Backup 七模块
-  无任何裸读原语——读一律经 Scan/Catalog 单点（codex 镜头③与本方清点
-  双向零发现）。
-- **本轮修**：Names 三处 + Sort existingEvents + Doctor staleTmpFiles +
-  Trash listTrashFiles + Serve(→Plan) listPlans 的枚举；Config/GitGuard
-  的控制文件 BS.readFile。
-- **界外（登记不修）**：写口逃逸 = §6.4 进程死亡语义（三十四轮已登记）；
-  openExclusive 家族是写路径原语；存在性**布尔探针**（doesFileExist/
-  doesDirectoryExist）只允许出现在 False→拒绝 的位置——False→放行 的布尔
-  探针属修复对象而非豁免（三十六轮 F1：GitGuard 已三态化）。
-
-### 收敛证据
-
-**308 tests（305+3：caseUnstablePushExit / caseConfigReadLocked /
-caseGitignoreReadLocked，后两个用 PM_CONFIG 临时改指 + 独占句柄造确定性
-占用；trashView Either 化连带 6 个既有用例改经 TestUtil.trashViewOK）**，
-GHC 警告 0（全量重编译下核实）。变异 **3/3 各杀恰好一条**（m21 去
-hasDiffR 的 unstable 合取 → caseUnstablePushExit；m22 去 loadConfig try →
-caseConfigReadLocked；m23 去 pmIgnoreGuard try → caseGitignoreReadLocked；
-运行记录在会话 scratchpad `mut35-results.txt`）。m21 预判过可能连带杀
-caseUnstableOnLocked，实测不杀——该用例夹具另有可读的 a.jpg 走 NEW，
-exit 1 经 newActive 仍成立；判别 UNSTABLE-only 出口的只有新用例，这正是
-要补它的原因。枚举口新 try（Names/Sort/Doctor/Trash/Serve）无确定性注入
-形态——openExclusiveBinary 锁的是文件，锁不住「目录被枚举」这个动作，
-登记为代码级核查（与三十四轮 R2/R9 先例同款）。
-
-## 第 36 轮（P6-H `49ba732`，codex 钉 SHA）——NO-GO，minset 1 条已修
-
-attempt 1 即真跑（204 次命令执行）。五镜头把三十五轮修复全部验干净：
-hasDiffR 合一后全仓只有 status/push 两个消费点、Names 整相位 try 对照删除侧
-仅缩进迁移、TRASH-ENUM/TMP-ENUM 为 Bad 且修复白名单只收 C2/R2/Q-DONE-LOST
-的 Warn 或 C5、staleTmpFiles 的 Left 构造 stale=[] 删除循环零次、
-trashEmptyLocked' 承接体与原体一致、/api/plans 保住 errors 数组契约、
-SortSource 逐段搬移且再导出面完整、Vault 冗余 import 零残余使用、七个
-「零直接命中」模块经原语全集 rg 复核为零、三个新用例判别力成立（Spec.hs
-全程预置 PM_CONFIG 使 finally 还原总能成立）、m21 不杀 caseUnstableOnLocked
-的登记解释静态核对成立。minset 恰一条：
-
-### F1（minset）：I11 的 .git 存在性探测把「查不出」塌成「不存在」
-
-`pmIgnoreGuard` 与 `findGitAncestor` 用 doesDirectoryExist/doesFileExist 探
-`.git`，两者把 ACL/断网/介质错误统统吞成 False——而守卫里 False 的去向是
-**放行**（自身「无」→ 祖先扫描；祖先也「无」→ Right ()）。合法 git root 的
-`.git` 属性读取遇 ACL/介质错误、root 其余位置仍可写时，I11 全链放行，随后
-`.pm` 写进未被 ignore 覆盖的工作树。三十五轮 F4 只关了 `.gitignore` 的
-**读**口，同函数上游的**存在性探针**是同一纪律（二十六轮「缺席与读不到必须
-分开」）的漏网——且 `Pm.Win.probeName`（P3b-13）当年为消灭的正是这个形状，
-仓里自己的注释就点着名（Win.hs：「ACL 拒绝读属性时该层会被当成尚不存在而
-放行」）。第一方核实三段俱成立（代码事实 / 未登记 / 模型内可达——§14 明列
-介质错误与并发良性进程）。
-
-修：探测改走 probeName 三态，判定收进纯函数 `classifyGitProbe`（Missing →
-继续/放行；Plain/Surrogate → git 语境成立，surrogate 含悬空——「当有」只会
-引向更严一侧：本层查 .gitignore、祖先层直接拒绝；Unknown → Left 核不了 =
-不放行）；`findGitAncestor` 换型 `Either String (Maybe FilePath)` 逐层同
-规则（无外部消费者，grep 证实）；`canonicalizePath` 一并 try（规范化失败
-Left，不逃顶）。**类界写明**（本卷 §35 界外行 + GitGuard 模块头）：布尔探针
-只允许出现在 False→拒绝 的位置——本模块 .gitignore 的 doesFileExist、
-requirePmTrusted 的 doesDirectoryExist 均属之，这是三十五轮清点表不含它们
-的原因，现在是显式规则而非默会假设。
-
-用例：caseClassifyGitProbe（四构造子穷举——ProbeUnknown 不许给布尔答案）+
-caseDanglingGitJunction（端到端判别器：悬空 .git junction 下旧布尔探针答
-False 放行、probeName 判 NameSurrogate 要求 .gitignore——GuardTests 位移槽
-用例早已实测悬空链接的 False 行为）。ProbeUnknown 无确定性 E2E 注入形态
-（错误码 5/53 在测试里造不出来）——这正是把判定提成纯函数的原因：要害格在
-类型层穷测，IO 接线薄到只剩一次 probeName 调用。两用例入 StateGuardTests
-（「缺席与查不出必须分开」的家，casePmIsPlainFile 同型；GuardTests 已
-711/750 行）。
-
-### F2（DOC_ONLY，当轮补录）：§35 清点表漏列三处已保护命中
-
-表声称按原语全集清点，但 Vault.listFlatPhotos（内部 try）、
-Config.requirePmTrusted 的 .pm 枚举（内部 try）、Hash.dirFingerprint
-（原语本体无 try，生产调用点 Doctor:412 / Names:283 / Exec rename 指纹全部
-在调用者 try 内——三处均经评审与第一方双向核实）没落进任何一类。无代码
-风险；表已当轮补录（§35 表内三十六轮标注）——「全集」声明必须逐命中可
-复核，否则又是一句可攻击的声明。
-
-### F3（DOC_ONLY，当轮修）：README 与 DESIGN 的库规模数字互相矛盾
-
-README「效果」节是 2026-08-25 实测（4859 / 480.9 GiB），DESIGN §1/§12 是
-2026-08-22 P0 基线（4635 / 459.3 GiB）——库在长大，两组都真，但互不注明
-采样日，读起来就是矛盾。修：DESIGN 两处标注「P0 基线 + 采样日」并指向
-README 现库数字；性能预算与验收口径仍按基线（那是它们当时的输入）。
-
-### F4（DOC_ONLY，当轮修）：「Exec 唯一写盘模块」说过头
-
-DESIGN §4 两处逐字称 Exec「全项目唯一有写盘 IO」——实际 Config/Journal/
-Catalog/Plan/Trash 都写 pm 自有状态文件。声明的本意是照片字节：已收窄为
-「唯一改动照片字节的模块」，状态文件写口显式点名。与三十五轮 Plan.hs
-「纯函数无 IO」同族：架构声明与代码事实的漂移，在有人拿它做判断之前据实
-收窄。
-
-### 同类扫尽（rule 09）：全仓布尔存在探针逐处分类
-
-按 doesFileExist/doesDirectoryExist/doesPathExist 全集清点 src/ + app/
-（约 60 命中），判据 = False 的去向是否放行 ∧ 下游有无响亮失败兜底：
-
-- **False→拒绝/报告即停**（安全方向，不动）：init/backup init/ingest 的
-  路径预检、ConfigEdit/Serve 的编辑校验、loadConfig 的「无配置」、
-  requirePmTrusted 的「非目录」、GitGuard 的「无 .gitignore」、
-  SortSource/Names/Sort 的源根检查。
-- **False→继续但下游响亮失败兜底**（不动）：写路径的「old? → delete →
-  moveBoundNoReplace」三连（Config writeConfig/writeJsonReplacing、Plan
-  savePlan——探针说谎则 no-replace 落位当场炸）；Exec/Apply/Names/Ingest
-  的目标占位判定（误判空位 → 执行期 no-replace/I5 复核挡住；误判占位 →
-  只是多拒一步）；Exec:335 与 Win slotOccupied 已是 try/异常按占用。
-- **False→更保守的误报**（不动，登记）：catalog/侧缓存当缺失重建、trash
-  枚举底座缺失答空（清除少删不会多删）、doctor 的 C/R/Q 行判定（探针塌
-  False 只流向非 --repair 行或把已完成误报成未完成；--repair 白名单只收
-  Warn+oid 组合且只补记录不动字节）、vault listFlatPhotos 目录缺失答空
-  （报告面偏 MISSING，push 的 MISSING 只报告）、Scan 的嵌套 root-id 判定
-  （塌 False 会把 .pm 内容当照片索引——catalog 污染可重扫修复，计划执行
-  仍有全部屏障）。
-- **False→放行且无兜底**（修，全仓唯一一处）：`pm init` 的配置存在闸
-  （Commands.hs）——exists 塌 False 绕过「配置已存在（--force 覆盖）」且
-  mold 丢失，既有备份盘登记被无 --force 覆盖。同 F1 三态化
-  （classifyGitProbe 通用化为存在性收口表，消息去 .git 化）；接线无独立
-  判别用例（Unknown 不可 E2E 注入；Surrogate 在旧写法下也非静默——落位
-  no-replace 会响亮失败），由共享分类器的穷举表 + 本条登记承载
-  （三十四轮 R2/R9 先例）。
-
-### 收敛证据
-
-**310 tests（308+2）**，GHC 警告 0（touch 强制重编译改动文件后核实）。变异
-**m24（ProbeUnknown → Right False）恰杀 1 条**（穷举表）；**m25
-（NameSurrogate → Right False）杀 2 条**——穷举表与悬空 junction E2E 都是
-它的设计探测器，不为凑「恰好一条」缩表。运行记录在会话 scratchpad
-`mut36-results.txt`。
-
-## 第 37 轮（P6-I `b68cb2e` + P6-I2 `0c48b28`，codex 钉双 SHA）——**GO，minset 空：门禁收敛**
-
-**执行者插曲二**：attempt 1 半途夭折——codex 连续畸形工具调用（missing
-field `target`）+ upstream 失败后，把中途分析当最终消息交出（58 次命令
-执行、344 字节、无 verdict 行）。看门旧判据（exec>0 ∧ 字节>200）误收——
-判据即根因，补上「结果必须含 verdict 行」后整轮重跑；夭折产物改名留证。
-重跑 attempt 1 真跑（216 次命令执行）出本轮 verdict。
-
-五镜头全绿：F1 三态修法逐格核对成立（probeName 错误码语义、classifyGitProbe
-方向、三条正常路径与父提交等价、surrogate 只朝更严、canonicalizePath 成功
-值不变、findGitAncestor 无外部消费者、各调用方拒绝方向保持）；rule-09 重扫
-68 个存在性命中逐处落入 §36 四类、无第二个无兜底放行口（init 闸修法核过：
-mold 保留、--force 语义保留、probeName 在既有配置锁内无新锁边界）；测试与
-变异登记一致（310=308+2、m24/m25 与登记吻合）；文档五处对齐（README「每道
-闸都有突变用例」对 init 接线略宽——评审判定 §36 已登记，不重列）；读口回归
-未发现新的「已证实且未登记」第三类。**minset: ∅——按用户裁定（"没有『未
-登记且模型内可达』的新根，即发布"），门禁自本轮收敛。**
-
-### GO 后收口（quality-over-cost 裁定）：Scan 链接探针塌 False
-
-评审把 `Scan.listTreeWith` 的 pathIsSymbolicLink 异常按 False 继续归为
-「已登记未证实残余」（登记点 = 行内注释的自辩）。第一方核实推翻该自辩：
-「真实错误会在下面的 stat 再现」只对普通文件成立——junction 属性读瞬时
-失败后，递归会**顺利**跟着链接下去，错误永不再现，库外文件被当库内 rel
-条目索引（下游：backup 会把外来字节拷进备份根、报告面被污染；删除屏障
-不受影响——probeConfined/resolveUnder 拒经 junction 的路径）。可达性与
-三十六轮 F1 同类（属性读遇 ACL/介质错误而其余操作成功），一致性要求同判。
-修：与 Trash.linkish / Exec.slotOccupied 同纪律——非「不存在」的探测异常
-按「是链接」跳过并入错误桶；「不存在」仍走 stat 路径响亮入错；该处 try
-同步收窄 SomeException→IOException（Ctrl-C 不吞）。
-
-**链接属性探针类清点**（try-塌 False 形态全仓四处）：Scan（本轮修）；
-Trash.linkish 与 Exec.slotOccupied（已保守，为范式）；SortSource 的
-rootLink（塌 False 只丢一条「源根是链接」诊断行，无递归/计划决策依赖——
-登记不修）。Hash.dirFingerprint 的裸 pathIsSymbolicLink 异常**上抛**进
-调用者 try = 响亮 fail-closed，属安全形态（塌 False 才危险，上抛不是）。
-
-**验证登记**：探测异常无确定性注入形态（错误码 5/53 在测试里造不出），
-新分支无配对用例、不可变异验证——按三十四轮 R2/R9 先例登记为代码级核查；
-310 tests 全绿、GHC 警告 0 维持。收敛既成，转入释放链（逐步摆清单 +
-AskUserQuestion，用户裁定在案）。
-
-## 第 38 轮（P6-J `6c6f049`，codex 钉 SHA，聚焦验证轮）——**GO，minset 空**
-
-GO 后收口提交的专项验证（attempt 1 即真跑，watchdog 三判据全过）。四镜头
-全绿：①修法等价性逐格核对——四种探针输入只有「Left 非 ENOENT：继续→跳过」
-一格变化，`--ignore-all-space` 证实 WalkDotDirs/SkipDotDirs 块纯重缩进，
-IOException 收窄只放走本就不该捕的异步异常；错误桶经 srErrors→CLI 逐项
-显示且 scan 返回 1、Sort 侧入 sfErrors 呈现语义正确。②同型清点复核：全仓
-五个 pathIsSymbolicLink 调用点与 §37 的「四处塌 Bool + 一处裸调上抛」
-一一对应无漏项；getFileSize/getModificationTime 只在 statSnap 内、各消费
-链均有 fail-closed 归宿。③文档与收敛表述不夸大。④无「本提交内成立 ∧
-未登记 ∧ 模型内可达」的新根。
-
-**新登记残余（父提交既存，非本轮引入）**：`freshnessSweep` 过滤
-statSnap Left 且只按遍历错误计 errN——已入 catalog 的条目读不出会落
-goneN（保守向：新鲜度不过 → 先 pm scan）；**未入 catalog 的新文件**若
-stat 失败则对计数不可见。报告面小洞，不在动盘路径上，登记待后续轮裁定。
-
-门禁自此**含 GO 后收口在内**全部过审。释放链已经用户确认启动。
+**330 tests（325+5：caseFirstPartySweep / caseProbeUnknownFailClosed /
+caseVaultCommands / caseConfigAbsolutePaths / caseEnsurePmSubdirNoSideEffect；
+另 caseGitSteps 重写、SortTests/GuardTests/ServeTests 各扩位）**，GHC 警告 0。
+变异逐个恰好配对转红后还原（邻近用例全绿，判别力核过）：
+
+```
+m-R1h whenPresent ProbeUnknown→Right Nothing → 2 红（三态钉 / listFlatPhotos 钉）
+m-R1p listPlans 吞 Left                      → 1 红（plans 是文件 → errors 必非空）
+m-R2  gitStepsLines 退回硬打 cd/origin main   → 1 红（与上线命令同一生成点钉）
+m-R3  winNameOk 丢尾点/空格判定               → 2 红（eventNameFor / resolveEvent）
+m-R4a writeConfig 去绝对化                   → 1 红   m-R4b loadConfig 去拒 → 1 红
+m-R5  ensurePmSubdir 退回先建后限域           → 1 红（库外零目录副作用钉）
+m-R6  resolveUnder 拆整段预检                → 1 红（缺失层后 ../盘符分量钉）
+m-R8  盘符闸拆除                             → 1 红（UNC 拒绝钉）
+```
+
+无从判红、代码级核查登记：R7 两处单 hPut 与 Dedupe.foldPath 收编——判别
+试针需要能观测「两次 hPut 之间」的崩溃点或语义差异，不存在；Ingest.crossCat
+的 ProbeUnknown 分支需 ACL 夹具（分类函数本身已被 caseClassifyGitProbe 判定
+表钉住）。接受不修（方向安全）：Doctor.staleTmpFiles 查不出→不删（no-delete
+方向）、Names 成片枚举塌 False→少提议 rename（只读）、Trash.listTrashFiles
+base 塌缩（既有注释登记）。
+
+## P7-J 第一方全量自审·第二轮（ultracode 多代理工作流，基线 `0bade70`）——14 簇类级收口
+
+流程同 P7-I（用户指令 2026-08-26：聚类 → 上游根因 → 类级修），但换成多代理
+工作流把全库**重扫**：并行 finder 分维度产出 **101 项 finding**，对抗复核后
+聚成 **14 簇**；每簇一名 triage 代理在 HEAD `0bade70` 上逐 file:line 复核
+（present / fixed_at_head / registered_residual / false_positive 四档，含对
+预置 refute 判语的三处推翻），再按簇设计类级修法。全部修法落在本提交，
+测试 330 → **382**（零 GHC 警告）。行为面变化的用户可见清单见
+DESIGN-COMMANDS §11。
+
+### 第一波（送审前已并入工作树）：散簇 + GUI
+
+命令文本生成（F072：`Pm.Ingest` 搬移行绕过 `inboxDoneCommand` 裸拼）、扫描
+覆盖（F039/F040：`.` 键换算不出全树覆盖、未枚举子树条目从快照消失）、探针
+（F041）、journal/undo（F027 双侧、F028 撕裂尾追加、F033/F034、F000 报文、
+F019 `--only`、F004 重键、F018 槽位报文）、gitignore 归一（F066）、names 身份
+闸（F095）、trash 清除逐项停（C102）、serve 配置快照按戳重读（C105）、sort
+组悬置复算（F049）。钉子新落 `test/SweepTests.hs` 等；判别突变见下表轮 1
+（21/22 ✓，m-F072b 首跑 BUILD-ERROR 系突变本身笔误，改 `let src = CmdPath f`
+后重跑转红）。GUI 簇 F（app.js 加载竞态 latest-request-wins 等）同波已修。
+
+### 第二波（四阶段类级修）：五大机制簇
+
+**簇 B——「退出码答不了『真做了吗』」（F029/F068/F031/F099；F020 独根同段修）。**
+根因（triage 原文要义）：「工作是否真发生」从塌缩的 `Int` 退出码读，而不是从
+**已存在**的逐项结果通道读——`executePlanNowWith` 只按 isBad 折 Int（每个
+`ONotExecuted` 都消失），32 轮为此建的 `PlanRun`/`fullyExecuted` 只接了一个
+消费者（ingest）；`runUndoCmd` 手搓 savePlan+`pure 0`，「存而未执 = 1」的
+定义到不了它；`planCategories` 从**计划**而不是**结果**答「动了什么」。
+类级修：`PlanRun`（PrRefused/PrSaved/PrRun + 逐项结果）贯通全部计划生成器与
+收尾——undo 走 `savePlanAndMaybeRun'`（exit 1）、`afterApply`/`runVaultPush`
+按 `landedItems`/`resultCategories` 收尾、`planIdOf`/`fullyExecuted` 单一定义。
+F020（confirm 裸 `getLine`，EOF 异常逃逸）：`try` + EOF=否。
+
+**簇 C——「CLI 打印死绑 stdout，GUI 端只有退出码」（F022/F051/F053/F078/C106）。**
+类级修：`(String -> IO ())` sink 贯通全部 GUI 可达命令路径（sort/apply/
+recheck/backup 缓存刷新等），serve 用 logRef 收集回 JSON `log` 字段 + 逐项
+`status`；CLI 侧 sink=putStrLn，输出逐字不变。
+
+**簇 A——「降级走旁道，退出码写常量」（F010/F077/F032/F056/F057/F021/F046/F079 等）。**
+根因（triage 原文）：降级在类型系统允许消费者丢弃的**旁道**上返回（`(Maybe a,
+[String])` 的告警被 `_` 抹掉；loadConfig 把「缺席」与「读不出」塌进同一个
+Left；readManifest 把整文件拒绝与单条坏行混进一个 [String]），随后退出码写
+**常量**而不是从降级推导——净效果：读不出/不可信/过期的状态配上 ✓ 与 exit 0。
+类级修：三个未转换的 loader 补成三态（`CatalogLoad`、`ConfigLoad`、
+`readManifest :: IO (Either …)`）+ 消费端逐个按三态分支；退出码改为降级的
+函数（`backupVerdict` 判定表、status 的 `warns` 入码、doctor 的 CATALOG/
+DEEP-SKIPPED 行、trash 视图整体拒绝、init --force 明说「未能保留」、backup
+的 `mainFresh` 闸）。
+
+**簇 G6——「配置按字段各查各的，整份记录无人验」（C101/F011/F082）。**
+根因（triage 原文）：`checkPatch` 收不到 `Config`，结构上写不出任何跨字段
+不变量；嵌套判定是 `backupInitPreflight` 的私有 where（只守备份对主库）；
+「备份 id⇔subpath 成对」存在三份互不一致的谓词（renderer/report/GUI），
+renderer 静默归一而无人拒绝；CLI 在校验器看到之前就把「--X --no-X」矛盾折成
+清空。类级修：`rootsNested`/`checkConfig` 汇点 + `checkPatch` 收 `Config`
+终于 `checkConfig (applyPatch c p)` + `configTxn` 锁内按盘上最新配置复验 +
+init/backup init（对 vault 槽补查）/serve 四路共用 + `tri`/`mkPatch` 拒矛盾
+exit 2 + renderer 与其它表同一 `section` helper（半对登记忠实保全）。
+
+**簇 D——「单一真源纪律只写在散文里」（F002/F023/F025/F044/F047/F059/F060/F096/F097 等）。**
+根因（triage 原文要义）：所有权声明只存在于 haddock 散文，定义与站点局部
+再拼写可以无限共存，编译器两边都看不见。类级修：逐个上收唯一定义并让原站点
+引用——`trashSrcRel`（Exec 字面 `"trash"` / Undo `pmSubTrash` / 谓词硬编码
+三处同源化）、`stemOf`（Import/Sort 双份局部 stemKey）、`inArchiveLayer`
+（clean 两处局部 + status 的「任何非暂存副本都算归档」口径错位 = F058/F096
+行为修）、`archiveLayers`（Dedupe 抄本）、`freshPending`（四处求和）、
+`utcToNs`（statSnap 原地重写截断）、`pendingEditDir`（Clean 字面 "待修改"）、
+`stagingTop`（Status 字面）；死名删除：`opRelPaths`（零调用导出）、`isPng`、
+`stemKey`（Versions 的同名异义局部改名 `versionKey`）。F042 同簇落地：root
+自身是 junction 属合法用法（resolveUnder 文档 + 句柄守卫用例既有钉），
+freshnessSweep 只对**库内子层** surrogate 拒绝。
+
+**簇 E——「文档/注释清点漂移」（17 项：F003/F013/F014/F036/F043/F045/F048/F053/F055/F062/F076/F080/F089/F090/F100 等）。**
+根因：据实清点类声明（字节出口、锁调用点、旗标census、GUI 页序、CSP 逐字）
+没有哨兵，代码改一次文档错一片；另有被代码否证的机制解释（F043「与
+readPmState 逐字一致 + link count 拒绝」——probeConfined 实际按 FileId 身份
+排除、不查 link count；F048「listDirectory 惰性列表 try-WHNF」讹传）留在注释
+里教坏下一个读者。类级修：注释逐项改写（Exec 头注、Hash、Win.pathUnder、
+nsToUtc/statSnap、Config F013 错位块、Serve 孤儿文档、Status 双 `-- ^`）+
+**`test/DocDriftTests.hs` 常驻哨兵 9 例**（字节出口 census、withConfigLock
+census、`--json` 唯一、GUI 页序、CSP 逐字、死名、Haddock 标记卫生、讹传、
+freshStagingCatalog 命名）。哨兵上线当轮即抓出 3 处漏网（Exec 头注在修注里
+复述原句自指命中、Exec/Serve 各一处双标记注释段）——机制成立的直接证据。
+文档侧 A1-A10/B 表核查由并行 docs 代理完成（DESIGN.md 750/750 零余量，
+行为面变化改记 DESIGN-COMMANDS §11；`--verify-media` 未实现已在 I3b 标注）。
+
+### 驳回/存疑处置（逐项 triage 判语，全库 101 项里的非 present 部分）
+
+- **false_positive**：F006（Win.hs rawRename 判语误报）、F016、F026（volumeFsType 取首
+  盘符幂等）、F063（侧缓存成对写非 dead work）、F087/F092（GUI 两项，机制
+  链在复核中断裂）。~~F024/F098~~ 当时也归此档——**第 41 轮被推翻**（#5，
+  γ 簇）：`catRootId` 确是 write-only，triage 采信预置 refute 判语时未经
+  grep 复核，codex 对、我错；更正以下一节的类级修为准。
+- **fixed_at_head**：F030。
+- **registered_residual**：F012（UNC `\\?\UNC\` 与 `\\server\share` 归一，
+  DESIGN.md 既有登记）、F071（VaultHold both-absent 臂复读，TOCTOU 方向无害）。
+- **接受不修（方向安全，代码级核查登记）**：Catalog removeIfExists（查不出 →
+  不删，no-delete 方向）；journal 撕裂尾 Warn 残余（既有注释登记）；
+  m-F027R（resolveOn 不重绑）预期 GREEN——loader 已绑定，纵深防御层。
+- **F090（CSP `style-src 'unsafe-inline'` 可收紧）**：代码侧证实零内联样式，
+  但 Tauri v2 webview 是否自注入内联 `<style>` 无法离线核实，需一次
+  `pm ui` + DevTools 实机验证——登记待办，不盲改 CSP。
+
+### 判别突变（轮 1：第一波散簇；轮 2：第二波五簇）
+
+每项突变恰好让配对钉子转红、邻近用例全绿后还原。轮 1 的 m-F072b 首跑
+BUILD-ERROR 是**突变本身**笔误（`let src = f` 类型不符），修正为
+`let src = CmdPath f` 后在轮 2 重跑转红（m2-F072b）。
+
+**轮 1（第一波散簇，22 项）：**
+
+| 突变 | 模式 | 预期 | 实得 | 用时 | 判定 |
+|---|---|---|---|---|---|
+| m-F072a Ingest 搬移行裸拼 f | `-p F072` | RED | RED (1/2 failed: 工作流 F072：ingestSteps 搬移行经 inboxDoneCommand——展开字符文件名给手动指引而非裸拼；命令行无反斜杠) | 191s | ✓ |
+| m-F072b Publish inboxDoneCommand 跳过 src checkPath | `-p F072` | RED | BUILD-ERROR | 25s | ✗ |
+| m-F039 uncoveredKey 丢 rel == "." | `-p F039` | RED | RED (1/1 failed: 第一方自审工作流 F039：基准目录列不出（RD 拒）→ 覆盖全树，catalog 不报「消失」) | 73s | ✓ |
+| m-F040 scanRoot unknown = Map.empty | `-p F040` | RED | RED (1/1 failed: 第一方自审工作流 F040：子树列不出 → 旧条目按「查不出」保留并计数，不从快照消失) | 204s | ✓ |
+| m-F041 WalkDotDirs 探针回退 doesFileExist | `-p F041` | RED | RED (1/1 failed: 工作流 F041：root-id.json 被 ACL 全拒 → 仍判 pm 状态目录不进入（布尔探针塌 False 会走进 .pm\tra) | 76s | ✓ |
+| m-F049 Sort 去掉 reholdKin | `-p E2E` | RED | RED (1/11 failed: ) | 96s | ✓ |
+| m-F027L loadPlan' 不绑定 root | `-p F027` | RED | RED (1/1 failed: F027 resolve 锁内重装只取条目：写回与读盘用 UUID 绑定的 root，文件里的过期 root 零字节) | 81s | ✓ |
+| m-F027R resolveOn 不重绑（loader 已绑，预期纵深防御=绿） | `-p F027` | GREEN? | GREEN (1 passed) | 66s | ✓ |
+| m-F066 gitignore 行规则回退 T.strip | `-p F066` | RED | RED (1/1 failed: F066 I11 .gitignore 前导空白是模式的一部分：「  .pm/」不算覆盖；尾随空白/CRLF 忽略) | 47s | ✓ |
+| m-F095 runNames 身份闸失效 | `-p F095` | RED | RED (1/1 failed: ) | 66s | ✓ |
+| m-F074N Names 计划闸不豁免自身 | `-p F074` | RED | RED (1/1 failed: ) | 61s | ✓ |
+| m-F074E Exec 执行闸不豁免自身 | `-p F074` | RED | RED (1/1 failed: ) | 37s | ✓ |
+| m-F028C 追加口不查尾部 | `-p F028` | RED | RED (1/1 failed: F028 撕裂尾之后再追加：新记录不黏进残行；残行仍报 torn（Warn）而非 CORRUPT；manifest 同口同修) | 78s | ✓ |
+| m-F028J 读侧不认撕裂标记 | `-p F028` | RED | RED (1/1 failed: F028 撕裂尾之后再追加：新记录不黏进残行；残行仍报 torn（Warn）而非 CORRUPT；manifest 同口同修) | 88s | ✓ |
+| m-F000 落位复核失败报文回退「交 pm doctor」 | `-p F000` | RED | RED (1/1 failed: F000 落位后复核失败：报文指向实现了的 pm resolve 路，不指向看不见该项的 pm doctor) | 60s | ✓ |
+| m-F033 用户侧 old 回退 existsAny | `-p F033` | RED | RED (1/1 failed: F033 用户侧 rename 源目录 ACL 全拒 → 仍判「在」落 R3；不落 R2、--repair 不补假 Done) | 35s | ✓ |
+| m-F034 C1 文案回退「将清除」 | `-p F034` | RED | RED (1/1 failed: F034 C1 修复文案与 --repair 实际行为一致：在途 tmp 不清除、文案不许诺清除) | 33s | ✓ |
+| m-C102 purgeLoop 不 try | `-p C102` | RED | RED (1/1 failed: C102 trash empty 逐项 unlink 失败 → 不逃顶、报已清除 k/N、exit 2、其余条目未动) | 41s | ✓ |
+| m-F019 --only 不比对序号域 | `-p F019` | RED | RED (1/1 failed: F019 --only 序号越界 → 拒绝并点名范围（不再静默全跳过 + 惰性巨列表）；范围内照常) | 74s | ✓ |
+| m-F004 重键回退 fromList 字节序 | `-p F004` | RED | RED (1/1 failed: F004 目录 rename 的 catalog 重键：改写后的条目胜过目标前缀下的过期条目（左偏），不由字节序决定) | 91s | ✓ |
+| m-F018 bindExecRoot 不列非 Present 槽位 | `-p F018` | RED | RED (1/1 failed: F018 bindExecRoot 零候选：槽位身份损坏/读不出时如实列出原因，不宣称「均不符」) | 87s | ✓ |
+| m-C105 serve 快照永不按戳重读 | `-p C105` | RED | RED (1/8 failed: 第一方自审工作流 C105：终端带外改了 config.toml → 同一 serve 的 GET /api/config 按盘上新值答；主) | 82s | ✓ |
+
+**轮 2（第二波五簇 + F072b 修正重跑，23 项）：**
+
+| 突变 | 模式 | 预期 | 实得 | 用时 | 判定 |
+|---|---|---|---|---|---|
+| m2-F032 Catalog classify 把「读不出」折成「缺席」 | `-p F032` | RED | RED (1/2 failed: 工作流 F032 快照被拒（hardlink 占名）→ doctor 报 CATALOG Bad；从未扫描的 root 不报) | - | ✓ |
+| m2-F010 Config TOML 解析失败折成 CfgAbsent | `-p F010` | RED | RED (1/1 failed: 工作流 F010/F077：init --force 遇旧配置读不出 → 明说未能保留；旧配置完好 → 登记保留且不报) | - | ✓ |
+| m2-F079 readManifest 吞整文件失败为空清单 | `-p F079` | RED | RED (1/1 failed: 工作流 F079/F038 manifest 整文件读不出（hardlink 占名）→ trash list/empty 退出 2，不报「隔) | - | ✓ |
+| m2-F046 status 退出码不看快照回退告警 | `-p F046` | RED | RED (1/1 failed: 工作流 F046：快照最新代坏、回退到 .1 → status 打 ⚠ 且退出 1（--cached 下唯一的 1 来源）) | 49s | ✓ |
+| m2-F056 backupVerdict 降级不抬码 | `-p F056` | RED | RED (1/1 failed: 工作流 F056/F057 backupVerdict 判定表：零降级零差异才 ✓/0；主库回退告警、备份盘读错/被改/未枚举 → 1) | 29s | ✓ |
+| m2-F057 mainFresh 永远放行 | `-p F057` | RED | RED (1/2 failed: 工作流 F057 mainFresh：干净库放行；多出未索引文件 → 拒绝并指向 pm scan) | 39s | ✓ |
+| m2-C101a checkPatch 不做整份复验 | `-p C101` | RED | RED (1/2 failed: 工作流 C101 checkConfig：vault 与主库嵌套（两个方向、既有配置改无关字段）拒；旁边的 vault 放行；备份半对登记拒) | 42s | ✓ |
+| m2-C101b runInit 跳过 checkConfig | `-p C101` | RED | RED (1/2 failed: ) | 39s | ✓ |
+| m2-F082 tri 矛盾折成清空（旧行为） | `-p F082` | RED | RED (1/1 failed: 工作流 F082 tri/mkPatch：--X 与 --no-X 同给 → Left「只能给一个」；三态其余三格照旧) | 35s | ✓ |
+| m2-F011 renderConfig backup 表回退全有才渲染 | `-p F011` | RED | RED (1/1 failed: 工作流 F011 备份登记 round-trip：整对写盘读回；半对（手编残余）也不被渲染器静默归零) | 53s | ✓ |
+| m2-F029 afterApply 收尾不看落位项 | `-p F029` | RED | GREEN (1 passed) | 49s | ○ 纵深防御¹ |
+| m2-F029b afterApply add 类目从计划取而非结果 | `-p F029` | RED | RED (1/1 failed: 工作流 F029/F068：push 收尾按落位项判) | 34s | ✓ |
+| m2-F069 pushableExt 丢 .jpeg | `-p F069` | RED | RED (1/1 failed: 工作流 F069 unpushable 与 push 门同谓词：.png 入列、.jpg/.jpeg 不入（pushableExt 唯一定义) | 41s | ✓ |
+| m2-F058 stagingArchivedSummary 不过层过滤 | `-p F058` | RED | RED (1/1 failed: 工作流 F058 stagingArchivedSummary：相册镜像不算「已归档」（口径 = inArchiveLayer）) | 32s | ✓ |
+| m2-F096 inArchiveLayer 加相册 | `-p F096` | RED | RED (1/1 failed: 工作流 F096 threeCopiesStillExist：主库见证只认 Raw/成片——相册镜像不算归档副本) | 26s | ✓ |
+| m2-F097 stemOf 基名不 case-fold | `-p F097` | RED | RED (1/1 failed: 工作流 F097 holdKin：主文件待裁决 → 同目录同 stem 侧车（case-fold）一并悬置；别组不受牵连) | 33s | ✓ |
+| m2-F002 isTrashSrcRel 永假（谓词与拼法脱钩） | `-p undo` | RED | RED (5/12 failed: P3b-4 #1 / P3b-5: 复位目标被占 → 占位者隔离(~displaced-N) + victim 复位；重跑用新槽位；undo; undo quarantine = 从 trash 原位复位; cx-2: 组内 Copy 失败 → Quarantine 自动复位；doctor 无 Bad；undo 无残留; P2.2: 复位后同计划重跑成功——第二次隔离不被误豁免，undo 可用; P3b-11 undo 一次复位历史 → 反向 Op 以 .pm/trash 为目标，生成时即拒) | 48s | ✓ |
+| m2-F042 子层 junction 也放行（守卫条件丢 relPrefix） | `-p F042` | RED | RED (1/1 failed: 工作流 F042：root 自身是 junction（合法）→ 照常核对；库内子层 junction 保持「探不出 = 错误」) | 42s | ✓ |
+| m2-F054 foldHardErrors 不抬码 | `-p F054` | RED | RED (1/1 failed: 工作流 F054：sort 提议/计划——子树列不出（ACL 拒）→ 退出码 1，不替没看过的目录担保；junction 跳过仍是 0) | 30s | ✓ |
+| m2-F047 freshPending 丢读取错误位 | `-p 退出码` | RED | RED (1/6 failed: ) | 38s | ✓ |
+| m2-F052 planIdOf 拒绝也给 id | `-p F052` | RED | RED (1/2 failed: 工作流 F052：planIdOf——PrRefused 无 id（盘上没有计划）；PrSaved/PrRun 带 id) | 37s | ✓ |
+| m2-F072b Publish inboxDoneCommand 跳过 src checkPath（轮1突变笔误修正版） | `-p F072` | RED | RED (2/2 failed: 工作流 F072：ingestSteps 搬移行经 inboxDoneCommand——展开字符文件名给手动指引而非裸拼；命令行无反斜杠; inboxDoneCommand（工作流 F072）：ingest 搬移命令同一纪律——解析-重渲染、'/' 分隔、操作数前 --；展开字符) | 102s | ✓ |
+| m2-F020 confirm 回退裸 getLine | `-p F020` | RED | RED (1/1 failed: ) | 37s | ✓ |
+¹ m2-F029 预期 RED 实得 GREEN 的机理已查明：外层闸（landedItems）被突变移除后，内层数据闸 resultCategories（同样从逐项结果推导）仍把全员未执行的 add 类目压成空 → 无 git 步骤。两层同源互护，与 m-F027R 同档；改打内层的 m2-F029b 转红证明钩子在承重。
+
+## 第 41 轮（P7-J `f724d52` 送审，codex 钉 SHA，0.6.0 发布前最终门禁轮）——NO-GO，minset {1–7} 全修（P7-K）
+
+三提交合审（P7-H/P7-I/P7-J，基线 `a6a0922`），623 次命令执行，9 条发现
+（7 minset + 2 GO-note）**第一方逐条核实全部成立、零误报**。四簇聚类与
+类级修（用户流程：聚类 → 上游根因 → 类级修）：
+
+### α「判定与使用不在同一原子域」（#1/#3/#4/#6 同形）
+
+判定（预检/查尾/读戳/探存在）与使用（写入/追加/缓存/建配置）分属两次独立
+解析，窗口各自放行被否决过的状态。
+
+- **#1 backup init 登记锁内只写不验**（BackupCmd.hs:136）：预检用进锁前
+  快照，锁内重读后直接写——与并发 `pm config set --vault` 交错可写成嵌套
+  配置。修：锁内按盘上最新配置重跑 `rootsNested` 两向 + 整份记录过
+  `checkConfig`（四条写路径的汇点纪律补上最后一条）；**对称向**：备份盘
+  按 UUID 登记、绝对路径要现场发现，`checkConfig` 在盘可发现时把每个命中
+  与主库/vault 各判一次嵌套（ConfigEdit.hs `bkNested`）；盘不在场无从核
+  ——**残余登记**：登记时点已在锁内验过，插盘后的首次配置写会补验。
+  钉：GuardTests「参数快照过期 → 拒绝且不落盘」（用参数快照 vs 盘上配置
+  模拟交错，确定性）+ PublishTests「对称向」。
+- **#3 init 绕过 loadConfigState**（Commands.hs runInit）：exists=False 直接
+  建新配置，孤儿 `<cfg>.tmp`（writeConfig 崩在删旧与改名之间的完整新配置）
+  被变成死文件。修：无条件走 `loadConfigState`，缺失 + 孤儿 tmp → exit 2
+  复述恢复指引；指引本身更正为「改名采用**或删除后**重跑 init」（原文还在
+  推荐会踩同一坑的裸重跑）。钉：ScanGuardTests（exit 2、.tmp 原封不动）。
+- **#4 serve 配置快照拆两个 IORef**（Serve.hs）：两个写端点并发可交错成
+  〈旧配置, 新戳〉且永不自愈。修：合成一个 `IORef (Config, 戳, 有效位)`
+  成组存取；写端点只**作废**（配对只允许发生在 `currentConfig` 的载入路径，
+  载入前后**双读戳**，不一致则存无效）；「作废」与「配置文件不存在（戳
+  Nothing）」分开编码——初版共用 Nothing 被整套 serve 夹具（无盘上配置的
+  约定）当场抓红 14 例。**残余登记**：交错本身无确定性观察点（代码级核查
+  + 双读戳结构保证），启动时装载与读戳的毫秒级窗口沿旧例登记。
+- **#6 journal/manifest 追加的查尾与追加是两次打开**（Win.hs）：
+  `tailUnterminated`（读口）与 `openStateAppend`（追加口）之间整个文件可被
+  替换——尾判属于旧对象、补换行落到新对象。修：合成 `openStateAppendTail`
+  （ReadWriteMode 不截断 + link count 守 + **同句柄**读尾字节再移回文件尾），
+  两个旧原语删除（唯一调用点 `withPmStateAppend'` 改单句柄）。
+  钉：HandleGuardTests（半截/换行/缺失三态 + hardlink 拒绝，同句柄追加）。
+
+### γ「身份字段落盘从不校验」（#5）
+
+`catRootId` 从写入那天起全仓零读点——快照整目录拷贝/恢复错位到别的库时
+零告警载入，而快照决定 backup/import/undo 读写哪些文件、scan 拿谁当 sha
+复用种子。修在 loader 汇点（P3b-13 闸下沉纪律）：`loadCatalog` 与
+`.pm/root-id.json` 对账，不符或核不出 → `CatRefused`（种子作废、scan 全量
+重建）。钉：StateGuardTests 身份闸双臂。**夹具类修**：TestUtil.mkCat 硬编码
+"test-root" 与夹具主流 `RootInfo "m"` 错位多年——闸上线当场抓红 13 例
+（ServeTests fixture、DedupeTests 屏障夹具等在错位快照上通过了历年测试），
+统一对齐（mkCat → "m"，显式 id 夹具补配对 root-id）；这也是闸在承重的
+直接证据。
+
+### β「失败路径没过 latest-request-wins」（#2）
+
+40 轮 #5 的类级修只覆盖了加载器的**成功**路径；旧请求晚到的**异常**照样
+经 catch/`.catch(fail)` 改写画面（连接横幅、vault 卡片、计划明细）。修：
+app.js 六个带代号的加载器整体包 try/catch——stale 的异常丢弃、当前代照抛
+给既有兜底；loadStatus 的 vault 内部 catch 补 stale 守（loadVault 的早有，
+纪律铺满）。GUI 无 harness——沿既往 GUI 修同待遇，人工核查登记，无突变行。
+
+### δ「发布字段手抄不从源导出」（#7 + GO-note #8/#9）
+
+- **#7 README**：测试计数同页 310/382 两说、`pm undo <planId>`（CLI 无此
+  形态）、收敛叙事停在 37/38 轮。修：计数单一上游（DESIGN-COMMANDS 状态
+  行）、undo 提要改真 CLI 形态、轮次收敛判定整段委托 REVIEW-LOG（README
+  不再手抄「第 N 轮 GO」）；**常驻哨兵** DocDriftTests `caseReadmeSync` 把
+  三条全钉死。
+- **#8 relUnder 盘根永不匹配**（Publish.hs）："D:/" 拼 "/" 成 "D://"——
+  修为恰一尾斜杠归一；PublishTests 盘根仓用例。
+- **#9 DocDriftTests 的 cwd 契约**：package.yaml `extra-source-files` 登记
+  全部被读的非源码文件 + `caseRepoRootCwd` 自证（换 cwd 得到一句人话）。
+
+行为面变化的用户可见清单：DESIGN-COMMANDS §11「41 轮门禁收口追加」（4 行）。
+测试 382 → **389**（7 新钉），真实库只读冒烟绿（status --cached 4633 文件
+exit 0 · config exit 0 备份对完好 · vault status 15 HELD exit 0——身份闸对
+真实 catalog 放行）。
+
+### 判别突变（轮 3：41 轮七修；#2 GUI 无 harness、#4 无确定性观察点，见上文登记）
+
+| 突变 | 模式 | 预期 | 实得 | 用时 | 判定 |
+|---|---|---|---|---|---|
+| m3-R41-1 backup register 锁内闸恒放行 | `-p 快照过期` | RED | RED (1/1 failed: 41 轮 #1 backup init 登记：锁内按盘上最新配置复验嵌套/checkConfig，参数快照过期 → 拒绝且不落盘) | 77s | ✓ |
+| m3-R41-1s checkConfig 不再发现备份盘 | `-p 对称向` | RED | RED (1/1 failed: 41 轮 #1 对称向：备份盘在场（可发现）→ checkConfig 判嵌套；库外镜像放行) | 49s | ✓ |
+| m3-R41-3 init 孤儿 tmp 闸恒放行 | `-p 恢复指引` | RED | RED (1/1 failed: 41 轮 #3 配置缺失 + 孤儿 <cfg>.tmp → init 拒绝并复述恢复指引，.tmp 原封不动) | 27s | ✓ |
+| m3-R41-5 catalog 身份闸恒相符 | `-p 身份闸` | RED | RED (1/1 failed: 41 轮 #5 catalog 身份闸：catRootId ≠ root-id.json → CatRefused（拷贝/恢复错位快照不当种) | 23s | ✓ |
+| m3-R41-6 openStateAppendTail 恒报非撕裂 | `-p 同一句柄` | RED | RED (1/1 failed: 41 轮 #6 openStateAppendTail：查尾与追加同一句柄——半截尾/换行尾/缺失三态 + hardlink 拒绝) | 53s | ✓ |
+| m3-R41-7 README undo 提要回抄死形态 | `-p 发布字段` | RED | RED (1/2 failed: 41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托) | 56s | ✓ |
+| m3-R41-8 relUnder 回抄盲拼斜杠 | `-p publishCommands` | RED | RED (1/1 failed: publishCommands：显式类目 add --、photos.json 仓内相对路径 add --、缺配/仓外拒绝生成、push -) | 21s | ✓ |
+
+## 第 42 轮（P7-K `7a0fa83`，codex 钉 SHA，聚焦复核轮）——FINAL NO-GO，minset {1} = 运行态证据 UNVERIFIED → P7-L
+
+**执行者插曲**：中转站账户余额耗尽（`ai.aiclick.cc` 403 INSUFFICIENT_BALANCE，
+四次 attempt 全零 exec，不算评审）；用户裁定「改用 OAuth 订阅额度」——
+`~/.codex/config.toml` 去掉中转 provider 覆盖、`codex login` 走 ChatGPT，
+attempt 1 即真跑（134 次命令执行）。
+
+四镜头全部核验成立（引其原文要义）：register 锁内 `loadConfig` 后构造 c1 过
+`checkConfig`；`runInit` 无条件 `loadConfigState`；`loadCatalog` 对 root-id
+读不出/不匹配均 `CatRefused`；serve 单 `IORef (Config, 戳, Bool)` 仅双读戳一致
+才有效、写端点只作废、主库锚点保持；`openStateAppendTail` 一次 ReadWriteMode
+打开、同句柄查尾、无第二次路径解析；六个 loader 只吞 stale 代；389 = 383
+testCase + 1 testProperty + 5 参数化展开，7 新钉均经 Spec 注册；`mkCat "m"`
+夹具「先拒绝、再对齐成功，不是恒真」；F024/F098 更正「没有粉饰」。
+
+- **#1（major，UNVERIFIED）运行态放行证明**：评审沙箱是受管只读环境——
+  `stack test` 撞 `C:\sr\pantry\…pantry-write-lock: permission denied`，直接跑
+  `pm-test.exe --list-tests` 撞 `%TEMP%` 下 `pm-test-cfg-*` 目录创建被拒——
+  **不是断言失败**，但 389 例在评审方手里仍是 UNVERIFIED。处置：第 43 轮改
+  `-s workspace-write` 沙箱 + `--add-dir` 把**仓外**目录
+  `%LOCALAPPDATA%\Temp\pm-review43` 加为可写并设为 `TEMP/TMP`（不能放仓内：
+  pm 的 I11 会拒绝位于上层 git 仓库内的测试 root，实测仓内 122/389 红——设计
+  在起作用，不是回归）+ 预编译 `pm-test.exe`（不经 Stack，绕开 pantry 锁），
+  让评审**自己**跑全套；另在钉定 SHA 的**新建 worktree**（独立 .stack-work，
+  库对象由该 worktree 自行编译）跑一次完整 `stack test` 作第二份证据
+  （`cleanenv-test.log`：HEAD f0d6dd9——日志已按 P7-M 重跑覆盖，44 轮 GO-note
+  订正、树净、389 全绿）。第 43 轮实测：受限令牌**不能改 DACL**，11 个 ACL
+  攻击夹具在 `icacls` exit 5 处中断——沙箱能力问题，见第 43 轮节。
+- **#2（minor，GO-note）`openStateAppendTail` 判定/查尾期间异常不关句柄**
+  （Win.hs:368）：hardlink 判定与 `hFileSize`/读尾/`hSeek` 若抛出，刚开的句柄
+  滞留到 GC——同文件其它资源转换口已有 `onException hClose` 口径，这个新口
+  漏了。修：整段置于 `flip onException (hClose h)`。无数据丢失方向（只读判定
+  阶段），代码级核查登记，无独立钉（构造 `hFileSize` 抛出无确定性形态）。
+- **#3（minor，GO-note）README 突变覆盖绝对化**（README.md:21、:157）：
+  「每道闸都配突变」与本轮登记的两项残余（#4 交错无确定性观察点、#2 GUI
+  无 harness）矛盾。修：措辞限定为「凡有可观测自动化落点的闸」并点名残余
+  登记处——**δ 簇同一根因**（发布字段的强断言没有上游），本次是措辞而非
+  数字，`caseReadmeSync` 不扩（绝对化措辞无法机械判定，靠评审）。
+
+以上两条 GO-note 落在 P7-L；#1 由第 43 轮在可写沙箱里闭合。
+
+## 第 43 轮（P7-L `45faac9`，codex 钉 SHA，workspace-write 沙箱）——FINAL NO-GO，minset {1,3,4}
+
+沙箱改 `-s workspace-write --add-dir %LOCALAPPDATA%\Temp\pm-review43`（仓外
+TEMP），32 次命令执行，评审后 `git status --porcelain` 空。#2（onException
+包裹范围）、#5（修复范围/750 预算/四处版本/树净）接受。
+
+- **#1（major，仍 UNVERIFIED）**：评审亲跑了预编译 `pm-test.exe`，但 codex 的
+  Windows **受限令牌不能修改 DACL**——11 个 ACL 攻击夹具（`withDenyAll`/
+  `icacls /deny`）在形成拒绝态时即 `icacls` exit 5 中断，跑不到断言。第一方
+  复现：`codex sandbox`（同一令牌）default 模式 11 红、`windows.sandbox=
+  "elevated"` 9 红，失败点全在 icacls；同一 exe 在普通令牌下 389 全绿。
+  **用户裁定（AskUserQuestion，2026-08-27）：保留沙箱，判据改为「环境限制
+  登记」**——不给模型无沙箱权限（那会让它对本机含 D:\Photography 有完整读写）。
+  第 44 轮闭合标准：评审亲跑 exe 得 378/389、逐条核对 11 例失败点全在
+  `icacls` exit 5（环境能力）而非产品断言、核对 exe SHA-256 与第一方两份
+  全绿日志一致（工作树 `wt-test.log`：HEAD f0d6dd9 树净 → 389 绿；干净
+  worktree `cleanenv-test.log`：独立 .stack-work、库对象由该 worktree 自行编译
+  → 389 绿；45 轮 #2 订正措辞）。
+- **#3（minor）README:221 性能表仍「每道承重闸一个突变」**：42 轮修了两处、
+  第三处漏网——`caseReadmeSync` 只管数字不管措辞，「全绿恰好证明措辞不在哨兵
+  范围」。修（P7-M `f0d6dd9`）：该格限定为「凡有可观测自动化落点的承重闸」
+  并指向残余登记；哨兵新增断言 README 不得含「每道闸都」「每道承重闸」（δ 簇
+  同根：强断言无上游→纳入哨兵）。
+- **#4（minor）REVIEW-LOG 第 42 轮节记的是被替换掉的仓内 TEMP 方案**：仓内
+  测试 root 会被 pm 的 I11 拒绝（上层 git 仓库内、非仓根，122/389 红——设计在
+  起作用）。修（P7-M）：改记实际方案（`--add-dir` 仓外）+ DACL 实测。
+
+## 第 44 轮（P7-N `214a463`，评审方改为 Claude Opus 5）——FINAL GO，minset 空
+
+**评审方变更**：codex 走 OAuth 订阅后第 44 轮 attempt 1 跑了 22 次命令即撞
+订阅额度上限（"You've hit your usage limit … try again at 1:30 PM"），后三次
+零 exec。用户裁定（AskUserQuestion，2026-08-27）：不等，**改用 Claude Opus 5**
+（Agent 子代理，只读工具 + Bash，普通用户令牌；提示 `prompt44-opus.md` 与
+codex 版同一口径，原文存档 `review44-opus-result.md`；评审后
+`git status --porcelain` 空，33 次工具调用 / 497 s）。**判据随之回到原判据**：
+Opus 令牌能改 DACL、无 pantry/%TEMP% 限制，#1 要求亲跑 389 全绿；43 轮节写的
+「378/389 + 11 例 icacls exit 5 环境限制登记」是沙箱情形下的备用标准，本轮未用。
+
+**#1 CLOSED（运行态放行证明）**：评审亲跑 `pm-test.exe` → `All 389 tests
+passed (40.48s)`、EXIT 0；SHA-256 `71cbf429…181d7` 逐字符等于第一方
+`wt-test.log`；exe 晚于最新源文件 12.06 s；`git diff f0d6dd9..HEAD --stat`
+仅 REVIEW-LOG；`cleanenv-test.log`（独立 worktree，库对象自行编译，08:52
+时间戳可查）389 绿互证。**#3 CLOSED**：反向突变两条（回填「每道承重闸一个
+突变」/「每道闸都配」）各判红于 `DocDriftTests.hs:215`；误伤核查 README:249
+「每道闸重走」、:159「承重闸配」不含被禁短语。**#4 CLOSED**：`review43.sh`
+与 42/43 轮节逐字一致。已登记残余三项（REVIEW-LOG:296/:379/:392）未重开。
+
+**四条 GO-note，聚类后两根（P7-O 收口）**：
+- **A/C 同根「文档对证据产物的描述沿用写作记忆，未从产物重读」**：42 轮节
+  :474 写「cleanenv-test.log：HEAD 45faac9」而日志自述 f0d6dd9（09:29 重跑
+  覆盖）；:473「从零编译」而那次是增量 `[1 of 22]`（从零编译在同 worktree
+  更早）。修：两句改从产物重读（见上，本节即改）。**B**（43 轮节的备用判据
+  未被应用）：本节首段明说。
+- **D「一个句柄两条关闭路径」**（Win.hs:376）：hardlink 拒绝分支显式 `hClose`
+  与 `onException (hClose h)` 处理器双关——幂等（`HandleGuardTests.hs:180-183`
+  活体证伪为非缺陷），但读起来像 bug。修：删分支内 `hClose`，处理器为唯一
+  关闭路径（净减一行；hardlink 用例仍绿）。
+
+**发布链自查新增发现（非评审项，`release060.sh` 泄漏扫描）**：pm.exe 含
+`D:\Projects\PhotoManager\.stack-work\install\…` ×6——0.5.0 资产同样 6 处，
+历次只扫用户主目录模式故漏网。根因：`Paths_photo_manager`（Main.hs 只用它取
+`--version`）把六个安装目录烤进二进制，且 exe 段的 Paths 对象直接进链接命令行、
+不经归档裁剪，hpack 生成即必在。类级修：版本改走 Cabal 宏
+`CURRENT_PACKAGE_VERSION`（`cabal_macros.h` 实核）+ package.yaml exe 段显式
+`other-modules: []`；常驻钉 `caseNoPathsModule`（Main.hs 不引用 Paths、版本走宏、
+exe 段显式 other-modules；**390 测试**）。扫描模式收敛到与 sancheck36 同类，
+三种假阳性登记：裸 `AppData`（warp `Types.AppData` 构造子名）、`skyma`
+（`skymanbp` 版权/标识）、`档案`（pm-ui.exe 内嵌中文词频表）。重建后
+pm.exe `D:\Projects` 0 命中、`pm --version` = `pm 0.6.0`；P7-O 树
+pm-test.exe SHA-256 `f42fc592a28009e92e77b5d04743eb8ab363604cb0df4c94f57a319c9668c961`、pm.exe（`.stack-work/install/…/bin` 副本）`44aa8fd0730b96bbe5ff885ab6273406aa6ea4821187ed164d09fe515ebacb88`。
+
+## 第 45 轮（P7-O `3c263c1`，Claude Opus 5 聚焦）——FINAL NO-GO，minset {1,2}（均文档）
+
+评审亲跑 `All 390 tests passed (38.55s)`，双哈希逐字符对上（pm-test.exe
+`f42fc592…c961`、pm.exe `44aa8fd0…cb88`），跑前跑后树净；57 次工具调用 / 848 s。
+产物级机制反证：修前 sidecar（0.5.0 期 `target/…/debug/pm.exe`）`D:\Projects` ×6、
+修后三份产物 0 命中；CPP 预处理逐行 diff 仅 3 处（LINE pragma / 注释内宏展开 /
+目标行），`--help` 里 `To-Be-Sync'd` 与 CJK 帮助文本完好；反向突变 M1–M3 各判红于
+`DocDriftTests.hs:226/227/229`，**M4（`other-modules: []` 挪到 tests 段）仍绿**。
+代码侧四项 CLOSED（句柄单关闭路径、CPP 无副作用、exe 段无 Paths、运行态）。
+原文存档 `review45-opus-result.md`。
+
+- **#1（minor）HISTORY.md:369 P7 行尾「389/389」**，同句前文已是「390 测试」——
+  又是 44 轮 A/C 那一类：新写的行没从产物重读。修（P7-P）：改 390/390；**类级**：
+  `caseReadmeSync` 从同一上游再派生一处——HISTORY.md 末段（当期阶段行）须含
+  `dcCount/dcCount`（m2 判红）。
+- **#2（minor）REVIEW-LOG:507 孪生断言「独立 .stack-work 从零编译 → 389 绿」原样
+  留着**——44 轮只修了被点名的 :473，没按类扫全文件。修：`git grep 从零编译`
+  全清点（仅 :507 与 44 轮节的订正叙述），:507 改同口径；收口动作追加「同一断言
+  全文件清点后再改」。
+- **GO-note 段落定位**（`DocDriftTests.hs:229` 整文件 `isInfixOf`）：修——断言
+  限定在 `executables:` 块内（顶格键之前的缩进行；CRLF 先 strip），m1 判红。
+- **GO-note 引用面**（只查 Main.hs；库侧引用同样把 Paths 对象拉进 pm.exe）：修——
+  `refModules "Paths_photo_manager" []` 清点 src/Pm + app 全部非注释行，m3 判红。
+- **GO-note 扫描器未入仓**（抓出泄漏的 leakscan 只在 scratchpad，扫描器本身就是
+  「历次漏网」的根因）：修——`scripts/leakscan.py` 入仓，模式全部运行期从
+  `USERPROFILE`/`USERNAME`/`LOCALAPPDATA`/`APPDATA`/仓根派生（零本机字面量，
+  rule 11），vault 类模式走 `PM_LEAK_PATTERNS`/`--extra` 留在本地；README「从源码
+  构建」补发布前扫描一步；`release060.sh` 改用仓内脚本（三份产物 0 命中，
+  patterns=16）。推前树扫描器 `AppData` 模式收成路径形态 `AppData[/\\]`（裸词
+  是对假阳性的讨论，不是泄漏；44 轮节那句本会被误判）。
+- **GO-note `onException` 无钉**：改用 `FILE_SHARE_NONE` 独占打开（Win32 `createFile …
+  oPEN_EXISTING`）为观测点（**46 轮订正**：此处原写「removeFile 观测点不成立——
+  openBoundTo 经 cbits 带 FILE_SHARE_DELETE」，被评审用同版本 GHC 探针证伪：
+  `openBoundTo` 是 `openBinaryFile`（Win.hs:407），legacy I/O manager 下泄漏句柄同样
+  挡删除；独占打开的真理由是它对 legacy 与 WinIO 都成立）：
+  泄漏的 GENERIC_READ|WRITE 句柄使其撞 ERROR_SHARING_VIOLATION；钉加在
+  `caseAppendTailSameHandle` hardlink 拒绝之后，m4（`onException` → `id`）判红。
+
+判别突变（`mutate4.py`，主树逐个 `git checkout` 还原）：
+
+| 突变 | 文件 | 结果 | 末行 |
+|---|---|---|---|
+| m1 | package.yaml | RED ✓ |     0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、exe 段显式 other-modules: FAIL (0.09s) / 1 out of 1 tests failed (0.09s) |
+| m2 | docs/HISTORY.md | RED ✓ |     41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托 REVIEW-LOG: FAIL (0.01s) / 1 out of 2 tests failed (0.04s) |
+| m3 | src/Pm/Versions.hs | RED ✓ |     0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、exe 段显式 other-modules: FAIL (0.08s) / 1 out of 1 tests failed (0.09s) |
+| m4 | src/Pm/Win.hs | RED ✓ |     P3b-12 journal/manifest/plan 被 hardlink 占名 → 拒绝写入，库外对象字节不变:                     FAIL /     41 轮 #6 openStateAppendTail：查尾与追加同一句柄——半截尾/换行尾/缺失三态 + hardlink 拒绝 |
+
+P7-P 树：390 测试、GHC 警告 0；pm-test.exe `b0276ba3ac817621ee8d155293ba54199c043a1db4048b8bd2547ddb6497d6f5`、pm.exe（`.stack-work/install/…/bin` 副本）`9fbc577aaff552bb3b7301f83636f10368ece91587502b30cd6f5cc459b6ac43`；
+sancheck37 零命中；三份发布产物 leakscan 0 命中。
+
+## 第 46 轮（P7-P `c16c8da`，Claude Opus 5 聚焦）——FINAL NO-GO，minset {1}
+
+评审亲跑 `All 390 tests passed (47.16s)`，双哈希逐字符对上（`b0276ba3…d6f5` /
+`9fbc577a…ac43`），编译输入无一新于两 exe，跑前跑后树净；79 次工具调用 / 1759 s。
+45 轮六条的修均生效（#3/#4 留残余、#6 的机制记述被证伪，见下）：HISTORY 计数入哨兵（沙箱反向突变红、历史行不受影响）、
+「从零编译」全文件清点、段落定位（M4 现红）、引用面（Types.hs 非注释引用红 / 注释
+绿）、扫描器入仓（**阳性对照** 0.5.0 期 `target/…/debug/pm.exe` → 12 命中 exit 1；
+三份发布产物 0 命中；派生模式两种斜杠齐全，大小写/转义/UTF-16BE 三候选实测 0）、
+钉的判别力（同版本 GHC 独立探针：泄漏句柄独占打开 FAILED、关闭后 SUCCEEDED）。
+原文存档 `review46-opus-result.md`。
+
+- **#1（major）钉的记录机制被产物证伪**：我在 45 轮节与 HandleGuardTests 注释里写
+  「removeFile 观测点不成立——openBoundTo 经 cbits 带 FILE_SHARE_DELETE」。第一方
+  复核：`openBoundTo` 就是 `openBinaryFile`（Win.hs:407），`pm_open_for_dispose`
+  （cbits/pm_win.c:50）Win.hs:616 导入、仅 :641 `withDisposeHandle` 调用，服务 :696 rename /
+  :721 delete——我 grep 到 `FILE_SHARE`
+  就归因、没读调用链。评审探针：legacy I/O manager 下 `DeleteFileW` 对泄漏句柄
+  FAILED（`__hs_swopen` 的 FILE_SHARE_DELETE 仅 `_O_TEMPORARY` 才置位），只有 WinIO
+  才成功。**根因**：用未经核实的机制去驳回评审发现，与 44/45 轮 A/C「沿用记忆不读
+  产物」同类且更重（讹传固化进公开源码注释）。修（P7-Q）：注释与 45 轮节改记真机制
+  （removeFile 在 legacy 下同样可观测但依赖 I/O manager；独占打开对两种 manager 都
+  成立——这才是选它的理由）；**类级**：`caseFolkloreNotInTests` 增加该讹传标志词
+  （拼接构造），test/ 下再出现即红。
+- **GO-note 存在性断言**（DocDriftTests exe 块 `any`）：再加一个没写 other-modules 的
+  exe stanza 仍绿。修：按两空格 stanza 头切块，逐块全称要求（至少一个 stanza）。
+- **GO-note `srcModules` 不递归**（P7-J 既有 helper，六个清点用例共用）：修：递归
+  枚举 `src/Pm/**/*.hs`，展示名 = 相对路径（平铺文件不变，既有期望不动）。
+- **GO-note README 扫描命令**：`pm-ui_<版本>_x64-setup.exe` 在 bash 里是重定向，
+  逐字执行一个产物都没扫。修：`V=$(awk '/^version:/{print $2}' ../../package.yaml)`
+  + 加引号（版本不手抄）。
+- **GO-note 突变表 m4 证据质量**：只见 P3b-12 连带、没出示新钉自身的 FAIL 文案。
+  修：`mutate4.py` 捕获 FAIL 后 3 行文案，m4 改 `-p openStateAppendTail` 单点重跑
+  （见下；首次用 `-p "41 轮 #6"` 被 tasty 当表达式解析、基线与突变同为 usage 输出的
+  **假红**，识别后改用用例名里的无空格 token——`mut4b.log` 作废，`mut4c.log` 为准）。
+- **GO-note 失败文案归因**：独占打开失败也可能是第三方瞬时占用 / 文件缺失。修：
+  文案列出三种来源并带原始错误文本，不一概归因「句柄未关」。
+
+m4 单点重跑（P7-Q 树，`onException` → `id`）：
+
+| 突变 | 文件 | 结果 | 末行 |
+|---|---|---|---|
+| m4 | src/Pm/Win.hs | RED ✓ | 41 轮 #6 openStateAppendTail：查尾与追加同一句柄——半截尾/换行尾/缺失三态 + hardlink 拒绝: FAIL (4.47s) / test\HandleGuardTests.hs:202: / 独占打开失败——句柄泄漏（sharing violation）/第三方占用/文件缺失，按错误 |
+
+P7-Q 树：390 测试、GHC 警告 0；pm-test.exe `919e6b07357a6596760e1840a41fc4d48ab46b2d0469744e3c201ed846d8d15a`、pm.exe（`.stack-work/install/…/bin` 副本）`cc67aa56bb76ccc631d8adabbec6cf46024b2b3ee55d9cbebc2726794d882ebf`。
+
+## 第 47 轮（P7-Q `1c57f71`，Claude Opus 5 聚焦）——FINAL GO，minset 空
+
+评审亲跑 `All 390 tests passed (48.79s)`，双哈希逐字符对上（`919e6b07…d15a` /
+`cc67aa56…2ebf`，并溯源到 install 副本——见 N5），`.hs/.c/.yaml/.cabal` 无一新于两 exe，
+跑前跑后树净。46 轮 minset {1} 的订正叙述这次被**同版本 GHC 9.10.3 独立探针**逐句实证：
+legacy manager 下泄漏句柄 `removeFile` FAILED、`+RTS --io-manager=native` 下 SUCCEEDED、
+独占打开在两种 manager 下均「泄漏时 FAILED / hClose 后 SUCCEEDED」（`review47-opus/Probe*.hs`）。
+五条 46 轮 GO-note 全部 CLOSED：讹传哨兵红（45 轮原句写进 test/ 即红）、exe stanza 全称化
+（沙箱 A 加 `pm2:` 红 / B 换位深缩进绿）、`srcModules` 递归（`src/Pm/Sub/Bar.hs` 引用 Paths 红、
+平铺展示名不变）、README 扫描命令逐字执行三份产物 `patterns=12 total hits=0`、m4 表行与
+`mut4c.log` 逐字符一致且 `-p "41 轮 #6"` 假红机制复现。评审标 UNVERIFIED 一项：「GHC 警告 0」
+（硬约束禁 `stack build`）——第一方 `run14.log`：`stack test` 全量重编 390 绿、源码警告 0
+（仅 clang `<built-in>` 的 `-Wnonportable-include-path` 既有噪声）。原文存档
+`review47-opus-result.md`。
+
+**六条 GO-note，聚类后两根（P7-R 收口，产品代码零改动）**：
+- **α「哨兵按字面形态/单一位置写，没穷举同类绕法」（N1/N2/N3）**：N1（major）
+  `other-modules: []` 注释掉即假绿——`refsIn` 早备了注释行剔除而此断言没用。修：块内先
+  剔 `#` 行再切 stanza（m5 红）。评审另议「改钉 `photo-manager.cabal`」不采：该文件
+  **不受跟踪**（`.gitignore`，hpack 生成物；`git ls-files` 无），按 `git ls-files` 复制
+  的沙箱拿不到，钉在它上面的用例会在净环境假红；真源仍是 package.yaml，产物侧第二道网是
+  发布链 `leakscan.py`（三份产物 0 命中）。N2 讹传标志词单一形态、只扫 test/：修——降为
+  **同行共现**判据（`openBoundTo` 与 `FILE_SHARE_DELETE`），扫描面 test/ + `srcModules`
+  （src/Pm 递归 + app），自身注释改写避免自命中（m7 src 红 / m8 test 红）。N3 两空格 `#`
+  行被当 stanza 头（假红）：修——头须以 `:` 结尾（m6 绿）。
+- **β「记述未从产物重读」（N4/N5/N6，与 44/45 轮 A/C 同根）**：N4 46 轮节两处——
+  「六条全部 CLOSED」改「修均生效（#3/#4 留残余、#6 机制记述被证伪）」；`pm_open_for_dispose`
+  改记 :616 导入 / :641 `withDisposeHandle` 调用 / :696 rename / :721 delete。N5 仓内两个
+  pm.exe（dist 未 strip 60.6 MB `170a3d86…` vs install 43.4 MB `cc67aa56…`）：44/45/46/47
+  轮哈希行统一标「`.stack-work/install/…/bin` 副本」。N6 `.hs` 注释指向只在本机 scratchpad 的
+  `mut4-rows.md`：改指本文件 46 轮 m4 表。
+
+判别突变（`mutate5.py`，主树逐个 `git checkout` 还原；m6 为**期望绿**的误伤对照）：
+
+| 突变 | 文件 | 期望 | 结果 | 末行 |
+|---|---|---|---|---|
+| m5 | package.yaml（`other-modules: []` → `# other-modules: []`） | 红 | RED ✓ | 0.6.0 发布链…每个 exe stanza 显式 other-modules: FAIL (0.09s) / test\DocDriftTests.hs:275: / package.yaml 每个 exe stanza 均须显式 other- |
+| m6 | package.yaml（`executables:` 下加两空格 `#` 行） | 绿 | GREEN ✓ | All 1 tests passed (0.09s) |
+| m7 | src/Pm/Versions.hs（加一行 openBoundTo + FILE_SHARE_DELETE 注释） | 红 | RED ✓ | 讹传清扫…不再出现在 src/app/test: FAIL (0.15s) / test\DocDriftTests.hs:199: / expected: [] / but got: [("Versions.hs","openBoundTo FILE_SHA |
+| m8 | test/TestUtil.hs（同上） | 红 | RED ✓ | 讹传清扫…: FAIL (0.16s) / test\DocDriftTests.hs:199: / expected: [] / but got: [("TestUtil.hs","openBoundTo FILE_SHA |
+
+P7-R 树：390 测试、GHC 警告 0；pm-test.exe `2de4c25f0eeaae140855168f74153dd1135647553bd726ec43b5443df163abd0`、pm.exe（`.stack-work/install/…/bin` 副本）`cc67aa56bb76ccc631d8adabbec6cf46024b2b3ee55d9cbebc2726794d882ebf`
+——与 P7-Q 相同（本提交只动 test/ 与 docs/），1c57f71 上构建的 0.6.0 发布产物继续有效（sidecar 同哈希）。

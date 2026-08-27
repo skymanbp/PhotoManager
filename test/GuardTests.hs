@@ -22,10 +22,11 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (saveCatalog)
-import Pm.Catalog (loadCatalog)
+import Pm.Catalog (catalogMaybe, loadCatalog)
 import Pm.Cli (GoOpts (..), recheckCleanPlan, savePlanAndMaybeRun, writeBackCatalog)
 import Pm.Commands (InitOpts (..), ResolveOpts (..), RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runClean, runImport, runInit, runResolve, runTrash)
 import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), createRootInfo, loadConfig, pmDir, readRootInfo, readRootState, requireRole, requireWritable, withConfigLock, writeConfig, writeRootInfo, writeSideCache)
+import Pm.BackupCmd (backupInitRun)
 import Pm.Lock (withRootLock)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec
@@ -77,10 +78,11 @@ guardTests =
     , testCase "三十二轮 R3 PM_CONFIG 正斜杠拼写 → configFilePath 归一，配置写不被句柄后验误拒" caseConfigPathForwardSlash
     , testCase "三十五轮 F4 config.toml 被独占占住 → loadConfig Left（不崩、不猜内容）" caseConfigReadLocked
     , testCase "三十五轮 F4 .gitignore 被独占占住 → I11 守卫拒绝（核不了=不放行）" caseGitignoreReadLocked
+    , testCase "41 轮 #1 backup init 登记：锁内按盘上最新配置复验嵌套/checkConfig，参数快照过期 → 拒绝且不落盘" caseBackupRegisterRevalidates
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
-mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing
+mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 caseWildcardNegations :: IO ()
 caseWildcardNegations = withSystemTempDirectory "pm-guard" $ \tmp -> do
@@ -302,6 +304,11 @@ caseBackupInitPreflight = withSystemTempDirectory "pm-guard" $ \tmp -> do
   case r3 of
     Right p -> assertBool p ("bak" `isInfixOf` p)
     Left e -> assertFailure e
+  -- 第一方自审 R8：UNC/无盘符路径登记得上、却永远发现不了（发现只枚举本机
+  -- 盘符卷；splitDrive 会把 \\server\share 整段丢出 subpath）——词法预检即拒，
+  -- 且不去 canonicalize 碰网络。
+  r4 <- backupInitPreflight cfg "\\\\server\\share\\pf"
+  assertBool "UNC 路径应拒（按盘符卷发现）" (either ("盘符" `isInfixOf`) (const False) r4)
 
 casePickRootMain :: IO ()
 casePickRootMain = withSystemTempDirectory "pm-guard" $ \tmp -> do
@@ -417,14 +424,14 @@ caseMainIsBackupWitness = withSystemTempDirectory "pm-guard" $ \tmp -> do
   writeRootInfo mainP (RootInfo "bk" RoleBackup now Nothing)
   pid <- newPlanId
   -- afterApply：备份计划收尾不得把 backup-cache 写进这个 root
-  afterApply cfg (Plan pid "backup" mainP (Just "bk") now []) 0
+  afterApply cfg putStrLn (Plan pid "backup" mainP (Just "bk") now []) []
   cacheEx <- doesDirectoryExist (pmDir mainP </> "backup-cache")
   cacheEx @?= False
   -- recheckCleanPlan：主库身份不符 → 全部降级，不复验
   let qplan =
         Plan pid "clean-staging" mainP (Just "bk") now
           [PlanItem 0 (OpQuarantine ("To-Be-Sync'd" </> "x.jpg") "s" "clean-staging:test") StPending Nothing]
-  dem <- recheckCleanPlan cfg qplan
+  dem <- recheckCleanPlan cfg putStrLn qplan
   map fst dem @?= [0]
   -- trash empty：clean-staging 记录 HELD，文件仍在
   let rel = "p" </> "x.jpg"
@@ -607,7 +614,7 @@ caseCatalogWriteBackTakesLock = withSystemTempDirectory "pm-clock" $ \tmp -> do
   let root = tmp </> "main"
   createDirectoryIfMissing True root
   now <- getCurrentTime
-  writeRootInfo root (RootInfo "rc" RoleMain now Nothing)
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (mkCat [])
   ref <- newIORef ([] :: [String])
   let sink l = modifyIORef ref (l :)
@@ -619,7 +626,7 @@ caseCatalogWriteBackTakesLock = withSystemTempDirectory "pm-clock" $ \tmp -> do
   free <- readIORef ref
   free @?= []
   -- 回写真的发生了（catalog 仍可装载）
-  (mcat, _) <- loadCatalog root
+  (mcat, _) <- catalogMaybe <$> loadCatalog root
   maybe (assertFailure "catalog 应仍可装载") (const (pure ())) mcat
 
 -- | init 的「查存在 → 读旧配置 → 写回」在 withConfigLock 内。锁被占 →
@@ -709,3 +716,25 @@ caseConfigPathForwardSlash = withSystemTempDirectory "pm-cfgslash" $ \tmp -> do
       (assertFailure . ("配置应可读回: " <>))
       (\c -> cfgMainPath c @?= (tmp </> "main"))
       ec
+
+-- | 41 轮 #1：backup init 的预检（嵌套判定）用的是**进锁前**的配置快照；
+-- 锁内此前只写不验——与并发 `pm config set --vault` 交错时，嵌套配置被静默
+-- 写成。用「参数快照 vs 盘上配置」模拟交错：参数无 vault（预检放行），盘上
+-- 已登记 vault 且镜像路径落在其内 → 锁内复验必须拒绝、登记不得落盘。
+caseBackupRegisterRevalidates :: IO ()
+caseBackupRegisterRevalidates = withSystemTempDirectory "pm-breg" $ \dir -> do
+  mold <- lookupEnv "PM_CONFIG"
+  setEnv "PM_CONFIG" (dir </> "config.toml")
+  flip finally (maybe (pure ()) (setEnv "PM_CONFIG") mold) $ do
+    let mainP = dir </> "main"
+        vaultP = dir </> "vault"
+        onDisk = Config mainP (Just vaultP) Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+        staleArg = Config mainP Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+    createDirectoryIfMissing True mainP
+    createDirectoryIfMissing True vaultP
+    _ <- writeConfig onDisk
+    r <- backupInitRun (vaultP </> "mirror") staleArg
+    case r of
+      Left m -> assertBool ("应点名锁内复验与嵌套: " <> m) ("锁内" `isInfixOf` m && "嵌套" `isInfixOf` m)
+      Right _ -> assertFailure "过期快照的登记竟被放行（锁内复验缺位）"
+    loadConfig >>= either assertFailure (\c -> (cfgBackupId c, cfgBackupSubpath c) @?= (Nothing, Nothing))

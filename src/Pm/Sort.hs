@@ -25,7 +25,7 @@
 -- 与亚特兰大 2025-01-02→01-05 首尾相接，那 7 张连号 ARW 因此同时落进两个
 -- 事件夹）。所以边界一律由用户在 @--from\/--to@ 里确认。
 --
--- **本模块不自立纪律**：可信索引这道闸走 'withFreshStagingCatalog'、目标唯一性
+-- **本模块不自立纪律**：可信索引这道闸走 'freshStagingCatalog'、目标唯一性
 -- 走 'Pm.Import.foldPath'、事件名走 'Pm.Names' 的两个 canon、目标已存在的裁决
 -- 走 'StNeedsDecision'、源一致性走 'Pm.Hash.statSnap' 的前后双 stat。sort 只是
 -- 把文件**送进** import 的入口，它对同一件事的口径必须与 import 逐字一致，
@@ -47,6 +47,8 @@ module Pm.Sort
     -- * 命令入口
   , runSortSurvey
   , runSortPlan
+  , runSortPlanTo
+  , hardErrors
   , SortSurvey (..)
   , SortSegment (..)
   , surveySort
@@ -69,19 +71,20 @@ import Data.Time
   , getCurrentTime
   , toGregorian
   )
-import System.Directory (doesDirectoryExist, listDirectory)
-import System.FilePath (takeBaseName, takeDirectory, takeFileName, (</>))
+import System.Directory (listDirectory)
+import System.FilePath (takeFileName, (</>))
 import Text.Printf (printf)
 
-import Pm.Cli (GoOpts (..), freshStagingCatalog, savePlanAndMaybeRun)
+import Pm.Cli (GoOpts (..), freshStagingCatalog, planIdOf, planRunCode, savePlanAndMaybeRunTo)
 import Pm.Config (Config (..), requireRole)
 import Pm.Hash (ContentProbe (..), StatSnap (..), probeConfined)
 import Pm.Import (foldPath, stagingTop)
 import Pm.Names (canonProcessedEvent, canonRawEvent)
-import Pm.Op (Op (..))
+import Pm.Op (Op (..), winNameOk)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), newPlanId)
 import Pm.SortSource
 import Pm.Types
+import Pm.Win (whenPresent)
 
 -- ─── 纯核心 ─────────────────────────────────────────────────────────────────
 
@@ -98,21 +101,17 @@ segmentBy gap xs = go (sortOn snd xs)
     | diffLocalTime t prev <= gap = grow (z : acc) zs
   grow acc rest = (acc, rest)
 
--- | 会让目标路径逃出事件夹的字符。@--place@ 与 @--event@ **两条路都要过**：
--- 'canonRawEvent' 只约束前 6 个字符（@dd-dd-@）并要求其后非空，地点部分它
--- 不设字符限制，所以只在 @--place@ 上设闸等于给 @--event@ 留了一个绕行口。
-badChar :: Char -> Bool
-badChar c = c `elem` ("\\/:*?\"<>|" :: String)
-
 -- | 事件夹名 @YY-MM-地点@。年月取自该段**起始日**；地点只能由用户给
 -- （实测相机档零 GPS，本库 94 张相册抽测 0 张有 GPS）。
 --
--- 地点做最小合法性约束：非空、不含路径分隔符与 Windows 保留字符。真正的
--- 权威校验是 'canonRawEvent'——调用方拿到名字后必须再过它一次。
+-- 地点走 'Pm.Op.winNameOk'（非空、无保留字符\/控制符、不以点\/空格结尾）。
+-- @--place@ 与 @--event@ **两条路都要过**：'canonRawEvent' 只约束前 6 个字符
+-- （@dd-dd-@）并要求其后非空，地点部分它不设字符限制，所以只在 @--place@ 上
+-- 设闸等于给 @--event@ 留了一个绕行口。真正的权威校验是 'canonRawEvent'——
+-- 调用方拿到名字后必须再过它一次。
 eventNameFor :: Day -> String -> Maybe String
 eventNameFor d place
-  | null place = Nothing
-  | any badChar place = Nothing
+  | not (winNameOk place) = Nothing
   -- Scheme A 的年份只有两位，而 'Pm.Names.yearFolder' 无条件补 "20"——
   -- 2000-2099 之外的拍摄年份会被**静默**折到错误世纪（1999 → 2099，
   -- 2101 → 2001）。这里拒了它，让用户用 --event 显式指定，而不是默默归错年。
@@ -219,11 +218,19 @@ classifyDst atStaging atArchive sha = case atStaging of
 holdKin :: [(FilePath, Verdict)] -> [(FilePath, Verdict)]
 holdKin xs = [(dst, bump dst v) | (dst, v) <- xs]
  where
-  stemKey dst = (foldPath (takeDirectory dst), foldPath (takeBaseName dst))
-  held = Set.fromList [stemKey dst | (dst, VConflict _) <- xs]
+  held = Set.fromList [stemOf dst | (dst, VConflict _) <- xs]
   bump dst VCopy
-    | Set.member (stemKey dst) held = VConflict "同 stem 主文件待裁决，本组悬置"
+    | Set.member (stemOf dst) held = VConflict "同 stem 主文件待裁决，本组悬置"
   bump _ v = v
+
+-- | 'verifySkips' 之后**再**悬置一次（第一方自审工作流 F049）：'holdKin' 只在
+-- 纯 'judge' 里跑，看到的是索引推出的判定；随后的 IO 复核会新造 VConflict
+-- （主文件的暂存目标实际内容不符）或把组里的 VArchived 翻回 VCopy——组约束
+-- 是判定流水线的**后置条件**，不是中间一步：主文件被复核成待裁决而侧车仍
+-- 待拷，侧车先行落位，@--keep both@ 改名时就指错主文件（正是 'holdKin' 要
+-- 防的）。只加严（VCopy → VConflict），复用同一条 stem 规则。
+reholdKin :: [Judged] -> [Judged]
+reholdKin js = zipWith (\j (_, v) -> j {jVerdict = v}) js (holdKin [(jDst j, jVerdict j) | j <- js])
 
 -- | @pm sort@ **不进计划**的每一类，逐类留底。
 --
@@ -244,8 +251,8 @@ data Accounting = Accounting
 -- 这些文件一个都没搬走，却不属于 'Accounting' 的任何一格：照片在 'spTake' 里
 -- （本该进计划），侧车已被主文件认领（所以不算 'spOrphanCars'）。不列出来，
 -- 它们就是这条路径上的静默缺席（codex 二十七轮 #4）。
-reportChosen :: SortPick -> IO ()
-reportChosen pick = reportChosenFiles (map fst (spTake pick) <> spSidecars pick)
+reportChosen :: (String -> IO ()) -> SortPick -> IO ()
+reportChosen sink pick = reportChosenFiles sink (map fst (spTake pick) <> spSidecars pick)
 
 -- | pick 之后**没有产出计划**的每一条路径都从这里出去。
 --
@@ -255,16 +262,20 @@ reportChosen pick = reportChosenFiles (map fst (spTake pick) <> spSidecars pick)
 -- **不截断**。此前在 40 项处截断并打一行"另有 N 个"——这与本命令的契约直接
 -- 矛盾：这是一条中止路径，用户要据此判断卡上还剩什么，"另有 2960 个"帮不上
 -- 任何忙。清单长是因为源大，那就打印那么长。
-reportChosenFiles :: [FilePath] -> IO ()
-reportChosenFiles chosen = do
-  printf
-    "\n本次**没有任何文件**进入计划。被选中但未归位的 %d 个（含侧车）：\n"
-    (length chosen)
-  forM_ chosen $ \c -> putStrLn ("    " <> c)
+reportChosenFiles :: (String -> IO ()) -> [FilePath] -> IO ()
+reportChosenFiles sink chosen = do
+  sink
+    ( printf
+        "\n本次**没有任何文件**进入计划。被选中但未归位的 %d 个（含侧车）："
+        (length chosen)
+    )
+  forM_ chosen $ \c -> sink ("    " <> c)
 
 -- | 逐类打印，返回被留下的文件总数（0 = 源里每个文件都进了计划）。
-reportAccounting :: Accounting -> IO Int
-reportAccounting ac = do
+-- 打印口由调用方给（第一方自审工作流 F051：`pm ui` 下 stdout 是空设备，
+-- serve 的 sort 端点把这些行收进 JSON 的 log；CLI 传 putStrLn，逐字不变）。
+reportAccounting :: (String -> IO ()) -> Accounting -> IO Int
+reportAccounting sink ac = do
   bucket
     "读不到拍摄时间"
     "不猜——请自行放置或先补 EXIF"
@@ -297,10 +308,10 @@ reportAccounting ac = do
   -- 可变参数不约束它们）。
   bucket :: String -> String -> [String] -> IO ()
   bucket title why xs = unless (null xs) $ do
-    printf "\n%s %d 个（%s）：\n" title (length xs) why
-    forM_ (take 20 xs) $ \p -> putStrLn ("      " <> p)
+    sink (printf "\n%s %d 个（%s）：" title (length xs) why)
+    forM_ (take 20 xs) $ \p -> sink ("      " <> p)
     unless (length xs <= 20) $
-      printf "      …另有 %d 个\n" (length xs - 20)
+      sink (printf "      …另有 %d 个" (length xs - 20))
 
 -- ─── 形态一：只读提议 ───────────────────────────────────────────────────────
 
@@ -409,6 +420,7 @@ renderSortSurvey sv = do
   forM_ (ssSegments sv) (printSegment (ssSrcAbs sv))
   _ <-
     reportAccounting
+      putStrLn
       Accounting
         { acUndated = ssUndated sv
         , -- 提议阶段没有区间，「区间外」这一格此刻不适用（形态二拿到
@@ -419,7 +431,7 @@ renderSortSurvey sv = do
         , acErrors = ssErrors sv
         }
   putStrLn "\n（分段只是提议：时间切不开首尾相接的两趟旅程，边界以你给的 --from/--to 为准）"
-  pure 0
+  foldHardErrors putStrLn (ssErrors sv) 0
 
 runSortSurvey :: FilePath -> Double -> Config -> IO Int
 runSortSurvey src gapHours cfg = do
@@ -455,9 +467,10 @@ existingEvents root = do
     Left e -> Left ("已有事件夹枚举失败（被占/介质错误？）: " <> show e)
     Right evs -> Right evs
  where
-  lsDir d = do
-    ok <- doesDirectoryExist d
-    if ok then sort <$> listDirectory d else pure []
+  -- 第一方自审 R1：存在性三态（'whenPresent'）——@doesDirectoryExist@ 把 ACL
+  -- 拒绝塌成「没有事件夹」，提议就会让用户新建一个重名的。查不出 → 抛进外层
+  -- try，与枚举失败同一出口（survey 整体 Left）。
+  lsDir d = whenPresent d (listDirectory d) >>= either (ioError . userError) (pure . sort . fromMaybe [])
   -- 反向映射复用 'Pm.Names.canonProcessedEvent'（它就是"剥掉 -Raw 后缀，返回
   -- YY-MM-地点"），而不是本地再写一个大小写敏感的 strip——两个方向用同一份
   -- 定义，归档层的 @26-04-X-raw@ 才折得到暂存区的 @26-04-X@ 上。
@@ -481,18 +494,25 @@ sameMonth evs d =
 -- 返回 (退出码, 生成的计划 id)。id 只在真出了计划时是 Just——GUI 第六页要用
 -- 它，而从 @.pm\/plans@ 里挑"最新的那个"是猜不是知道（并发生成时会挑错）。
 runSortPlan :: GoOpts -> FilePath -> Either String String -> Day -> Day -> Config -> IO (Int, Maybe T.Text)
-runSortPlan go src placeOrEvent from to cfg = do
+runSortPlan = runSortPlanTo putStrLn
+
+-- | 同上，打印口由调用方给（工作流 F051/F078：serve 的 sort 端点把交代清单与
+-- 四条中止路径的说明收进 JSON 的 log，页面据此显示，而不是指向一个被静音的
+-- 终端）。
+runSortPlanTo :: (String -> IO ()) -> GoOpts -> FilePath -> Either String String -> Day -> Day -> Config -> IO (Int, Maybe T.Text)
+runSortPlanTo sink go src placeOrEvent from to cfg = do
   let root = cfgMainPath cfg
   -- 与 runImport 同一次序：身份校验先于任何读取与判定。
   er <- requireRole RoleMain root
   case er of
-    Left msg -> putStrLn msg >> pure (2, Nothing)
-    Right info -> withSource src (2, Nothing) $ \_ sf -> do
+    Left msg -> sink msg >> pure (2, Nothing)
+    Right info -> withSource sink src (2, Nothing) $ \_ sf -> do
       (dated, undated) <- readTimes (sfPhotos sf)
       let pick = pickFiles (sfSidecars sf) from to dated
       -- 交代先于计划：留下的每一类都在用户看到"待拷 N 张"之前就列出来。
       left <-
         reportAccounting
+          sink
           Accounting
             { acUndated = undated
             , acOutOfRange = spOutOfRange pick
@@ -505,37 +525,40 @@ runSortPlan go src placeOrEvent from to cfg = do
           -- 撞名是**整批拒绝**：这一趟没有任何文件进入计划。所以这里不能沿用
           -- 上面那句「以上 N 个不在本次计划里」——那会让人以为其余的进了。
           -- 说清楚"一个都没进"，才是对这一格的如实交代（codex 二十六轮 #7）。
-          putStrLn "✗ 同名文件来自多个源路径，整批拒绝（不替你挑哪一个）："
+          sink "✗ 同名文件来自多个源路径，整批拒绝（不替你挑哪一个）："
           forM_ cs $ \(n, srcs) -> do
-            putStrLn ("    " <> n <> ":")
-            forM_ srcs $ \s -> putStrLn ("        " <> s)
+            sink ("    " <> n <> ":")
+            forM_ srcs $ \s -> sink ("        " <> s)
           -- 光打印撞名的那几个名字不够：被选中的**其余**照片、以及跟着它们的
           -- 侧车同样不会被搬走，而它们既不在 'spCollide' 里，也不在
           -- 'spOrphanCars'（侧车已被认领，所以不算无主）——于是一个都不出现在
           -- 输出里（codex 二十七轮 #4）。把本次选中的全部文件逐条列出来。
-          reportChosen pick
+          reportChosen sink pick
           unless (left == 0) $
-            printf "另有 %d 个文件因上列其他原因被留下。\n" left
+            sink (printf "另有 %d 个文件因上列其他原因被留下。" left)
           pure (2, Nothing)
         (_, []) -> do
-          putStrLn "该区间内没有可定时的照片"
+          sink "该区间内没有可定时的照片"
           unless (left == 0) $
-            printf "（源里另有 %d 个文件因上列原因未被归位）\n" left
+            sink (printf "（源里另有 %d 个文件因上列原因未被归位）" left)
           pure (1, Nothing)
         (_, taken@((_, t1) : _)) -> do
           unless (left == 0) $
-            printf "\n（以上 %d 个文件**不在**本次计划里；清卡前请自行确认）\n" left
+            sink (printf "\n（以上 %d 个文件**不在**本次计划里；清卡前请自行确认）" left)
           case resolveEvent (localDay t1) placeOrEvent of
             -- 与撞名同类：计划前失败，被选中的文件一个都没搬走，同样要交代。
-            Left why -> putStrLn ("✗ " <> why) >> reportChosen pick >> pure (2, Nothing)
+            Left why -> sink ("✗ " <> why) >> reportChosen sink pick >> pure (2, Nothing)
             Right ev -> do
               -- 新鲜度不过同样是**计划前失败**：选中的文件一个都没搬走，
               -- 要与撞名/事件名非法一样逐条交代（codex 二十八轮 #4）。
-              ecat <- freshStagingCatalog root
+              ecat <- freshStagingCatalog sink root
               case ecat of
-                Left m -> putStrLn ("✗ " <> m) >> reportChosen pick >> pure (2, Nothing)
-                Right cat ->
-                  buildPlan cfg go info ev (map fst taken <> spSidecars pick) cat
+                Left m -> sink ("✗ " <> m) >> reportChosen sink pick >> pure (2, Nothing)
+                Right cat -> do
+                  (code, mpid) <- buildPlan sink cfg go info ev (map fst taken <> spSidecars pick) cat
+                  -- 「✓ 没有需要归位的新照片」+ 0 不得替没枚举出来的子树担保（F054）。
+                  code' <- foldHardErrors sink (sfErrors sf) code
+                  pure (code', mpid)
 
 -- | 决定事件夹名：@--place@ 自动补 @YY-MM@（取该段起始日），@--event@ 直接用。
 -- 两条最后都要过 'canonRawEvent'——那是 import 认这个目录的同一把尺子，
@@ -544,11 +567,11 @@ resolveEvent :: Day -> Either String String -> Either String String
 resolveEvent d poe = do
   name <- case poe of
     Right ev
-      | any badChar ev -> Left ("事件名含非法字符（\\/:*?\"<>|）: " <> ev)
+      | not (winNameOk ev) -> Left ("事件名不是可创建的 Windows 名字（空、含 \\/:*?\"<>| 或控制符、或以点/空格结尾）: " <> ev)
       | otherwise -> Right ev
     Left place ->
       maybe
-        (Left ("地点不合法（空、含 \\/:*?\"<>| 、或拍摄年份不在 2000-2099）: " <> place))
+        (Left ("地点不合法（空、含 \\/:*?\"<>| 或控制符、以点/空格结尾、或拍摄年份不在 2000-2099）: " <> place))
         Right
         (eventNameFor d place)
   case canonRawEvent name of
@@ -557,27 +580,30 @@ resolveEvent d poe = do
 
 -- root 不再单独传：它恒等于 @cfgMainPath cfg@，两个参数表达同一件事时，
 -- 迟早会有一处传错。计划的执行期屏障也要 Config（'Pm.Cli.runBarrier'）。
-buildPlan :: Config -> GoOpts -> RootInfo -> String -> [FilePath] -> Catalog -> IO (Int, Maybe T.Text)
-buildPlan cfg go info ev picked cat = do
+buildPlan :: (String -> IO ()) -> Config -> GoOpts -> RootInfo -> String -> [FilePath] -> Catalog -> IO (Int, Maybe T.Text)
+buildPlan sink cfg go info ev picked cat = do
   let root = cfgMainPath cfg
   snaps <- forM picked $ \p -> (,) p <$> snapshotSrc p
   case [(p, why) | (p, Left why) <- snaps] of
     -- 少搬一个文件比搬错更难发现：能读的那些照样出计划，等于把"这批没全到"
     -- 藏进一份看上去正常的计划里。整批拒绝，把问题留在用户眼前。
     failed@(_ : _) -> do
-      putStrLn "✗ 源文件读取失败，整批不出计划："
-      forM_ failed $ \(p, why) -> putStrLn ("    " <> p <> " — " <> why)
+      sink "✗ 源文件读取失败，整批不出计划："
+      forM_ failed $ \(p, why) -> sink ("    " <> p <> " — " <> why)
       -- 读得出的那些也一个都没搬走：只列失败项，等于让人以为其余的进了计划
       -- （codex 二十八轮 #4，与第 27 轮 #4 同一形状——那次只扫了一半）。
-      reportChosenFiles picked
+      reportChosenFiles sink picked
       pure (2, Nothing)
     [] -> do
       let judged0 = judge cat ev [(p, sha, st) | (p, Right (sha, st)) <- snaps]
-      judged <- verifySkips root judged0
-      let changed = length [() | (a, b) <- zip judged0 judged, jVerdict a /= jVerdict b]
+      verified <- verifySkips root judged0
+      -- 「索引已过期」只数内容复核改判的项，在再悬置之前算（再悬置牵连的
+      -- 侧车不是被内容重判的）。
+      let changed = length [() | (a, b) <- zip judged0 verified, jVerdict a /= jVerdict b]
+          judged = reholdKin verified
       unless (changed == 0) $
-        printf "⚠ 索引已过期：%d 项按目标位置的**实际内容**重新判定\n" changed
-      emit cfg go info judged
+        sink (printf "⚠ 索引已过期：%d 项按目标位置的**实际内容**重新判定" changed)
+      emit sink cfg go info judged
 
 -- | 一个源文件的完整判定行。
 data Judged = Judged
@@ -654,26 +680,31 @@ verifySkips root = mapM check
         -- 归档层同名异容是 import 的返修裁决管的事，照常拷进暂存区。
         | otherwise -> j {jVerdict = VCopy}
 
-emit :: Config -> GoOpts -> RootInfo -> [Judged] -> IO (Int, Maybe T.Text)
-emit cfg go info judged = do
+emit :: (String -> IO ()) -> Config -> GoOpts -> RootInfo -> [Judged] -> IO (Int, Maybe T.Text)
+emit sink cfg go info judged = do
   let root = cfgMainPath cfg
-  printf
-    "归位：待拷 %d · 已在目标位置 %d · 已归档 %d · 待裁决 %d\n"
-    (tally (== VCopy))
-    (tally (== VAtDest))
-    (tally (== VArchived))
-    (tally isConflict)
+  sink
+    ( printf
+        "归位：待拷 %d · 已在目标位置 %d · 已归档 %d · 待裁决 %d"
+        (tally (== VCopy))
+        (tally (== VAtDest))
+        (tally (== VArchived))
+        (tally isConflict)
+    )
   forM_ [j | j <- judged, isConflict (jVerdict j)] $ \j ->
-    putStrLn ("  ⚠ " <> takeFileName (jSrc j) <> ": " <> conflictWhy (jVerdict j))
+    sink ("  ⚠ " <> takeFileName (jSrc j) <> ": " <> conflictWhy (jVerdict j))
   forM_ (take 10 [j | j <- judged, jVerdict j == VArchived]) $ \j ->
-    putStrLn ("  · 已归档，不重复搬: " <> takeFileName (jSrc j))
+    sink ("  · 已归档，不重复搬: " <> takeFileName (jSrc j))
   if null items
-    then putStrLn "✓ 没有需要归位的新照片" >> pure (0, Nothing)
+    then sink "✓ 没有需要归位的新照片" >> pure (0, Nothing)
     else do
       pid <- newPlanId
       now <- getCurrentTime
-      code <-
-        savePlanAndMaybeRun
+      -- 工作流 F052：id 只在计划真的落了盘时给（PrRefused 在 savePlan 之前就
+      -- 返回）；PrSaved（无 --apply）盘上有文件，退出码 1 仍带 id。
+      pr <-
+        savePlanAndMaybeRunTo
+          sink
           cfg
           go
           Plan
@@ -684,7 +715,7 @@ emit cfg go info judged = do
             , plCreated = now
             , plItems = items
             }
-      pure (code, Just pid)
+      pure (planRunCode pr, planIdOf pr pid)
  where
   tally f = length [() | j <- judged, f (jVerdict j)]
   items =

@@ -16,7 +16,10 @@
 module Pm.Config
   ( Config (..)
   , configFilePath
+  , ConfigLoad (..)
+  , loadConfigState
   , loadConfig
+  , checkAbsolute
   , writeConfig
   , withConfigLock
   , renderConfig
@@ -37,8 +40,10 @@ module Pm.Config
   , pmSubBackupCache
   , pmSubVaultCache
   , untrustedMsg
+  , ensurePmSubdir
   , readPmState
   , withPmStateAppend
+  , withPmStateAppend'
   , resolvePmPath
   , readSideCache
   , SideCacheWrite (..)
@@ -50,9 +55,11 @@ module Pm.Config
 import Control.Exception (IOException, bracket, finally, throwIO, try)
 import Control.Monad (when)
 import Crypto.Random (getRandomBytes)
+import Data.Char (isControl)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
+import Data.List (intercalate)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -67,7 +74,7 @@ import System.Directory
   )
 import System.Environment (lookupEnv)
 import GHC.IO.Handle.Lock (LockMode (ExclusiveLock), hTryLock)
-import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FilePath (isAbsolute, takeDirectory, takeFileName, (</>))
 import System.IO (Handle, hClose)
 import System.IO.Error (isAlreadyInUseError, isDoesNotExistError)
 import Text.Printf (printf)
@@ -81,7 +88,7 @@ import Pm.Win
   , flushHandleToDisk
   , moveBoundNoReplace
   , openFreshBinary
-  , openStateAppend
+  , openStateAppendTail
   , openStateLock
   , openStateRead
   , probeName
@@ -97,6 +104,14 @@ data Config = Config
     -- ^ 备份 root 的 UUID（`pm backup init` 登记；发现流程按 UUID 认盘，§9）
   , cfgBackupSubpath :: Maybe FilePath
     -- ^ 备份镜像相对盘根的位置（如 "Photography"）；盘符不入配置
+  , cfgPortfolioDir :: Maybe FilePath
+    -- ^ portfolio 仓的本地路径（P7 上线命令生成用；photos-json 是只读引用
+    -- 检查，这个是仓本身，两者独立可设）
+  , cfgVaultPush :: Maybe String
+    -- ^ 展示集仓 @git push@ 的目标（如 "origin main"）；不设 = 裸 @git push@。
+    -- 字符闸在 'Pm.Publish.pushTargetOk'（设置入口统一过 checkPatch）。
+  , cfgPortfolioPush :: Maybe String
+    -- ^ portfolio 仓 push 目标；同上
   }
   deriving (Show, Eq)
 
@@ -109,6 +124,9 @@ instance TOML.DecodeTOML Config where
       <*> TOML.getFieldsOpt ["main", "workers"]
       <*> TOML.getFieldsOpt ["backup", "id"]
       <*> TOML.getFieldsOpt ["backup", "subpath"]
+      <*> TOML.getFieldsOpt ["portfolio", "dir"]
+      <*> TOML.getFieldsOpt ["vault", "push"]
+      <*> TOML.getFieldsOpt ["portfolio", "push"]
 
 -- | 配置文件位置。**`PM_CONFIG` 覆盖**优先于 XDG 目录，理由两条：
 --
@@ -133,8 +151,20 @@ configFilePath = do
       dir <- getXdgDirectory XdgConfig "pm"
       pure (dir </> "config.toml")
 
+-- | 配置载入三态（工作流 F010/F077）：「不存在」与「读不出」此前同为 Left，
+-- 'Pm.Commands.runInit' 再把 Left 压回 Nothing——两次有损折叠，正好落在唯一
+-- 需要这个区别的路径上（--force 重建要保留旧登记，读不出时必须明说没保留）。
+data ConfigLoad = CfgAbsent String | CfgUnreadable String | CfgOk Config
+
 loadConfig :: IO (Either String Config)
-loadConfig = do
+loadConfig = collapse <$> loadConfigState
+ where
+  collapse (CfgOk c) = Right c
+  collapse (CfgAbsent m) = Left m
+  collapse (CfgUnreadable m) = Left m
+
+loadConfigState :: IO ConfigLoad
+loadConfigState = do
   fp <- configFilePath
   exists <- doesFileExist fp
   if not exists
@@ -145,13 +175,13 @@ loadConfig = do
       -- 这里认出它并给出恢复动作；**不自动改名**——自动提升一个来历不明的
       -- .tmp 与 'Pm.VaultHold.readHolds' 的 fail-closed 原则相悖。
       orphan <- doesFileExist (fp <> ".tmp")
-      pure . Left $
+      pure . CfgAbsent $
         if orphan
           then
             "配置缺失，但发现 " <> fp <> ".tmp —— 上次写入崩在删旧与改名之间。"
               <> "那份内容是完整的新配置：核对后改名成 "
               <> takeFileName fp
-              <> " 即可恢复（或重跑 pm init --main <主库路径>）"
+              <> " 即可恢复（或删除该 .tmp 后重跑 pm init --main <主库路径>）"
           else "配置不存在: " <> fp <> " —— 先运行 pm init --main <主库路径>"
     else do
       -- 三十五轮 F4：doesFileExist 与读取之间有窗口（编辑器/同步器短暂独占、
@@ -159,32 +189,84 @@ loadConfig = do
       -- 读不出 = Left，withCfg 打印后 exit 2（fail-closed，不猜内容）。
       rawE <- try (BS.readFile fp) :: IO (Either IOException BS.ByteString)
       case rawE of
-        Left e -> pure (Left ("配置读取失败（被占/被挪？）: " <> show e <> " —— 解除占用后重试"))
+        Left e -> pure (CfgUnreadable ("配置读取失败（被占/被挪？）: " <> show e <> " —— 解除占用后重试"))
         Right raw -> case TE.decodeUtf8' raw of
-          Left e -> pure (Left ("配置不是 UTF-8: " <> show e))
+          Left e -> pure (CfgUnreadable ("配置不是 UTF-8: " <> show e))
           Right txt -> case TOML.decode txt of
-            Left e -> pure (Left (T.unpack (TOML.renderTOMLError e)))
-            Right c -> pure (Right c)
+            Left e -> pure (CfgUnreadable (T.unpack (TOML.renderTOMLError e)))
+            Right c -> pure (either CfgUnreadable CfgOk (checkAbsolute c))
 
--- | TOML literal strings (single quotes) keep Windows backslashes verbatim.
+-- | 配置里的路径字段一律须为绝对路径（第一方自审 R4）：相对路径按进程 cwd
+-- 解析，`pm ui` 拉起的 serve 与终端里的 pm 各有各的 cwd，同一份配置会指向
+-- 两个地方，而 checkPatch 只查过「此刻从这个 cwd 看存在」。写侧 'writeConfig'
+-- 先绝对化，这里挡的是手编。
+checkAbsolute :: Config -> Either String Config
+checkAbsolute c =
+  case [k <> " = " <> v | (k, Just v) <- fields, not (isAbsolute v)] of
+    [] -> Right c
+    bad -> Left ("配置里的路径须为绝对路径（" <> intercalate "；" bad <> "）——改成完整盘符路径后重试")
+ where
+  fields =
+    [ ("main.path", Just (cfgMainPath c))
+    , ("vault.path", cfgVaultPath c)
+    , ("portfolio.photos-json", cfgPhotosJson c)
+    , ("portfolio.dir", cfgPortfolioDir c)
+    ]
+
+-- | 'writeConfig' 的入口归一：三条写入口（init / config set / 登记备份盘）都
+-- 可能拿到用户键入的相对路径，统一在这一处绝对化，'checkAbsolute' 才不会把
+-- pm 自己写出的配置拒掉。
+absolutizeConfig :: Config -> IO Config
+absolutizeConfig c = do
+  m <- makeAbsolute (cfgMainPath c)
+  v <- traverse makeAbsolute (cfgVaultPath c)
+  j <- traverse makeAbsolute (cfgPhotosJson c)
+  d <- traverse makeAbsolute (cfgPortfolioDir c)
+  pure c {cfgMainPath = m, cfgVaultPath = v, cfgPhotosJson = j, cfgPortfolioDir = d}
+
+-- | TOML 字符串值编码（39 轮 #3）。此前所有字符串值裸拼 literal 单引号：
+-- 值本身含 @'@（如 @D:\\O'Brien@，能过 checkPatch 的合法目录名）就写出
+-- **非法 TOML**——而 writeConfig 先落盘后重读，正式配置已被顶掉，每一条
+-- pm 命令自此起不来。能用 literal（反斜杠原样，Windows 路径可读）就用；
+-- 含单引号/控制符退到 basic string 并转义。**渲染器所有字符串值必须经它。**
+tomlStr :: Text -> Text
+tomlStr v
+  | T.all litOk v = "'" <> v <> "'"
+  | otherwise = "\"" <> T.concatMap esc v <> "\""
+ where
+  litOk ch = ch /= '\'' && not (isControl ch)
+  esc ch = case ch of
+    '"' -> "\\\""
+    '\\' -> "\\\\"
+    _
+      | isControl ch -> T.pack (printf "\\u%04X" (fromEnum ch))
+      | otherwise -> T.singleton ch
+
 renderConfig :: Config -> Text
 renderConfig c =
   T.unlines $
     [ "# pm 配置 —— 手动编辑后无需任何重载步骤"
     , "[main]"
-    , "path = '" <> T.pack (cfgMainPath c) <> "'"
+    , "path = " <> tomlStr (T.pack (cfgMainPath c))
     ]
       <> maybe [] (\w -> ["workers = " <> T.pack (show w)]) (cfgWorkers c)
-      <> ( case (cfgBackupId c, cfgBackupSubpath c) of
-            (Just bid, Just sub) ->
-              ["", "[backup]", "id = '" <> bid <> "'", "subpath = '" <> T.pack sub <> "'"]
-            _ -> []
-         )
-      <> maybe [] (\p -> ["", "[vault]", "path = '" <> T.pack p <> "'"]) (cfgVaultPath c)
-      <> maybe
-        []
-        (\p -> ["", "[portfolio]", "photos-json = '" <> T.pack p <> "'"])
-        (cfgPhotosJson c)
+      -- 工作流 F011：与其它表同一 helper——此前唯独这张表全有才渲染，半对
+      -- 登记被**静默归零**；「登记成对」的判定归 'Pm.ConfigEdit.checkConfig'
+      -- （写入口当场拒），渲染器只忠实保全已设字段
+      <> section "backup" [("id", T.unpack <$> cfgBackupId c), ("subpath", cfgBackupSubpath c)]
+      -- 每张表渲染**所有**已设字段：渲染器漏一个字段，下一次任何写回就把
+      -- 用户设过的那项静默抹掉（round-trip 由 configTxn 的写后重读顺带验证）。
+      <> section "vault" [("path", cfgVaultPath c), ("push", cfgVaultPush c)]
+      <> section
+        "portfolio"
+        [ ("photos-json", cfgPhotosJson c)
+        , ("dir", cfgPortfolioDir c)
+        , ("push", cfgPortfolioPush c)
+        ]
+ where
+  section name kvs = case [k <> " = " <> tomlStr (T.pack v) | (k, Just v) <- kvs] of
+    [] -> []
+    ls -> ["", "[" <> name <> "]"] <> ls
 
 -- | 写配置。P4-8 起 GUI 也能改配置，半写的 config.toml 会让**每一条** pm
 -- 命令都起不来。
@@ -200,8 +282,9 @@ renderConfig c =
 -- 那里只会剩下内容完整的 @<fp>.tmp@，'loadConfig' 认得出并指明怎么恢复。
 -- 并发那一侧由 'withConfigLock' 兜（同一个固定 tmp 名也只有一个写者）。
 writeConfig :: Config -> IO FilePath
-writeConfig c = do
+writeConfig c0 = do
   fp <- configFilePath
+  c <- absolutizeConfig c0
   -- 目录取自 fp 本身（PM_CONFIG 可以指到任意位置，不能再假定是 XDG 目录）
   createDirectoryIfMissing True (takeDirectory fp)
   let tmp = fp <> ".tmp"
@@ -358,18 +441,34 @@ readPmState root rel = do
           | otherwise ->
               Left ((pmDir root </> rel) <> " 无法可信读取（" <> show e <> "）——人工核查")
 
--- | 'readPmState' 的追加写对偶：完整路径 'resolveUnder' → 'openStateAppend'
--- （打开后立刻查 link count）→ 在该句柄上执行 @act@。journal 与 manifest 是
+-- | 'readPmState' 的追加写对偶：完整路径 'resolveUnder' → 'openStateAppendTail'
+-- （打开后立刻查 link count、同句柄判尾）→ 在该句柄上执行 @act@。journal 与 manifest 是
 -- pm 仅有的两个「必须复用既有名字」的追加目标，都走这里。
 --
--- 两种拒绝都以 IOException 抛出（与 'openStateAppend' 的既有契约一致）：
+-- 两种拒绝都以 IOException 抛出（与 'openStateAppendTail' 的既有契约一致）：
 -- 调用点在 Exec 的崩溃处理之内，写不成必须整项中止而不是继续。
 withPmStateAppend :: FilePath -> FilePath -> (Handle -> IO a) -> IO a
-withPmStateAppend root rel act = do
+withPmStateAppend root rel act = withPmStateAppend' root rel (const act)
+
+-- | 同上，并把「追加前尾部是否有半截行」告诉调用方（True = 本函数已补上换行，
+-- 新记录从新的一行开始）。第一方自审工作流 F028：断电可在末行留下半截 JSON；
+-- 此前追加写直接接在半截后面，新记录与残行黏成一行——一条真实记录被吞，且
+-- 残行从「末行半截」（Warn，可恢复）变成「中段 CORRUPT」（Bad，永不可修，
+-- undo 从此拒绝）。记录层只断言自己**看过**的尾部状态：先查尾字节，非换行
+-- 结尾先补换行；journal 据此再写一条显式的撕裂标记（'Pm.Journal' 的
+-- @JTornGap@），读侧把「不可解析行 + 紧随其后的标记」判回撕裂尾。尾字节
+-- 查不出 → 抛（同本函数既有契约：写不成必须整项中止，不当无事发生）。
+withPmStateAppend' :: FilePath -> FilePath -> (Bool -> Handle -> IO a) -> IO a
+withPmStateAppend' root rel act = do
   m <- resolveUnder root (".pm" </> rel)
   case m of
     Nothing -> ioError (userError (untrustedMsg (pmDir root </> rel)))
-    Just fp -> bracket (openStateAppend fp) hClose act
+    Just fp ->
+      -- 41 轮 #6：查尾与追加在**同一次打开**里（'openStateAppendTail'）——
+      -- 两次打开之间文件可被整体替换，尾判属于旧对象、补换行落到新对象。
+      bracket (openStateAppendTail fp) (hClose . snd) $ \(torn, h) -> do
+        when torn (BS.hPut h (BS.singleton 10))
+        act torn h
 
 -- | 可重建侧缓存（备份盘缓存 \/ vault 缓存）的受信读取。三态：
 -- @Left@=不可信（junction\/hardlink\/ACL）、@Right Nothing@=缺席或损坏 JSON
@@ -510,6 +609,18 @@ createRootInfo' root info = do
       deleteBoundAt tmp
       pure (Left (final <> " 已存在或不可创建（不覆盖既有身份）: " <> show e))
 
+-- | 建 @.pm@ 的**子目录**（plans \/ trash）：先逐级限域，再在返回的路径上
+-- mkdir（第一方自审 R5）。顺序反过来——先 mkdir 再 resolveUnder——在 @.pm@
+-- 是指向库外的 junction 时会先在库外建出目录、再被拒：拒绝是对的，副作用
+-- 不该有。'writeSideCache' 早已是这个次序，此处把另外两处（'Pm.Plan.savePlan'
+-- 与 'Pm.Trash.appendManifest'）收齐。
+ensurePmSubdir :: FilePath -> FilePath -> IO (Either String FilePath)
+ensurePmSubdir root sub = do
+  m <- resolveUnder root (".pm" </> sub)
+  case m of
+    Nothing -> pure (Left (untrustedMsg (pmDir root </> sub)))
+    Just d -> createDirectoryIfMissing True d >> pure (Right d)
+
 -- | 覆盖写标识——仅供测试 fixture 与显式重写场景；生产建 root 一律走
 -- 'createRootInfo'。
 writeRootInfo :: FilePath -> RootInfo -> IO ()
@@ -517,19 +628,6 @@ writeRootInfo root info = do
   createDirectoryIfMissing True (pmDir root)
   BSL.writeFile (rootInfoPath root) (Aeson.encode info)
 
--- | 侧缓存目录的成对写入（catalog.json + meta.json），备份盘缓存与 vault 缓存
--- 共用：都是可重建的展示\/加速缓存，耐久层在别处（备份盘自己的 @.pm@、照片
--- 文件本身）。
---
--- P3b-12（九轮）：覆盖写能被 hardlink 引到库外 → 改「独占创建 tmp → 删旧 →
--- no-replace 落位」。
--- P3b-13（十轮复审 critical，探针实证）：接口从「给我一个目录」改成
--- 「给我 root + @.pm@ 下的子目录名」——旧签名让调用方自由拼路径
--- （'Pm.Backup.cacheDir'、'Pm.Vault.vaultCacheDir'），于是把
--- @.pm\/vault-cache@ 做成 junction 后，正常的 @pm vault status@ 会删掉并替换
--- **库外**的 catalog.json\/meta.json（实测库外文件变成了 pm 写的内容）。
--- 现在每个文件的完整路径在建目录前后各过一次 'resolveUnder'，与 Exec 的
--- tmp 落位同款。
 -- | Run the action holding the root's exclusive mutation lock; Nothing if
 -- another pm instance holds it. （原 Pm.Lock，三十一轮下沉至此——见该模块头。）
 --
@@ -570,6 +668,19 @@ data SideCacheWrite
   | CacheRefused String
   deriving (Show, Eq)
 
+-- | 侧缓存目录的成对写入（catalog.json + meta.json），备份盘缓存与 vault 缓存
+-- 共用：都是可重建的展示\/加速缓存，耐久层在别处（备份盘自己的 @.pm@、照片
+-- 文件本身）。
+--
+-- P3b-12（九轮）：覆盖写能被 hardlink 引到库外 → 改「独占创建 tmp → 删旧 →
+-- no-replace 落位」。
+-- P3b-13（十轮复审 critical，探针实证）：接口从「给我一个目录」改成
+-- 「给我 root + @.pm@ 下的子目录名」——旧签名让调用方自由拼路径
+-- （'Pm.Backup.cacheDir'、'Pm.Vault.vaultCacheDir'），于是把
+-- @.pm\/vault-cache@ 做成 junction 后，正常的 @pm vault status@ 会删掉并替换
+-- **库外**的 catalog.json\/meta.json（实测库外文件变成了 pm 写的内容）。
+-- 现在每个文件的完整路径在建目录前后各过一次 'resolveUnder'，与 Exec 的
+-- tmp 落位同款。
 writeSideCache :: Aeson.ToJSON meta => FilePath -> FilePath -> Catalog -> meta -> IO SideCacheWrite
 writeSideCache root sub cat meta = do
   -- 三十一轮 F1：catalog.json + meta.json 是**成对**状态，两文件之间没有锁时
@@ -579,12 +690,12 @@ writeSideCache root sub cat meta = do
   -- 共用本函数，十九轮登记的 vault-cache 跨进程争用残余随本条一并关闭
   -- （三十二轮更正：此前误记为二十轮；登记原文在 REVIEW-LOG 十九轮 bullet）。
   m <- withRootLock root $ do
-    let dir = pmDir root </> sub
-    pre <- resolveUnder root (".pm" </> sub)
-    case pre of
-      Nothing -> pure (Left (untrustedMsg dir))
-      Just _ -> do
-        createDirectoryIfMissing True dir
+    -- 第一方自审 R5 扫尾：子目录一律经 'ensurePmSubdir'（先限域、在返回的路径上
+    -- mkdir），不再对拼接串 mkdir。
+    ed <- ensurePmSubdir root sub
+    case ed of
+      Left e -> pure (Left e)
+      Right _ -> do
         r1 <- writeCacheFile root sub "catalog.json" (Aeson.encode cat)
         case r1 of
           Left e -> pure (Left e)

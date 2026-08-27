@@ -33,9 +33,10 @@ module Pm.Commands
   , runDedupe
   ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (forM, forM_, unless)
 import Data.Function (on)
-import Data.List (nubBy)
+import Data.List (intercalate, nubBy)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Data.Time (diffUTCTime, getCurrentTime)
@@ -47,8 +48,9 @@ import Text.Printf (printf)
 import Pm.Apply
 import Pm.Backup
 import Pm.BackupCmd (BackupCmd (..), backupInitPreflight, runBackupInit, runBackupRun)
-import Pm.Catalog (loadCatalog, saveCatalog)
+import Pm.Catalog (CatalogLoad (..), catalogMaybe, catalogOr, loadCatalog, loadNote, saveCatalog)
 import Pm.Clean
+import Pm.ConfigEdit (checkConfig)
 import Pm.Cli
 import Pm.Dedupe
 import Pm.Config
@@ -142,26 +144,60 @@ runInit o = do
             if exists && not (ioForce o)
               then pure (Left ("配置已存在: " <> cfgFp <> "（--force 覆盖）"))
               else do
-                -- --force 重建时保留既有备份盘登记（那是 backup init 的产物）
-                mold <- if exists then either (const Nothing) Just <$> loadConfig else pure Nothing
-                vaultOk <- mapM doesDirectoryExist (ioVault o)
-                case (ioVault o, vaultOk) of
-                  (Just vp, Just False) -> pure (Left ("vault 路径不存在: " <> vp))
-                  _ ->
-                    Right
-                      <$> writeConfig
-                        Config
-                          { cfgMainPath = mainPath
-                          , cfgVaultPath = ioVault o
-                          , cfgPhotosJson = ioPhotosJson o
-                          , cfgWorkers = ioWorkers o
-                          , cfgBackupId = maybe Nothing cfgBackupId mold
-                          , cfgBackupSubpath = maybe Nothing cfgBackupSubpath mold
-                          }
+                -- --force 重建时保留既有备份盘登记（那是 backup init 的产物）。
+                -- 工作流 F010/F077：「读不出」与「不存在」不同——前者要明说哪些
+                -- 设置没保留（TOML 坏了 / 非 UTF-8 / 相对路径……整份解码失败，
+                -- cfgBackupId 随之丢失）。硬拒绝不可取：pm init 是唯一不经
+                -- withCfg 的入口，是从坏配置里逃出来的唯一通路；先说再写。
+                -- 41 轮 #3：exists=False 也要问 'loadConfigState'——「配置缺失
+                -- 但躺着孤儿 <cfg>.tmp」的知识在它那里（上次 writeConfig 崩在
+                -- 删旧与改名之间，.tmp 是完整的新配置）。此前 init 按 exists
+                -- 直接绕过，会在旁边再写一份全新配置，把待恢复的备份盘登记等
+                -- 设置永久变成死文件。拒绝并复述恢复指引，核完再跑。
+                st <- loadConfigState
+                orphan <- doesFileExist (cfgFp <> ".tmp")
+                if not exists && orphan
+                  then
+                    pure . Left $ case st of
+                      CfgAbsent m -> m
+                      _ -> cfgFp <> ".tmp 存在（上次配置写入中断）——先人工核查（改名采用或删除），再重跑 pm init"
+                  else do
+                    let (mold, lost) = case st of
+                          CfgOk c -> (Just c, Nothing)
+                          CfgUnreadable why -> (Nothing, Just why)
+                          CfgAbsent _ -> (Nothing, Nothing)
+                    vaultOk <- mapM doesDirectoryExist (ioVault o)
+                    let newCfg =
+                          Config
+                              { cfgMainPath = mainPath
+                              , cfgVaultPath = ioVault o
+                              , cfgPhotosJson = ioPhotosJson o
+                              , cfgWorkers = ioWorkers o
+                              , cfgBackupId = maybe Nothing cfgBackupId mold
+                              , cfgBackupSubpath = maybe Nothing cfgBackupSubpath mold
+                              , -- P7：发布路径/push 目标与备份盘登记同类——它们是
+                                -- config set / GUI 设置页的产物，init 没有对应旗标，
+                                -- --force 重建时不保留就是静默丢设置。
+                                cfgPortfolioDir = maybe Nothing cfgPortfolioDir mold
+                              , cfgVaultPush = maybe Nothing cfgVaultPush mold
+                              , cfgPortfolioPush = maybe Nothing cfgPortfolioPush mold
+                              }
+                    case (ioVault o, vaultOk) of
+                      (Just vp, Just False) -> pure (Left ("vault 路径不存在: " <> vp))
+                      _ -> do
+                        -- 工作流 C101：整份配置过同一个汇点校验（主库/vault 不
+                        -- 嵌套、备份登记成对、路径绝对）——init 是四条写路径之一
+                        errs <- checkConfig newCfg
+                        if null errs
+                          then (\fp -> Right (fp, lost)) <$> writeConfig newCfg
+                          else pure (Left (intercalate "\n" errs))
       case mw of
         Nothing -> putStrLn "另一个 pm 正在改配置（config.lock 被持有），初始化未写入，稍后重试" >> pure 2
         Just (Left msg) -> putStrLn msg >> pure 2
-        Just (Right fp) -> putStrLn ("✓ 配置已写入 " <> fp) >> initMarker o mainPath
+        Just (Right (fp, lost)) -> do
+          forM_ lost $ \why ->
+            putStrLn ("⚠ 旧配置读不出（" <> why <> "）——备份盘登记与发布路径/push 目标未能保留，重建后请重跑 pm backup init / pm config set")
+          putStrLn ("✓ 配置已写入 " <> fp) >> initMarker o mainPath
 
 -- | init 的第二段：主库 root 标识。不动配置文件，在配置锁外。
 initMarker :: InitOpts -> FilePath -> IO Int
@@ -204,7 +240,8 @@ runScanCmd sc cfg = do
   case er of
     Left msg -> putStrLn msg >> pure 2
     Right rootInfo -> do
-      (old, warns) <- loadCatalog root
+      -- scan 是重建快照的那条路：被拒/坏掉的旧快照只当种子丢掉，从零重算
+      (old, warns) <- catalogMaybe <$> loadCatalog root
       mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
       defWorkers <- getNumProcessors
       let workers = fromMaybe (fromMaybe defWorkers (cfgWorkers cfg)) (scWorkers sc)
@@ -350,9 +387,29 @@ trashEmptyLocked' cfg root yes tv = do
               -- P6-C：unlink 改句柄形态——打开（终段不跟随）→ 先验句柄绑定
               -- 就是这条已限域的路径 → 句柄上置 delete。resolveUnder 与删除
               -- 之间的窗口不再存在：换掉中途任何一层都会让先验不符而拒绝。
-              forM_ purgeable $ \(_, abs') -> deleteBoundAt abs'
-              putStrLn ("✓ 已清除 " <> show (length purgeable) <> " 项（manifest 记录保留为历史）")
-              pure (if heldN == 0 then 0 else 1)
+              -- 第一方自审工作流 C102：unlink 是会抛的 IO（共享冲突超预算、只读
+              -- 属性 → ACCESS_DENIED、句柄绑定不符）。此前裸 forM_：异常逃顶、
+              -- 进程以 1 退出——与「清干净但有 HELD」同码，摘要行也没了，调用方分
+              -- 不清「清完」和「删到第 k 个死掉」。逐项 try、首个失败即停（保守：
+              -- 少删不多删）、报已清除 k/N、exit 2（DESIGN §5：IO 失败 = 2）。
+              done <- purgeLoop (0 :: Int) purgeable
+              case done of
+                Right n -> do
+                  putStrLn ("✓ 已清除 " <> show n <> " 项（manifest 记录保留为历史）")
+                  pure (if heldN == 0 then 0 else 1)
+                Left (k, p, e) -> do
+                  putStrLn
+                    ( "✗ " <> p <> ": " <> show e <> " —— 已清除 " <> show k <> "/" <> show (length purgeable)
+                        <> " 项，其余未动；解除占用/只读后重跑 pm trash empty（pm trash list 可查看）"
+                    )
+                  pure 2
+ where
+  purgeLoop k [] = pure (Right k)
+  purgeLoop k ((_, p) : rest) = do
+    r <- try (deleteBoundAt p) :: IO (Either IOException ())
+    case r of
+      Left e -> pure (Left (k, p, e))
+      Right () -> purgeLoop (k + 1) rest
 
 -- | 受屏障保护的隔离类别。
 data PurgeBarrier
@@ -380,10 +437,13 @@ purgeBarriers cfg guarded
       case emain of
         Left m -> pure ([], [(r, "主库身份不符: " <> m) | (_, (r, _)) <- guarded])
         Right _ -> do
-          mMain <- fst <$> loadCatalog (cfgMainPath cfg)
-          case mMain of
-            Nothing -> pure ([], [(r, "主库无索引") | (_, (r, _)) <- guarded])
-            Just mainCat -> do
+          lm <- loadCatalog (cfgMainPath cfg)
+          let held why = pure ([], [(r, why) | (_, (r, _)) <- guarded])
+          case lm of
+            -- 缺席与读不出都 HELD，理由各说各的（工作流 A 簇）
+            CatAbsent -> held "主库无索引"
+            CatRefused _ -> held ("主库" <> loadNote lm)
+            CatLoaded mainCat _ -> do
               bak <-
                 if any ((== BThreeCopies) . fst) guarded
                   then do
@@ -391,8 +451,8 @@ purgeBarriers cfg guarded
                     case er of
                       Left msg -> pure (Left ("备份盘不在线: " <> msg))
                       Right broot -> do
-                        mb <- fst <$> loadCatalog broot
-                        pure (maybe (Left "备份盘无索引") (Right . (,) broot) mb)
+                        lb <- loadCatalog broot
+                        pure (case lb of CatLoaded c _ -> Right (broot, c); other -> Left ("备份盘" <> loadNote other))
                   else pure (Left "本批无 clean-staging 记录")
               judged <- forM guarded $ \(b, rec@(r, _)) -> do
                 -- 即将被永久删除的那个对象 = 隔离区里的载荷。见证与它**同身份**
@@ -479,11 +539,11 @@ runDedupe go cfg = do
   case erole of
     Left msg -> putStrLn msg >> pure 2
     Right info -> do
-      (mcat, warns) <- loadCatalog root
-      mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
-      case mcat of
-        Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
-        Just cat -> do
+      lc <- loadCatalog root
+      case catalogOr "主库尚未索引 → 先 pm scan" lc of
+        Left m -> putStrLn m >> pure 2
+        Right (cat, warns) -> do
+          mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
           let gs = dedupeGroups cat
               items = dedupePlanItems gs
           if null gs
@@ -531,10 +591,10 @@ runClean go cfg = do
       case er of
         Left msg -> putStrLn ("无法确认第三副本，不生成任何清理项: " <> msg) >> pure 1
         Right broot -> do
-          (mbak, _) <- loadCatalog broot
-          case mbak of
-            Nothing -> putStrLn "备份盘尚无索引 → 先 pm backup" >> pure 2
-            Just bakCat -> do
+          lb <- loadCatalog broot
+          case catalogOr "备份盘尚无索引 → 先 pm backup" lb of
+            Left m -> putStrLn m >> pure 2
+            Right (bakCat, _) -> do
               let rep = planClean cat bakCat
               (verified, demoted) <- verifyCandidates root broot (clEligible rep)
               let held = clHeld rep <> demoted

@@ -29,15 +29,16 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime)
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (bracket)
 import Control.Monad (when)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
+import Data.Maybe (fromMaybe)
+import System.Directory (doesFileExist, listDirectory)
 import System.FilePath (dropExtension, takeExtension, (</>))
 import System.IO (hClose)
 import Text.Printf (printf)
 
-import Pm.Config (pmDir, pmSubPlans, readPmState, requirePmTrusted, untrustedMsg)
-import Pm.Win (deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary, resolveUnder)
+import Pm.Config (ensurePmSubdir, pmDir, pmSubPlans, readPmState, requirePmTrusted, untrustedMsg)
+import Pm.Win (deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary, resolveUnder, whenPresent)
 import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
 
 data ItemStatus
@@ -158,8 +159,10 @@ savePlan :: Plan -> IO FilePath
 savePlan p = do
   let root = plRootPath p
       pid = plId p
-  createDirectoryIfMissing True (plansDir root)
-  m <- resolveUnder root (".pm" </> pmSubPlans </> (T.unpack pid <> ".json"))
+  -- 第一方自审 R5：子目录先限域再建（'ensurePmSubdir'），不在被劫持的 .pm 后面
+  -- 留下一个库外 plans 目录。
+  ed <- ensurePmSubdir root pmSubPlans
+  m <- either (const (pure Nothing)) (const (resolveUnder root (".pm" </> pmSubPlans </> (T.unpack pid <> ".json")))) ed
   case m of
     Nothing -> ioError (userError (untrustedMsg (planPath root pid)))
     Just fp -> do
@@ -204,7 +207,12 @@ loadPlan' root pid = do
               | plId p /= pid ->
                   Left ("计划文件内 id（" <> T.unpack (plId p) <> "）与文件名（" <> T.unpack pid <> "）不符，拒绝装载")
               | Left e <- validatePlan p -> Left (e <> "，拒绝装载")
-              | otherwise -> Right p
+              -- 第一方自审工作流 F027：文件里的 @root@ 字段是生成时的挂载路径
+              -- （可手编、盘符已变），是线索不是证据。受信取用口只有这一个，
+              -- 在这里把记录绑到**字节实际来自**的目录，每个调用方（resolve 的
+              -- 锁内重装、listPlans/GUI 列表）就不必各自记得重绑。执行前仍按
+              -- 'plRootId' 走 bindExecRoot（UUID 发现），两道互不替代。
+              | otherwise -> Right p {plRootPath = root}
 
 -- | 列出 @root\/.pm\/plans@ 下装得出来的计划；装不出来的按 (文件名, 原因)
 -- 返回。目录本身经 'requirePmTrusted' + 完整路径 'resolveUnder'，每个计划经
@@ -224,11 +232,13 @@ listPlans root = do
       case m of
         Nothing -> pure ([], [("", untrustedMsg (root </> ".pm" </> pmSubPlans))])
         Just d -> do
-          ex <- doesDirectoryExist d
-          namesE <- try (if ex then listDirectory d else pure []) :: IO (Either IOException [FilePath])
+          -- 第一方自审 R1：存在性三态——@doesDirectoryExist@ 把 ACL 拒绝塌成
+          -- 「没有计划」，页面安静地空着；查不出 = errors 一条。
+          namesE <- whenPresent d (listDirectory d)
           case namesE of
-            Left e -> pure ([], [("", "计划目录枚举失败（被占/介质错误？）: " <> show e)])
-            Right names -> do
+            Left e -> pure ([], [("", "计划目录枚举失败（被占/介质错误？）: " <> e)])
+            Right names0 -> do
+              let names = fromMaybe [] names0
               let pids = [T.pack (dropExtension n) | n <- names, takeExtension n == ".json", isValidPlanId (T.pack (dropExtension n))]
               rs <- mapM (\pid -> fmap ((,) (T.unpack pid)) (loadPlan root pid)) pids
               pure ([p | (_, Right p) <- rs], [(n, e) | (n, Left e) <- rs])

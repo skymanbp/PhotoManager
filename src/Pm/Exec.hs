@@ -3,9 +3,12 @@
 
 -- | ★ The safety kernel — the ONLY module that mutates user-visible files
 -- (DESIGN.md §4, §6). Every landing is a fail-if-exists rename; every
--- mutation is journaled Intent-before-effect with real disk barriers; there
--- is no delete call anywhere except the one §6.1 footnote allows (our own
--- unrenamed tmp file).
+-- mutation is journaled Intent-before-effect with real disk barriers. 本模块
+-- 唯一的 delete 是 §6.1 脚注允许的那一个（自己没 rename 成功的 tmp）——
+-- 照片字节的另外两个出口（@pm trash empty@ 的唯一 unlink、doctor --repair
+-- 的孤儿 tmp 清理）在 'Pm.Commands'\/'Pm.Doctor'，以 DESIGN.md §4 的据实
+-- 清点为准（工作流 F003：此前的头注对「全仓没有 delete」作了过度声明，
+-- 与清点相抵）。
 --
 -- 'Checkpoint's are called OUTSIDE all exception handling: the fault
 -- injection tests throw from them to simulate a crash at every protocol
@@ -44,7 +47,7 @@ import System.Directory
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO.Error (isDoesNotExistError)
 
-import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requirePmTrusted)
+import Pm.Config (pmDir, pmSubTmp, readRootInfo, requirePmTrusted)
 import Pm.ExecTypes
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Hash
@@ -56,7 +59,7 @@ import Pm.Trash
 import Pm.Types
 -- P3b-10 七轮：canonical 限域挡 junction 别名。P3b-11 八轮：改用逐级下降的
 -- resolveUnder（基准自身也可能被劫持），pathAtOrUnder 负责 .pm 语义排除。
-import Pm.Win (deleteBoundAt, moveBoundNoReplace, pathAtOrUnder, resolveUnder)
+import Pm.Win (deleteBoundAt, moveBoundNoReplace, normPath, pathAtOrUnder, resolveUnder)
 
 
 -- 子目录名取自 'Pm.Config' 的单一真源，'requirePmTrusted' 校验的就是这一条。
@@ -277,7 +280,7 @@ restoreQuarantine env root j pid (_, qit, trashRel) = do
       victimAbs = root </> victimRel
       restoreOp =
         OpRename
-          (".pm" </> "trash" </> trashRel)
+          (trashSrcRel trashRel)
           victimRel
           (FpFileSha (opVictimSha (piOp qit)))
       oid = restoreOpId pid (piIx qit)
@@ -377,6 +380,7 @@ execItem env root j pid item = case piStatus item of
 -- P3b-12（九轮复审 major）：@.pm@ 排除判定改为三态并只接受明确的
 -- @Just False@。此前 'pathAtOrUnder' 解析失败返回 False，取反后成了"不在
 -- @.pm@ 里 → 放行"，是结构性 fail-open。
+
 -- | 放行判据（纯函数，导出给测试钉住）：'Pm.Win.pathAtOrUnder' 的三态里，
 -- **只有**明确的"不在 .pm 内"才放行。@Nothing@（答不上来）与 @Just True@
 -- （在 .pm 内）都拒。
@@ -412,7 +416,7 @@ confinedUserPath root rel = do
 -- 自己再拼一次名字，于是"校验的字符串"与"操作的对象"又变成两次独立解析——
 -- 那正是十一~十三轮反复出现的同一个形状。返回路径后，调用方**无从**绕过。
 confinedTrash :: FilePath -> FilePath -> IO (Maybe FilePath)
-confinedTrash root rel = resolveUnder root (".pm" </> pmSubTrash </> rel)
+confinedTrash root rel = resolveUnder root (trashSrcRel rel)
 
 -- | pm **自建**的 @.pm\/tmp\/\<planId\>\/\<name\>@ 落位点。
 --
@@ -535,8 +539,15 @@ execCopyLand env j oid op tmp dstAbs wsha rsha =
               jAppend j Barrier (JFailed oid ("落位失败: " <> T.pack (show e)) tf)
               pure (OFailed ("落位 rename 失败: " <> show e))
         Right () -> do
+          eeCheckpoint env CpCopyAfterLand
           -- P3b-4 评审 #1：落位后复核的 stat/hash 异常必须留在
           -- 本项内变成 OFailed——逃逸出去会绕过组回滚（复位不跑）。
+          -- 第一方自审工作流 F000：下面两个失败臂都写 JFailed（终态），doctor 的
+          -- pending 折叠随即把该 oid 退役——C5 行只对「撕裂」（Intent 无终态）
+          -- 成立（DESIGN §6.4），这里 pm 没崩、已响亮报 FAILED、exit 1。报文只能
+          -- 指向真正实现了的路：重新生成计划 → dst 内容不符判 NEEDS-DECISION →
+          -- pm resolve --keep src|dst|both。「交 pm doctor」是指向一个结构上看不见
+          -- 该项的工具。
           verE <-
             try ((,) <$> statSnap dstAbs <*> sha256File dstAbs)
               :: IO (Either IOException (StatSnap, Text))
@@ -544,12 +555,12 @@ execCopyLand env j oid op tmp dstAbs wsha rsha =
             Left e -> do
               tf <- getCurrentTime
               jAppend j Barrier (JFailed oid ("落位后复核异常: " <> T.pack (show e)) tf)
-              pure (OFailed ("落位后复核异常（交 pm doctor）: " <> show e))
+              pure (OFailed ("落位后复核异常（dst 已落位但核不了、源未动；重新生成计划后用 pm resolve --keep src|dst 裁决）: " <> show e))
             Right (post, psha)
               | psha /= opSha op -> do
                   tf <- getCurrentTime
                   jAppend j Barrier (JFailed oid "post-move verify failed" tf)
-                  pure (OFailed "落位后复核失败（矩阵 C5，交 pm doctor）")
+                  pure (OFailed "落位后复核失败（dst 内容不符、源未动；本项已记 FAILED，doctor 不再追踪——重新生成计划后用 pm resolve --keep src 裁决）")
               | otherwise -> do
                   eeCheckpoint env CpCopyAfterMove
                   td <- getCurrentTime
@@ -583,7 +594,10 @@ execRename' env j oid op oldAbs newAbs = do
   if not (oldIsFile || oldIsDir)
     then pure (OConflict "重命名源不存在")
     else
-      if newIsFile || newIsDir
+      -- 第一方自审工作流 F074：目标与源折大小写相等 = 同一对象（NTFS 路径身份），
+      -- 纯大小写改名不是「目标已存在」——'normPath' 是全仓的路径身份比较器
+      -- （'Pm.Win.handleIsAt' / rawBoundTo 同款），计划闸（'Pm.Names'）同一豁免。
+      if (newIsFile || newIsDir) && normPath oldAbs /= normPath newAbs
         then pure (OConflict "重命名目标已存在（I5：不覆盖）")
         else do
           -- 三十四轮（同型扫尽）：指纹读口 fail-closed——读失败 ≠ 指纹不符

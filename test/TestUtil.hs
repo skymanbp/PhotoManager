@@ -31,10 +31,14 @@ module TestUtil
   , execNow
   , captureStdout
   , trashViewOK
+  , withDenyAll
+  , withDenyList
   ) where
 
-import Control.Exception (SomeException, bracket, finally, throwIO, try)
+import Control.Exception (SomeException, bracket, bracket_, finally, throwIO, try)
 import Control.Monad (forM_, when)
+import System.Environment (getEnv)
+import System.Process (readCreateProcess, shell)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime (..), fromGregorian, getCurrentTime)
@@ -45,7 +49,7 @@ import System.IO (IOMode (..), hClose, hFlush, hGetContents, hSetEncoding, openF
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty.HUnit
 
-import Pm.Cli (executePlanNow)
+import Pm.Cli (PlanRun (..), executePlanNowWith)
 import Pm.Config (Config (..), RootIdState (..), createRootInfo, readRootState, writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity, runDoctor)
 import Pm.Exec
@@ -56,6 +60,28 @@ import Pm.Plan
 import Pm.Scan (ScanOpts (..), ScanResult (..), scanRoot)
 import Pm.Trash (TrashView, trashView)
 import Pm.Types
+
+-- | 对路径挂「当前用户全拒 (F)」ACE 跑动作，结束必解除（bracket_；文件
+-- 所有者恒可改回自己文件的 DACL，不会被自己锁死）。三十九轮（P7）实验：
+-- 拒 (RA)/(RD,RA) 都不影响 GetFileAttributesEx 类探针（目录元数据兜底），
+-- 全拒 (F) 才让 CreateFile 类探针（pathIsSymbolicLink/getFileSize/
+-- getModificationTime）确定性 permission denied——这是「非 ENOENT 探针
+-- 失败」目前唯一的确定性注入形态。
+withDenyAll :: FilePath -> IO a -> IO a
+withDenyAll p act = do
+  user <- getEnv "USERNAME"
+  let icacls args = () <$ readCreateProcess (shell ("icacls \"" <> p <> "\" " <> args <> " >nul")) ""
+  bracket_ (icacls ("/deny \"" <> user <> "\":(F)")) (icacls ("/remove:d \"" <> user <> "\"")) act
+
+-- | 同 'withDenyAll'，但只拒**列目录**权限 (RD)：第一方自审工作流 F039/F040
+-- 实测——目录级拒 (RD) 让 GetFileAttributes 与 doesDirectoryExist 照常成功
+-- （probeName = NamePlain），FindFirstFile 却 ERROR_ACCESS_DENIED，即
+-- listDirectory 确定性抛出。这是「目录在、列不出」的确定性注入形态。
+withDenyList :: FilePath -> IO a -> IO a
+withDenyList p act = do
+  user <- getEnv "USERNAME"
+  let icacls args = () <$ readCreateProcess (shell ("icacls \"" <> p <> "\" " <> args <> " >nul")) ""
+  bracket_ (icacls ("/deny \"" <> user <> "\":(RD)")) (icacls ("/remove:d \"" <> user <> "\"")) act
 
 -- | 'trashView' 三十五轮 Either 化（枚举 fail-closed）后的测试解包：正常
 -- fixture 里枚举失败即测试失败，各用例照旧拿 TrashView 断言。
@@ -189,8 +215,10 @@ t0 = UTCTime (fromGregorian 2026 1 1) 0
 mkE :: FilePath -> String -> Entry
 mkE p sha = Entry p 1 0 (T.pack sha) KindPhoto Nothing
 
+-- | 41 轮 #5 后 catalog 身份必须与 root-id 对账：夹具主流写
+-- @RootInfo "m"@，这里同号；显式 id 的夹具自己写配对的 root-id。
 mkCat :: [Entry] -> Catalog
-mkCat es = Catalog "test-root" t0 (entryMap es)
+mkCat es = Catalog "m" t0 (entryMap es)
 
 scanQuiet :: String -> FilePath -> IO Catalog
 scanQuiet rid root = srCatalog <$> scanRoot (ScanOpts 1 False) Nothing (T.pack rid) root
@@ -237,6 +265,9 @@ mkVaultCfg root vdir =
     , cfgWorkers = Nothing
     , cfgBackupId = Nothing
     , cfgBackupSubpath = Nothing
+    , cfgPortfolioDir = Nothing
+    , cfgVaultPush = Nothing
+    , cfgPortfolioPush = Nothing
     }
 
 writeF :: FilePath -> String -> IO ()
@@ -248,5 +279,6 @@ mkMain :: FilePath -> IO ()
 mkMain root = writeRootInfo root (RootInfo "main-rid" RoleMain t0 Nothing)
 
 -- | 立即执行的 runPlan（测试用：跳过交互确认，仍走完整 Exec 内核）。
-execNow :: Config -> Plan -> IO Int
-execNow cfg p = savePlan p >> executePlanNow cfg p
+-- 返回 'PlanRun'：push 的收尾自工作流 F068 起按逐项结果判，不按退出码。
+execNow :: Config -> Plan -> IO PlanRun
+execNow cfg p = savePlan p >> uncurry PrRun <$> executePlanNowWith cfg putStrLn p

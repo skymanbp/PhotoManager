@@ -113,10 +113,10 @@ tagsOf plan dem =
 caseBarrierKeepsOne :: IO ()
 caseBarrierKeepsOne = withDup $ \root sha a b -> do
   pl1 <- planOf [(a, sha)]
-  d1 <- recheckDedupeItems root (dupCat sha a b) pl1
+  d1 <- recheckDedupeItems putStrLn root (dupCat sha a b) pl1
   tagsOf pl1 d1 @?= ["PENDING"]
   pl2 <- planOf [(a, sha), (b, sha)]
-  d2 <- recheckDedupeItems root (dupCat sha a b) pl2
+  d2 <- recheckDedupeItems putStrLn root (dupCat sha a b) pl2
   tagsOf pl2 d2 @?= ["DECIDE", "DECIDE"]
 
 -- | catalog 声称第二份还在，盘上已经没有 → 不能放行。这正是"生成计划与执行
@@ -125,7 +125,7 @@ caseBarrierSurvivorMissing :: IO ()
 caseBarrierSurvivorMissing = withDup $ \root sha a b -> do
   removeFile (root </> b)
   pl <- planOf [(a, sha)]
-  d <- recheckDedupeItems root (dupCat sha a b) pl
+  d <- recheckDedupeItems putStrLn root (dupCat sha a b) pl
   tagsOf pl d @?= ["DECIDE"]
 
 -- | 幸存者 b 是 hardlink，但它的另一端在库外的第三个名字上——它与受害者 a
@@ -141,7 +141,7 @@ caseBarrierSurvivorHardlink = withDup $ \root sha a b -> do
   writeFile outside dupBody
   _ <- readCreateProcess (shell ("mklink /H " <> q (root </> b) <> " " <> q outside)) ""
   pl <- planOf [(a, sha)]
-  d <- recheckDedupeItems root (dupCat sha a b) pl
+  d <- recheckDedupeItems putStrLn root (dupCat sha a b) pl
   tagsOf pl d @?= ["PENDING"]
 
 -- | 受害者与幸存者互为 hardlink：**同一个对象**的两个名字。隔离掉 a 之后
@@ -154,7 +154,7 @@ caseBarrierSameObject = withDup $ \root sha a b -> do
   removeFile (root </> b)
   _ <- readCreateProcess (shell ("mklink /H " <> q (root </> b) <> " " <> q (root </> a))) ""
   pl <- planOf [(a, sha)]
-  d <- recheckDedupeItems root (dupCat sha a b) pl
+  d <- recheckDedupeItems putStrLn root (dupCat sha a b) pl
   tagsOf pl d @?= ["DECIDE"]
 
 -- | 受害者名单只差大小写：仍要算成同一份，否则 b 会被当成"另一份幸存者"，
@@ -164,7 +164,7 @@ caseBarrierCaseFold = withDup $ \root sha a b -> do
   let bUp = map upper b
       upper c = if c >= 'a' && c <= 'z' then toEnum (fromEnum c - 32) else c
   pl <- planOf [(a, sha), (bUp, sha)]
-  d <- recheckDedupeItems root (dupCat sha a b) pl
+  d <- recheckDedupeItems putStrLn root (dupCat sha a b) pl
   tagsOf pl d @?= ["DECIDE", "DECIDE"]
 
 -- | 暂存区不是归档层：To-Be-Sync'd 里的同 sha 副本不能充当"还留着一份"。
@@ -177,7 +177,7 @@ caseStagingIsNotSurvivor = withDup $ \root sha a _ -> do
   archiveLayerRel stg @?= False
   survivingArchiveCopies cat Set.empty (T.pack sha) @?= [a]
   pl <- planOf [(a, sha)]
-  d <- recheckDedupeItems root cat pl
+  d <- recheckDedupeItems putStrLn root cat pl
   tagsOf pl d @?= ["DECIDE"]
 
 -- ─── 接线（两条路径共用一张表 / trash empty 的分流） ──────────────────────
@@ -191,21 +191,21 @@ casePreExecRow = withDup $ \root sha a b -> do
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
   kindBarrier "dedupe" @?= Just BarrierDedupe
   kindBarrier "clean-staging" @?= Just BarrierClean
   forM_ ["sort", "backup", "import", "names", "undo", "vault-push", "restore-from-backup"] $ \k ->
     kindBarrier k @?= Nothing
   -- 两份都批准 → dedupe 屏障给出全量降级清单
   pd <- planOf [(a, sha), (b, sha)]
-  dem <- runBarrier cfg BarrierDedupe pd {plRootPath = root}
+  dem <- runBarrier cfg putStrLn BarrierDedupe pd {plRootPath = root}
   map fst dem @?= [0, 1]
   -- 三十二轮（p6a#0 残余关闭）：构造子 → 实现的**对应关系**按降级理由区分。
   -- 只比序号时两行 RHS 对调仍绿——本 fixture 备份未登记，clean 屏障会以
   -- 「备份盘不在线」把同样的 [0,1] 全量降级；理由文本才分得出接的是哪个。
   assertBool ("dedupe 屏障的理由应指归档层余量: " <> show dem)
     (all (T.isInfixOf "归档层" . snd) dem)
-  demC <- runBarrier cfg BarrierClean pd {plRootPath = root}
+  demC <- runBarrier cfg putStrLn BarrierClean pd {plRootPath = root}
   map fst demC @?= [0, 1]
   assertBool ("clean 屏障的理由应指三副本复验: " <> show demC)
     (all (T.isInfixOf "复验三副本" . snd) demC)
@@ -217,7 +217,7 @@ caseTrashEmptyBarrier :: IO ()
 caseTrashEmptyBarrier = withDup $ \root sha a b -> do
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
       rel = "p" </> "dup.arw"
   createDirectoryIfMissing True (trashDir root </> "p")
   writeFile (trashDir root </> rel) dupBody
@@ -244,7 +244,7 @@ caseTrashEmptyBarrier = withDup $ \root sha a b -> do
 caseBarrierRunsInsideLock :: IO ()
 caseBarrierRunsInsideLock = withDup $ \root sha a b -> do
   now <- getCurrentTime
-  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
   plan <- (\p -> p {plRootPath = root}) <$> planOf [(a, sha)]
   seen <- newIORef Nothing
@@ -265,7 +265,7 @@ caseBarrierRunsInsideLock = withDup $ \root sha a b -> do
 caseKernelRefusesMissingBarrier :: IO ()
 caseKernelRefusesMissingBarrier = withDup $ \root sha a b -> do
   now <- getCurrentTime
-  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
   plan <- (\p -> p {plRootPath = root}) <$> planOf [(a, sha)]
   r <- execPlan defaultExecEnv plan
@@ -282,7 +282,7 @@ caseKernelRefusesMissingBarrier = withDup $ \root sha a b -> do
 caseBarrierBadDemotion :: IO ()
 caseBarrierBadDemotion = withDup $ \root sha a b -> do
   now <- getCurrentTime
-  writeRootInfo root (RootInfo "r" RoleMain now Nothing)
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
   p0 <- planOf [(a, sha)]
   let plan = p0 {plRootPath = root}
@@ -304,7 +304,7 @@ caseTrashEmptyTakesLock :: IO ()
 caseTrashEmptyTakesLock = withDup $ \root sha a b -> do
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
       rel = "p" </> "dup.arw"
   createDirectoryIfMissing True (trashDir root </> "p")
   writeFile (trashDir root </> rel) dupBody
@@ -352,7 +352,7 @@ planOf vs =
       { plId = "20260101-000000-abcdef"
       , plKind = "dedupe"
       , plRootPath = "."
-      , plRootId = Just "r"
+      , plRootId = Just "m"
       , plCreated = t0
       , plItems =
           [ PlanItem ix (OpQuarantine v (T.pack sha) "dedupe:test") StPending Nothing

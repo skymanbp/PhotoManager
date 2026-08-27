@@ -26,6 +26,7 @@ module Pm.GitGuard
 
 import Control.Exception (IOException, try)
 import qualified Data.ByteString as BS
+import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory (canonicalizePath, doesFileExist)
@@ -91,7 +92,13 @@ pmIgnoreGuard role dir0 = do
               case rawE of
                 Left e -> pure (Left (i11Msg igFp ("读取失败（被占/被挪？）: " <> show e)))
                 Right raw -> do
-                  let ls = map T.strip (T.lines (TE.decodeUtf8Lenient raw))
+                  -- 第一方自审工作流 F066：守卫必须是 gitignore(5) 行规则的**精确限制**
+                  -- ——git 只忽略尾随**空格**（未转义时）；前导空白、尾随 TAB/NBSP 都是
+                  -- 模式的一部分（git 2.52 实测：check-ignore 对这些变体全答 NOT-ignored）。
+                  -- `T.strip` 两头都剥、`isSpace` 连 TAB/NBSP 也剥，都把 git 不认的行当成
+                  -- 覆盖放行。只做两件事：去一个尾随 CR（CRLF 行尾），再去尾随空格。
+                  let norm l = T.dropWhileEnd (== ' ') (fromMaybe l (T.stripSuffix "\r" l))
+                      ls = map norm (T.lines (TE.decodeUtf8Lenient raw))
                       hasRule = ".pm/" `elem` ls
                       risky l =
                         let f = T.toLower l

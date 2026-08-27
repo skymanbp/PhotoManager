@@ -13,9 +13,11 @@ module Pm.SortSource
   , snapshotWith
   , withSourceQ
   , withSource
+  , hardErrors
+  , foldHardErrors
   ) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (IOException, try)
 import Control.Monad (forM)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
@@ -23,12 +25,14 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Time (LocalTime)
 import System.Directory (canonicalizePath, doesDirectoryExist, makeAbsolute, pathIsSymbolicLink)
-import System.FilePath (takeBaseName, takeDirectory, takeExtension, (</>))
+import System.FilePath (takeExtension, (</>))
+import System.IO.Error (isDoesNotExistError)
+import Text.Printf (printf)
 
 import Pm.Exif (readCaptureTime)
 import Pm.Hash (StatSnap, sha256File, statSnap)
-import Pm.Import (foldPath)
-import Pm.Scan (DotDirs (..), listTreeWith)
+import Pm.Import (stemOf)
+import Pm.Scan (DotDirs (..), listTreeWith, reparseSkipNote)
 import Pm.Types
 
 -- ─── 扫描（IO） ─────────────────────────────────────────────────────────────
@@ -72,7 +76,18 @@ listSource dir = do
       -- 显式指定（与 root 放在 junction 上一样是合法用法，见 'resolveUnder'
       -- 的说明），所以**不拒绝**，但必须告诉用户他实际在整理哪个目录
       -- （codex 二十六轮 #5）。
-      rootLink <- either (const False) id <$> tryIO (pathIsSymbolicLink dir)
+      -- 三十九轮（P7 探针类清扫）：探测异常不再塌成「非链接」。这行只产
+      -- 说明（不改枚举/分类/计划），但塌 False 意味着源根恰是 junction 而
+      -- 属性读瞬时失败时，说明行消失、用户以为整理的就是指定目录——
+      -- 「查不出」就说查不出。「不存在」交给上层 doesDirectoryExist 的
+      -- 判定，不在这里出声。
+      rootLinkE <- tryIO (pathIsSymbolicLink dir)
+      let rootLink = either (const False) id rootLinkE
+          probeNotes =
+            [ "源根的链接属性查不出（" <> show e <> "）——若它其实是 junction/symlink，实际整理的目录可能与指定的不同"
+            | Left e <- [rootLinkE]
+            , not (isDoesNotExistError e)
+            ]
       real <-
         if rootLink
           then either (const Nothing) Just <$> tryIO (canonicalizePath dir)
@@ -86,21 +101,20 @@ listSource dir = do
           , sfUnknown = pick KindMeta
           , sfErrors = [(dir </> r, e) | (r, e) <- errs]
           , sfNotes =
-              [ "源根本身是 symlink/junction，实际整理的是 " <> fromMaybe "（解析失败）" real
-              | rootLink
-              ]
+              probeNotes
+                <> [ "源根本身是 symlink/junction，实际整理的是 " <> fromMaybe "（解析失败）" real
+                   | rootLink
+                   ]
           }
  where
-  tryIO :: IO a -> IO (Either SomeException a)
+  -- 只捕 IOException（三十九轮类清扫；Hash.hs 家规）：SomeException 会把
+  -- UserInterrupt/ThreadKilled 一起吞掉。
+  tryIO :: IO a -> IO (Either IOException a)
   tryIO = try
 
 -- | (源目录, 折叠后的 stem) → 该 stem 的侧车。按目录分键：不同目录下同名的
--- 两组照片各有各的侧车，全局按 stem 索引会把它们串在一起。
--- | 侧车与主文件的配对键：(所在目录, 折叠后的 stem)。'sidecarIndex' 与
--- 「无主侧车」两处共用，免得配对口径分成两份。
-stemOf :: FilePath -> (FilePath, FilePath)
-stemOf p = (foldPath (takeDirectory p), foldPath (takeBaseName p))
-
+-- 两组照片各有各的侧车，全局按 stem 索引会把它们串在一起。配对键共用
+-- 'Pm.Import.stemOf'（本模块 re-export；工作流 F055\/F097）。
 sidecarIndex :: [FilePath] -> Map.Map (FilePath, FilePath) [FilePath]
 sidecarIndex ps =
   Map.fromListWith
@@ -145,7 +159,11 @@ snapshotWith stat hash p = do
       if pre == post
         then Right (sha, post)
         else Left "hash 期间被修改（源仍在写入）"
-  pure (either (\(e :: SomeException) -> Left (show e)) id r)
+  -- 三十九轮（P7 类清扫）：SomeException→IOException。生产注入
+  -- （statSnap/sha256File）只抛 IO 异常，行为不变；测试注入的断言失败
+  -- （HUnitFailure）此前会被洗成 Left 再被调用方吞掉——收窄后照常传播，
+  -- 这是修复不是收紧。
+  pure (either (\(e :: IOException) -> Left (show e)) id r)
 
 -- | 两种形态共用的源目录入口：解析成绝对路径、确认存在、分三摞列出。
 -- **静默**——不打印任何东西，因为提议形态要把诊断当**数据**交回
@@ -158,17 +176,41 @@ withSourceQ src onMissing k = do
   absSrc <- makeAbsolute src
   ok <- doesDirectoryExist absSrc
   if not ok
-    then putStrLn ("源目录不存在: " <> absSrc) >> pure onMissing
+    then pure onMissing
     else listSource absSrc >>= k absSrc
 
--- | 同上，并把 'sfNotes' 打印出来——计划形态用。
+-- | 同上，并把「源目录不存在」与 'sfNotes' 打印出来——计划形态用；打印口由
+-- 调用方给（`pm ui` 下 stdout 是空设备，serve 端点收进 JSON）。
 --
 -- 第 27 轮把诊断从 'sfErrors' 分出来之后**没接输出**，于是"分开"变成了静默
 -- 丢弃：一条本来会打印的说明反而消失了（codex 二十八轮 #7）。它不计入
 -- "未入计划 N 个"，那正是分开的目的。提议形态的同一件事由
--- 'renderSortSurvey' 做。
-withSource :: FilePath -> a -> (FilePath -> SourceFiles -> IO a) -> IO a
-withSource src onMissing k = withSourceQ src onMissing $ \absSrc sf -> do
-  mapM_ (\n -> putStrLn ("· " <> n)) (sfNotes sf)
-  k absSrc sf
+-- 'renderSortSurvey' 做。「源目录不存在」这一行以前打在 'withSourceQ' 里
+-- （第一方自审工作流 F053）：与它自己的「静默」契约相反，survey 形态打两遍，
+-- serve 的 survey 端点也往被静音的 stdout 灌——现在只有这一处会打印。
+withSource :: (String -> IO ()) -> FilePath -> a -> (FilePath -> SourceFiles -> IO a) -> IO a
+withSource sink src onMissing k = do
+  absSrc <- makeAbsolute src
+  ok <- doesDirectoryExist absSrc
+  if not ok
+    then sink ("源目录不存在: " <> absSrc) >> pure onMissing
+    else withSourceQ src onMissing $ \a sf -> do
+      mapM_ (\n -> sink ("· " <> n)) (sfNotes sf)
+      k a sf
 
+-- | 遍历错误里**真正的**失败（第一方自审工作流 F054）：源里有一棵子树没枚举
+-- 出来，「✓ 没有需要归位的新照片」/退出码 0 就是在替一个没看过的目录担保。
+-- 'Pm.Scan.reparseSkipNote' 是设计内跳过，不是失败，排除后再判。
+hardErrors :: [(FilePath, String)] -> [(FilePath, String)]
+hardErrors = filter ((/= reparseSkipNote) . snd)
+
+-- | 把 'hardErrors' 折进退出码：只把「一切正常」的 0 抬成 1，拒绝（2）与
+-- 「计划已存」（1）原样保留，并说明为什么。
+foldHardErrors :: (String -> IO ()) -> [(FilePath, String)] -> Int -> IO Int
+foldHardErrors sink errs code
+  | code == 0 && not (null hard) = do
+      sink (printf "⚠ 源里有 %d 处未能枚举（见上「遍历时出错」）——不当作整卡都看过了，退出码 1" (length hard))
+      pure 1
+  | otherwise = pure code
+ where
+  hard = hardErrors errs

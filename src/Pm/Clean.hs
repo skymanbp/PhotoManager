@@ -29,7 +29,7 @@ import Data.Maybe (isJust)
 
 import Pm.Hash (ContentProbe (..), anyCopyAliveExcept, probeConfined)
 import Pm.Win (FileId)
-import Pm.Import (stagingTop)
+import Pm.Import (inArchiveLayer, pendingEditDir, stagingTop)
 import Pm.Op
 import Pm.Plan (ItemStatus (..), PlanItem (..))
 import Pm.Types
@@ -62,12 +62,11 @@ planClean mainCat bakCat =
  where
   parts e = splitDirectories (enPath e)
   inStaging e = take 1 (parts e) == [stagingTop]
-  isPendingEdit e = take 2 (parts e) == [stagingTop, "待修改"]
+  isPendingEdit e = take 2 (parts e) == [stagingTop, pendingEditDir]
   staging = [e | e <- Map.elems (catEntries mainCat), inStaging e]
   pendingEdit = [enPath e | e <- staging, isPendingEdit e]
-  -- 评审 mj-5：「归档副本」按契约只认 Raw/成片 两层——相册是下游收藏集，
-  -- 只在相册有副本说明归档层错位，必须 HELD 而不是放行清理。
-  inArchiveLayer e = take 1 (parts e) `elem` [["Raw"], ["成片"]]
+  -- 「归档副本」口径共用 'Pm.Import.inArchiveLayer'（mj-5：只认 Raw/成片，
+  -- 相册镜像必须 HELD 而不是放行清理）。
   archiveBySha =
     Map.fromListWith
       (<>)
@@ -139,8 +138,7 @@ witnessId root' sha excl = anyCopyAliveExcept root' sha excl . map enPath
 -- 同身份不算一份副本。
 threeCopiesStillExist :: FilePath -> Catalog -> FilePath -> Catalog -> [FileId] -> Text -> IO Bool
 threeCopiesStillExist mainRoot mainCat backupRoot bakCat excl sha = do
-  let inArchiveLayer e = take 1 (splitDirectories (enPath e)) `elem` [["Raw"], ["成片"]]
-      archiveWits = [e | e <- Map.elems (catEntries mainCat), inArchiveLayer e, enSha e == sha]
+  let archiveWits = [e | e <- Map.elems (catEntries mainCat), inArchiveLayer e, enSha e == sha]
       backupWits = [e | e <- Map.elems (catEntries bakCat), enSha e == sha]
   ma <- witnessId mainRoot sha excl archiveWits
   case ma of

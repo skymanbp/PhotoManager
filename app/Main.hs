@@ -1,21 +1,21 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Thin CLI shell: option parsing + dispatch only. All orchestration lives
 -- in Pm.Commands / Pm.Cli (库层，P4 的 serve/GUI 复用同一路径).
+-- CPP 只为一处：@--version@ 取 Cabal 注入的 @CURRENT_PACKAGE_VERSION@ 宏。
 module Main (main) where
 
 -- 两摞、各自按字母序：先 base/外部，再 Pm.*。P4-8 与 P5-A 各自把新 import
 -- 塞在了中间（Data.Time / Text.Read / Pm.ConfigEdit），本次归位。
 import Data.Time (Day)
-import Data.Version (showVersion)
 import Options.Applicative
-import Paths_photo_manager (version)
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import Text.Read (readMaybe)
 
 import Pm.Cli (GoOpts (..), savePlanAndMaybeRun, savePlanAndMaybeRun')
 import Pm.Commands
-import Pm.ConfigEdit (ConfigPatch (..), runConfigSet, runConfigShow)
+import Pm.ConfigEdit (ConfigSetOpts (..), mkPatch, runConfigSet, runConfigShow)
 import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
 import Pm.Ingest (runVaultIngest)
 import Pm.Names (runNames)
@@ -46,7 +46,7 @@ data Cmd
   | CmdVaultHold Bool [FilePath] -- 暂不同步（True）/ 恢复（False）；只写主库 .pm
   | CmdVaultIngest GoOpts String [FilePath] -- --category + FILES；两份计划（主库 相册/ + vault <类目>/）
   | CmdConfigShow -- 打印配置与路径健康（只读）
-  | CmdConfigSet ConfigPatch -- 改 vault / photos.json / 并发数（主库路径只读）
+  | CmdConfigSet ConfigSetOpts -- 改 vault / photos.json / 并发数（主库路径只读）
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
   | CmdVersions -- 版本组/精确重复报告（只读）
   | CmdDedupe GoOpts -- 精确重复 → 逐份可裁决的隔离计划（全部 NEEDS-DECISION）
@@ -117,15 +117,19 @@ run (CmdBackup (BackupInit p)) = withCfg (runBackupInit p)
 run (CmdBackup (BackupRun go mworkers)) = withCfg (runBackupRun go mworkers)
 run (CmdClean go) = withCfg (runClean go)
 run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
+-- push 与 ingest 同：收尾按逐项结果判（'Pm.Cli.landedItems'），退出码由
+-- 'Pm.Cli.planRunCode' 换算（工作流 F068）。
 run (CmdVaultPush go mcat fs) =
-  withCfg (\cfg -> runVaultPush (savePlanAndMaybeRun cfg go) mcat fs cfg)
+  withCfg (\cfg -> runVaultPush (savePlanAndMaybeRun' cfg go) mcat fs cfg)
 run (CmdVaultHold hold fs) = withCfg (runVaultHold hold fs)
 -- ingest 走可判别的 'savePlanAndMaybeRun''：它要按「主库那份**真的全部落完**」
 -- 决定 vault 那份跑不跑，Int 退出码分不出这个（三十二轮 R4，见 Pm.Ingest）。
 run (CmdVaultIngest go cat fs) =
   withCfg (\cfg -> runVaultIngest (savePlanAndMaybeRun' cfg go) (goApply go) cat fs cfg)
 run CmdConfigShow = withCfg runConfigShow
-run (CmdConfigSet p) = withCfg (runConfigSet p)
+-- 工作流 F082：--X 与 --no-X 同给是矛盾，报错退出 2（与 --place/--event、
+-- --backup/--vault 同一纪律），不在解析器里替使用者猜一个
+run (CmdConfigSet o) = either (\m -> putStrLn m >> pure 2) (\p -> withCfg (runConfigSet p)) (mkPatch o)
 run (CmdNames go) = withCfg (\cfg -> runNames (savePlanAndMaybeRun cfg go) cfg)
 run CmdVersions = withCfg runVersions
 run (CmdDedupe go) = withCfg (runDedupe go)
@@ -140,10 +144,13 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    -- 版本号取自 package.yaml（cabal 生成的 Paths 模块），不再手抄一份：
+    -- 版本号取自 package.yaml（Cabal 注入的 CPP 宏），不再手抄一份：
     -- 二十四轮实测，这个字面量是第六处版本号，改版本时漏掉它 → 0.4.6 的
     -- 二进制自称 0.4.5。单一真源之后它不可能再漂。
-    infoOption ("pm " <> showVersion version) (long "version" <> help "打印版本")
+    -- 0.6.0 发布链实测：改宏不改 Paths 模块，因为 Paths_photo_manager 把
+    -- 构建机的六个安装目录（D:\…\.stack-work\install\…）整段烤进二进制——
+    -- 公开资产不得带本机路径；package.yaml 的 exe 段同时不再生成该模块。
+    infoOption ("pm " <> CURRENT_PACKAGE_VERSION) (long "version" <> help "打印版本")
   backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
   vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =
@@ -179,19 +186,24 @@ parserInfo =
           <> command "ui" (info (pure CmdUi) (progDesc "拉起桌面 GUI（pm-ui.exe：PM_UI_EXE 或 pm.exe 同目录；GUI 自己启动并管理 pm serve）"))
       )
   -- 三态：不给 = 不动；--no-X = 清空；给值 = 设值。与 API 的 JSON 三态同构。
+  -- 解析器只收集原始 (值, 清空) 对；矛盾（两个都给）由 'Pm.ConfigEdit.mkPatch'
+  -- 拒绝（工作流 F082——旧写法在这里把矛盾静默折成清空）。
   patchP =
-    ConfigPatch
-      <$> triple "vault" "展示集（vault）目录"
-      <*> triple "photos-json" "portfolio 的 photos.json（只读引用检查）"
-      <*> ( (\mw clear -> if clear then Just Nothing else fmap Just mw)
+    ConfigSetOpts
+      <$> pair "vault" "展示集（vault）目录"
+      <*> pair "photos-json" "portfolio 的 photos.json（只读引用检查）"
+      <*> ( (,)
               <$> optional (option auto (long "workers" <> metavar "N" <> help "扫描并发数（1..64）；备份盘不读它，默认单线程防 HDD 寻道抖动，另用 pm backup --workers"))
               <*> switch (long "no-workers" <> help "清空并发数（回到默认=核数）")
           )
+      <*> pair "portfolio-dir" "portfolio 仓的本地路径（上线命令生成用）"
+      <*> pair "vault-push" "展示集仓的 push 目标（如 origin main；不设 = 裸 git push）"
+      <*> pair "portfolio-push" "portfolio 仓的 push 目标（同上）"
       -- 只为**拒绝**而存在（internal，不出现在帮助里）：与 JSON 的
       -- @"main": null@ 同构——出现即拒，不区分"设值"还是"清空"。
-      <*> (fmap Just <$> optional (strOption (long "main" <> metavar "PATH" <> internal)))
-  triple nm desc =
-    (\mv clear -> if clear then Just Nothing else fmap Just mv)
+      <*> optional (strOption (long "main" <> metavar "PATH" <> internal))
+  pair nm desc =
+    (,)
       <$> optional (strOption (long nm <> metavar "PATH" <> help ("设置" <> desc)))
       <*> switch (long ("no-" <> nm) <> help ("清空" <> desc))
   serveP =
@@ -199,7 +211,7 @@ parserInfo =
       ServeOpts
         <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
         <*> switch (long "exit-on-stdin-eof" <> help "stdin 关闭即退出（GUI 拉起时用：父进程一死 serve 随之结束，不留孤儿）")
-        <*> switch (long "writable" <> help "允许四个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）、记录「暂不同步」决定（写主库的 .pm/vault-holds.json）、改配置（写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识）；都不执行、不碰照片；缺省只读")
+        <*> switch (long "writable" <> help "允许五个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）、生成 sort 计划（写主库的 .pm/plans）、记录「暂不同步」决定（写主库的 .pm/vault-holds.json）、改配置（写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识）；都不执行、不碰照片；缺省只读")
         <*> switch (long "allow-apply" <> help "另外允许 POST /api/apply 执行已存的计划——这是唯一会动照片字节的端点，因此单独一个开关，不并进 --writable（蕴含 --writable）。装载/绑 root/--only/执行期复验全部与 CLI 的 pm apply 同源")
   initP =
     fmap CmdInit $

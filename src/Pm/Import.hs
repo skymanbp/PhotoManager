@@ -17,7 +17,10 @@
 module Pm.Import
   ( ImportReport (..)
   , stagingTop
+  , pendingEditDir
   , foldPath
+  , stemOf
+  , inArchiveLayer
   , planImport
   , importPlanItems
   , stagingArchivedSummary
@@ -104,11 +107,10 @@ planImport cat =
       collided (_, dst) = Map.findWithDefault 0 (foldPath dst) dstCount > 1
       -- 评审 mj-3（P2.3 收口）：stem 组按**规范化目标路径**分组，不按源路径
       -- ——两种被接受的源布局（Raw\事件 与 Raw\年\事件-Raw）落到同一目标
-      -- 目录，源路径分组会漏掉跨布局的同 stem 侧车。撞名/返修升级都用它。
-      stemKey dst = (foldPath (takeDirectory dst), foldPath (takeBaseName dst))
+      -- 目录，源路径分组会漏掉跨布局的同 stem 侧车。撞名/返修升级同用 'stemOf'。
       collStems =
-        Set.fromList [stemKey dst | m@(_, dst) <- mapped, collided m]
-      isDup m@(_, dst) = collided m || stemKey dst `Set.member` collStems
+        Set.fromList [stemOf dst | m@(_, dst) <- mapped, collided m]
+      isDup m@(_, dst) = collided m || stemOf dst `Set.member` collStems
       dups = filter isDup mapped
       uniq = filter (not . isDup) mapped
       classify (e, dst) = case Map.lookup (foldPath dst) catByFold of
@@ -121,8 +123,8 @@ planImport cat =
       -- NEEDS-DECISION 时，其同目标目录同 stem 的待拷侧车不得先行落位
       -- （先拷会产生孤立侧车；裁决 keep both 改名时更会指错主文件）。
       reworkStems =
-        Set.fromList [stemKey dst | (_, _, Just (_, dst)) <- classified]
-      inReworkKin (_, dst) = stemKey dst `Set.member` reworkStems
+        Set.fromList [stemOf dst | (_, _, Just (_, dst)) <- classified]
+      inReworkKin (_, dst) = stemOf dst `Set.member` reworkStems
    in ImportReport
         { irCopy = [c | (Just c, _, _) <- classified, not (inReworkKin c)]
         , irAlready = [a | (_, Just a, _) <- classified]
@@ -136,6 +138,23 @@ planImport cat =
 -- | Windows-semantics comparison key（评审 mj-2）：normalise + case-fold。
 foldPath :: FilePath -> FilePath
 foldPath = map toLower . normalise
+
+-- | 侧车与主文件的配对键：(所在目录, 折叠后的 stem)，两个分量都过 'foldPath'。
+-- 按目录分键：不同目录下同名的两组照片各有各的侧车，全局按 stem 索引会把
+-- 它们串在一起。计划器的撞名\/返修升级（评审 mj-3）、sort 的组悬置
+-- （'Pm.Sort.holdKin'）与侧车索引（'Pm.SortSource.sidecarIndex'）共用这一个
+-- 定义（工作流 F097：此前 Import 与 Sort 各有一份局部 @stemKey@）。
+stemOf :: FilePath -> (FilePath, FilePath)
+stemOf p = (foldPath (takeDirectory p), foldPath (takeBaseName p))
+
+-- | 「归档层」判定：按契约只认 Raw\/成片 两层（评审 mj-5）——相册是下游
+-- 收藏集，只在相册有副本说明归档层错位，不算「已归档」。clean 的放行与
+-- 三副本复检（'Pm.Clean'）、status 的「已归档，冗余」统计共用（工作流
+-- F058\/F059\/F096：此前三处两种口径——status 把**任何**非暂存副本都算
+-- 归档，相册镜像被报成「已归档，冗余」）。与 'Pm.Dedupe.archiveLayerRel'
+-- （含相册，dedupe 报告范围）不同名不同义。
+inArchiveLayer :: Entry -> Bool
+inArchiveLayer e = take 1 (splitDirectories (enPath e)) `elem` [["Raw"], ["成片"]]
 
 -- | Plan items for the actionable part of the report. @root@ is the main
 -- library root (staging lives inside it) — sources become absolute here.
@@ -161,8 +180,9 @@ importPlanItems root rep =
       , opSrcMtimeNs = enMtimeNs e
       }
 
--- | (staging file count, how many of them already have a same-sha copy
--- outside staging) — status uses this to say 「已归档，冗余」 vs 「待归档」.
+-- | (staging file count, how many of them already have a same-sha copy in
+-- the archive layers, 'inArchiveLayer') — status uses this to say
+-- 「已归档，冗余」 vs 「待归档」.
 -- 待修改\\ 不参与统计：那些文件在返修中，冗余与否无意义（clean 也不碰它们）。
 stagingArchivedSummary :: Catalog -> (Int, Int)
 stagingArchivedSummary cat =
@@ -171,7 +191,7 @@ stagingArchivedSummary cat =
           ( \e (s, a) ->
               if take 1 (splitDirectories (enPath e)) == [stagingTop]
                 then (if take 2 (splitDirectories (enPath e)) == [stagingTop, pendingEditDir] then s else e : s, a)
-                else (s, Set.insert (enSha e) a)
+                else (s, if inArchiveLayer e then Set.insert (enSha e) a else a)
           )
           ([], Set.empty)
           (catEntries cat)

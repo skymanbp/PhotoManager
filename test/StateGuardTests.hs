@@ -19,16 +19,17 @@ import qualified Data.ByteString.Lazy as BSL
 import Data.List (isInfixOf)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, removeDirectory, removeDirectoryLink)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeDirectory, removeDirectoryLink)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Catalog (loadCatalog, saveCatalog)
-import Pm.Config (Config (..), SideCacheWrite (..), pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
-import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
+import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog, saveCatalog)
+import Pm.Commands (TrashCmd (..), runTrash)
+import Pm.Config (Config (..), SideCacheWrite (..), ensurePmSubdir, pmDir, readSideCache, requirePmTrusted, writeRootInfo, writeSideCache)
+import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Exec (Checkpoint (..), ExecEnv (..), ItemOutcome (..), defaultExecEnv, dirFingerprint, execPlan)
 import Pm.GitGuard (classifyGitProbe, vaultIgnoreGuard)
 import Pm.Hash (sha256File)
@@ -36,10 +37,10 @@ import Pm.Journal (JEntry (..), Sync (..), jAppend, withJournal)
 import Pm.Lock (withRootLock)
 import Pm.Op (Fingerprint (..), Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, savePlan)
-import Pm.Trash (TrashRecord (..), appendManifest, readManifest, trashDir)
+import Pm.Trash (TrashRecord (..), appendManifest, manifestMaybe, readManifest, trashDir)
 import Pm.Win (NameKind (..), deleteBoundAt, moveBoundNoReplace)
 import Pm.Status (StatusOpts (..), runStatus)
-import Pm.Types (Catalog, RootInfo (..), RootRole (..))
+import Pm.Types (Catalog (..), RootInfo (..), RootRole (..))
 import TestUtil
 
 stateGuardTests :: TestTree
@@ -57,6 +58,9 @@ stateGuardTests =
     , testCase "P3b-16 复位源 .pm/trash/<pid> 是 junction → doctor 报 PM-LINK，--repair 不补虚假 Done" caseDoctorRestoreSrcJunction
     , testCase "P3b-16 .pm/tmp/<planId> 是 junction → C1 的 tmp 探测报 PM-LINK，不穿透库外" caseDoctorPendingTmpProbe
     , testCase "P3b-16 侧缓存失信 → pm status 报 ⚠ 且退出码 1（不再静默 exit 0）" caseStatusUntrustedCacheExit
+    , testCase "工作流 F079/F038 manifest 整文件读不出（hardlink 占名）→ trash list/empty 退出 2，不报「隔离区为空」" caseTrashManifestUnreadableExit
+    , testCase "工作流 F032 快照被拒（hardlink 占名）→ doctor 报 CATALOG Bad；从未扫描的 root 不报" caseDoctorCatalogRefused
+    , testCase "工作流 F032 --deep 无快照 → DEEP-SKIPPED Bad 且退出 1，不沉默；不带 --deep 仍零发现" caseDoctorDeepSkipped
     , testCase "P3b-17 FpDir 复位源是真实目录 → 必须落 R3（收窄成 doesFileExist 会错报 R2 并补假 Done）" caseRestoreSrcFpDir
     , testCase "P3b-17 FpFileSha + 目录占住载荷名 → 同样必须落 R3（触发不需要 FpDir）" caseRestoreSrcFpFile
     , testCase "P3b-18 root 是 junction、落位前改指诱饵库 → Copy 只用解析返回的 dst 路径，落在原库" caseCopyDstUsesResolvedPath
@@ -66,6 +70,8 @@ stateGuardTests =
     , testCase "三十二轮 R1：短暂共享冲突（err 32）→ 提交型打开按 Win32 同款预算重试而非立刻失败" caseDisposeRetriesSharing
     , testCase "三十六轮 F1 classifyGitProbe 三态穷举：查不出 ≠ 不存在（ProbeUnknown 必须 Left）" caseClassifyGitProbe
     , testCase "三十六轮 F1 悬空 .git junction → 判 git 语境要 .gitignore（布尔探针会当「无 git」放行）" caseDanglingGitJunction
+    , testCase "第一方自审 R5：.pm 是 junction → ensurePmSubdir/savePlan/appendManifest 拒绝且库外零目录副作用" caseEnsurePmSubdirNoSideEffect
+    , testCase "41 轮 #5 catalog 身份闸：catRootId ≠ root-id.json → CatRefused（拷贝/恢复错位快照不当种子）；相符照常载入" caseCatalogIdentityMismatch
     ]
 
 -- 本模块只需要 hardlink（/H）与文件 symlink（无开关）两种形态；目录 junction
@@ -97,7 +103,7 @@ caseManifestDeepSymlink = withSystemTempDirectory "pm-sguard" $ \dir -> do
   either (const (pure ())) (const (assertFailure "appendManifest 应拒绝 symlink 化的 manifest")) ra
   readFile (outside </> "hostage.ndjson") >>= (@?= "OUTSIDE-ORIGINAL\n")
   -- 读侧：同口拒绝，绝不把库外内容当隔离清单
-  (rs, ws) <- readManifest root
+  (rs, ws) <- manifestMaybe <$> readManifest root
   rs @?= []
   assertBool ("readManifest 应报不可信: " <> show ws) (any ("不是 root 下的真实目录项" `isInfixOf`) ws)
 
@@ -116,7 +122,7 @@ caseCatalogHardlinkRead = withSystemTempDirectory "pm-sguard" $ \dir -> do
   mkHardLink (pmDir root </> "catalog.json") (outside </> "evil-catalog.json")
   -- 深度 1 的枚举闸放行（hardlink 不可见）——这正是需要读侧句柄判定的原因
   requirePmTrusted root >>= either (assertFailure . ("闸不应看见 hardlink（否则本例测错了层）: " <>)) pure
-  (mc, ws) <- loadCatalog root
+  (mc, ws) <- catalogMaybe <$> loadCatalog root
   mc @?= Nothing
   assertBool ("loadCatalog 应报拒读: " <> show ws) (any ("无法可信读取" `isInfixOf`) ws)
   -- 库外对象完好（拒读不 unlink、不改写）
@@ -165,7 +171,7 @@ casePmIsPlainFile = withSystemTempDirectory "pm-sguard" $ \dir -> do
     >>= either
       (\m -> assertBool m ("不是目录" `isInfixOf` m))
       (const (assertFailure "requirePmTrusted 应拒绝 .pm 是普通文件的 root"))
-  (mc, ws) <- loadCatalog root
+  (mc, ws) <- catalogMaybe <$> loadCatalog root
   mc @?= Nothing
   assertBool ("loadCatalog 应报不可信: " <> show ws) (any ("不是目录" `isInfixOf`) ws)
 
@@ -376,6 +382,63 @@ caseStatusUntrustedCacheExit = withSystemTempDirectory "pm-sguard" $ \dir -> do
   code1 <- runStatus (mkSCfg root) (StatusOpts True)
   code1 @?= 1
 
+-- | 工作流 F079/F038：manifest **整文件**读不出（hardlink 占名 → readPmState
+-- 拒）此前与「一行坏记录」同进一个 [String]：trash list 打「隔离区为空」exit 0，
+-- trash empty 打「没有可清除」exit 0。整文件失败现在是 trashView 的 Left——
+-- 与枚举失败同码 2；坏行仍只是坏行（PathGuardTests 的 caseManifestPathEscape
+-- 钉住那一半 exit 0，本例与它一红一绿才算判别）。
+caseTrashManifestUnreadableExit :: IO ()
+caseTrashManifestUnreadableExit = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside"
+  createDirectoryIfMissing True (trashDir root)
+  createDirectoryIfMissing True outside
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  writeFile (outside </> "evil-manifest.ndjson") ""
+  mkHardLink (trashDir root </> "manifest.ndjson") (outside </> "evil-manifest.ndjson")
+  (outL, cL) <- captureStdout (runTrash (mkSCfg root) TrashList root)
+  cL @?= 2
+  assertBool ("不得报隔离区为空: " <> outL) (not ("隔离区为空" `isInfixOf` outL))
+  (outE, cE) <- captureStdout (runTrash (mkSCfg root) (TrashEmpty True) root)
+  cE @?= 2
+  assertBool ("不得报没有可清除: " <> outE) (not ("没有可清除" `isInfixOf` outE))
+
+-- | 工作流 F032：快照通道是 doctor 唯一被丢掉的降级信号（journal/manifest/枚举
+-- 失败都有各自的行）。被拒 → CATALOG Bad；判别：从未扫描的 root（缺席）不是
+-- 发现——按 @mcat == Nothing@ 键的错修法会把新 root 判红。
+caseDoctorCatalogRefused :: IO ()
+caseDoctorCatalogRefused = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside"
+      fresh = dir </> "fresh"
+  mapM_ (createDirectoryIfMissing True) [pmDir root, outside, fresh]
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  writeRootInfo fresh (RootInfo "f" RoleMain now Nothing)
+  writeFile (outside </> "evil-catalog.json") "{\"whatever\":1}"
+  mkHardLink (pmDir root </> "catalog.json") (outside </> "evil-catalog.json")
+  rows <- doctorRows root
+  assertBool ("被拒的快照应报 CATALOG Bad: " <> show rows) (("CATALOG", Bad) `elem` rows)
+  rowsF <- doctorRows fresh
+  assertBool ("缺席不是发现: " <> show rowsF) (not (any ((== "CATALOG") . fst) rowsF))
+
+-- | 工作流 F032 的另一半：--deep 的决定此前藏在 @Just cat@ 分支里，没有快照
+-- 就一个字节不核、一句话不说、退出 0。
+caseDoctorDeepSkipped :: IO ()
+caseDoctorDeepSkipped = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True (pmDir root)
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  (fs, code) <- runDoctor root (DoctorOpts True False)
+  let rows = [(fRow f, fSeverity f) | f <- fs]
+  assertBool ("--deep 无快照不得沉默: " <> show rows) (("DEEP-SKIPPED", Bad) `elem` rows)
+  code @?= 1
+  (fs0, code0) <- runDoctor root (DoctorOpts False False)
+  filter (== "DEEP-SKIPPED") (map fRow fs0) @?= []
+  code0 @?= 0
+
 -- ─── P3b-17（十四轮） ───────────────────────────────────────────────────────
 
 -- | 十四轮 **major**：P3b-16 把复位源的 `existsAny`（文件**或**目录）换成受信
@@ -492,7 +555,7 @@ caseCopyDstUsesResolvedPath = withSystemTempDirectory "pm-sguard" $ \dir -> do
   removeDirectoryLink rootLink
 
 mkSCfg :: FilePath -> Config
-mkSCfg root = Config root Nothing Nothing Nothing Nothing Nothing
+mkSCfg root = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- ─── P6-C（路线图③）：提交型操作的句柄形态 ────────────────────────────────
 
@@ -617,3 +680,56 @@ caseDanglingGitJunction = withSystemTempDirectory "pm-sguard" $ \dir -> do
     Right () -> assertFailure "悬空 .git junction 被当成「无 git 语境」放行（三十六轮 F1 的形状）"
     Left msg -> assertBool ("应按 git 语境要求 .gitignore: " <> msg) (".gitignore" `isInfixOf` msg)
   removeDirectoryLink (v </> ".git")
+
+-- ─── 第一方自审 R5：`.pm` 子目录「先限域再建」───────────────────────────────
+
+-- | @.pm@ 整个是 junction 时，旧序「先 createDirectoryIfMissing 子目录、再
+-- resolveUnder 限域」照样会**拒绝**——但 mkdir 已经穿透 junction 把
+-- @plans/@\/@trash/@ 建进了库外，留下目录副作用。'ensurePmSubdir' 把限域挪到
+-- mkdir 之前：把它退回「先建后限域」，下面三条 @doesDirectoryExist … \@?= False@
+-- 转红（拒绝断言仍绿——这正是旧序漏检的原因）。
+caseEnsurePmSubdirNoSideEffect :: IO ()
+caseEnsurePmSubdirNoSideEffect = withSystemTempDirectory "pm-sguard" $ \dir -> do
+  let root = dir </> "root"
+      outside = dir </> "outside"
+  createDirectoryIfMissing True root
+  createDirectoryIfMissing True outside
+  mkJunction (pmDir root) outside
+  -- 根口：helper 本身
+  eh <- ensurePmSubdir root "probe"
+  either (const (pure ())) (const (assertFailure "ensurePmSubdir 应拒绝 junction 化的 .pm")) eh
+  doesDirectoryExist (outside </> "probe") >>= (@?= False)
+  -- 消费口 1：savePlan（plan 在真实的 root2 上构造，写向被劫持的 root）
+  plan0 <- mkPlanIO (dir </> "root2") []
+  rs <- try (savePlan plan0 {plRootPath = root}) :: IO (Either SomeException FilePath)
+  either (const (pure ())) (const (assertFailure "savePlan 应拒绝 junction 化的 .pm")) rs
+  doesDirectoryExist (outside </> "plans") >>= (@?= False)
+  -- 消费口 2：appendManifest
+  now <- getCurrentTime
+  ra <- try (appendManifest root (TrashRecord "v.jpg" "v.jpg" "aa" "t" tpid now)) :: IO (Either SomeException ())
+  either (const (pure ())) (const (assertFailure "appendManifest 应拒绝 junction 化的 .pm")) ra
+  doesDirectoryExist (outside </> "trash") >>= (@?= False)
+  removeDirectoryLink (pmDir root)
+
+-- | 41 轮 #5：catRootId 是身份字段，落盘后此前**无人读**——把 A 库的 .pm
+-- 整目录拷去 B 库（迁移/恢复错位）后 loadCatalog 零告警载入，而快照决定
+-- backup/import/undo 去读写哪些文件、scan 拿谁当 sha 复用种子。loader 汇点
+-- 与 .pm/root-id.json 对账，对不上整链拒绝（同 P3b-13 的闸下沉纪律）。
+caseCatalogIdentityMismatch :: IO ()
+caseCatalogIdentityMismatch = withSystemTempDirectory "pm-catid" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True root
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "real-rid" RoleMain now Nothing)
+  saveCatalog root (mkCat [])
+  cl <- loadCatalog root
+  case cl of
+    CatRefused ws -> assertBool ("应点名身份不符: " <> show ws) (any ("身份不符" `isInfixOf`) ws)
+    _ -> assertFailure "错位快照竟被载入（或被当成缺席）"
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  cl2 <- loadCatalog root
+  case cl2 of
+    CatLoaded c ws -> do
+      catRootId c @?= "m"
+      ws @?= []
+    _ -> assertFailure "身份相符的快照必须照常载入"
