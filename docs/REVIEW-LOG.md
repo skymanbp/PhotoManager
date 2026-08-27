@@ -486,3 +486,29 @@ testCase + 1 testProperty + 5 参数化展开，7 新钉均经 Spec 注册；`mk
   数字，`caseReadmeSync` 不扩（绝对化措辞无法机械判定，靠评审）。
 
 以上两条 GO-note 落在 P7-L；#1 由第 43 轮在可写沙箱里闭合。
+
+## 第 43 轮（P7-L `45faac9`，codex 钉 SHA，workspace-write 沙箱）——FINAL NO-GO，minset {1,3,4}
+
+沙箱改 `-s workspace-write --add-dir %LOCALAPPDATA%\Temp\pm-review43`（仓外
+TEMP），32 次命令执行，评审后 `git status --porcelain` 空。#2（onException
+包裹范围）、#5（修复范围/750 预算/四处版本/树净）接受。
+
+- **#1（major，仍 UNVERIFIED）**：评审亲跑了预编译 `pm-test.exe`，但 codex 的
+  Windows **受限令牌不能修改 DACL**——11 个 ACL 攻击夹具（`withDenyAll`/
+  `icacls /deny`）在形成拒绝态时即 `icacls` exit 5 中断，跑不到断言。第一方
+  复现：`codex sandbox`（同一令牌）default 模式 11 红、`windows.sandbox=
+  "elevated"` 9 红，失败点全在 icacls；同一 exe 在普通令牌下 389 全绿。
+  **用户裁定（AskUserQuestion，2026-08-27）：保留沙箱，判据改为「环境限制
+  登记」**——不给模型无沙箱权限（那会让它对本机含 D:\Photography 有完整读写）。
+  第 44 轮闭合标准：评审亲跑 exe 得 378/389、逐条核对 11 例失败点全在
+  `icacls` exit 5（环境能力）而非产品断言、核对 exe SHA-256 与第一方两份
+  全绿日志一致（工作树 `wt-test.log`：HEAD f0d6dd9 树净 → 389 绿；干净
+  worktree `cleanenv-test.log`：独立 .stack-work 从零编译 → 389 绿）。
+- **#3（minor）README:221 性能表仍「每道承重闸一个突变」**：42 轮修了两处、
+  第三处漏网——`caseReadmeSync` 只管数字不管措辞，「全绿恰好证明措辞不在哨兵
+  范围」。修（P7-M `f0d6dd9`）：该格限定为「凡有可观测自动化落点的承重闸」
+  并指向残余登记；哨兵新增断言 README 不得含「每道闸都」「每道承重闸」（δ 簇
+  同根：强断言无上游→纳入哨兵）。
+- **#4（minor）REVIEW-LOG 第 42 轮节记的是被替换掉的仓内 TEMP 方案**：仓内
+  测试 root 会被 pm 的 I11 拒绝（上层 git 仓库内、非仓根，122/389 红——设计在
+  起作用）。修（P7-M）：改记实际方案（`--add-dir` 仓外）+ DACL 实测。
