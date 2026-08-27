@@ -1,15 +1,15 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Thin CLI shell: option parsing + dispatch only. All orchestration lives
 -- in Pm.Commands / Pm.Cli (库层，P4 的 serve/GUI 复用同一路径).
+-- CPP 只为一处：@--version@ 取 Cabal 注入的 @CURRENT_PACKAGE_VERSION@ 宏。
 module Main (main) where
 
 -- 两摞、各自按字母序：先 base/外部，再 Pm.*。P4-8 与 P5-A 各自把新 import
 -- 塞在了中间（Data.Time / Text.Read / Pm.ConfigEdit），本次归位。
 import Data.Time (Day)
-import Data.Version (showVersion)
 import Options.Applicative
-import Paths_photo_manager (version)
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import Text.Read (readMaybe)
 
@@ -144,10 +144,13 @@ parserInfo =
     (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
  where
   versionOpt =
-    -- 版本号取自 package.yaml（cabal 生成的 Paths 模块），不再手抄一份：
+    -- 版本号取自 package.yaml（Cabal 注入的 CPP 宏），不再手抄一份：
     -- 二十四轮实测，这个字面量是第六处版本号，改版本时漏掉它 → 0.4.6 的
     -- 二进制自称 0.4.5。单一真源之后它不可能再漂。
-    infoOption ("pm " <> showVersion version) (long "version" <> help "打印版本")
+    -- 0.6.0 发布链实测：改宏不改 Paths 模块，因为 Paths_photo_manager 把
+    -- 构建机的六个安装目录（D:\…\.stack-work\install\…）整段烤进二进制——
+    -- 公开资产不得带本机路径；package.yaml 的 exe 段同时不再生成该模块。
+    infoOption ("pm " <> CURRENT_PACKAGE_VERSION) (long "version" <> help "打印版本")
   backupSw = switch (long "backup" <> help "作用于备份 root（需插盘）")
   vaultSw = switch (long "vault" <> help "作用于 vault root（首次 pm vault push 时建立）")
   commands =

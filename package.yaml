@@ -53,6 +53,10 @@ executables:
   pm:
     main: Main.hs
     source-dirs: app
+    # 显式空 other-modules 让 hpack 不再自动加 Paths_photo_manager：exe 段的
+    # Paths 对象直接进链接命令行（不经归档裁剪），会把构建机安装目录烤进
+    # pm.exe（0.6.0 发布链泄漏扫描抓出 6 处）；版本号改由 CPP 宏取（app/Main.hs）。
+    other-modules: []
     ghc-options:
     - -threaded
     - -rtsopts

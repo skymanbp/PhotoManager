@@ -369,12 +369,12 @@ openStateAppendTail fp = do
   h <- openBoundTo ReadWriteMode fp
   -- 42 轮 GO-note #2：判定与查尾期间任何异常（盘拔出、权限变化、读尾 I/O
   -- 错）都要把刚开的句柄关掉，不能滞留到 GC——同文件其它资源转换口的口径。
+  -- 44 轮 GO-note：这是**唯一**的关闭路径——hardlink 拒绝分支只抛不关，
+  -- 由这个处理器收句柄（此前分支内再关一次，双关虽幂等却像 bug）。
   flip onException (hClose h) $ do
     ok <- handleIsSingleLink h
     if not ok
-      then do
-        hClose h
-        ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝写入——人工核查"))
+      then ioError (userError (fp <> ": 该名字与别处的文件是同一对象（hardlink），拒绝写入——人工核查"))
       else do
         n <- hFileSize h
         torn <-

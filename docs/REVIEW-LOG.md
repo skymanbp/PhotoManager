@@ -471,8 +471,9 @@ testCase + 1 testProperty + 5 参数化展开，7 新钉均经 Spec 注册；`mk
   pm 的 I11 会拒绝位于上层 git 仓库内的测试 root，实测仓内 122/389 红——设计
   在起作用，不是回归）+ 预编译 `pm-test.exe`（不经 Stack，绕开 pantry 锁），
   让评审**自己**跑全套；另在钉定 SHA 的**新建 worktree**（独立 .stack-work，
-  从零编译）跑一次完整 `stack test` 作第二份证据（`cleanenv-test.log`：HEAD
-  45faac9、树净、389 全绿）。第 43 轮实测：受限令牌**不能改 DACL**，11 个 ACL
+  库对象由该 worktree 自行编译）跑一次完整 `stack test` 作第二份证据
+  （`cleanenv-test.log`：HEAD f0d6dd9——日志已按 P7-M 重跑覆盖，44 轮 GO-note
+  订正、树净、389 全绿）。第 43 轮实测：受限令牌**不能改 DACL**，11 个 ACL
   攻击夹具在 `icacls` exit 5 处中断——沙箱能力问题，见第 43 轮节。
 - **#2（minor，GO-note）`openStateAppendTail` 判定/查尾期间异常不关句柄**
   （Win.hs:368）：hardlink 判定与 `hFileSize`/读尾/`hSeek` 若抛出，刚开的句柄
@@ -512,3 +513,47 @@ TEMP），32 次命令执行，评审后 `git status --porcelain` 空。#2（onE
 - **#4（minor）REVIEW-LOG 第 42 轮节记的是被替换掉的仓内 TEMP 方案**：仓内
   测试 root 会被 pm 的 I11 拒绝（上层 git 仓库内、非仓根，122/389 红——设计在
   起作用）。修（P7-M）：改记实际方案（`--add-dir` 仓外）+ DACL 实测。
+
+## 第 44 轮（P7-N `214a463`，评审方改为 Claude Opus 5）——FINAL GO，minset 空
+
+**评审方变更**：codex 走 OAuth 订阅后第 44 轮 attempt 1 跑了 22 次命令即撞
+订阅额度上限（"You've hit your usage limit … try again at 1:30 PM"），后三次
+零 exec。用户裁定（AskUserQuestion，2026-08-27）：不等，**改用 Claude Opus 5**
+（Agent 子代理，只读工具 + Bash，普通用户令牌；提示 `prompt44-opus.md` 与
+codex 版同一口径，原文存档 `review44-opus-result.md`；评审后
+`git status --porcelain` 空，33 次工具调用 / 497 s）。**判据随之回到原判据**：
+Opus 令牌能改 DACL、无 pantry/%TEMP% 限制，#1 要求亲跑 389 全绿；43 轮节写的
+「378/389 + 11 例 icacls exit 5 环境限制登记」是沙箱情形下的备用标准，本轮未用。
+
+**#1 CLOSED（运行态放行证明）**：评审亲跑 `pm-test.exe` → `All 389 tests
+passed (40.48s)`、EXIT 0；SHA-256 `71cbf429…181d7` 逐字符等于第一方
+`wt-test.log`；exe 晚于最新源文件 12.06 s；`git diff f0d6dd9..HEAD --stat`
+仅 REVIEW-LOG；`cleanenv-test.log`（独立 worktree，库对象自行编译，08:52
+时间戳可查）389 绿互证。**#3 CLOSED**：反向突变两条（回填「每道承重闸一个
+突变」/「每道闸都配」）各判红于 `DocDriftTests.hs:215`；误伤核查 README:249
+「每道闸重走」、:159「承重闸配」不含被禁短语。**#4 CLOSED**：`review43.sh`
+与 42/43 轮节逐字一致。已登记残余三项（REVIEW-LOG:296/:379/:392）未重开。
+
+**四条 GO-note，聚类后两根（P7-O 收口）**：
+- **A/C 同根「文档对证据产物的描述沿用写作记忆，未从产物重读」**：42 轮节
+  :474 写「cleanenv-test.log：HEAD 45faac9」而日志自述 f0d6dd9（09:29 重跑
+  覆盖）；:473「从零编译」而那次是增量 `[1 of 22]`（从零编译在同 worktree
+  更早）。修：两句改从产物重读（见上，本节即改）。**B**（43 轮节的备用判据
+  未被应用）：本节首段明说。
+- **D「一个句柄两条关闭路径」**（Win.hs:376）：hardlink 拒绝分支显式 `hClose`
+  与 `onException (hClose h)` 处理器双关——幂等（`HandleGuardTests.hs:180-183`
+  活体证伪为非缺陷），但读起来像 bug。修：删分支内 `hClose`，处理器为唯一
+  关闭路径（净减一行；hardlink 用例仍绿）。
+
+**发布链自查新增发现（非评审项，`release060.sh` 泄漏扫描）**：pm.exe 含
+`D:\Projects\PhotoManager\.stack-work\install\…` ×6——0.5.0 资产同样 6 处，
+历次只扫用户主目录模式故漏网。根因：`Paths_photo_manager`（Main.hs 只用它取
+`--version`）把六个安装目录烤进二进制，且 exe 段的 Paths 对象直接进链接命令行、
+不经归档裁剪，hpack 生成即必在。类级修：版本改走 Cabal 宏
+`CURRENT_PACKAGE_VERSION`（`cabal_macros.h` 实核）+ package.yaml exe 段显式
+`other-modules: []`；常驻钉 `caseNoPathsModule`（Main.hs 不引用 Paths、版本走宏、
+exe 段显式 other-modules；**390 测试**）。扫描模式收敛到与 sancheck36 同类，
+三种假阳性登记：裸 `AppData`（warp `Types.AppData` 构造子名）、`skyma`
+（`skymanbp` 版权/标识）、`档案`（pm-ui.exe 内嵌中文词频表）。重建后
+pm.exe `D:\Projects` 0 命中、`pm --version` = `pm 0.6.0`；P7-O 树
+pm-test.exe SHA-256 `f42fc592a28009e92e77b5d04743eb8ab363604cb0df4c94f57a319c9668c961`、pm.exe `44aa8fd0730b96bbe5ff885ab6273406aa6ea4821187ed164d09fe515ebacb88`。

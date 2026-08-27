@@ -35,6 +35,7 @@ docDriftTests =
     , testCase "命名同步：DESIGN-COMMANDS 讲的是 freshStagingCatalog（F025 收尾）" caseFreshGateName
     , testCase "41 轮 GO-note #9 运行契约：cwd = 仓库根（本套件按根相对路径读仓库文件）" caseRepoRootCwd
     , testCase "41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托 REVIEW-LOG" caseReadmeSync
+    , testCase "0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、exe 段显式 other-modules" caseNoPathsModule
     ]
 
 -- ─── 基础设施 ────────────────────────────────────────────────────────────────
@@ -213,6 +214,19 @@ caseReadmeSync = do
   -- 43 轮 #3：突变覆盖的绝对化措辞（「每道闸都配」「每道承重闸」）与登记残余
   -- 矛盾——42 轮修了两处、第三处漏网，哨兵此前不管措辞只管数字。
   assertBool "README 不得绝对化突变覆盖（有登记残余）" (not (any (`isInfixOf` readme) ["每道闸都", "每道承重闸"]))
+
+-- | 0.6.0 发布链泄漏扫描：`Paths_photo_manager` 把构建机的六个安装目录
+-- （`D:\…\.stack-work\install\…`）烤进 pm.exe——exe 段的 Paths 对象直接进
+-- 链接命令行，不经归档裁剪，只要 hpack 生成它就一定在。修法两处（版本改走
+-- Cabal 的 CPP 宏、package.yaml exe 段显式 `other-modules: []`）都不许回潮；
+-- 只查非注释行，注释里交代历史是合法的。
+caseNoPathsModule :: IO ()
+caseNoPathsModule = do
+  m <- readUtf8 ("app" </> "Main.hs")
+  assertBool "app/Main.hs 不得引用 Paths_photo_manager（安装目录会烤进二进制）" (not (refsIn "Paths_photo_manager" m))
+  assertBool "app/Main.hs 的版本串须取 CURRENT_PACKAGE_VERSION 宏" (refsIn "CURRENT_PACKAGE_VERSION" m)
+  py <- readUtf8 "package.yaml"
+  assertBool "package.yaml exe 段须显式 other-modules: []（否则 hpack 自动加 Paths 模块）" ("other-modules: []" `isInfixOf` py)
 
 -- | @countsBefore suf s@：s 里所有「数字串 + suf」形态的数字。
 countsBefore :: String -> String -> [Int]
