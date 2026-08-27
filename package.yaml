@@ -11,6 +11,7 @@ extra-source-files:
 - README.md
 - docs/DESIGN.md
 - docs/DESIGN-COMMANDS.md
+- docs/DESIGN-GUI.md
 - gui/ui/index.html
 - gui/src-tauri/tauri.conf.json
 

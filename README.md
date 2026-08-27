@@ -19,12 +19,12 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
 > 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
 > 为准，不在这里手抄**），凡有可观测自动化落点的闸都配"删掉它就转红"的突变
-> 验证用例（393 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
+> 验证用例（394 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
 > 性观察点）在 REVIEW-LOG 登记为残余，不冒充覆盖。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
-命令细节：[docs/DESIGN-COMMANDS.md](docs/DESIGN-COMMANDS.md)。
-开发史（P0–P7 全程）：[docs/HISTORY.md](docs/HISTORY.md)。
+命令细节：[docs/DESIGN-COMMANDS.md](docs/DESIGN-COMMANDS.md)。GUI 与 `pm serve` API：[docs/DESIGN-GUI.md](docs/DESIGN-GUI.md)。
+开发史（P0–P8 全程）：[docs/HISTORY.md](docs/HISTORY.md)。
 对抗评审归档：[docs/reviews/](docs/reviews/)。
 
 ## 功能与工作范围
@@ -234,7 +234,7 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 |---|---|---|
 | 增量扫描（4633 文件，其中 122 新 hash / 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（393 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
+| 测试套件（394 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
 | 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | 突变验证 | 凡有可观测自动化落点的承重闸各配一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过；无落点者登记为残余） | REVIEW-LOG 各轮收敛证据 |

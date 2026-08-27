@@ -143,7 +143,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 `pm sort <源>` 的提议形态拆成 `surveySort`（判定与取数）+ `renderSortSurvey`
 （打印，CLI 输出逐字不变），与 `Pm.Status.statusReport` /
 `Pm.BackupCmd.backupInitRun` 同一形态。GUI 的「整理新照片」页（左侧导航**第二
-页**，次序见 DESIGN.md §11）要的是**结果**不是那段文字，而两者必须同源——否则
+页**，次序见 DESIGN-GUI.md §11）要的是**结果**不是那段文字，而两者必须同源——否则
 页面上看到的分段与终端建议的命令会各说各话。
 
 顺带把 `withSource` 泛化并分成两层：`withSourceQ` 只列举（提议形态要把诊断当
@@ -288,7 +288,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   ——seek-penalty/MediaType 探测从未实现；`Pm.Win.listCandidateDrives` 的 `DriveKind` 仅按
   GetDriveTypeW 筛 REMOVABLE/FIXED 做**发现**，并发数与它无关。worker 数**不是 Root 属性**：
   `root-id.json` 只记 `id/role/created/fsType`。主库扫描是另一条口径（`[main] workers`，
-  DESIGN.md §11.4）。
+  DESIGN-GUI.md §11「设置页与配置端点」）。
 - 拔盘期间 `pm status` 用备份 root 的本地缓存快照报「上次同步时间 + 当时滞后量」。
 
 ---
@@ -345,7 +345,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   类目取计划面（`Pm.Serve`，`planCategories`）。固定三类 `landscape portrait urban`
   只出现在上线命令里（`Pm.Publish.publishCommands`）。明确禁止 `git add -A`/`git add .`
   （防把 `.pm/` 等误提交），操作数前必有 `--`；push 目标取自 `vault.push` 设置。命令文本与上线命令
-  （DESIGN.md §11 `GET /api/publish-commands`）**同一生成点**
+  （DESIGN-GUI.md §11 `GET /api/publish-commands`）**同一生成点**
   （`Publish.vaultCommands`，解析-重渲染，第一方自审 R2）——生成不了（路径
   嵌不进命令行等）打印原因 + 手动指引；pm 不执行 git（I9）。
 - **photos.json 不在 pm 写域**：类别判定/坐标是 AI 视觉判断，属 `/photo-inbox`。
@@ -401,7 +401,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P7 / pm 0.6.1 / 393 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **P7 / pm 0.6.1 / 394 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。

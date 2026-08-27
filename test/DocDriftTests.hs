@@ -25,11 +25,12 @@ docDriftTests =
   testGroup
     "P7-J 文档—代码漂移哨兵"
     [ testCase "字节出口清点：deleteBoundAt 引用模块集合固定；Exec 头注不再写 no delete call anywhere" caseByteExitCensus
-    , testCase "配置锁清点：withConfigLock 调用模块集合 = DESIGN 声明的四条读改写路径" caseConfigLockCensus
+    , testCase "配置锁清点：withConfigLock 调用模块集合 = DESIGN-GUI 声明的四条读改写路径" caseConfigLockCensus
     , testCase "--json 清点：全 CLI 只有 vault status 一处 long \"json\"" caseJsonFlagCensus
-    , testCase "GUI 页序：DESIGN ①—⑥ 的顺序与 index.html 的 nav 次序一致" caseGuiNavOrder
-    , testCase "CSP 逐字：DESIGN 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）" caseCspQuoted
-    , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，app.js 零 setAttribute、innerHTML 只赋空串" caseGuiNoInlineStyle
+    , testCase "GUI 页序：DESIGN-GUI ①—⑥ 的顺序与 index.html 的 nav 次序一致" caseGuiNavOrder
+    , testCase "CSP 逐字：DESIGN-GUI 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）" caseCspQuoted
+    , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链" caseGuiNoInlineStyle
+    , testCase "750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）" caseLineBudget
     , testCase "死名清扫：opRelPaths / isPng / stemKey 不再出现在 src/app" caseNoDeadNames
     , testCase "Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记" caseHaddockMarkerHygiene
     , testCase "讹传清扫：被否证的机制解释（F048 列表脊、46 轮 openBoundTo 共享模式）不再出现在 src/app/test" caseFolkloreNotInTests
@@ -93,14 +94,14 @@ caseByteExitCensus = do
   design <- readUtf8 ("docs" </> "DESIGN.md")
   assertBool "DESIGN §4 的据实清点声明还在" ("照片字节只有三个出口" `isInfixOf` design)
 
--- | DESIGN.md:574「**四条**读改写路径共用（… 全仓 `withConfigLock` 调用点
--- 即此四处）」。
+-- | DESIGN-GUI.md §11「配置文件的写纪律」：「**四条**读改写路径共用（… 全仓
+-- `withConfigLock` 调用点即此四处）」（P8-A 起 §11 住在 DESIGN-GUI.md）。
 caseConfigLockCensus :: IO ()
 caseConfigLockCensus = do
   refs <- refModules "withConfigLock" ["Config.hs"]
   refs @?= ["BackupCmd.hs", "Commands.hs", "ConfigEdit.hs", "Serve.hs"]
-  design <- readUtf8 ("docs" </> "DESIGN.md")
-  assertBool "DESIGN 的「四条读改写路径」声明还在" ("**四条**读改写路径共用" `isInfixOf` design)
+  design <- readUtf8 ("docs" </> "DESIGN-GUI.md")
+  assertBool "DESIGN-GUI 的「四条读改写路径」声明还在" ("**四条**读改写路径共用" `isInfixOf` design)
 
 -- | DESIGN.md:225「`--json` 只有 `pm vault status` 一个」。
 caseJsonFlagCensus :: IO ()
@@ -110,7 +111,8 @@ caseJsonFlagCensus = do
   design <- readUtf8 ("docs" </> "DESIGN.md")
   assertBool "DESIGN 的 --json 唯一性声明还在" ("`--json` 只有 `pm vault status` 一个" `isInfixOf` design)
 
--- | DESIGN.md:519-533 的 ①—⑥ 与 gui/ui/index.html 的 nav 次序：编号即次序。
+-- | DESIGN-GUI.md §11「GUI（P4-4 UX 重做…）」的 ①—⑥ 与 gui/ui/index.html 的 nav
+-- 次序：编号即次序（P8-A 起 §11 住在 DESIGN-GUI.md）。
 caseGuiNavOrder :: IO ()
 caseGuiNavOrder = do
   html <- readUtf8 ("gui" </> "ui" </> "index.html")
@@ -121,7 +123,7 @@ caseGuiNavOrder = do
   tabs @?= ["status", "sort", "vault", "plans", "config", "help"]
   mapM_ (\lbl -> assertBool ("nav label: " <> lbl) (("</span>" <> lbl <> "</button>") `isInfixOf` html))
     ["状态", "整理新照片", "分类推送", "计划", "设置", "上手"]
-  design <- readUtf8 ("docs" </> "DESIGN.md")
+  design <- readUtf8 ("docs" </> "DESIGN-GUI.md")
   let marks = ["①**状态**", "②**整理新照片**", "③**分类推送**", "④**计划**", "⑤**设置**", "⑥**上手**"]
       pos mk = T.length (fst (T.breakOn (T.pack mk) (T.pack design)))
   mapM_ (\mk -> assertBool ("DESIGN 应包含 " <> mk) (mk `isInfixOf` design)) marks
@@ -134,12 +136,12 @@ breakOn pat s = case T.breakOn (T.pack pat) (T.pack s) of
     | T.null rest -> Nothing
     | otherwise -> Just (T.unpack (T.drop (T.length (T.pack pat)) rest))
 
--- | DESIGN.md:534-537 自称「`gui/src-tauri/tauri.conf.json` 逐字」——把
--- DESIGN 里逐字引用的两条指令与真实 csp 双向对上，其余两条按语义断言。
+-- | DESIGN-GUI.md §11 自称「`gui/src-tauri/tauri.conf.json` 逐字」——把
+-- DESIGN-GUI 里逐字引用的两条指令与真实 csp 双向对上，其余两条按语义断言。
 caseCspQuoted :: IO ()
 caseCspQuoted = do
   conf <- readUtf8 ("gui" </> "src-tauri" </> "tauri.conf.json")
-  design <- readUtf8 ("docs" </> "DESIGN.md")
+  design <- readUtf8 ("docs" </> "DESIGN-GUI.md")
   let quoted =
         [ "connect-src http://127.0.0.1:* ipc: http://ipc.localhost"
         , "img-src 'self' blob: data:"
@@ -155,14 +157,18 @@ caseCspQuoted = do
 
 -- | F090 收紧后的前提：页面与脚本不得引入 CSP 会拦的内联样式/脚本形态。
 -- 48 轮：判据从字面表改为**词法**——属性名后任意空白与单/双引号、任意 on* 事件、
--- 带属性或有内容的 `<script>`；app.js 零 `setAttribute`、`innerHTML` 只赋空串、无
+-- 带属性或有内容的 `<script>`；脚本零 `setAttribute`、`innerHTML` 只赋空串、无
 -- HTML 注入口（字面表曾放过 `style='…'` / `style = "…"` / `onsubmit=` / module script）。
 -- CSSOM 写（`el.style.x = …` / `setProperty`）不受 style-src 管，仍允许。
 -- 任一回潮 = 发布版 GUI 在 `style-src 'self'` 下静默丢样式。
+-- P8-A：页面脚本不止 app.js（vault.js 拆出）——扫 `gui/ui` 下**全部** .js，并要求
+-- 每个脚本都被 index.html 外链：拆分不得让哨兵漏看一个文件，也不得留死脚本。
 caseGuiNoInlineStyle :: IO ()
 caseGuiNoInlineStyle = do
   html <- readUtf8 ("gui" </> "ui" </> "index.html")
-  js <- readUtf8 ("gui" </> "ui" </> "app.js")
+  jsFiles <- sort . filter (".js" `isSuffixOf`) <$> listDirectory ("gui" </> "ui")
+  js <- concat <$> mapM (\f -> readUtf8 ("gui" </> "ui" </> f)) jsFiles
+  mapM_ (\f -> assertBool ("index.html 应外链 " <> f) (("src=\"" <> f <> "\"") `isInfixOf` html)) jsFiles
   let lc = map toLower
       eqAt s = take 1 (dropWhile isSpace s) == "="
       quotedAt s = take 1 (dropWhile isSpace (drop 1 (dropWhile isSpace s))) `elem` ["\"", "'"]
@@ -176,9 +182,9 @@ caseGuiNoInlineStyle = do
   assertEqual "index.html 内联样式属性" [] (attr "style" html)
   assertEqual "index.html on* 事件属性" [] (events html)
   assertEqual "index.html 内联/非外链 <script>" [] (scripts html)
-  assertEqual "index.html/app.js <style" [] (styleEls html <> styleEls js)
-  assertEqual "app.js setAttribute/HTML 注入口" [] [w | w <- ["setAttribute(", "insertAdjacentHTML", "outerHTML", "document.write", "cssText"], w `isInfixOf` js]
-  assertEqual "app.js innerHTML 只允许赋空串" [] (innerBad js)
+  assertEqual "index.html/gui/ui 脚本 <style" [] (styleEls html <> styleEls js)
+  assertEqual "gui/ui 脚本 setAttribute/HTML 注入口" [] [w | w <- ["setAttribute(", "insertAdjacentHTML", "outerHTML", "document.write", "cssText"], w `isInfixOf` js]
+  assertEqual "gui/ui 脚本 innerHTML 只允许赋空串" [] (innerBad js)
 
 -- | P7-J 删掉的三个名字不得回潮：opRelPaths（无调用者的导出）、isPng
 -- （与 push 门分叉的第二份谓词）、stemKey（Import/Sort 双份局部配对键）。
@@ -311,6 +317,31 @@ caseNoPathsModule = do
       exes = stanzas code
   assertBool "package.yaml executables: 块内至少一个 exe stanza" (not (null exes))
   assertBool "package.yaml 每个 exe stanza 均须显式 other-modules: []（非注释行；否则 hpack 自动加 Paths 模块）" (all (any ("other-modules: []" `isInfixOf`)) exes)
+
+-- | 750 行硬预算（DESIGN §16）：此前只是评审期约定、零自动化——P8-A 拆分三个
+-- 触顶文件（Serve.hs / app.js / DESIGN.md）时写成哨兵，CI 的 `stack test` 顺带
+-- 执行。手写的源码 / 测试 / 文档 / 页面 / 脚本全部 ≤ 750 行；生成物（Cargo.lock、
+-- .cabal）与第三方评审原件（docs/reviews/，证据不得修剪）不在清单里。
+caseLineBudget :: IO ()
+caseLineBudget = do
+  ms <- srcModules
+  dirs <-
+    concat
+      <$> mapM
+        listWith
+        [ ("test", [".hs"])
+        , ("docs", [".md"])
+        , ("docs" </> "specs", [".md"])
+        , ("gui" </> "ui", [".js", ".html", ".css"])
+        , ("gui" </> "src-tauri" </> "src", [".rs"])
+        , ("scripts", [".py"])
+        , ("cbits", [".c", ".h"])
+        ]
+  let files = map snd ms <> dirs <> ["README.md"]
+  over <- concat <$> mapM (\f -> (\s -> [(f, n) | let n = length (lines s), n > 750]) <$> readUtf8 f) files
+  assertEqual "超过 750 行预算的手写文件（DESIGN §16）" [] over
+ where
+  listWith (d, exts) = map (d </>) . sort . filter (\f -> any (`isSuffixOf` f) exts) <$> listDirectory d
 
 -- | @countsBefore suf s@：s 里所有「数字串 + suf」形态的数字。
 countsBefore :: String -> String -> [Int]

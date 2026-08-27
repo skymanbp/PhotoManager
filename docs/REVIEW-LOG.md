@@ -273,3 +273,35 @@ P7-T 树：393 测试、GHC 警告 0；pm-test.exe `7f53c05ffb80e4c21e12f06d9ca8
 0.6.1 发布件（`release061.sh` 于 P7-T 树重建）：zip `dd5e3d7eef0592052475a7b26bcedb231575154688dcfee1306fc6bf363b3e49`、setup `d1a719b89fa825e55e987e3df382081ceb29de9bd7de10c0519538270ca1b060`，leakscan 16 模式 0 命中；GUI 探针头
 `style-src 'self'`、六页零违规、正面控制被拦；CLI e2e `logs/run-061-p7t/` 69 步 0 not ok（第 34 步
 `[DEEP-DONE] 18 条目待深验：已重读重 hash 18、不符 0、读取失败/消失 0`），真实库 4894 文件 / 516907900342 B 前后逐字段相同。
+
+## P8-A 预算拆分（第一方，2026-08-27；P8 工作包第一步，零产品行为变化）
+
+用户 2026-08-27 交付 P8 七项工作包（Photography 为相片 SoT、成片→相册通道、相册→vault `_inbox` 投影 + 分类 +
+推送提示、AI 分类/定位 GUI 入口、非 jpg 一键转换、vault 侧技能、GUI 审查后全量文档、GitHub Actions 出二进制并
+发布收官）。理解阶段走 ultracode 工作流（7 读者 + 综合简报 + 两路对抗核查，均 needs-fix：15 条驳回 / 22 条缺口，
+原文存档 `scratchpad/p8-understand.md`、`p8-checks.md`）——实测 `DESIGN.md` 与 `Serve.hs` 各 750/750、`app.js`
+724/750，任何 P8 功能都写不进去，故先拆分：
+
+- `Serve.hs` → `Pm.ServeEnv`（`ServeEnv`/配置快照/两个应答别名）+ `Pm.ServeVault`（四个 vault 端点 + 请求体类型，
+  case 分支包成 `Maybe`，`routeWith` 先问它再走本表）；`app.js` → `vault.js`（分类推送页封成 `window.pmVault` 工厂，
+  `busy()` 替代跨文件的 `submitting`）；`DESIGN.md` §11 整节 → `DESIGN-GUI.md`（存根留位，编号沿用）。三处均逐字搬移。
+- 哨兵：读 §11 的 `caseGuiNavOrder` / `caseCspQuoted` / `caseConfigLockCensus` 同 commit 改读 `DESIGN-GUI.md`；
+  `caseGuiNoInlineStyle` 改扫 `gui/ui` 全部 `.js` 并要求每个脚本被 index.html 外链（拆分不得让哨兵漏看文件、不得留死
+  脚本）；新增 `caseLineBudget`——750 行预算此前零自动化（核查缺口 M1.5），现由 `stack test` 执行、CI 复用。
+- 据实更正 `DESIGN.md` §1.3「vault `.gitignore` 不含 `.pm/`（P5 需补）」——实际早已含（核查缺口 M1.7/M2.13）。
+- 核查驳回的简报断言本轮已按类改写进计划（vault root 尚未建立、PROJECTED 与 splitHeld 的自相矛盾、HELD 机制描述、
+  dedupe 回归不存在、`jpegExt` 第二谓词、行号漂移）——设计裁定在下一步 AskUserQuestion 后落 `DESIGN-P8.md`。
+
+判别突变（`mutate_p8a.py`，运行期文件突变、逐条单点 `-p '/token/'` 重跑、每条还原后复跑绿）：
+
+| id | 突变 | -p | 基线 | 期望红 | 突变输出 | 还原 |
+|---|---|---|---|---|---|---|
+| m-a | scripts/_mut751.py 751 行 → 750 行预算哨兵 | `/750/` | All 1 tests passed (0.12s) | RED ✓ | 750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）: FAIL (0.13s) | GREEN ✓ |
+| m-b | gui/ui/_dead.js 未被 index.html 外链 → F090 哨兵 | `/F090/` | All 2 tests passed (0.03s) | RED ✓ | F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链: FAIL (0.01s) | GREEN ✓ |
+| m-c | DESIGN-GUI.md 四条读改写路径声明改字 → 配置锁清点哨兵（改读 DESIGN-GUI 后仍钉住） | `/withConfigLock/` | All 2 tests passed (0.13s) | RED ✓ | 配置锁清点：withConfigLock 调用模块集合 = DESIGN-GUI 声明的四条读改写路径: FAIL (0.07s) | GREEN ✓ |
+| m-d | DESIGN-GUI.md ①**状态** 标记破坏 → 页序哨兵（改读 DESIGN-GUI 后仍钉住） | `/nav/` | All 1 tests passed (0.01s) | RED ✓ | GUI 页序：DESIGN-GUI ①—⑥ 的顺序与 index.html 的 nav 次序一致: FAIL (0.02s) | GREEN ✓ |
+| m-e | DESIGN-GUI.md style-src 引用改字 → CSP 逐字哨兵（改读 DESIGN-GUI 后仍钉住） | `/CSP/` | All 1 tests passed (0.02s) | RED ✓ | CSP 逐字：DESIGN-GUI 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）: FAIL (0.02s) | GREEN ✓ |
+
+P8-A 树：394 测试、GHC 警告 0（仅 clang `<built-in>` 的 `-Wnonportable-include-path` 既有噪声）；`node --check` 两脚本通过；
+pm-test.exe `0d76f4ef699f5b0d07b2595c9cf73443639a93dbf2f787bd453270ca67530913`、pm.exe（`.stack-work/install/…/bin` 副本）
+`0f7a01623b66b92bea7246137e0ffdfa51557672c2697081d8ecefaa915552a2`；`wc -l`：Serve.hs 544 / app.js 584 / DESIGN.md 607 / DESIGN-GUI.md 173。

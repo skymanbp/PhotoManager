@@ -33,6 +33,8 @@
 --   * vault 端点会刷新 @.pm/vault-cache@（不是文件系统意义的纯读）；warp 并发
 --     执行请求，缓存替换共用固定 tmp 名——进程内互斥 'seVaultLock' 串行化
 --     （十八轮 minor）。
+--   * P8-A：会话环境（'ServeEnv'）在 "Pm.ServeEnv"，四个 vault 端点在 "Pm.ServeVault"
+--     ——逐字搬出，本文件回到 750 行预算内；路由表在 routeWith 先问 vault 模块。
 module Pm.Serve
   ( ServeOpts (..)
   , ServeEnv
@@ -49,8 +51,8 @@ module Pm.Serve
 
 import Control.Concurrent.Async (race)
 import Control.Monad (when)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Control.Concurrent.MVar (withMVar)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import Control.Exception (IOException, bracket, try)
 
 import Pm.ServeGuard
@@ -79,19 +81,18 @@ import System.IO (IOMode (ReadMode), hClose, hFlush, stdout)
 import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog, loadNote)
 import Pm.Cli (GoOpts (..), executePlanNowWith)
 import Pm.Commands (afterApply, loadPlanAnyRoot, prepareApply)
-import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, requireWritable, withConfigLock)
+import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, withConfigLock)
 import Pm.ConfigEdit (checkPatch, configTxn)
 import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
 import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, listPlans, savePlan)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, listPlans)
 import Pm.Publish (publishCommands)
+import Pm.ServeEnv
+import Pm.ServeVault (routeVault)
 import Pm.Sort (SortSegment (..), SortSurvey (..), runSortPlanTo, surveySort)
 import Pm.Status (StatusOpts (..), statusReport)
 import Pm.Types
-import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newActive, planCategories, renderVaultJson, vaultPushItems)
-import Pm.VaultCmd (holdOpsIO, withHoldsTxn)
-import Pm.VaultHold (VaultHold (..), writeHolds)
 import Pm.Win (openBoundTo, resolveUnder)
 
 data ServeOpts = ServeOpts
@@ -109,64 +110,6 @@ data ServeOpts = ServeOpts
     -- ^ P5-C：允许 @POST /api/apply@ **执行**已存的计划（唯一会动照片字节的
     -- 端点）。蕴含 'soWritable'——能执行却不能生成计划是没有意义的组合。
   }
-
--- | 一次 serve 会话的状态：配置、token、可写开关、vault 缓存刷新的进程内互斥。
-data ServeEnv = ServeEnv
-  { seCfgSnap :: IORef (Config, Maybe (UTCTime, Integer), Bool)
-    -- ^ 配置快照、其 config.toml 变更戳、有效位——**一个** IORef 成组存取
-    -- （41 轮 #4：拆两个 ref 时两个写端点可交错成〈旧配置, 新戳〉且永不
-    -- 自愈）。有效位 False = 作废，下一请求必从盘上重读（C105/P4-8）；
-    -- 作废与「配置文件不存在（戳 Nothing）」是两个状态，不共用编码。
-  , seToken :: BS.ByteString
-  , seWritable :: Bool
-  , seAllowApply :: Bool
-  , seVaultLock :: MVar ()
-  , seApplyLock :: MVar ()
-    -- ^ 同一 serve 进程内的 apply 串行化。跨进程另有 root 锁（I10）——这把只是
-    -- 让页面连点两下得到的是排队，而不是一条 "lock busy"。
-  }
-
--- | @allowApply@ 蕴含 writable：见模块头的三级授权。
-newServeEnv :: Config -> BS.ByteString -> Bool -> Bool -> IO ServeEnv
-newServeEnv cfg tok writable allowApply = do
-  -- 〈配置, 戳〉一次配对写入（装载与读戳之间的毫秒级启动窗口沿旧例登记）。
-  snap <- configFilePath >>= configStamp >>= \st -> newIORef (cfg, st, True)
-  ServeEnv snap tok (writable || allowApply) allowApply <$> newMVar () <*> newMVar ()
-
--- | 本次请求应答所依据的配置。第一方自审工作流 C105：此前快照只在本进程的
--- POST 之后刷新，终端里 `pm config set` / `pm backup init` 改了 config.toml
--- 之后 GET /api/config 仍答启动时的旧值——设置页「重新载入」拿到同一份旧快照，
--- 还把旧 vault 路径预填进输入框，一点保存就把终端改动静默改回去。每次请求
--- stat 一次配置文件（'configStamp'），戳变了才重读；只并入可变字段，主库路径
--- 保持启动时的锚点（--allow-apply 授权的对象就是它；'Pm.ConfigEdit' 也拒改）。
--- 重读失败 → 本次请求 500 并说明原因，快照与戳都不动（报告 fail-closed）。
-currentConfig :: ServeEnv -> IO (Either String Config)
-currentConfig env = do
-  fp <- configFilePath
-  now <- configStamp fp
-  (boot, seen, ok) <- readIORef (seCfgSnap env)
-  if ok && now == seen
-    then pure (Right boot)
-    else do
-      r <- loadConfig
-      case r of
-        Left m -> pure (Left ("配置文件已在外部改动但无法重新载入（" <> m <> "）——修正后重试"))
-        Right fresh -> do
-          let merged = fresh {cfgMainPath = cfgMainPath boot}
-          -- 41 轮 #4：载入后**再读一次戳**，与载入前一致才可与配置成对入册；
-          -- 载入期间又被改（戳不同）→ 有效位 False，下一请求必然重读。
-          now2 <- configStamp fp
-          writeIORef (seCfgSnap env) (merged, now2, now2 == now)
-          pure (Right merged)
-
--- | 写端点改完配置后**作废**快照。41 轮 #4：此前这里「写配置引用」与「读
--- 盘上变更戳」是两步独立动作，两个写端点并发可交错成〈旧配置, 新戳〉——
--- 〈配置, 戳〉配对只允许发生在 'currentConfig' 的双读戳路径上；这里只作废
--- （主库锚点随快照保持），下一请求必然从盘上重读到刚写入的值。
-setServeConfig :: ServeEnv -> Config -> IO ()
-setServeConfig env _ = do
-  (boot, seen, _) <- readIORef (seCfgSnap env)
-  writeIORef (seCfgSnap env) (boot, seen, False)
 
 -- | 启动时打印给调用方的一行 JSON。
 data Announce = Announce
@@ -242,8 +185,6 @@ serveApp env req respond = do
       | not (authorized (seToken env) hdrs) -> err status401 "缺少或错误的 Bearer token"
       | otherwise -> route env req jsonR err corsHdrs respond
 
-type Reply = Status -> ResponseHeaders -> Value -> IO ResponseReceived
-
 route :: ServeEnv -> Request -> Reply -> (Status -> String -> IO ResponseReceived) -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 route env req jsonR err corsHdrs respond = do
   -- 配置每次请求读一次：`POST /api/config` 改完后同一个 serve 必须立刻按新
@@ -253,8 +194,13 @@ route env req jsonR err corsHdrs respond = do
     Left m -> err status500 m
     Right cfg -> routeWith cfg env req jsonR err corsHdrs respond
 
-routeWith :: Config -> ServeEnv -> Request -> Reply -> (Status -> String -> IO ResponseReceived) -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
-routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req) of
+routeWith :: Config -> ServeEnv -> Request -> Reply -> ErrReply -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+routeWith cfg env req jsonR err corsHdrs respond =
+  -- P8-A：vault 端点在 "Pm.ServeVault"（逐字搬移）先匹配，不命中再走本模块的表。
+  fromMaybe (routeMain cfg env req jsonR err corsHdrs respond) (routeVault cfg env req jsonR err corsHdrs respond)
+
+routeMain :: Config -> ServeEnv -> Request -> Reply -> ErrReply -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
+routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req) of
   ("GET", ["api", "ping"]) ->
     -- allowApply：GUI 据此决定计划页要不要渲染「执行」按钮——按钮出现在
     -- 没有第三级授权的 serve 上，点了只会收 403（P7）。
@@ -263,137 +209,6 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
     let fresh = lookup "fresh" (queryString req) == Just (Just "1")
     r <- statusReport cfg (StatusOpts (not fresh))
     jsonR status200 [] (toJSON r)
-  ("GET", ["api", "vault", "status"]) -> do
-    er <- vaultReport
-    case er of
-      Left (msg, code) -> err (if code == 2 then status404 else status500) msg
-      Right r ->
-        -- 与 `pm vault status --json` 的 stdout **逐字节相同**：同一 renderVaultJson
-        -- 加 CLI putStrLn 的末尾换行（十八轮 minor：此前少那一个 LF）。
-        respond
-          ( responseLBS
-              status200
-              (("Content-Type", "application/json; charset=utf-8") : corsHdrs)
-              (renderVaultJson (vrSrcDir r) (vrVaultDir r) (vrSrcCount r) (vrVaultCount r) (vrDiff r) (vrUnpushable r) (vrUnstable r) (vrHeld r) (vrHeldStale r) <> "\n")
-          )
-  -- P4-2：分类页要按 sha 拉缩略图，而 vault/status 的 "new" 只有文件名；
-  -- 这里把 NEW 名字配上主库 catalog 的 Entry（sha/size），仍是只读。
-  ("GET", ["api", "vault", "new"]) -> do
-    er <- vaultReport
-    case er of
-      Left (msg, code) -> err (if code == 2 then status404 else status500) msg
-      Right r ->
-        jsonR
-          status200
-          []
-          ( object
-              [ "categories" .= fixedCategories
-              , "new"
-                  .= [ object ["name" .= n, "sha" .= fmap enSha me, "size" .= fmap enSize me]
-                     | n <- newActive r
-                     , let me = Map.lookup n (vrSrcMeta r)
-                     ]
-              , -- 第九态（P4-7）：已决定「暂不同步」的 NEW。单列出来，页面把
-                -- 决定回显成第四个按钮，随时能改回某个类目。
-                "held"
-                  .= [ object ["name" .= n, "sha" .= fmap enSha me, "size" .= fmap enSize me]
-                     | (n, _) <- vrHeld r
-                     , let me = Map.lookup n (vrSrcMeta r)
-                     ]
-              , "heldStale" .= [object ["name" .= n, "why" .= w] | (n, w) <- vrHeldStale r]
-              , -- 页面要知道「没有 NEW 但有 DRIFT」也能出纯裁决计划（二十轮 minor）
-                "drift" .= [object ["name" .= n, "category" .= c] | (n, c, _, _) <- vdDrift (vrDiff r)]
-              ]
-          )
-  -- P4-5：唯一的写端点——由页面的分类指派**生成** vault push 计划（不执行、
-  -- 不碰照片；执行仍是另一步，尚无端点）。写域限于 @<vault>/.pm@：计划落在
-  -- @.pm/plans@，首次请求还会经 I11 幂等建 @.pm/root-id@（'mkVaultPushPlan'
-  -- 里的 'ensureVaultRoot'）——二十轮把「只写 plans」这句措辞纠正到这里。
-  -- 校验与计划构造和 CLI `pm vault push` 共用（'checkAssignments' /
-  -- 'vaultPushItems' / 'mkVaultPushPlan'），落盘前同样过 'requireWritable'。
-  ("POST", ["api", "vault", "push-plan"])
-    | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝生成计划"
-    | otherwise -> do
-        body <- readBodyCapped req
-        case body of
-          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
-          Just raw -> case Aeson.eitherDecodeStrict' raw of
-            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
-            -- compute→校验→ensureRoot→落盘在同一次持锁里完成：两个并发 POST
-            -- 在首次建 root 时会都看到 RootAbsent，其中一次 createRootInfo
-            -- （no-replace）必失败 → 500（codex 二十轮 minor）。与 GET 刷新
-            -- vault 缓存用的是同一把 'seVaultLock'。
-            Right (PushPlanReq as) -> withMVar (seVaultLock env) $ \_ -> do
-              er <- computeVault True cfg
-              case er of
-                Left (msg, code) -> err (if code == 2 then status404 else status500) msg
-                Right r
-                  -- 空指派只在「有 DRIFT 待裁决」时有意义（纯裁决计划）——否则
-                  -- vault 只有 DRIFT 时页面按钮永远灰着（二十轮 minor）。
-                  | null as && null (vdDrift (vrDiff r)) ->
-                      err status400 "assignments 为空，且没有 DRIFT 待裁决项——无计划可生成"
-                  | otherwise -> do
-                      let pairs' = [(paCategory a, paName a) | a <- as]
-                          errs = checkAssignments r pairs'
-                      if not (null errs)
-                        then jsonR status400 [] (object ["error" .= ("指派不合法" :: String), "details" .= errs])
-                        else do
-                          let items = vaultPushItems r pairs'
-                          eplan <- mkVaultPushPlan r items
-                          case eplan of
-                            Left m -> err status500 m
-                            Right plan -> do
-                              w <- requireWritable (plRootPath plan)
-                              case w of
-                                Left m -> err status403 ("vault root 不可写: " <> m)
-                                Right _ -> do
-                                  esave <- try (savePlan plan) :: IO (Either IOException FilePath)
-                                  case esave of
-                                    Left e -> err status500 ("计划落盘失败: " <> show e)
-                                    Right fp ->
-                                      jsonR
-                                        status200
-                                        []
-                                        ( object
-                                            [ "plan" .= plan
-                                            , "path" .= fp
-                                            , "apply" .= ("pm apply " <> T.unpack (plId plan))
-                                            , -- 与 CLI 收尾、上线命令同一生成点（Pm.Publish.vaultCommands）
-                                              "gitSteps" .= gitStepsLines cfg (plRootPath plan) (plId plan) (planCategories plan)
-                                            ]
-                                        )
-  -- P4-7：第二个写端点——记录/撤销「暂不同步」的决定。写域是**主库**的
-  -- @.pm/vault-holds.json@（vault 仓与照片零改动），校验与 CLI
-  -- `pm vault hold|unhold` 共用 'holdRequest'。同样在 'seVaultLock' 里
-  -- compute→校验→写一次持锁完成。
-  ("POST", ["api", "vault", "hold"])
-    | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝记录决定"
-    | otherwise -> do
-        body <- readBodyCapped req
-        case body of
-          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
-          Just raw -> case Aeson.eitherDecodeStrict' raw of
-            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
-            Right (HoldReq hs us) -> withMVar (seVaultLock env) $ \_ -> do
-              -- 事务壳带主库 root lock（I10）：进程内 MVar 挡不住第二个 pm
-              -- 进程的读改写丢更新（codex 二十一轮 major）。
-              res <- withHoldsTxn cfg $ \olds r -> do
-                eops <- holdOpsIO r olds hs us
-                case eops of
-                  Left errs -> pure (Left (unlines errs, 400))
-                  Right kept -> do
-                    w <- writeHolds (cfgMainPath cfg) kept
-                    pure $ case w of
-                      Left m -> Left ("主库 .pm 不可写: " <> m, 403)
-                      Right () -> Right kept
-              case res of
-                Left (msg, 400) -> jsonR status400 [] (object ["error" .= ("决定不合法" :: String), "details" .= lines msg])
-                Left (msg, 403) -> err status403 msg
-                Left (msg, 4) -> err status409 msg -- root lock 被别的 pm 占用
-                Left (msg, 2) -> err status404 msg
-                Left (msg, _) -> err status500 msg
-                Right kept ->
-                  jsonR status200 [] (object ["held" .= map vhName kept, "count" .= length kept])
   -- P4-8：设置页的只读视图——路径 + 每条路径的健康状态。主库这一项恒
   -- `editable:false`：它是身份锚点，改它等于换一个库，留给终端 `pm init`。
   ("GET", ["api", "config"]) -> do
@@ -629,9 +444,6 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                   Right bytes ->
                     respond (responseLBS status200 (("Content-Type", "image/jpeg") : ("Cache-Control", "private, max-age=3600") : corsHdrs) (BSL.fromStrict bytes))
   _ -> err status404 "无此端点"
- where
-  -- vault 缓存刷新串行化（十八轮 minor）：两个并发 GET 会争用固定 tmp 名。
-  vaultReport = withMVar (seVaultLock env) (const (computeVault True cfg))
 
 -- | @{"src","place"|"event","from","to"}@ —— 与 CLI 的 @pm sort … --place …
 -- --from … --to …@ 同一组参数，交给**同一个** 'runSortPlan'。
@@ -686,17 +498,6 @@ instance Aeson.FromJSON ApplyReq where
   parseJSON = Aeson.withObject "apply" $ \o ->
     ApplyReq <$> o Aeson..: "planId" <*> o Aeson..:? "only"
 
--- | @{"assignments":[{"name":"a.jpg","category":"landscape"},…]}@
-newtype PushPlanReq = PushPlanReq [PushAssign]
-
-data PushAssign = PushAssign {paName :: FilePath, paCategory :: String}
-
-instance Aeson.FromJSON PushPlanReq where
-  parseJSON = Aeson.withObject "push-plan" $ \o -> PushPlanReq <$> o Aeson..: "assignments"
-
-instance Aeson.FromJSON PushAssign where
-  parseJSON = Aeson.withObject "assignment" $ \o -> PushAssign <$> o Aeson..: "name" <*> o Aeson..: "category"
-
 -- | root 标识三态 → 页面用的短标签（P4-8 设置页）。
 rootTag :: RootIdState -> String
 rootTag st = case st of
@@ -710,13 +511,6 @@ newtype BackupInitReq = BackupInitReq FilePath
 
 instance Aeson.FromJSON BackupInitReq where
   parseJSON = Aeson.withObject "backup-init" $ \o -> BackupInitReq <$> o Aeson..: "path"
-
--- | @{"hold":["a.jpg"],"unhold":["b.jpg"]}@（两个键都可缺省为空）
-data HoldReq = HoldReq [FilePath] [FilePath]
-
-instance Aeson.FromJSON HoldReq where
-  parseJSON = Aeson.withObject "hold" $ \o ->
-    HoldReq <$> (fromMaybe [] <$> o Aeson..:? "hold") <*> (fromMaybe [] <$> o Aeson..:? "unhold")
 
 validSha :: Text -> Bool
 validSha s = T.length s == 64 && T.all isHexDigit s
