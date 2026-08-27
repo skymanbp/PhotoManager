@@ -31,11 +31,11 @@ docDriftTests =
     , testCase "CSP 逐字：DESIGN 引用的指令逐条出现在 tauri.conf.json 的 csp 里" caseCspQuoted
     , testCase "死名清扫：opRelPaths / isPng / stemKey 不再出现在 src/app" caseNoDeadNames
     , testCase "Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记" caseHaddockMarkerHygiene
-    , testCase "讹传清扫：F048 被否证的机制解释不再出现在 test/" caseFolkloreNotInTests
+    , testCase "讹传清扫：被否证的机制解释（F048 列表脊、46 轮 openBoundTo 共享模式）不再出现在 src/app/test" caseFolkloreNotInTests
     , testCase "命名同步：DESIGN-COMMANDS 讲的是 freshStagingCatalog（F025 收尾）" caseFreshGateName
     , testCase "41 轮 GO-note #9 运行契约：cwd = 仓库根（本套件按根相对路径读仓库文件）" caseRepoRootCwd
     , testCase "41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托 REVIEW-LOG" caseReadmeSync
-    , testCase "0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、exe 段显式 other-modules" caseNoPathsModule
+    , testCase "0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、每个 exe stanza 显式 other-modules" caseNoPathsModule
     ]
 
 -- ─── 基础设施 ────────────────────────────────────────────────────────────────
@@ -186,12 +186,16 @@ caseHaddockMarkerHygiene = do
 -- 出现在任何测试文件里。标志词用拼接构造，免得本文件自指命中。
 caseFolkloreNotInTests :: IO ()
 caseFolkloreNotInTests = do
-  -- 46 轮第二条讹传：「openBoundTo 经 cbits 打开、带 FILE_SHARE_DELETE」——实为
+  -- 46 轮第二条讹传：把 openBoundTo 说成「经 cbits 打开、带 share-delete」——实为
   -- openBinaryFile（Win.hs:407），pm_open_for_dispose 只服务 delete/rename；这句曾被
-  -- 用来驳回评审发现并写进测试注释。标志词同样拼接构造。
-  let folklore = ["强制" <> "列表脊", "openBoundTo 带 " <> "FILE_SHARE_DELETE"]
-  fs <- sort . filter (".hs" `isSuffixOf`) <$> listDirectory "test"
-  bad <- concat <$> mapM (\f -> (\s -> [(f, w) | w <- folklore, w `isInfixOf` s]) <$> readUtf8 ("test" </> f)) fs
+  -- 用来驳回评审发现并写进测试注释。47 轮 GO-note：单一字面形态换个措辞即漏，改为
+  -- **同一行共现**判据（两个标志词同行即红），扫描面从 test/ 扩到 src/Pm + app。
+  -- 标志词拼接构造，免得本函数自指命中。
+  let folklore = [["强制" <> "列表脊"], ["openBoundTo", "FILE_SHARE_" <> "DELETE"]]
+      hits s = [unwords ws | ws <- folklore, any (\l -> all (`isInfixOf` l) ws) (lines s)]
+  ts <- map (\f -> (f, "test" </> f)) . sort . filter (".hs" `isSuffixOf`) <$> listDirectory "test"
+  ms <- srcModules
+  bad <- concat <$> mapM (\(m, fp) -> (\s -> [(m, w) | w <- hits s]) <$> readUtf8 fp) (ts <> ms)
   bad @?= []
 
 -- | F025 收尾：闸的共享定义叫 'freshStagingCatalog'（withFreshStagingCatalog
@@ -257,16 +261,18 @@ caseNoPathsModule = do
         [] -> True
       exeBlock = takeWhile indented (drop 1 (dropWhile ((/= "executables:") . strip) (lines py)))
       -- 46 轮 GO-note：存在性断言会被「再加一个没写 other-modules 的 exe stanza」骗绿
-      -- ——按两空格缩进的 stanza 头切块，逐块全称要求。
+      -- ——按两空格缩进的 stanza 头切块，逐块全称要求。47 轮 GO-note：先剔除注释行
+      -- （把该行注释掉曾骗绿），stanza 头须以 ':' 结尾（两空格注释行曾被当头、假红）。
+      code = filter (not . ("#" `isPrefixOf`) . strip) exeBlock
       isHeader l = case l of
-        (' ' : ' ' : c : _) -> not (isSpace c)
+        (' ' : ' ' : c : _) -> not (isSpace c) && ":" `isSuffixOf` strip l
         _ -> False
       stanzas ls' = case dropWhile (not . isHeader) ls' of
         [] -> []
         (h : rest) -> let (body, more) = break isHeader rest in (h : body) : stanzas more
-      exes = stanzas exeBlock
+      exes = stanzas code
   assertBool "package.yaml executables: 块内至少一个 exe stanza" (not (null exes))
-  assertBool "package.yaml 每个 exe stanza 均须显式 other-modules: []（否则 hpack 自动加 Paths 模块）" (all (any ("other-modules: []" `isInfixOf`)) exes)
+  assertBool "package.yaml 每个 exe stanza 均须显式 other-modules: []（非注释行；否则 hpack 自动加 Paths 模块）" (all (any ("other-modules: []" `isInfixOf`)) exes)
 
 -- | @countsBefore suf s@：s 里所有「数字串 + suf」形态的数字。
 countsBefore :: String -> String -> [Int]

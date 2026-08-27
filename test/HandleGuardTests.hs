@@ -189,7 +189,7 @@ caseAppendTailSameHandle = withSystemTempDirectory "pm-tail" $ \tmp -> do
   -- （legacy）I/O manager 下它不带 FILE_SHARE_DELETE，所以「拒绝后 removeFile 须成功」
   -- 同样可观测（评审用同版本 GHC 探针实证）——但那依赖 I/O manager（WinIO 下删除
   -- 会成功），独占打开对两种 manager 都成立，故选它。删掉 Win.hs 的 onException
-  -- 本断言转红（mut4-rows.md m4）。
+  -- 本断言转红（突变记录见 docs/REVIEW-LOG.md 第 46 轮节 m4 表）。
   ex <-
     try
       ( Win32File.createFile (tmp </> "hl.ndjson") Win32File.gENERIC_READ Win32File.fILE_SHARE_NONE Nothing Win32File.oPEN_EXISTING Win32File.fILE_ATTRIBUTE_NORMAL Nothing
