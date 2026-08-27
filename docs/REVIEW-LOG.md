@@ -466,10 +466,14 @@ testCase + 1 testProperty + 5 参数化展开，7 新钉均经 Spec 注册；`mk
   `stack test` 撞 `C:\sr\pantry\…pantry-write-lock: permission denied`，直接跑
   `pm-test.exe --list-tests` 撞 `%TEMP%` 下 `pm-test-cfg-*` 目录创建被拒——
   **不是断言失败**，但 389 例在评审方手里仍是 UNVERIFIED。处置：第 43 轮改
-  `-s workspace-write` 沙箱 + `TEMP/TMP` 指到仓内 `.stack-work/review-tmp` +
-  预编译 `pm-test.exe`（不经 Stack，绕开 pantry 锁），让评审**自己**跑全套；
-  另在钉定 SHA 的**新建 worktree**（独立 .stack-work，从零编译）跑一次完整
-  `stack test` 作第二份证据（日志见 P7-L 提交后的第 43 轮节）。
+  `-s workspace-write` 沙箱 + `--add-dir` 把**仓外**目录
+  `%LOCALAPPDATA%\Temp\pm-review43` 加为可写并设为 `TEMP/TMP`（不能放仓内：
+  pm 的 I11 会拒绝位于上层 git 仓库内的测试 root，实测仓内 122/389 红——设计
+  在起作用，不是回归）+ 预编译 `pm-test.exe`（不经 Stack，绕开 pantry 锁），
+  让评审**自己**跑全套；另在钉定 SHA 的**新建 worktree**（独立 .stack-work，
+  从零编译）跑一次完整 `stack test` 作第二份证据（`cleanenv-test.log`：HEAD
+  45faac9、树净、389 全绿）。第 43 轮实测：受限令牌**不能改 DACL**，11 个 ACL
+  攻击夹具在 `icacls` exit 5 处中断——沙箱能力问题，见第 43 轮节。
 - **#2（minor，GO-note）`openStateAppendTail` 判定/查尾期间异常不关句柄**
   （Win.hs:368）：hardlink 判定与 `hFileSize`/读尾/`hSeek` 若抛出，刚开的句柄
   滞留到 GC——同文件其它资源转换口已有 `onException hClose` 口径，这个新口

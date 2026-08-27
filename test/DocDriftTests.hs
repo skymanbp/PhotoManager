@@ -210,6 +210,9 @@ caseReadmeSync = do
   assertBool "README 的 undo 提要须是真 CLI 形态 pm undo --last" ("pm undo --last" `isInfixOf` readme)
   assertBool "README 不得出现 pm undo <planId>（CLI 无此形态）" (not ("pm undo <planId>" `isInfixOf` readme))
   assertBool "README 不手抄「…轮 GO」收敛判定（委托 REVIEW-LOG）" (not ("轮 GO" `isInfixOf` readme))
+  -- 43 轮 #3：突变覆盖的绝对化措辞（「每道闸都配」「每道承重闸」）与登记残余
+  -- 矛盾——42 轮修了两处、第三处漏网，哨兵此前不管措辞只管数字。
+  assertBool "README 不得绝对化突变覆盖（有登记残余）" (not (any (`isInfixOf` readme) ["每道闸都", "每道承重闸"]))
 
 -- | @countsBefore suf s@：s 里所有「数字串 + suf」形态的数字。
 countsBefore :: String -> String -> [Int]
