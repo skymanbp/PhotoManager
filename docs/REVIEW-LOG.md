@@ -589,9 +589,11 @@ pm-test.exe SHA-256 `f42fc592a28009e92e77b5d04743eb8ab363604cb0df4c94f57a319c966
   构建」补发布前扫描一步；`release060.sh` 改用仓内脚本（三份产物 0 命中，
   patterns=16）。推前树扫描器 `AppData` 模式收成路径形态 `AppData[/\\]`（裸词
   是对假阳性的讨论，不是泄漏；44 轮节那句本会被误判）。
-- **GO-note `onException` 无钉**：评审建议的「拒绝后 `removeFile` 须成功」**不成立**
-  ——`openBoundTo`（cbits/pm_win.c:53）带 `FILE_SHARE_DELETE`，泄漏句柄挡不住删除。
-  改用 `FILE_SHARE_NONE` 独占打开（Win32 `createFile … oPEN_EXISTING`）为观测点：
+- **GO-note `onException` 无钉**：改用 `FILE_SHARE_NONE` 独占打开（Win32 `createFile …
+  oPEN_EXISTING`）为观测点（**46 轮订正**：此处原写「removeFile 观测点不成立——
+  openBoundTo 经 cbits 带 FILE_SHARE_DELETE」，被评审用同版本 GHC 探针证伪：
+  `openBoundTo` 是 `openBinaryFile`（Win.hs:407），legacy I/O manager 下泄漏句柄同样
+  挡删除；独占打开的真理由是它对 legacy 与 WinIO 都成立）：
   泄漏的 GENERIC_READ|WRITE 句柄使其撞 ERROR_SHARING_VIOLATION；钉加在
   `caseAppendTailSameHandle` hardlink 拒绝之后，m4（`onException` → `id`）判红。
 
@@ -606,3 +608,45 @@ pm-test.exe SHA-256 `f42fc592a28009e92e77b5d04743eb8ab363604cb0df4c94f57a319c966
 
 P7-P 树：390 测试、GHC 警告 0；pm-test.exe `b0276ba3ac817621ee8d155293ba54199c043a1db4048b8bd2547ddb6497d6f5`、pm.exe `9fbc577aaff552bb3b7301f83636f10368ece91587502b30cd6f5cc459b6ac43`；
 sancheck37 零命中；三份发布产物 leakscan 0 命中。
+
+## 第 46 轮（P7-P `c16c8da`，Claude Opus 5 聚焦）——FINAL NO-GO，minset {1}
+
+评审亲跑 `All 390 tests passed (47.16s)`，双哈希逐字符对上（`b0276ba3…d6f5` /
+`9fbc577a…ac43`），编译输入无一新于两 exe，跑前跑后树净；79 次工具调用 / 1759 s。
+45 轮六条**全部 CLOSED**：HISTORY 计数入哨兵（沙箱反向突变红、历史行不受影响）、
+「从零编译」全文件清点、段落定位（M4 现红）、引用面（Types.hs 非注释引用红 / 注释
+绿）、扫描器入仓（**阳性对照** 0.5.0 期 `target/…/debug/pm.exe` → 12 命中 exit 1；
+三份发布产物 0 命中；派生模式两种斜杠齐全，大小写/转义/UTF-16BE 三候选实测 0）、
+钉的判别力（同版本 GHC 独立探针：泄漏句柄独占打开 FAILED、关闭后 SUCCEEDED）。
+原文存档 `review46-opus-result.md`。
+
+- **#1（major）钉的记录机制被产物证伪**：我在 45 轮节与 HandleGuardTests 注释里写
+  「removeFile 观测点不成立——openBoundTo 经 cbits 带 FILE_SHARE_DELETE」。第一方
+  复核：`openBoundTo` 就是 `openBinaryFile`（Win.hs:407），`pm_open_for_dispose`
+  （cbits/pm_win.c:50）只在 Win.hs:616 给 delete/rename 用——我 grep 到 `FILE_SHARE`
+  就归因、没读调用链。评审探针：legacy I/O manager 下 `DeleteFileW` 对泄漏句柄
+  FAILED（`__hs_swopen` 的 FILE_SHARE_DELETE 仅 `_O_TEMPORARY` 才置位），只有 WinIO
+  才成功。**根因**：用未经核实的机制去驳回评审发现，与 44/45 轮 A/C「沿用记忆不读
+  产物」同类且更重（讹传固化进公开源码注释）。修（P7-Q）：注释与 45 轮节改记真机制
+  （removeFile 在 legacy 下同样可观测但依赖 I/O manager；独占打开对两种 manager 都
+  成立——这才是选它的理由）；**类级**：`caseFolkloreNotInTests` 增加该讹传标志词
+  （拼接构造），test/ 下再出现即红。
+- **GO-note 存在性断言**（DocDriftTests exe 块 `any`）：再加一个没写 other-modules 的
+  exe stanza 仍绿。修：按两空格 stanza 头切块，逐块全称要求（至少一个 stanza）。
+- **GO-note `srcModules` 不递归**（P7-J 既有 helper，六个清点用例共用）：修：递归
+  枚举 `src/Pm/**/*.hs`，展示名 = 相对路径（平铺文件不变，既有期望不动）。
+- **GO-note README 扫描命令**：`pm-ui_<版本>_x64-setup.exe` 在 bash 里是重定向，
+  逐字执行一个产物都没扫。修：`V=$(awk '/^version:/{print $2}' ../../package.yaml)`
+  + 加引号（版本不手抄）。
+- **GO-note 突变表 m4 证据质量**：只见 P3b-12 连带、没出示新钉自身的 FAIL 文案。
+  修：`mutate4.py` 捕获 FAIL 后 3 行文案，m4 改 `-p "41 轮 #6"` 单点重跑（见下）。
+- **GO-note 失败文案归因**：独占打开失败也可能是第三方瞬时占用 / 文件缺失。修：
+  文案列出三种来源并带原始错误文本，不一概归因「句柄未关」。
+
+m4 单点重跑（P7-Q 树，`onException` → `id`）：
+
+| 突变 | 文件 | 结果 | 末行 |
+|---|---|---|---|
+| m4 | src/Pm/Win.hs | RED ✓ | 41 轮 #6 openStateAppendTail：查尾与追加同一句柄——半截尾/换行尾/缺失三态 + hardlink 拒绝: FAIL (4.47s) / test\HandleGuardTests.hs:202: / 独占打开失败——句柄泄漏（sharing violation）/第三方占用/文件缺失，按错误 |
+
+P7-Q 树：390 测试、GHC 警告 0；pm-test.exe `919e6b07357a6596760e1840a41fc4d48ab46b2d0469744e3c201ed846d8d15a`、pm.exe `cc67aa56bb76ccc631d8adabbec6cf46024b2b3ee55d9cbebc2726794d882ebf`。

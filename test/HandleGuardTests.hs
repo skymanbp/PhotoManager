@@ -184,13 +184,19 @@ caseAppendTailSameHandle = withSystemTempDirectory "pm-tail" $ \tmp -> do
     Right (_, h) -> hClose h >> assertFailure "hardlink 占名必须拒绝"
   -- 45 轮 GO-note：拒绝路径的句柄由 `onException (hClose h)` 处理器收——它是唯一
   -- 关闭路径，此前没有钉。观测点是 FILE_SHARE_NONE 的独占打开：泄漏句柄
-  -- （GENERIC_READ|WRITE 仍开着）会让它撞 ERROR_SHARING_VIOLATION。removeFile
-  -- 不是观测点：openBoundTo 带 FILE_SHARE_DELETE，泄漏句柄挡不住删除。
-  -- 删掉 Win.hs 的 onException 本断言转红。
+  -- （GENERIC_READ|WRITE 仍开着）会让它撞 ERROR_SHARING_VIOLATION。
+  -- 46 轮订正：`openBoundTo` 是 `openBinaryFile`（Win.hs:407），不经 cbits；GHC 默认
+  -- （legacy）I/O manager 下它不带 FILE_SHARE_DELETE，所以「拒绝后 removeFile 须成功」
+  -- 同样可观测（评审用同版本 GHC 探针实证）——但那依赖 I/O manager（WinIO 下删除
+  -- 会成功），独占打开对两种 manager 都成立，故选它。删掉 Win.hs 的 onException
+  -- 本断言转红（mut4-rows.md m4）。
   ex <-
     try
       ( Win32File.createFile (tmp </> "hl.ndjson") Win32File.gENERIC_READ Win32File.fILE_SHARE_NONE Nothing Win32File.oPEN_EXISTING Win32File.fILE_ATTRIBUTE_NORMAL Nothing
           >>= Win32File.closeHandle
       ) ::
       IO (Either SomeException ())
-  either (\e -> assertFailure ("拒绝后句柄须已关闭（独占打开应成功）: " <> show e)) pure ex
+  -- 46 轮 GO-note：打开失败不只一种来源——句柄泄漏（onException 被删）报 sharing
+  -- violation，第三方瞬时占用（如扫描器）也报它，文件被误删则是 does not exist；
+  -- 文案把原始错误带出来让人分辨，不一概归因。
+  either (\e -> assertFailure ("独占打开失败——句柄泄漏（sharing violation）/第三方占用/文件缺失，按错误文本分辨: " <> show e)) pure ex

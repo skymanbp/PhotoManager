@@ -15,7 +15,7 @@ import Data.Maybe (mapMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
-import System.Directory (doesFileExist, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath ((</>))
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -43,11 +43,22 @@ docDriftTests =
 readUtf8 :: FilePath -> IO String
 readUtf8 fp = T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile fp
 
--- | src/Pm 全部模块 + app/Main.hs，(展示名, 路径)。
+-- | src/Pm 全部模块（**递归**——46 轮 GO-note：平铺枚举会对 src/Pm/Sub/X.hs 里的
+-- 引用视而不见，六个清点用例共用此处，一处改惠及全部）+ app/Main.hs，
+-- (展示名, 路径)。展示名 = 相对 src/Pm 的路径，平铺文件仍是裸文件名，既有期望不变。
 srcModules :: IO [(String, FilePath)]
 srcModules = do
-  ms <- sort . filter (".hs" `isSuffixOf`) <$> listDirectory ("src" </> "Pm")
-  pure ([(m, "src" </> "Pm" </> m) | m <- ms] <> [("Main.hs", "app" </> "Main.hs")])
+  ms <- walk ("src" </> "Pm") ""
+  pure (sort ms <> [("Main.hs", "app" </> "Main.hs")])
+ where
+  walk dir rel = do
+    es <- sort <$> listDirectory dir
+    concat <$> mapM (visit dir rel) es
+  visit dir rel e = do
+    let p = dir </> e
+        r = if null rel then e else rel <> "/" <> e
+    isDir <- doesDirectoryExist p
+    if isDir then walk p r else pure [(r, p) | ".hs" `isSuffixOf` e]
 
 strip :: String -> String
 strip = dropWhileEnd isSpace . dropWhile isSpace
@@ -175,9 +186,12 @@ caseHaddockMarkerHygiene = do
 -- 出现在任何测试文件里。标志词用拼接构造，免得本文件自指命中。
 caseFolkloreNotInTests :: IO ()
 caseFolkloreNotInTests = do
-  let folklore = "强制" <> "列表脊"
+  -- 46 轮第二条讹传：「openBoundTo 经 cbits 打开、带 FILE_SHARE_DELETE」——实为
+  -- openBinaryFile（Win.hs:407），pm_open_for_dispose 只服务 delete/rename；这句曾被
+  -- 用来驳回评审发现并写进测试注释。标志词同样拼接构造。
+  let folklore = ["强制" <> "列表脊", "openBoundTo 带 " <> "FILE_SHARE_DELETE"]
   fs <- sort . filter (".hs" `isSuffixOf`) <$> listDirectory "test"
-  bad <- concat <$> mapM (\f -> (\s -> [f | folklore `isInfixOf` s]) <$> readUtf8 ("test" </> f)) fs
+  bad <- concat <$> mapM (\f -> (\s -> [(f, w) | w <- folklore, w `isInfixOf` s]) <$> readUtf8 ("test" </> f)) fs
   bad @?= []
 
 -- | F025 收尾：闸的共享定义叫 'freshStagingCatalog'（withFreshStagingCatalog
@@ -242,7 +256,17 @@ caseNoPathsModule = do
         (c : _) -> isSpace c
         [] -> True
       exeBlock = takeWhile indented (drop 1 (dropWhile ((/= "executables:") . strip) (lines py)))
-  assertBool "package.yaml executables: 块内须显式 other-modules: []（否则 hpack 自动加 Paths 模块）" (any ("other-modules: []" `isInfixOf`) exeBlock)
+      -- 46 轮 GO-note：存在性断言会被「再加一个没写 other-modules 的 exe stanza」骗绿
+      -- ——按两空格缩进的 stanza 头切块，逐块全称要求。
+      isHeader l = case l of
+        (' ' : ' ' : c : _) -> not (isSpace c)
+        _ -> False
+      stanzas ls' = case dropWhile (not . isHeader) ls' of
+        [] -> []
+        (h : rest) -> let (body, more) = break isHeader rest in (h : body) : stanzas more
+      exes = stanzas exeBlock
+  assertBool "package.yaml executables: 块内至少一个 exe stanza" (not (null exes))
+  assertBool "package.yaml 每个 exe stanza 均须显式 other-modules: []（否则 hpack 自动加 Paths 模块）" (all (any ("other-modules: []" `isInfixOf`)) exes)
 
 -- | @countsBefore suf s@：s 里所有「数字串 + suf」形态的数字。
 countsBefore :: String -> String -> [Int]
