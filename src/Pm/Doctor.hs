@@ -26,7 +26,7 @@ import System.IO (hClose)
 import System.IO.Error (isDoesNotExistError)
 import System.FilePath (joinPath, makeRelative, splitDirectories, (</>))
 
-import Pm.Catalog (loadCatalog)
+import Pm.Catalog (CatalogLoad (..), loadCatalog)
 import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
 import Pm.Hash (sha256File, sha256Handle)
@@ -155,7 +155,7 @@ runDoctor' root opts = do
   etv <- trashView root
   let (q1, manifestWarns) = case etv of
         Left e ->
-          ([Finding "TRASH-ENUM" Bad ("trash 枚举失败——Q1 对账本轮核不了: " <> e) "解除占用后重跑 pm doctor"], [])
+          ([Finding "TRASH-ENUM" Bad ("trash 枚举/manifest 读取失败——Q1 对账本轮核不了: " <> e) "解除占用后重跑 pm doctor"], [])
         Right tv ->
           ( [ Finding "Q1" Warn ("trash 中无 manifest 记录的文件: " <> f) ""
             | f <- tvUnregistered tv
@@ -175,23 +175,22 @@ runDoctor' root opts = do
             ]
           )
 
-  -- Catalog verification age
-  (mcat, _) <- loadCatalog root
-  ageFinding <- case mcat of
-    Nothing -> pure []
-    Just cat -> do
-      deepFindings <-
-        if doDeep opts
-          then deepVerify root cat
-          else pure []
-      let unverified = [() | e <- Map.elems (catEntries cat), enLastVerified e == Nothing]
+  -- Catalog verification age. 工作流 F032：快照通道此前是本函数唯一被丢掉的
+  -- 降级信号（journal/manifest/枚举失败各有自己的行）——被拒的快照按行报
+  -- Bad，回退跳过的坏代报 Warn；--deep 在没有快照时不得沉默（它一个字节都
+  -- 没核）。缺席（从未扫描）本身不是发现。
+  lc <- loadCatalog root
+  let deepSkipped why = [Finding "DEEP-SKIPPED" Bad ("--deep 全库复核本轮未执行（" <> why <> "）") "先 pm scan 重建后重跑" | doDeep opts]
+  ageFinding <- case lc of
+    CatAbsent -> pure (deepSkipped "尚无索引")
+    CatRefused ws ->
+      pure ([Finding "CATALOG" Bad w "排除原因后重试，或 pm scan 重建；快照被拒说明有人手编过或介质出错" | w <- ws] <> deepSkipped "快照载入失败")
+    CatLoaded cat ws -> do
+      deepFindings <- if doDeep opts then deepVerify root cat else pure []
+      let nUnverified = length [() | e <- Map.elems (catEntries cat), enLastVerified e == Nothing]
       pure
-        ( [ Finding
-              "VERIFY-AGE"
-              Info
-              (show (Map.size (catEntries cat)) <> " 条目; 无验证时间戳条目 " <> show (length unverified))
-              ""
-          ]
+        ( [Finding "CATALOG" Warn ("快照坏代已跳过（本轮按较旧一代核对）: " <> w) "pm scan 重建" | w <- ws]
+            <> [Finding "VERIFY-AGE" Info (show (Map.size (catEntries cat)) <> " 条目; 无验证时间戳条目 " <> show nUnverified) ""]
             <> deepFindings
         )
 
@@ -319,7 +318,11 @@ classifyPending' root (oid, op) = case op of
           Just tmpAbs -> probePmExists PmEntryFile root (makeRelative (pmDir root) tmpAbs)
         case etmp of
           Left m -> pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]
-          Right True -> pure [Finding "C1" Warn (T.unpack oid <> ": 中断于写 tmp 阶段 (" <> dstRel <> ")") "--repair 将清除 tmp；重跑原计划即可续传"]
+          -- 第一方自审工作流 F034：修复文案必须来自实现它的谓词——在途 Intent 的
+          -- tmp 被 'staleTmpFiles' 按 pending 排除，--repair 的删除循环只吃 stale；
+          -- 此前文案许诺「将清除 tmp」而循环里根本没有它（DESIGN §6.4 C1 也只说
+          -- 报告 + 重跑）。「续传」同样不实：重跑走独占创建，从零重写。
+          Right True -> pure [Finding "C1" Warn (T.unpack oid <> ": 中断于写 tmp 阶段 (" <> dstRel <> ")") "--repair 不清除该 tmp（在途 Intent 的证据）；重跑原计划即可（重写从零开始，落位前覆盖它）"]
           Right False -> pure [Finding "C1" Info (T.unpack oid <> ": Intent 后无痕迹（写 tmp 前中断），重跑原计划即可") ""]
   OpRename old new fp -> do
     -- P3b-16（十三轮 major）：`old` 允许是 @.pm/trash/…@（undo/组复位的复位
@@ -335,14 +338,20 @@ classifyPending' root (oid, op) = case op of
     -- P3b-17（十四轮 major）：问的必须是 @PmEntryAny@——`existsAny` 一直含
     -- 目录，而 rename 的两侧都可以是目录（FpDir）。收窄成"文件存在"会把真实
     -- 存在的目录复位源判成缺席，把 R3 错报成 R2 Warn 并被 --repair 补假 Done。
+    -- 第一方自审工作流 F033：用户侧也三态。`existsAny`（doesFileExist ||
+    -- doesDirectoryExist）把 ACL 拒绝塌成 False——目录级全拒时 old 被判「不在」，
+    -- 与「new 在且指纹相符」组成 (False, True) 格，R3 错报成 R2 Warn，恰在
+    -- --repair 白名单里 → 补一条与真 Done 逐字节相同的假 Done，进 undo。
+    -- 'probeName' 不受对象自身 ACL 影响（三十九轮实测）；查不出 → Left →
+    -- PM-LINK Bad（白名单之外）。链接占名算「在」（保守：只会把格推向 R3/R?）。
     eOldEx <-
       if isTrashSrcRel old
         then probePmExists PmEntryAny root (joinPath (drop 1 (splitDirectories old)))
-        else Right <$> existsAny (root </> old)
-    case eOldEx of
+        else userSideExists (root </> old)
+    eNewEx <- userSideExists (root </> new)
+    case (,) <$> eOldEx <*> eNewEx of
       Left m -> pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]
-      Right oldEx -> do
-        newEx <- existsAny (root </> new)
+      Right (oldEx, newEx) ->
         case (oldEx, newEx) of
           (True, False) -> pure [Finding "R1" Info (T.unpack oid <> ": rename 未执行 (" <> old <> " → " <> new <> ")，重跑原计划即可") ""]
           (False, True) -> do
@@ -392,6 +401,17 @@ existsAny :: FilePath -> IO Bool
 existsAny p = do
   f <- doesFileExist p
   if f then pure True else doesDirectoryExist p
+
+-- | 用户侧路径的三态存在性（第一方自审工作流 F033）：'probeName' 走
+-- GetFileAttributes，对象自身的 ACL 拒绝不影响它；查不出即 Left。
+userSideExists :: FilePath -> IO (Either String Bool)
+userSideExists p = do
+  k <- probeName p
+  pure $ case k of
+    NameMissing -> Right False
+    NamePlain -> Right True
+    NameSurrogate -> Right True
+    ProbeUnknown -> Left (p <> " 存在性查不出（ACL/介质错误？）")
 
 -- | 三十四轮（同型扫尽）：读失败 ≠ 指纹不符——两者的下一步不同（稍后重跑
 -- vs 人工核查），折叠成 False 会把占用误报成内容问题；Left 由调用方报
@@ -575,8 +595,13 @@ applyRepairs root findings pending stale = do
     case m of
       Nothing -> putStrLn ("  跳过: " <> f <> " 不再是可信路径（junction/symlink？），不删除——人工核查")
       Just fp -> do
-        deleteBoundAt fp -- pm 自建的 .pm/tmp 文件，从未 rename 落位，非用户数据（P6-C 句柄形态）
-        putStrLn ("  修复: 清除孤儿 tmp " <> f)
+        -- pm 自建的 .pm/tmp 文件，从未 rename 落位，非用户数据（P6-C 句柄形态）。
+        -- 第一方自审工作流 C102（同型）：unlink 会抛（占用超预算/只读属性）；
+        -- 逃顶会连带放弃后面的 C5 计划生成。逐项 try、报出、继续。
+        r <- try (deleteBoundAt fp) :: IO (Either IOException ())
+        putStrLn $ case r of
+          Right () -> "  修复: 清除孤儿 tmp " <> f
+          Left e -> "  ✗ 孤儿 tmp 未清除（" <> show e <> "）: " <> f <> " —— 解除占用/只读后重跑"
   forM_ c5 $ \(oid, op) -> case op of
     OpCopy _ dstRel _ _ _ -> do
       -- 三十四轮（同型扫尽）：隔离计划记录的是 victim 当下的 sha，读不出就

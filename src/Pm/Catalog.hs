@@ -4,7 +4,11 @@
 -- pm unlinks a file, and it only ever touches its own oldest snapshot copy,
 -- never user data.
 module Pm.Catalog
-  ( loadCatalog
+  ( CatalogLoad (..)
+  , loadCatalog
+  , catalogMaybe
+  , catalogOr
+  , loadNote
   , saveCatalog
   , catalogPath
   ) where
@@ -12,6 +16,7 @@ module Pm.Catalog
 import Control.Exception (bracket)
 import Control.Monad (foldM, when)
 import Data.Aeson (eitherDecodeStrict', encode)
+import Data.List (intercalate)
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, doesFileExist)
@@ -42,7 +47,16 @@ tamperMark = "，快照拒绝载入 → pm scan 重建"
 --    ——backup 忽略 load warnings 拿 @.1@ 算 diff（'Pm.BackupCmd'），会漏备
 --    base 才有的新文件。整条链**就地终止**，返回 Nothing：调用点一律
 --    fail-closed 到"先 pm scan 重建"。
-loadCatalog :: FilePath -> IO (Maybe Catalog, [String])
+--
+-- 第一方自审工作流 A 簇：'readPmState' 给出的「缺席 / 读不出 / 有」三态此前
+-- 在这里被压成 @Maybe@，差别只剩一个 @_@ 就能丢掉的 @[String]@——21 个调用点
+-- 里 14 个正是这么丢的，于是「查不出」被当成「不存在」：doctor 沉默、backup
+-- 打 ✓、apply 说「root 尚无索引」。现在类型上分开：'CatRefused' = 可信闸拒 /
+-- 读不出 / 手编痕迹 / 三代全坏；'CatAbsent' 只在三代**都不存在**且零告警时；
+-- 'CatLoaded' 带回退时跳过的坏代告警（不为空就是降级，退出码要认）。
+data CatalogLoad = CatAbsent | CatRefused [String] | CatLoaded Catalog [String]
+
+loadCatalog :: FilePath -> IO CatalogLoad
 loadCatalog root = do
   -- P3b-13（十轮复审 major）：闸下沉到 loader。此前只在命令层加闸，于是
   -- pm status / pm versions / apply 的计划查找都在闸之前就读了 .pm。
@@ -51,8 +65,32 @@ loadCatalog root = do
   -- 真正收成一个口，本函数的逐代读取也已改道走它。）
   tr <- requirePmTrusted root
   case tr of
-    Left m -> pure (Nothing, [m])
-    Right () -> loadCatalog' root
+    Left m -> pure (CatRefused [m])
+    Right () -> classify <$> loadCatalog' root
+ where
+  classify (Just c, ws) = CatLoaded c ws
+  classify (Nothing, []) = CatAbsent
+  classify (Nothing, ws) = CatRefused ws
+
+-- | 折回旧的 @(Maybe, 告警)@ 形态——给**已经**按告警分支的调用点（scan 的种子、
+-- status 的报告）与测试用；新代码按三态分支。
+catalogMaybe :: CatalogLoad -> (Maybe Catalog, [String])
+catalogMaybe CatAbsent = (Nothing, [])
+catalogMaybe (CatRefused ws) = (Nothing, ws)
+catalogMaybe (CatLoaded c ws) = (Just c, ws)
+
+-- | 命令层的常用折法：缺席与拒绝都是 Left，但**理由不同**——「尚未索引 →
+-- 先 pm scan」与「索引读不出（原因）」不能是同一句话。
+catalogOr :: String -> CatalogLoad -> Either String (Catalog, [String])
+catalogOr absentMsg CatAbsent = Left absentMsg
+catalogOr _ (CatRefused ws) = Left ("索引读不出（" <> intercalate "；" ws <> "）—— 排除原因后重试，或 pm scan 重建")
+catalogOr _ (CatLoaded c ws) = Right (c, ws)
+
+-- | 一句话交代载入结果（给「因此跳过了某件事」的告警行用）。
+loadNote :: CatalogLoad -> String
+loadNote CatAbsent = "尚无索引"
+loadNote (CatRefused ws) = "索引读不出: " <> intercalate "；" ws
+loadNote (CatLoaded _ _) = "索引已载入"
 
 loadCatalog' :: FilePath -> IO (Maybe Catalog, [String])
 loadCatalog' root = foldM step (Nothing, []) ["catalog.json", "catalog.json.1", "catalog.json.2"]

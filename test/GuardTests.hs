@@ -22,7 +22,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (saveCatalog)
-import Pm.Catalog (loadCatalog)
+import Pm.Catalog (catalogMaybe, loadCatalog)
 import Pm.Cli (GoOpts (..), recheckCleanPlan, savePlanAndMaybeRun, writeBackCatalog)
 import Pm.Commands (InitOpts (..), ResolveOpts (..), RootSel (..), TrashCmd (..), afterApply, backupInitPreflight, initPreflight, pickRoot, runClean, runImport, runInit, runResolve, runTrash)
 import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), createRootInfo, loadConfig, pmDir, readRootInfo, readRootState, requireRole, requireWritable, withConfigLock, writeConfig, writeRootInfo, writeSideCache)
@@ -422,14 +422,14 @@ caseMainIsBackupWitness = withSystemTempDirectory "pm-guard" $ \tmp -> do
   writeRootInfo mainP (RootInfo "bk" RoleBackup now Nothing)
   pid <- newPlanId
   -- afterApply：备份计划收尾不得把 backup-cache 写进这个 root
-  afterApply cfg (Plan pid "backup" mainP (Just "bk") now []) 0
+  afterApply cfg putStrLn (Plan pid "backup" mainP (Just "bk") now []) []
   cacheEx <- doesDirectoryExist (pmDir mainP </> "backup-cache")
   cacheEx @?= False
   -- recheckCleanPlan：主库身份不符 → 全部降级，不复验
   let qplan =
         Plan pid "clean-staging" mainP (Just "bk") now
           [PlanItem 0 (OpQuarantine ("To-Be-Sync'd" </> "x.jpg") "s" "clean-staging:test") StPending Nothing]
-  dem <- recheckCleanPlan cfg qplan
+  dem <- recheckCleanPlan cfg putStrLn qplan
   map fst dem @?= [0]
   -- trash empty：clean-staging 记录 HELD，文件仍在
   let rel = "p" </> "x.jpg"
@@ -624,7 +624,7 @@ caseCatalogWriteBackTakesLock = withSystemTempDirectory "pm-clock" $ \tmp -> do
   free <- readIORef ref
   free @?= []
   -- 回写真的发生了（catalog 仍可装载）
-  (mcat, _) <- loadCatalog root
+  (mcat, _) <- catalogMaybe <$> loadCatalog root
   maybe (assertFailure "catalog 应仍可装载") (const (pure ())) mcat
 
 -- | init 的「查存在 → 读旧配置 → 写回」在 withConfigLock 内。锁被占 →

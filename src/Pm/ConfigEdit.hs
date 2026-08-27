@@ -13,19 +13,58 @@ module Pm.ConfigEdit
   ( ConfigPatch (..)
   , emptyPatch
   , checkPatch
+  , checkConfig
+  , rootsNested
   , applyPatch
   , configTxn
   , runConfigShow
   , runConfigSet
+  , ConfigSetOpts (..)
+  , tri
+  , mkPatch
   ) where
 
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
-import System.Directory (doesDirectoryExist, doesFileExist)
+import Data.Char (toLower)
+import Data.List (intercalate, isPrefixOf)
+import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist)
+import System.FilePath (normalise, splitDirectories)
 
 import qualified Data.Text as T
-import Pm.Config (Config (..), configFilePath, loadConfig, withConfigLock, writeConfig)
+import Pm.Config (Config (..), checkAbsolute, configFilePath, loadConfig, withConfigLock, writeConfig)
 import Pm.Publish (cmdPath, pushTarget)
+
+-- | 两个 root 是否嵌套（任一方向）：canonicalize 两侧（解析已存在前缀的
+-- junction/symlink 与真实大小写），再按 case-fold 分量做祖先判断——文本级
+-- normalise 挡不住主库的别名路径（评审 mj-4 的既有判据，工作流 C101 上提为
+-- 唯一定义：此前是 'Pm.BackupCmd.backupInitPreflight' 的私有 where，只守
+-- 备份槽对主库；vault 对主库、备份对 vault 都没人守）。
+rootsNested :: FilePath -> FilePath -> IO Bool
+rootsNested a b = do
+  ca <- canonicalizePath a
+  cb <- canonicalizePath b
+  let comps p = map (map toLower) (splitDirectories (normalise p))
+  pure (comps ca `isPrefixOf` comps cb || comps cb `isPrefixOf` comps ca)
+
+-- | 整份 'Config' 的汇点校验（工作流 C101/F011）：四条写路径（init / config
+-- set / POST config / backup init）此前各查各的字段，跨字段不变量无归宿——
+-- vault 落在 Raw\成片\相册 之下时 scan 把展示集索引进主库、dedupe 把每张
+-- 已推送照片报成精确重复。查：路径绝对（'checkAbsolute'）、主库与 vault
+-- 不嵌套、备份登记成对（id 与 subpath 同有同无）。
+checkConfig :: Config -> IO [String]
+checkConfig c = do
+  nested <- case cfgVaultPath c of
+    Nothing -> pure []
+    Just v -> do
+      n <- rootsNested (cfgMainPath c) v
+      pure ["vault 与主库嵌套（" <> v <> " vs " <> cfgMainPath c <> "）——展示集必须在库外，否则 scan 把它索引进主库、dedupe 把每张已推送照片报成重复" | n]
+  let absErr = either (: []) (const []) (checkAbsolute c)
+      pairErr = case (cfgBackupId c, cfgBackupSubpath c) of
+        (Just _, Nothing) -> ["备份盘登记不完整（只有 id、缺 subpath）—— 重跑 pm backup init <盘上镜像路径>"]
+        (Nothing, Just _) -> ["备份盘登记不完整（只有 subpath、缺 id）—— 重跑 pm backup init <盘上镜像路径>"]
+        _ -> []
+  pure (absErr <> nested <> pairErr)
 
 -- | 三态字段：'Nothing' = 本次不动；@Just Nothing@ = 清空；@Just (Just x)@ = 设成 x。
 data ConfigPatch = ConfigPatch
@@ -71,9 +110,10 @@ instance Aeson.FromJSON ConfigPatch where
 
 -- | fail-closed：任一条不合法就整体不写，并一次返回全部错误（GUI 能一次标完）。
 -- 路径存在性是 IO 判定：设一个不存在的 vault 目录只会让后续每条命令报错，不如
--- 当场拒绝。
-checkPatch :: ConfigPatch -> IO [String]
-checkPatch p = do
+-- 当场拒绝。收 'Config'（工作流 C101）：跨字段不变量只能在**施加后的整份记录**
+-- 上判——'checkConfig' 兜底；锁内以盘上最新配置再复验一次（'configTxn'）。
+checkPatch :: Config -> ConfigPatch -> IO [String]
+checkPatch c p = do
   ev <- case cpVault p of
     Just (Just v) -> do
       isDir <- doesDirectoryExist v
@@ -106,7 +146,8 @@ checkPatch p = do
       -- （main: null，想清空）：两者都是"经编辑层动主库"，一律拒。
       em = ["主库路径只读：改它等于换一个库，请在终端 pm init --main <路径>" | Just _ <- [cpMain p]]
       en = ["没有要改的项" | p == emptyPatch]
-  pure (em <> en <> ev <> ej <> ep <> ew <> es)
+  whole <- checkConfig (applyPatch c p)
+  pure (em <> en <> ev <> ej <> ep <> ew <> es <> whole)
 
 -- | 施加（纯函数）。调用方须先过 'checkPatch'。
 applyPatch :: Config -> ConfigPatch -> Config
@@ -132,6 +173,15 @@ configTxn p = do
   case fresh of
     Left e -> pure (Left ("配置无法重新读入: " <> e))
     Right c0 -> do
+      -- 锁内按盘上最新配置复验（工作流 C101）：调用方 checkPatch 用的是它
+      -- 自己那份可能过期的快照，并发下另一方刚设的字段要与本补丁合起来判
+      errs <- checkConfig (applyPatch c0 p)
+      if not (null errs)
+        then pure (Left ("配置不合法（锁内按盘上最新配置复验）: " <> intercalate "；" errs))
+        else configTxn' c0 p
+
+configTxn' :: Config -> ConfigPatch -> IO (Either String (Config, FilePath))
+configTxn' c0 p = do
       fp <- writeConfig (applyPatch c0 p)
       back <- loadConfig
       pure $ case back of
@@ -166,7 +216,9 @@ runConfigShow c = do
   putStrLn ("  并发数    " <> maybe "（默认=核数）" show (cfgWorkers c))
   case (cfgBackupId c, cfgBackupSubpath c) of
     (Just i, Just s) -> putStrLn ("  备份盘    UUID " <> T.unpack i <> " · 盘内路径 " <> s <> "（按 UUID 认盘，与盘符无关）")
-    _ -> putStrLn "  备份盘    （未登记）→ pm backup init <盘上镜像路径>"
+    (Nothing, Nothing) -> putStrLn "  备份盘    （未登记）→ pm backup init <盘上镜像路径>"
+    -- 半对登记（手编残余）：checkConfig 在写入口拒新增，这里如实报存量
+    _ -> putStrLn "  备份盘    ⚠ 登记不完整（id 与 subpath 须成对）→ 重跑 pm backup init"
   pure 0
  where
   mark True = ""
@@ -178,8 +230,8 @@ runConfigShow c = do
 -- 真正施加补丁的基准在锁内重新读（见 'configTxn'），拿这份可能已过期的快照
 -- 写回会抹掉别人刚改的字段。
 runConfigSet :: ConfigPatch -> Config -> IO Int
-runConfigSet p _stale = do
-  errs <- checkPatch p
+runConfigSet p stale = do
+  errs <- checkPatch stale p
   if not (null errs)
     then mapM_ (putStrLn . ("  ✗ " <>)) errs >> pure 2
     else do
@@ -190,3 +242,36 @@ runConfigSet p _stale = do
         Just (Right (c2, fp)) -> do
           putStrLn ("✓ 已写入 " <> fp)
           runConfigShow c2
+
+-- ─── CLI 旗标的三态收集（工作流 F082） ──────────────────────────────────────
+
+-- | @pm config set@ 的原始旗标：每项是 (给的值, @--no-X@ 开关)。矛盾留给
+-- 'mkPatch' 拒绝——此前解析器里 @if clear then Just Nothing else …@ 把
+-- 「--vault X --no-vault」静默折成清空：✓ 已写入、退出 0，给的路径从未被看见，
+-- 与 @--place/--event@、@--backup/--vault@ 的「只能给一个」纪律相反。
+data ConfigSetOpts = ConfigSetOpts
+  { csVault :: (Maybe FilePath, Bool)
+  , csPhotosJson :: (Maybe FilePath, Bool)
+  , csWorkers :: (Maybe Int, Bool)
+  , csPortfolioDir :: (Maybe FilePath, Bool)
+  , csVaultPush :: (Maybe String, Bool)
+  , csPortfolioPush :: (Maybe String, Bool)
+  , csMain :: Maybe FilePath
+  }
+
+-- | (值, 清空) → 三态；两个都给 = 使用者写错了，直接报错不替他猜（I1）。
+tri :: String -> (Maybe a, Bool) -> Either String (Maybe (Maybe a))
+tri nm (Just _, True) = Left ("--" <> nm <> " 与 --no-" <> nm <> " 只能给一个")
+tri _ (Nothing, True) = Right (Just Nothing)
+tri _ (mv, False) = Right (fmap Just mv)
+
+mkPatch :: ConfigSetOpts -> Either String ConfigPatch
+mkPatch o =
+  ConfigPatch
+    <$> tri "vault" (csVault o)
+    <*> tri "photos-json" (csPhotosJson o)
+    <*> tri "workers" (csWorkers o)
+    <*> tri "portfolio-dir" (csPortfolioDir o)
+    <*> tri "vault-push" (csVaultPush o)
+    <*> tri "portfolio-push" (csPortfolioPush o)
+    <*> pure (fmap Just (csMain o))

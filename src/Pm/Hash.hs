@@ -11,7 +11,6 @@ module Pm.Hash
   , statSnap
   , dirFingerprint
   , nsToUtc
-  , utcToNs
   , statHitStable
   , ContentProbe (..)
   , probeConfined
@@ -65,15 +64,15 @@ data ContentProbe
 -- 永久删除）或「已归档，不用搬」（@pm sort@ 据此跳过）。两个调用点共用这一处，
 -- 免得再分叉（codex 二十六轮 #1）。
 --
--- 形态与 'Pm.Config.readPmState' **逐字一致**，因为要治的是同三件事：
--- 完整相对路径 'resolveUnder' → **只打开一次** → 在句柄上查 link count →
--- 从**同一句柄**读完。第一版这里是 @getFileSize@ 探一次存在性、再按名字
--- @sha256File@ 打开第二次——「校验的对象」与「读的对象」又成了两次独立解析，
--- 正是本项目十一\/十二\/十三轮反复收拾的那个形状（codex 二十七轮 #1）。
---
--- link count \> 1 一并拒绝：'resolveUnder' 原理上看不见 hardlink，而这个判定
--- 的下游一边是「三副本齐了，可以永久删」——三份副本必须是三个**独立对象**，
--- 同一个对象出现在两个名字下不算两份。
+-- 形态与 'Pm.Config.readPmState' **同型但不逐字一致**（工作流 F043 修注）：
+-- 同样是「完整相对路径 'resolveUnder' → 'openBoundTo' 只打开一次 → 从**同一
+-- 句柄**读完」，但这里**不查 link count**——hardlink 是合法库内形态（codex
+-- 二十八轮 #2），「同一对象出现在两个名字下不算两份」由同一句柄上取的
+-- 'FileId' 在**对象身份**层回答（@excl@ 名单 + 'anyCopyAliveExcept' 逐份
+-- 排除），不在名字层一刀切拒绝；readPmState 读的是 @.pm@ 自身状态文件，
+-- link count \> 1 在那里只可能是劫持，才整体拒。第一版这里是 @getFileSize@
+-- 探一次存在性、再按名字 @sha256File@ 打开第二次——「校验的对象」与「读的
+-- 对象」是两次独立解析，正是十一\/十二\/十三轮反复收拾的形状（二十七轮 #1）。
 --
 -- 只捕 'IOException'：@SomeException@ 会把 @UserInterrupt@\/@ThreadKilled@
 -- 一起吞掉，让 Ctrl-C 变成一条"读不到"。@isDoesNotExistError@ 把**缺席**从
@@ -166,11 +165,14 @@ copyFileHashed src dst =
               else BS.hPut hd b >> go (hashUpdate ctx b)
       go hashInit
 
--- | Inverse of the truncation in 'statSnap' — exact (both sides are integers
--- over a fixed 10^9 denominator).
+-- | Inverse of 'utcToNs' — exact (both sides are integers over a fixed
+-- 10^9 denominator).
 nsToUtc :: Integer -> UTCTime
 nsToUtc ns = posixSecondsToUTCTime (fromRational (ns % 1_000_000_000))
 
+-- | NTFS stores 100 ns ticks; POSIXTime is picosecond-precise, so this
+-- truncation is lossless for every filesystem we can meet. 'statSnap' 与
+-- 'statHitStable' 共用（工作流 F044：statSnap 原地重写过一份同款截断）。
 utcToNs :: UTCTime -> Integer
 utcToNs t = truncate (utcTimeToPOSIXSeconds t * 1_000_000_000)
 
@@ -203,10 +205,7 @@ statSnap :: FilePath -> IO StatSnap
 statSnap fp = do
   sz <- getFileSize fp
   mt <- getModificationTime fp
-  -- NTFS stores 100 ns ticks; POSIXTime is picosecond-precise, so this
-  -- truncation is lossless for every filesystem we can meet.
-  let ns = truncate (utcTimeToPOSIXSeconds mt * 1_000_000_000) :: Integer
-  pure (StatSnap sz ns)
+  pure (StatSnap sz (utcToNs mt))
 
 -- | 目录指纹：递归树上每个条目一行 @类型\\t相对路径\\t大小\\tmtimeNs@
 -- （目录大小记 -1、mtime 记 0），排序后 sha256。P3b-5 复审 B2：原先只看

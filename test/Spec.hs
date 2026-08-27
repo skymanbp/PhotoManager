@@ -14,6 +14,7 @@ import Test.Tasty
 import Test.Tasty.Runners (NumThreads (..))
 
 import DedupeTests (dedupeTests)
+import DocDriftTests (docDriftTests)
 import GuardTests (guardTests)
 import HandleGuardTests (handleGuardTests)
 import IngestTests (ingestTests)
@@ -28,6 +29,7 @@ import ServeTests (serveTests)
 import ServeWriteTests (serveWriteTests)
 import SortGuardTests (sortGuardTests)
 import StateGuardTests (stateGuardTests)
+import SweepTests (sweepTests)
 import VaultHoldTests (vaultHoldTests)
 import VaultTests (vaultTests)
 
@@ -45,4 +47,4 @@ main = do
     -- 断言读到别人的输出、失败详情反而被吞掉。这是共享资源的正确处置：
     -- 有一个进程级资源，就不能同时跑两个用例。代价是几秒钟。
     defaultMain
-      (localOption (NumThreads 1) $ testGroup "pm" [kernelTests, plannerTests, vaultTests, vaultHoldTests, namesTests, guardTests, pathGuardTests, handleGuardTests, stateGuardTests, serveTests, serveWriteTests, sortTests, sortGuardTests, dedupeTests, ingestTests, scanGuardTests, publishTests])
+      (localOption (NumThreads 1) $ testGroup "pm" [kernelTests, plannerTests, vaultTests, vaultHoldTests, namesTests, guardTests, pathGuardTests, handleGuardTests, stateGuardTests, serveTests, serveWriteTests, sortTests, sortGuardTests, dedupeTests, ingestTests, scanGuardTests, publishTests, sweepTests, docDriftTests])

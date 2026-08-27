@@ -14,7 +14,7 @@ import Data.List (isInfixOf)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.Wai.Test
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile)
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile)
 import System.FilePath (isAbsolute, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
@@ -22,9 +22,11 @@ import Test.Tasty.HUnit
 
 import Pm.Config (Config (..), configFilePath, loadConfig, withConfigLock, writeConfig)
 import Pm.Op (Op (..))
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, savePlan)
 import Pm.Serve (listPlans, serveApp)
-import ServeTests (decodeBody, field, arrLen, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvW, mkHardLink, postReq, seedConfig, tok, withVault)
+import Data.Foldable (toList)
+import Data.Time (getCurrentTime)
+import ServeTests (decodeBody, field, arrLen, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvA, mkEnvW, mkHardLink, postReq, seedConfig, seedSortSrc, tok, withVault)
 
 serveWriteTests :: TestTree
 serveWriteTests =
@@ -35,6 +37,9 @@ serveWriteTests =
     , testCase "P4-6 POST /api/vault/push-plan：DRIFT-only（无 NEW）空指派 → 纯裁决计划；照片零改动" caseServePushPlanDrift
     , testCase "P4-7 POST /api/vault/hold：只读 403；标记后 new 移出、held 列出；同名同时标与撤 400；撤销恢复；被 hold 的不能 push" caseServeHold
     , testCase "P4-8 GET /api/config：路径与健康状态；主库恒 editable=false" caseServeConfigGet
+    , testCase "工作流 F051/F052/F078 POST /api/sort/plan：交代清单与中止说明随 log 回响应；撞名 → code 2 + planId null + 两条源路径都在 log" caseServeSortPlanLog
+    , testCase "工作流 F022/F078 POST /api/apply：屏障全量降级的理由进 log，逐项 status=needs-decision" caseServeApplyDemoteLog
+    , testCase "工作流 C106 POST /api/apply：push 计划落位后收尾 git 步骤进 log（stdout 已静音），add 只列落位类目" caseServeApplyGitStepsLog
     , -- 下面这些用例都动**同一份**配置（PM_CONFIG 是进程级环境变量，见
       -- Spec.hs）。tasty 缺省并行执行，必须显式串行化，否则互相踩：一个
       -- 用例占着配置锁的时候，另一个的合法写入会变成 409。
@@ -48,6 +53,7 @@ serveWriteTests =
         , testCase "writeConfig：config.toml.tmp 被 hardlink 占名 → 不穿透写，库外文件零改动" caseConfigTmpHardlink
         , testCase "loadConfig：正文缺失而残留 .tmp → 指出这是中断的写入并给恢复动作，不当\"配置不存在\"" caseConfigOrphanTmp
         , testCase "第一方自审 R4：配置路径须绝对——writeConfig 写前绝对化；手编相对路径 loadConfig 拒" caseConfigAbsolutePaths
+        , testCase "第一方自审工作流 C105：终端带外改了 config.toml → 同一 serve 的 GET /api/config 按盘上新值答；主库路径保持启动锚点" caseServeConfigExternalEdit
         ]
     ]
 
@@ -322,8 +328,8 @@ caseServeConfigLock = withSystemTempDirectory "pm-serve" $ \dir -> do
       vdir = dir </> "vault"
   (cfg0, _, _, _) <- fixture root
   cfg <- withVault vdir cfg0
-  env <- mkEnvW cfg
   seedConfig root
+  env <- mkEnvW cfg
   fp <- configFilePath
   before <- BS.readFile fp
   gotLock <- newEmptyMVar
@@ -397,3 +403,133 @@ caseConfigAbsolutePaths = do
     Right c -> assertFailure ("手编相对路径应拒: " <> cfgMainPath c)
     Left m -> assertBool m ("绝对路径" `isInfixOf` m)
 
+
+-- | 快照此前只在本进程的 POST 之后刷新：终端 `pm config set` 之后 GET /api/config
+-- 仍答启动时的旧值，设置页「重新载入」拿到同一份旧快照并把旧 vault 预填进
+-- 输入框。修后按 config.toml 的变更戳重读；主库路径是会话的身份锚点，带外
+-- 换库不得让运行中的 serve 换库。
+caseServeConfigExternalEdit :: IO ()
+caseServeConfigExternalEdit = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+      vdir2 = dir </> "vault2"
+  (cfg0, _, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  createDirectoryIfMissing True vdir2
+  _ <- writeConfig cfg
+  env <- mkEnv cfg
+  -- 带外改动（终端 pm config set 的效果）：不经 POST
+  _ <- writeConfig cfg {cfgVaultPath = Just vdir2, cfgWorkers = Just 7}
+  flip runSession (serveApp env) $ do
+    r <- getReq "/api/config" [] tok
+    assertStatus 200 r
+    liftIO' $ do
+      field ["vault", "path"] (decodeBody r) @?= Just (Aeson.String (T.pack vdir2))
+      field ["workers"] (decodeBody r) @?= Just (Aeson.Number 7)
+  createDirectoryIfMissing True (dir </> "other")
+  _ <- writeConfig cfg {cfgMainPath = dir </> "other"}
+  flip runSession (serveApp env) $ do
+    r <- getReq "/api/config" [] tok
+    liftIO' $ field ["main", "path"] (decodeBody r) @?= Just (Aeson.String (T.pack root))
+
+-- | 响应体 log 字段的各行（非数组 → 空）。
+logLines :: Aeson.Value -> [T.Text]
+logLines v = case field ["log"] v of
+  Just (Aeson.Array xs) -> [t | Aeson.String t <- toList xs]
+  _ -> []
+
+-- | `pm ui` 下 serve 的 stdout 是空设备：交代清单（区间外/侧车/读不出时间）
+-- 与四条中止路径的说明此前全部打进被静音的终端，页面只拿到一个数字。
+-- 现在同一函数（'Pm.Sort.runSortPlanTo'）经 sink 把这些行收进 log；撞名整批
+-- 拒绝时 planId 是 null（PrRefused 在 savePlan 之前返回，盘上没有那个计划）。
+caseServeSortPlanLog :: IO ()
+caseServeSortPlanLog = withSystemTempDirectory "pm-serve-sort" $ \tmp -> do
+  (src, cfg) <- seedSortSrc tmp
+  BS.writeFile (src </> "DCIM" </> "b.xmp") "sidecar-of-out-of-range-master"
+  let body o = Aeson.encode (Aeson.object o)
+      req0 = ["src" Aeson..= src, "from" Aeson..= ("2026-08-25" :: String), "to" Aeson..= ("2026-08-26" :: String), "place" Aeson..= ("Atlanta" :: String)]
+  envW <- mkEnvW cfg
+  flip runSession (serveApp envW) $ do
+    ok <- postReq "/api/sort/plan" (body req0)
+    assertStatus 200 ok
+    let v = decodeBody ok
+        ls = logLines v
+    liftIO' $ do
+      field ["code"] v @?= Just (Aeson.Number 1)
+      assertBool ("区间外的 b.ARW 应在 log 里交代: " <> show ls) (any ("b.ARW" `T.isInfixOf`) ls)
+      assertBool ("孤儿侧车 b.xmp 应在 log 里交代: " <> show ls) (any ("b.xmp" `T.isInfixOf`) ls)
+      assertBool ("计划摘要应在 log 里: " <> show ls) (any ("计划已存" `T.isInfixOf`) ls)
+  -- 撞名：两个源路径下同名主文件 → 整批拒绝，两条路径都要在 log 里
+  createDirectoryIfMissing True (src </> "DCIM" </> "y")
+  copyFile (src </> "DCIM" </> "a.ARW") (src </> "DCIM" </> "y" </> "a.ARW")
+  flip runSession (serveApp envW) $ do
+    r <- postReq "/api/sort/plan" (body req0)
+    assertStatus 200 r
+    let v = decodeBody r
+        ls = logLines v
+    liftIO' $ do
+      field ["code"] v @?= Just (Aeson.Number 2)
+      field ["planId"] v @?= Just Aeson.Null
+      assertBool ("撞名两条路径都应在 log: " <> show ls)
+        (any (T.pack ("DCIM" </> "a.ARW") `T.isInfixOf`) ls && any (T.pack ("y" </> "a.ARW") `T.isInfixOf`) ls)
+
+-- | 执行期屏障把全部待执行项降级时，CLI 在终端看到「⚠ 无法复验三副本（…），
+-- 全部待执行项暂停」；serve 的同一条路此前把它打进被静音的 stdout，页面只
+-- 看到两个「未执行」。理由必须进 log，逐项 status 必须是 needs-decision。
+caseServeApplyDemoteLog :: IO ()
+caseServeApplyDemoteLog = withSystemTempDirectory "pm-serve-apply" $ \dir -> do
+  let root = dir </> "root"
+  (cfg, _, sj, _) <- fixture root -- 有索引、无备份盘登记 → clean 屏障全量降级
+  now <- getCurrentTime
+  pid <- newPlanId
+  _ <-
+    savePlan
+      Plan
+        { plId = pid
+        , plKind = "clean-staging"
+        , plRootPath = root
+        , plRootId = Just "m"
+        , plCreated = now
+        , plItems = [PlanItem 0 (OpQuarantine ("To-Be-Sync'd" </> "x.jpg") sj "clean-staging:test") StPending Nothing]
+        }
+  envA <- mkEnvA cfg
+  flip runSession (serveApp envA) $ do
+    r <- postReq "/api/apply" (Aeson.encode (Aeson.object ["planId" Aeson..= pid]))
+    assertStatus 200 r
+    let v = decodeBody r
+        ls = logLines v
+    liftIO' $ do
+      assertBool ("降级理由应进 log: " <> show ls) (any ("全部待执行项暂停" `T.isInfixOf`) ls)
+      case field ["items"] v of
+        Just (Aeson.Array xs) -> do
+          map (field ["status", "s"]) (toList xs) @?= [Just (Aeson.String "needs-decision")]
+          map (field ["outcome"]) (toList xs) @?= [Just (Aeson.String "未执行")]
+        other -> assertFailure ("items 应为一项: " <> show other)
+
+-- | push 计划经 /api/apply 落位后，CLI 会打印可粘贴的 git 步骤（add 只列落位
+-- 类目、无 -A）；serve 的同一收尾（'Pm.Commands.afterApply'）此前 putStrLn 进
+-- 空设备——GUI 用户永远看不到接下来该做什么。收尾行必须在 log 里。
+caseServeApplyGitStepsLog :: IO ()
+caseServeApplyGitStepsLog = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, _, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  envW <- mkEnvW cfg
+  pid <- flip runSession (serveApp envW) $ do
+    r <- postReq "/api/vault/push-plan" "{\"assignments\":[{\"name\":\"a.jpg\",\"category\":\"portrait\"}]}"
+    assertStatus 200 r
+    liftIO' $ case field ["plan", "id"] (decodeBody r) of
+      Just (Aeson.String p) -> pure p
+      other -> assertFailure ("响应缺 plan.id: " <> show other) >> pure ""
+  envA <- mkEnvA cfg
+  flip runSession (serveApp envA) $ do
+    r <- postReq "/api/apply" (Aeson.encode (Aeson.object ["planId" Aeson..= pid]))
+    assertStatus 200 r
+    let v = decodeBody r
+        ls = logLines v
+    liftIO' $ do
+      field ["code"] v @?= Just (Aeson.Number 0)
+      assertBool ("收尾 git 步骤应进 log: " <> show ls) (any ("git -C" `T.isInfixOf`) ls)
+      assertBool ("add 应只列落位类目 portrait: " <> show ls) (any ("add -- portrait" `T.isSuffixOf`) ls)
+  doesFileExist (vdir </> "portrait" </> "a.jpg") >>= (@?= True)

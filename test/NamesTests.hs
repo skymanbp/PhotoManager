@@ -5,7 +5,7 @@ module NamesTests (namesTests) where
 
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (isInfixOf, sort)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
@@ -30,6 +30,7 @@ namesTests =
     , testCase "namesPlan：年份夹不符与同批撞名全降裁决" caseNamesPlan
     , testCase "runNames E2E：Scheme B 目录改名落盘 + undo 完整回滚" caseNamesE2E
     , testCase "P3b-5 B1/B3：主库路径是 backup root → 拒绝出计划；目标被文件占位 → 降裁决" caseNamesGuards
+    , testCase "第一方自审工作流 F074：纯大小写改名（-raw → -Raw）计划闸与执行闸都豁免自身，落盘拼写改变，undo 反向同样可执行" caseNamesCaseOnlySuffix
     , testCase "normalizeStem：§1.1 后缀清单 + 迭代不动点" caseStem
     , testCase "versionsReport：设计内成片↔相册对排除；同目录版本组；真重复上报" caseVersions
     , testCase "designedGroup：Raw 原片就是 JPG / 相册撞名避让 算设计内；有 RAW 兄弟、没撞名、同层两份 仍上报" caseDesignedGroups
@@ -133,6 +134,28 @@ caseNamesGuards = withSystemTempDirectory "pm-names" $ \tmp -> do
   code2 <- runNames (\_ -> writeIORef ran2 True >> pure 0) (mkMainCfg root)
   code2 @?= 1
   readIORef ran2 >>= (@?= False)
+
+-- | NTFS 折大小写：@doesDirectoryExist "23-12-Turkey-Raw"@ 对已存在的
+-- @23-12-Turkey-raw@ 答 True——旧计划闸把源自身当成占位者，该项永久
+-- NEEDS-DECISION，报文还点名一个不存在的占位者；执行闸同样拒。断言必须看
+-- **拼写**（listDirectory），doesDirectoryExist 两种拼写都 True、钉不住。
+caseNamesCaseOnlySuffix :: IO ()
+caseNamesCaseOnlySuffix = withSystemTempDirectory "pm-names" $ \tmp -> do
+  let root = tmp </> "main"
+      ydir = root </> "Raw" </> "2023"
+  writeF (ydir </> "23-12-Turkey-raw" </> "x.ARW") "RAWBYTES"
+  writeRootInfo root (RootInfo "m" RoleMain t0 Nothing)
+  let cfg = mkMainCfg root
+  code <- runNames (\p -> savePlan p >> executePlanNow cfg p) cfg
+  code @?= 0
+  listDirectory ydir >>= (@?= ["23-12-Turkey-Raw"])
+  inside <- readFile (ydir </> "23-12-Turkey-Raw" </> "x.ARW")
+  inside @?= "RAWBYTES"
+  -- undo 是反向的纯大小写改名：执行闸同一豁免
+  eundo <- buildUndoPlan root 1
+  uplan <- either (\e -> assertFailure e >> undefined) pure eundo
+  executePlanNow cfg uplan >>= (@?= 0)
+  listDirectory ydir >>= (@?= ["23-12-Turkey-raw"])
 
 caseStem :: IO ()
 caseStem = do

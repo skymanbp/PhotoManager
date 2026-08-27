@@ -98,7 +98,7 @@ catalogTests =
               e2 = Entry ("Raw" </> "2023" </> "x.ARW") 7 9 "bb" KindPhoto (Just now)
               cat = Catalog "rid-1" now (entryMap [e1, e2])
           saveCatalog root cat
-          (loaded, warns) <- loadCatalog root
+          (loaded, warns) <- catalogMaybe <$> loadCatalog root
           warns @?= []
           fmap catRootId loaded @?= Just "rid-1"
           fmap catEntries loaded @?= Just (catEntries cat)
@@ -112,7 +112,7 @@ catalogTests =
           e1 <- doesFileExist (base <> ".1")
           e2 <- doesFileExist (base <> ".2")
           (e0, e1, e2) @?= (True, True, True)
-          (loaded, _) <- loadCatalog root
+          (loaded, _) <- catalogMaybe <$> loadCatalog root
           fmap catRootId loaded @?= Just "g4"
     ]
 

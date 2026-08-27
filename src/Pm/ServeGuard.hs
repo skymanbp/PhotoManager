@@ -15,6 +15,7 @@ module Pm.ServeGuard
   , muteStdout
   , waitStdinEof
   , bindLoopback
+  , configStamp
   ) where
 
 import Control.Exception (IOException, catch, try)
@@ -23,10 +24,12 @@ import qualified Data.ByteArray as BA
 import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
+import Data.Time (UTCTime)
 import GHC.IO.Handle (hDuplicateTo)
 import Network.HTTP.Types (RequestHeaders, hAuthorization)
 import Network.Socket
 import Network.Wai (Request, getRequestBodyChunk)
+import System.Directory (getFileSize, getModificationTime)
 import System.IO (IOMode (WriteMode), hClose, hIsEOF, openFile, stdin, stdout)
 
 -- | 16 字节熵 → 32 位 hex。
@@ -110,3 +113,10 @@ bindLoopback port = do
   bind sock (SockAddrInet (fromIntegral port) (tupleToHostAddress (127, 0, 0, 1)))
   listen sock 64
   pure sock
+
+-- | 配置文件的变更戳（mtime + 大小；读不到 → Nothing）。第一方自审工作流
+-- C105：serve 的配置快照按它决定是否重读（'Pm.Serve' 的 currentConfig）。
+configStamp :: FilePath -> IO (Maybe (UTCTime, Integer))
+configStamp fp = do
+  r <- try ((,) <$> getModificationTime fp <*> getFileSize fp) :: IO (Either IOException (UTCTime, Integer))
+  pure (either (const Nothing) Just r)

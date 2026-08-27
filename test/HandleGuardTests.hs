@@ -9,13 +9,16 @@ import System.Directory (canonicalizePath, createDirectoryIfMissing, removeDirec
 import System.FilePath ((</>))
 import Control.Exception (SomeException, bracket, try)
 import Data.List (isInfixOf)
-import System.IO (IOMode (ReadMode), hClose, hGetContents', openBinaryFile)
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
+import System.IO (IOMode (ReadMode), hClose, hGetContents', openBinaryFile, stdin, withBinaryFile)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Pm.Cli (GoOpts (..), confirm)
 import Pm.Win (handleFinalPath, handleIsAt, openBoundTo, resolveUnder)
+import TestUtil (captureStdout)
 
 handleGuardTests :: TestTree
 handleGuardTests =
@@ -23,7 +26,32 @@ handleGuardTests =
     "P5-D 句柄身份守卫（P7 自 PathGuardTests 拆出）"
     [ testCase "P5-D 句柄反查路径：中途 junction / 末级 symlink 判否；普通文件、库内 hardlink、root 经 junction 判是" caseHandleIsAt
     , testCase "P5-D 解析之后、打开之前把中途一层换成 junction → openBoundTo 拒绝，裸 open 会读到库外（窗口已关）" caseResolveThenSwap
+    , testCase "工作流 F020：确认口 stdin 是 EOF（NUL 设备）→ 按「否」返回 False，不抛 isEOFError" caseConfirmEofIsNo
     ]
+
+-- | 设备命名空间的写法；裸 "NUL" 走的是 GHC 的普通路径打开，会 does not exist。
+nulDevice :: FilePath
+nulDevice = [bsl, bsl, toEnum 46, bsl] <> "NUL"
+ where
+  bsl = toEnum 92 :: Char
+
+-- | 两段式确认的 stdin 关闭：`pm … --apply < NUL`、管道上游先退出、GUI 起的
+-- 子进程——都是 EOF。'confirm' 此前裸 getLine，isEOFError 逃到 RTS：计划已存、
+-- 字节未动，却在确认口打出一串堆栈。EOF 必须等于「否」。
+caseConfirmEofIsNo :: IO ()
+caseConfirmEofIsNo = do
+  saved <- hDuplicate stdin
+  (_, r) <-
+    captureStdout $
+      withBinaryFile nulDevice ReadMode $ \h -> do
+        hDuplicateTo h stdin
+        r <- try (confirm (GoOpts True False)) :: IO (Either SomeException Bool)
+        hDuplicateTo saved stdin
+        pure r
+  hClose saved
+  case r of
+    Right b -> b @?= False
+    Left e -> assertFailure ("EOF 不得以异常逃逸: " <> show e)
 
 -- | P5-D 的地基（codex 二十八轮 #1）：把「解析出路径 → 按名字重开」换成
 -- 「打开 → 用**句柄**确认它绑定的正是那条路径」。
@@ -76,9 +104,6 @@ caseHandleIsAt = withSystemTempDirectory "pm-final" $ \tmp -> do
     Nothing -> assertFailure "handleFinalPath 应能取到普通文件的路径"
  where
   isAtVia p = bracket (openBinaryFile p ReadMode) hClose (\h -> handleIsAt h p)
-  -- 设备命名空间的写法；裸 "NUL" 走的是 GHC 的普通路径打开，会 does not exist
-  nulDevice = [bsl, bsl, toEnum 46, bsl] <> "NUL"
-  bsl = toEnum 92 :: Char
 
 
 -- | 第 28 轮 #1 的正面回答：解析与打开之间的窗口。

@@ -19,17 +19,18 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (saveCatalog)
+import Pm.Scan (reparseSkipNote)
 import Pm.Hash (ContentProbe (..), probeConfined)
 import Pm.Scan (DotDirs (..), listTreeWith)
-import Pm.Cli (GoOpts (..))
+import Pm.Cli (GoOpts (..), PlanRun (..), planIdOf)
 import Pm.Config (Config (..))
 import Pm.Exif (parseCaptureTime, readCaptureTime)
 import Pm.Op (Op (..))
-import Pm.Plan (PlanItem (..))
-import Pm.Sort (SourceFiles (..), listSource, runSortPlan, runSortSurvey)
+import Pm.Plan (ItemStatus (..), PlanItem (..))
+import Pm.Sort (SourceFiles (..), Verdict (..), hardErrors, holdKin, listSource, runSortPlan, runSortSurvey)
 import Pm.Types (RootRole (..))
 import SortTests (ascii, bs, d, photoAt, plansDirOf, planItemsIn, sample, sortPlan, u16e, u32e, want, withLib)
-import TestUtil (captureStdout, ensureTestRoot, scanQuiet)
+import TestUtil (captureStdout, ensureTestRoot, scanQuiet, withDenyAll)
 
 sortGuardTests :: TestTree
 sortGuardTests =
@@ -54,7 +55,50 @@ sortGuardTests =
     , testCase "暂存区新鲜度不过 → 被选中的文件逐条列出（计划前失败的第三条路径）" caseFreshnessAbortReportsAll
     , testCase "源文件读取失败整批拒绝 → 读得出的那些也要列出（第四条路径）" caseSnapshotAbortReportsAll
     , testCase "被选中清单不得截断：超过 40 个也要逐条列全" caseChosenNotTruncated
+    , testCase "工作流 F041：root-id.json 被 ACL 全拒 → 仍判 pm 状态目录不进入（布尔探针塌 False 会走进 .pm\\trash）" caseSourcePmDirProbeDenied
+    , testCase "工作流 F052：planIdOf——PrRefused 无 id（盘上没有计划）；PrSaved/PrRun 带 id" casePlanIdOfTable
+    , testCase "工作流 F054：sort 提议/计划——子树列不出（ACL 拒）→ 退出码 1，不替没看过的目录担保；junction 跳过仍是 0" caseSortErrorsExit
+    , testCase "工作流 F097 holdKin：主文件待裁决 → 同目录同 stem 侧车（case-fold）一并悬置；别组不受牵连" caseSidecarHeldWithMaster
     ]
+
+-- | 「计划 id 只在真出了计划时是 Just」：PrRefused 在 savePlan 之前返回，
+-- 盘上没有文件，GUI 照着一个不存在的 id 显示「pm apply <id>」就是误导。
+casePlanIdOfTable :: IO ()
+casePlanIdOfTable = do
+  planIdOf (PrRefused "root 不可写") "p1" @?= Nothing
+  planIdOf PrSaved "p1" @?= Just "p1"
+  planIdOf (PrRun 0 []) "p1" @?= Just "p1"
+  -- 设计内跳过不是硬错误；其它一律是
+  hardErrors [("link", reparseSkipNote), ("locked", "目录列举失败: denied")] @?= [("locked", "目录列举失败: denied")]
+
+-- | 源里有一棵子树没枚举出来（ACL 拒），「✓ 没有需要归位的新照片」+ 退出码 0
+-- 就是在替一个没看过的目录担保——survey 与 plan 两个形态都要抬到 1；
+-- junction 的跳过是设计内的（它进错误表只是为了逐条交代），退出码不动。
+caseSortErrorsExit :: IO ()
+caseSortErrorsExit = withLib $ \src root cfg -> do
+  -- 先把区间内的两张真的搬进暂存区并重建索引：第二次跑同一张卡时「没有需要
+  -- 归位的新照片」→ 本来是 0
+  (_, c0) <- captureStdout (fst <$> runSortPlan (GoOpts True True) src (Left "Atlanta") (d 2026 8 25) (d 2026 8 26) cfg)
+  c0 @?= 0
+  scanQuiet "test-root" root >>= saveCatalog root
+  (_, cAgain) <- captureStdout (sortPlan src cfg)
+  cAgain @?= 0
+  -- junction：跳过并交代，不是失败
+  createDirectoryIfMissing True (src </> "elsewhere")
+  _ <- readCreateProcess (shell ("mklink /J \"" <> (src </> "DCIM" </> "link") <> "\" \"" <> (src </> "elsewhere") <> "\"")) ""
+  (_, cLink) <- captureStdout (sortPlan src cfg)
+  cLink @?= 0
+  (_, sLink) <- captureStdout (runSortSurvey src 72 cfg)
+  sLink @?= 0
+  -- ACL 全拒的子目录：列不出 → 两个形态都必须是 1，且说明为什么
+  createDirectoryIfMissing True (src </> "DCIM" </> "locked")
+  withDenyAll (src </> "DCIM" </> "locked") $ do
+    (outP, cDeny) <- captureStdout (sortPlan src cfg)
+    cDeny @?= 1
+    assertBool ("plan 形态应说明未能枚举: " <> outP) (elemSub "未能枚举" outP)
+    (outS, sDeny) <- captureStdout (runSortSurvey src 72 cfg)
+    sDeny @?= 1
+    assertBool ("survey 形态应说明未能枚举: " <> outS) (elemSub "未能枚举" outS)
 
 -- | 索引说「已在目标位置」，但盘上那个文件的**内容**其实不同（同尺寸改写后
 -- 把 mtime 改回去，(size,mtime) 新鲜度扫掠看不出来）。跳过是一个「这张不用
@@ -85,6 +129,12 @@ caseSortE2EStaleSkip = withLib $ \src root cfg -> do
   let named = [(takeFileName (opDstRel (piOp i)), piStatus i) | i <- items1]
   -- a.ARW 必须重新出现——要么待拷、要么待裁决，就是不能被静默跳过
   lookup "a.ARW" named /= Nothing @?= True
+  -- 第一方自审工作流 F049：a.xmp 是 a.ARW 的同 stem 侧车。主文件被 verifySkips
+  -- 重判为待裁决后，侧车不得仍是 StPending 先行落位（--keep both 改名会指错
+  -- 主文件）——组悬置必须在内容复核之后再算一次（reholdKin）。
+  case lookup "a.xmp" named of
+    Just (StNeedsDecision _) -> pure ()
+    other -> assertFailure ("侧车必须随主文件一并悬置，实得: " <> show other)
   -- 目标字节未被本命令改动（只出计划，未 --apply）
   BS.readFile (dstDir </> "a.ARW") >>= (@?= evil)
 
@@ -243,10 +293,10 @@ caseProbeUnreadable = withSystemTempDirectory "pm-probe2" $ \tmp -> do
 
 -- | 目录列举失败必须变成一条**带路径的错误**，异常不得逃出去。
 --
--- 这条用例暴露过一个真缺陷：'listDirectory' 是
--- @filter f \<$\> getDirectoryContents@，返回**惰性**列表，@try@ 只求值到
--- WHNF，异常会在消费列表时才炸——正好在 try 之外。所以光包 try 不够，必须
--- 在 try 内部强制列表脊。（突变 Q7 全绿暴露）
+-- （工作流 F048 修注：此前这里断言过一套「惰性求值让异常逃出 @try@」的
+-- 机制解释，不成立——枚举失败的真实处置在 'Pm.Scan.listTreeCov'：列举异常
+-- 当场被捕获，化成错误表条目 +「未枚举覆盖」。本用例钉的是这个转换的存在，
+-- 不是求值时序。）
 caseListDirFails :: IO ()
 caseListDirFails = withSystemTempDirectory "pm-lsfail" $ \tmp -> do
   let f = tmp </> "notadir.txt"
@@ -280,6 +330,21 @@ caseSourceSkipsPmDir = withSystemTempDirectory "pm-src-root" $ \tmp -> do
   sort (map takeFileName (sfPhotos sf)) @?= ["hidden.ARW", "real.ARW"]
   -- 跳过 .pm 这件事必须留一条记录
   any (elemSub "pm 状态目录" . snd) (sfErrors sf) @?= True
+
+-- | 第一方自审工作流 F041（R1 同类）：root-id.json 被**文件级** ACL 全拒时，
+-- 旧判据 doesFileExist 塌 False → 走进 .pm\\trash 把隔离件当待归位照片
+-- （实测：file deny (F) 下 doesFileExist=False，而目录 listDirectory 照常）。
+-- 'probeName' 对 ACL 免疫（GetFileAttributes 照常成功），判成状态目录、不进入。
+caseSourcePmDirProbeDenied :: IO ()
+caseSourcePmDirProbeDenied = withSystemTempDirectory "pm-src-acl" $ \tmp -> do
+  let src = tmp </> "library"
+  createDirectoryIfMissing True (src </> ".pm" </> "trash" </> "p1")
+  writeFile (src </> ".pm" </> "root-id.json") "{}"
+  writeFile (src </> ".pm" </> "trash" </> "p1" </> "quar.jpg") "Q"
+  writeFile (src </> "real.jpg") "R"
+  (files, notes) <- withDenyAll (src </> ".pm" </> "root-id.json") (listTreeWith WalkDotDirs src)
+  sort files @?= ["real.jpg"]
+  any (elemSub "状态目录" . snd) notes @?= True
 
 -- | 'resolveUnder' 原理上看不见 hardlink，而 probeConfined 的下游一边是
 -- 「三副本齐了，可以永久删」——三份必须是三个**独立对象**。
@@ -500,3 +565,18 @@ caseChosenNotTruncated = withSystemTempDirectory "pm-trunc" $ \tmp -> do
 qq :: FilePath -> String
 qq p = [toEnum 34] <> p <> [toEnum 34]
 
+-- | 'holdKin' 的组悬置走共享配对键 'Pm.Import.stemOf'：主文件 VConflict 时，
+-- 同目录同 stem（case-fold）的待拷侧车必须一并悬置；不同 stem 的成员不受
+-- 牵连。键是目标路径。
+caseSidecarHeldWithMaster :: IO ()
+caseSidecarHeldWithMaster = do
+  let out =
+        holdKin
+          [ ("Raw" </> "E" </> "a.ARW", VConflict "目标已存在")
+          , ("Raw" </> "E" </> "A.xmp", VCopy)
+          , ("Raw" </> "E" </> "b.ARW", VCopy)
+          ]
+  case out of
+    [(_, VConflict _), (_, VConflict held), (_, VCopy)] ->
+      held @?= "同 stem 主文件待裁决，本组悬置"
+    other -> assertFailure ("侧车应随主文件悬置、b 组不受牵连: " <> show (map fst other))

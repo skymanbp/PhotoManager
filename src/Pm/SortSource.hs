@@ -13,6 +13,8 @@ module Pm.SortSource
   , snapshotWith
   , withSourceQ
   , withSource
+  , hardErrors
+  , foldHardErrors
   ) where
 
 import Control.Exception (IOException, try)
@@ -23,13 +25,14 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Time (LocalTime)
 import System.Directory (canonicalizePath, doesDirectoryExist, makeAbsolute, pathIsSymbolicLink)
-import System.FilePath (takeBaseName, takeDirectory, takeExtension, (</>))
+import System.FilePath (takeExtension, (</>))
 import System.IO.Error (isDoesNotExistError)
+import Text.Printf (printf)
 
 import Pm.Exif (readCaptureTime)
 import Pm.Hash (StatSnap, sha256File, statSnap)
-import Pm.Import (foldPath)
-import Pm.Scan (DotDirs (..), listTreeWith)
+import Pm.Import (stemOf)
+import Pm.Scan (DotDirs (..), listTreeWith, reparseSkipNote)
 import Pm.Types
 
 -- ─── 扫描（IO） ─────────────────────────────────────────────────────────────
@@ -110,12 +113,8 @@ listSource dir = do
   tryIO = try
 
 -- | (源目录, 折叠后的 stem) → 该 stem 的侧车。按目录分键：不同目录下同名的
--- 两组照片各有各的侧车，全局按 stem 索引会把它们串在一起。
--- | 侧车与主文件的配对键：(所在目录, 折叠后的 stem)。'sidecarIndex' 与
--- 「无主侧车」两处共用，免得配对口径分成两份。
-stemOf :: FilePath -> (FilePath, FilePath)
-stemOf p = (foldPath (takeDirectory p), foldPath (takeBaseName p))
-
+-- 两组照片各有各的侧车，全局按 stem 索引会把它们串在一起。配对键共用
+-- 'Pm.Import.stemOf'（本模块 re-export；工作流 F055\/F097）。
 sidecarIndex :: [FilePath] -> Map.Map (FilePath, FilePath) [FilePath]
 sidecarIndex ps =
   Map.fromListWith
@@ -177,17 +176,41 @@ withSourceQ src onMissing k = do
   absSrc <- makeAbsolute src
   ok <- doesDirectoryExist absSrc
   if not ok
-    then putStrLn ("源目录不存在: " <> absSrc) >> pure onMissing
+    then pure onMissing
     else listSource absSrc >>= k absSrc
 
--- | 同上，并把 'sfNotes' 打印出来——计划形态用。
+-- | 同上，并把「源目录不存在」与 'sfNotes' 打印出来——计划形态用；打印口由
+-- 调用方给（`pm ui` 下 stdout 是空设备，serve 端点收进 JSON）。
 --
 -- 第 27 轮把诊断从 'sfErrors' 分出来之后**没接输出**，于是"分开"变成了静默
 -- 丢弃：一条本来会打印的说明反而消失了（codex 二十八轮 #7）。它不计入
 -- "未入计划 N 个"，那正是分开的目的。提议形态的同一件事由
--- 'renderSortSurvey' 做。
-withSource :: FilePath -> a -> (FilePath -> SourceFiles -> IO a) -> IO a
-withSource src onMissing k = withSourceQ src onMissing $ \absSrc sf -> do
-  mapM_ (\n -> putStrLn ("· " <> n)) (sfNotes sf)
-  k absSrc sf
+-- 'renderSortSurvey' 做。「源目录不存在」这一行以前打在 'withSourceQ' 里
+-- （第一方自审工作流 F053）：与它自己的「静默」契约相反，survey 形态打两遍，
+-- serve 的 survey 端点也往被静音的 stdout 灌——现在只有这一处会打印。
+withSource :: (String -> IO ()) -> FilePath -> a -> (FilePath -> SourceFiles -> IO a) -> IO a
+withSource sink src onMissing k = do
+  absSrc <- makeAbsolute src
+  ok <- doesDirectoryExist absSrc
+  if not ok
+    then sink ("源目录不存在: " <> absSrc) >> pure onMissing
+    else withSourceQ src onMissing $ \a sf -> do
+      mapM_ (\n -> sink ("· " <> n)) (sfNotes sf)
+      k a sf
 
+-- | 遍历错误里**真正的**失败（第一方自审工作流 F054）：源里有一棵子树没枚举
+-- 出来，「✓ 没有需要归位的新照片」/退出码 0 就是在替一个没看过的目录担保。
+-- 'Pm.Scan.reparseSkipNote' 是设计内跳过，不是失败，排除后再判。
+hardErrors :: [(FilePath, String)] -> [(FilePath, String)]
+hardErrors = filter ((/= reparseSkipNote) . snd)
+
+-- | 把 'hardErrors' 折进退出码：只把「一切正常」的 0 抬成 1，拒绝（2）与
+-- 「计划已存」（1）原样保留，并说明为什么。
+foldHardErrors :: (String -> IO ()) -> [(FilePath, String)] -> Int -> IO Int
+foldHardErrors sink errs code
+  | code == 0 && not (null hard) = do
+      sink (printf "⚠ 源里有 %d 处未能枚举（见上「遍历时出错」）——不当作整卡都看过了，退出码 1" (length hard))
+      pure 1
+  | otherwise = pure code
+ where
+  hard = hardErrors errs

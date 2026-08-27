@@ -22,6 +22,7 @@
 module Pm.Publish
   ( publishCommands
   , vaultCommands
+  , inboxDoneCommand
   , CmdPath
   , cmdPath
   , renderCmdPath
@@ -33,6 +34,7 @@ module Pm.Publish
 import Data.Char (isAlphaNum, isAscii, isAsciiLower, isAsciiUpper, isControl, toLower)
 import Data.Either (isRight)
 import Data.List (dropWhileEnd, isPrefixOf)
+import System.FilePath (takeDirectory, (</>))
 
 import Pm.Config (Config (..))
 import Pm.VaultCore (fixedCategories)
@@ -147,6 +149,18 @@ vaultCommands c dir cats msg = do
   pure [gitC d ("add -- " <> unwords cs), gitC d ("commit -m " <> q m), gitC d (push t)]
  where
   msgOk ch = ch `notElem` ("\"\\$`!%" :: String) && not (isControl ch)
+
+-- | ingest 收尾的 @_inbox → _done@ 搬移命令（'Pm.Ingest.ingestSteps'），第一方
+-- 自审工作流 F072：源路径来自命令行/相机卡文件名，同样是「整块粘进终端」的
+-- 文本，此前却裸拼——@IMG_$(whoami).jpg@ 是合法 NTFS 名，bash 双引号内照样
+-- 展开；且目标以 @\\"@ 收尾（反斜杠转义了闭合引号，bash 直接报 EOF）。与
+-- git 步骤同一纪律：解析-重渲染（@/@ 分隔、操作数前 @--@），嵌不进即 Left。
+-- 目标是源所在目录下的 @_done/@（尾随 @/@ 明示目录）。
+inboxDoneCommand :: FilePath -> Either String String
+inboxDoneCommand f = do
+  src <- checkPath "_inbox 源文件" f
+  dst <- checkPath "_done 目标目录" (takeDirectory f </> "_done")
+  pure ("mv -- " <> q (renderCmdPath src) <> " " <> q (renderCmdPath dst <> "/"))
 
 -- | 生成两仓上线命令（纯函数；@GET \/api\/publish-commands@ 原样返回）。
 -- 配置了哪侧就出哪侧；两侧都没配 → Left 指路设置页；任一项复验不过 →

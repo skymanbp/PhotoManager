@@ -17,7 +17,7 @@ module Pm.Op
   , winNameOk
   , userRelOk
   , isTrashSrcRel
-  , opRelPaths
+  , trashSrcRel
   , opPathsOk
   , describeOp
   ) where
@@ -28,7 +28,9 @@ import Data.Char (isControl, isDigit, toLower)
 import Data.List (dropWhileEnd)
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.FilePath (isAbsolute, isPathSeparator, splitDirectories)
+import System.FilePath (isAbsolute, isPathSeparator, splitDirectories, (</>))
+
+import Pm.Config (pmSubTrash)
 
 data Fingerprint
   = FpFileSha Text
@@ -191,8 +193,9 @@ winNameOk n = not (null n) && all ok n && normComp n == map toLower n
 -- 相对、不含 @:@、不以分隔符开头、且**规范化后**每个分量都非空的路径
 -- （P3b-10：规范化后为空即 @.@ \/ @..@ \/ @...@ \/ 纯空格之类的等价名）。
 --
--- 词法校验挡不住 junction\/symlink 别名——那一层由 'Pm.Win.pathUnder' 在真正
--- 动盘处（尤其 @pm trash empty@ 的唯一 unlink）做 canonical 限域。
+-- 词法校验挡不住 junction\/symlink 别名——那一层由 'Pm.Win.resolveUnder' 的
+-- 逐级下降在真正动盘处（尤其 @pm trash empty@ 的唯一 unlink）做限域
+-- （P3b-11 起 'Pm.Win.pathUnder' 不再守动盘口，见其文档）。
 relPathOk :: FilePath -> Bool
 relPathOk p =
   not (null p)
@@ -200,14 +203,6 @@ relPathOk p =
     && notElem ':' p
     && not (any isPathSeparator (take 1 p))
     && all (not . null . normComp) (splitDirectories p)
-
--- | Op 的相对路径字段（OpCopy 的 src 是绝对路径，允许指向其他 root，不在
--- 其列——它只被读取，落位目标是 dstRel；其来源 catalog 由
--- 'Pm.Catalog.loadCatalog' 校验）。
-opRelPaths :: Op -> [FilePath]
-opRelPaths OpCopy {opDstRel = d} = [d]
-opRelPaths (OpRename o n _) = [o, n]
-opRelPaths (OpQuarantine v _ _) = [v]
 
 -- | **用户数据**相对路径：词法合法（'relPathOk'）且首级不是 @.pm@（比对走
 -- 'normComp'，@.PM@ \/ @.pm.@ 一并拒绝）。Op 的落位目标与 catalog 条目路径
@@ -221,7 +216,14 @@ userRelOk p = relPathOk p && map normComp (take 1 (splitDirectories p)) /= [".pm
 -- 原位。单一真源：'opPathsOk' 的例外判定与 'Pm.Exec' 的限域分流都用它，
 -- 免得两处对"什么算 trash 源"给出不同答案。
 isTrashSrcRel :: FilePath -> Bool
-isTrashSrcRel p = relPathOk p && map normComp (take 2 (splitDirectories p)) == [".pm", "trash"]
+isTrashSrcRel p = relPathOk p && map normComp (take 2 (splitDirectories p)) == map normComp [".pm", pmSubTrash]
+
+-- | 同一判定的**拼装侧**：undo\/组复位 rename 源的唯一拼法。谓词与拼法同源
+-- （工作流 F002\/F023：此前 'Pm.Exec' 写字面 @"trash"@、'Pm.Undo' 写
+-- 'Pm.Config.pmSubTrash'、上面的谓词又硬编码两个字面量——三处一旦有一处
+-- 改名，'opPathsOk' 放行的路径与实际 rename 的源就不再是同一条）。
+trashSrcRel :: FilePath -> FilePath
+trashSrcRel rel = ".pm" </> pmSubTrash </> rel
 
 -- | Op 全部相对路径合法，且不指向 @.pm@ 内部——唯一例外是 undo\/复位 rename
 -- 的源（'isTrashSrcRel'）；其余任何 @.pm@ 前缀（如 rename

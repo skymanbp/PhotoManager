@@ -26,7 +26,7 @@ import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Catalog (catalogPath, loadCatalog, saveCatalog)
+import Pm.Catalog (catalogMaybe, catalogPath, loadCatalog, saveCatalog)
 import Pm.Commands (TrashCmd (..), initPreflight, runTrash)
 import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), createRootInfo, pmDir, readRootState, requirePmTrusted, writeRootInfo, writeSideCache)
 import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
@@ -35,7 +35,7 @@ import Pm.Hash (sha256File)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, readJournal, withJournal)
 import Pm.Op
 import Pm.Plan
-import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, manifestPath, readManifest, trashDir)
+import Pm.Trash (TrashRecord (..), TrashView (..), appendManifest, manifestMaybe, manifestPath, readManifest, trashDir, trashView)
 import Pm.Types (Catalog (..), Entry (..), RootInfo (..), RootRole (..))
 import Pm.Undo (buildUndoPlan)
 import Pm.Win (openExclusiveBinary, pathAtOrUnder, pathUnder, resolveUnder, whenPresent)
@@ -52,7 +52,7 @@ pathGuardTests =
     , testCase "P3b-10 trash 内 junction：不递归 + 删除/搬运前 canonical 限域 → 库外文件存活" caseTrashJunctionConfinement
     , testCase "P3b-10 手编 catalog 越界 enPath → 快照拒绝载入（backup/import 拿不到非法 src）" caseCatalogPathValidation
     , testCase "P3b-10 undo：journal 非法 Op/trashRel → 拒绝生成撤销计划" caseUndoRejectsBadPaths
-    , testCase "P3b-11 .pm/trash 自身是 junction（基准被劫持）→ 遍历列空、trash empty HELD、execPlan 拒绝" caseTrashBaseJunction
+    , testCase "P3b-11 .pm/trash 自身是 junction（基准被劫持）→ 视图拒绝、trash empty HELD、execPlan 拒绝" caseTrashBaseJunction
     , testCase "P3b-11 root/alias → .pm 的目录别名 → 逐级下降拒绝，root-id.json 搬不走" casePmAliasDir
     , testCase "P3b-11 预置 hardlink 占用确定性 tmp 名 → 独占创建拒绝，库外内容不被覆盖" caseTmpHardlinkClobber
     , testCase "P3b-11 .pm/tmp/<plan> 是 junction → doctor --repair 不删库外文件" caseDoctorTmpJunction
@@ -278,14 +278,14 @@ caseCatalogPathValidation = withSystemTempDirectory "pm-guard" $ \dir -> do
   let good = dir </> "good"
   createDirectoryIfMissing True good
   saveCatalog good (mkCat [mkE ("成片" </> "ok.jpg") "aa"])
-  (g, w0) <- loadCatalog good
+  (g, w0) <- catalogMaybe <$> loadCatalog good
   assertBool "正常快照应载入" (maybe False (const True) g)
   w0 @?= []
   -- 单代 root（无 .1）：坏 base 直接判非法
   let bad = dir </> "bad"
   createDirectoryIfMissing True bad
   saveCatalog bad (mkCat [mkE ("成片" </> "ok.jpg") "aa", mkE (".." </> ".." </> "evil.jpg") "bb"])
-  (b, ws) <- loadCatalog bad
+  (b, ws) <- catalogMaybe <$> loadCatalog bad
   b @?= Nothing
   assertBool ("应报路径非法: " <> show ws) (any ("条目路径非法" `isInfixOf`) ws)
   -- P3b-11：enPath 校验从 relPathOk 收紧到 userRelOk——".pm\journal.ndjson"
@@ -293,7 +293,7 @@ caseCatalogPathValidation = withSystemTempDirectory "pm-guard" $ \dir -> do
   let inpm = dir </> "inpm"
   createDirectoryIfMissing True inpm
   saveCatalog inpm (mkCat [mkE (".pm" </> "journal.ndjson") "cc"])
-  (p, wp) <- loadCatalog inpm
+  (p, wp) <- catalogMaybe <$> loadCatalog inpm
   p @?= Nothing
   assertBool ("指向 .pm 的条目应拒绝: " <> show wp) (any ("条目路径非法" `isInfixOf`) wp)
 
@@ -308,7 +308,7 @@ caseCatalogGenerationSemantics = withSystemTempDirectory "pm-guard" $ \dir -> do
   saveCatalog torn (mkCat [mkE ("成片" </> "gen2.jpg") "bb"])
   doesFileExist (catalogPath torn <> ".1") >>= (@?= True) -- 确有上一代可退
   writeFile (catalogPath torn) "{ this is not json"
-  (t, tw) <- loadCatalog torn
+  (t, tw) <- catalogMaybe <$> loadCatalog torn
   case t of
     Nothing -> assertFailure ("半写 base 应回退到 .1: " <> show tw)
     Just c -> assertBool "回退到的应是上一代内容" (any (("gen1.jpg" `isInfixOf`) . enPath) (Map.elems (catEntries c)))
@@ -319,7 +319,7 @@ caseCatalogGenerationSemantics = withSystemTempDirectory "pm-guard" $ \dir -> do
   saveCatalog tam (mkCat [mkE ("成片" </> "gen1.jpg") "aa"])
   saveCatalog tam (mkCat [mkE (".." </> ".." </> "evil.jpg") "bb"])
   doesFileExist (catalogPath tam <> ".1") >>= (@?= True) -- 合法的上一代就在那里
-  (m, mw) <- loadCatalog tam
+  (m, mw) <- catalogMaybe <$> loadCatalog tam
   m @?= Nothing -- 但绝不回退过去
   assertBool ("应报路径非法: " <> show mw) (any ("条目路径非法" `isInfixOf`) mw)
 
@@ -372,9 +372,10 @@ caseTrashBaseJunction = withSystemTempDirectory "pm-guard" $ \dir -> do
   resolveUnder root (".pm" </> "trash" </> "v.jpg") >>= (@?= Nothing)
   -- ① .pm 家族可信性闸：所有 .pm 写入口的共同前提
   requirePmTrusted root >>= either (\m -> assertBool m ("不是 root 下的真实目录" `isInfixOf` m)) (const (assertFailure "requirePmTrusted 应拒绝 junction 基准"))
-  -- ② 遍历侧：库外内容不得被列成"隔离文件"
-  tv <- trashViewOK root
-  tvUnregistered tv @?= []
+  -- ② 读侧：被劫持的基准不是「隔离区为空」——manifest 整文件读不出 = 视图
+  --   整体拒绝（工作流 F079：此前列空 + 一条"损坏行"，trash list 报空 exit 0）
+  etv <- trashView root
+  either (\m -> assertBool m ("不是 root 下的真实目录" `isInfixOf` m)) (const (assertFailure "trashView 应拒绝被劫持的 .pm/trash 基准")) etv
   -- ③ 唯一 unlink：被劫持基准 → HELD，库外文件存活。
   -- P3b-14：appendManifest 自身现在就拒绝（完整路径 resolveUnder 在 trash
   -- 这一级看到 junction）——旧用例把"穿过 junction 写出 manifest"当 setup
@@ -688,13 +689,13 @@ caseLoaderLevelGate = withSystemTempDirectory "pm-guard" $ \dir -> do
   -- 库外放一份"看起来很正常"的 catalog 与 journal
   writeFile (outside </> "journal.ndjson") ""
   mkJunction (pmDir root) outside
-  (mc, cw) <- loadCatalog root
+  (mc, cw) <- catalogMaybe <$> loadCatalog root
   mc @?= Nothing
   assertBool ("loadCatalog 应报不可信: " <> show cw) (any ("不是 root 下的真实目录项" `isInfixOf`) cw)
   (js, jw) <- readJournal root
   js @?= []
   assertBool ("readJournal 应报不可信: " <> show jw) (any ("不是 root 下的真实目录项" `isInfixOf`) jw)
-  (ms, mw) <- readManifest root
+  (ms, mw) <- manifestMaybe <$> readManifest root
   ms @?= []
   assertBool ("readManifest 应报不可信: " <> show mw) (any ("不是 root 下的真实目录项" `isInfixOf`) mw)
   lp <- loadPlan root tpid

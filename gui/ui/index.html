@@ -81,7 +81,9 @@
         <h1>分类推送 <span class="muted small">相册里还没进 vault 的照片（NEW）——也可以决定「暂不同步」</span></h1>
         <div class="actions">
           <span id="assign-progress" class="muted">…</span>
-          <button id="btn-plan" class="btn primary" disabled>保存决定</button>
+          <!-- 按钮名与上手页、空网格提示、状态页「下一步」四处一字不差：
+               这个按钮两件事一起做（落「暂不同步」决定 + 出推送计划）。 -->
+          <button id="btn-plan" class="btn primary" disabled>保存决定并生成推送计划</button>
         </div>
       </header>
       <div id="plan-result" class="banner hidden"></div>
@@ -155,7 +157,7 @@
       <header class="page-head"><h1>三步上手</h1></header>
       <ol class="howto">
         <li><b>看状态</b>：左侧「状态」一眼看清三件事——Raw / 成片 / 相册各多少、相册与 vault 差哪些、备份盘上次什么时候同步。</li>
-        <li><b>分类推送</b>：「分类推送」里给每张 NEW 照片选 landscape / portrait / urban，点「生成推送计划」。这一步只写计划文件，不碰照片。</li>
+        <li><b>分类推送</b>：「分类推送」里给每张 NEW 照片选 landscape / portrait / urban，点「保存决定并生成推送计划」。这一步只写计划文件，不碰照片。</li>
         <li><b>执行</b>：到「计划」页点「执行这个计划」（点两次确认），或在终端跑 <code>pm apply &lt;id&gt;</code>——同一套校验写入 + 日志，随时 <code>pm undo</code>。之后按提示做 git 提交，或用「状态」页的「复制上线命令」（pm 从不替你执行 git）。</li>
       </ol>
       <p class="muted">安全模型：GUI 是独立进程，从不直接触碰照片文件；一切经 <code>pm serve</code> 的本机 API。pm 没有删除与覆盖原语——唯一的移出机制是带清单的隔离区。</p>

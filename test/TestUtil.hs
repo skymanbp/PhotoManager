@@ -32,6 +32,7 @@ module TestUtil
   , captureStdout
   , trashViewOK
   , withDenyAll
+  , withDenyList
   ) where
 
 import Control.Exception (SomeException, bracket, bracket_, finally, throwIO, try)
@@ -48,7 +49,7 @@ import System.IO (IOMode (..), hClose, hFlush, hGetContents, hSetEncoding, openF
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty.HUnit
 
-import Pm.Cli (executePlanNow)
+import Pm.Cli (PlanRun (..), executePlanNowWith)
 import Pm.Config (Config (..), RootIdState (..), createRootInfo, readRootState, writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity, runDoctor)
 import Pm.Exec
@@ -71,6 +72,16 @@ withDenyAll p act = do
   user <- getEnv "USERNAME"
   let icacls args = () <$ readCreateProcess (shell ("icacls \"" <> p <> "\" " <> args <> " >nul")) ""
   bracket_ (icacls ("/deny \"" <> user <> "\":(F)")) (icacls ("/remove:d \"" <> user <> "\"")) act
+
+-- | 同 'withDenyAll'，但只拒**列目录**权限 (RD)：第一方自审工作流 F039/F040
+-- 实测——目录级拒 (RD) 让 GetFileAttributes 与 doesDirectoryExist 照常成功
+-- （probeName = NamePlain），FindFirstFile 却 ERROR_ACCESS_DENIED，即
+-- listDirectory 确定性抛出。这是「目录在、列不出」的确定性注入形态。
+withDenyList :: FilePath -> IO a -> IO a
+withDenyList p act = do
+  user <- getEnv "USERNAME"
+  let icacls args = () <$ readCreateProcess (shell ("icacls \"" <> p <> "\" " <> args <> " >nul")) ""
+  bracket_ (icacls ("/deny \"" <> user <> "\":(RD)")) (icacls ("/remove:d \"" <> user <> "\"")) act
 
 -- | 'trashView' 三十五轮 Either 化（枚举 fail-closed）后的测试解包：正常
 -- fixture 里枚举失败即测试失败，各用例照旧拿 TrashView 断言。
@@ -266,5 +277,6 @@ mkMain :: FilePath -> IO ()
 mkMain root = writeRootInfo root (RootInfo "main-rid" RoleMain t0 Nothing)
 
 -- | 立即执行的 runPlan（测试用：跳过交互确认，仍走完整 Exec 内核）。
-execNow :: Config -> Plan -> IO Int
-execNow cfg p = savePlan p >> executePlanNow cfg p
+-- 返回 'PlanRun'：push 的收尾自工作流 F068 起按逐项结果判，不按退出码。
+execNow :: Config -> Plan -> IO PlanRun
+execNow cfg p = savePlan p >> uncurry PrRun <$> executePlanNowWith cfg putStrLn p

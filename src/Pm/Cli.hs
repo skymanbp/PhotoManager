@@ -8,12 +8,19 @@ module Pm.Cli
   ( GoOpts (..)
   , confirm
   , renderPlanBrief
+  , renderPlanBriefTo
   , executePlanNow
   , executePlanNowWith
   , PlanRun (..)
+  , planRunCode
+  , planIdOf
+  , fullyExecuted
+  , landedItems
   , savePlanAndMaybeRun
   , savePlanAndMaybeRun'
+  , savePlanAndMaybeRunTo
   , bindExecRoot
+  , bindExecRootWith
   , runBarrier
   , writeBackCatalog
   , recheckCleanPlan
@@ -22,12 +29,14 @@ module Pm.Cli
   , applyOnlyToPlan
   , parseOnly
   , stagingFresh
+  , mainFresh
   , withFreshStagingCatalog
   , freshStagingCatalog
   , reportScanIssues
   , refreshBackupCache
   ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.Char (toLower)
 import Data.Function (on)
@@ -42,10 +51,10 @@ import Text.Printf (printf)
 import Text.Read (readMaybe)
 
 import Pm.Backup
-import Pm.Catalog (loadCatalog, saveCatalog)
+import Pm.Catalog (CatalogLoad (..), catalogOr, loadCatalog, loadNote, saveCatalog)
 import Pm.Clean (threeCopiesStillExist)
 import Pm.Hash (ContentProbe (..), probeConfined)
-import Pm.Config (Config (..), SideCacheWrite (..), readRootInfo, requireMain, requireWritable)
+import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), readRootState, requireMain, requireWritable)
 import Pm.Dedupe (recheckDedupeItems)
 import Pm.Diff (BackupDiff (..))
 import Pm.Exec (ExecEnv (..), ItemOutcome (..), defaultExecEnv, execPlan, outcomeLabel, updateCatalog)
@@ -54,7 +63,7 @@ import Pm.Journal (Sync (..))
 import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
-import Pm.Scan (ScanResult (..), freshnessSweep)
+import Pm.Scan (ScanResult (..), freshPending, freshnessSweep)
 import Pm.Types
 import Pm.Win (volumeFsType)
 
@@ -71,19 +80,27 @@ confirm go
   | otherwise = do
       putStr "执行以上计划? [y/N] "
       hFlush stdout
-      l <- getLine
-      pure (map toLower l `elem` ["y", "yes"])
+      -- 第一方自审工作流 F020：stdin 关闭（EOF）或答案不可解码一律按「否」
+      -- ——同 'Pm.ServeGuard.waitStdinEof' 的 try 纪律。裸 getLine 让异常逃到
+      -- RTS：计划已存、字节未动，却在两段式确认口打出一串堆栈，且
+      -- 'Pm.Ingest' 对「答了 n」的次序提示（I7）永远打不出来。
+      r <- try getLine :: IO (Either IOException String)
+      pure (either (const False) (\l -> map toLower l `elem` ["y", "yes"]) r)
 
 -- | 大计划只展示头部，完整清单在计划文件里（pm apply --dry 可全量打印）。
 renderPlanBrief :: Plan -> IO ()
-renderPlanBrief plan = do
+renderPlanBrief = renderPlanBriefTo putStrLn
+
+-- | 同上，打印口由调用方给（工作流 F051 的 sink 纪律，见 'executePlanNowWith'）。
+renderPlanBriefTo :: (String -> IO ()) -> Plan -> IO ()
+renderPlanBriefTo sink plan = do
   let ls = renderPlan plan
       cap = 32
   if length ls <= cap + 1
-    then mapM_ putStrLn ls
+    then mapM_ sink ls
     else do
-      mapM_ putStrLn (take (cap + 1) ls)
-      printf "  …另有 %d 项（pm apply --dry %s 查看全量）\n" (length ls - cap - 1) (T.unpack (plId plan))
+      mapM_ sink (take (cap + 1) ls)
+      sink (printf "  …另有 %d 项（pm apply --dry %s 查看全量）" (length ls - cap - 1) (T.unpack (plId plan)))
 
 -- | 执行一个计划并回写其 root 的 catalog。备份计划的 Copy Done 走 Barrier
 -- （可移动介质，§9）；执行 root 的 UUID 在锁内复验（cx-1）。
@@ -120,7 +137,7 @@ executePlanNow' cfg sink plan = do
             -- 无条件装上（不再按 kind 挑）：内核先查 'Pm.Plan.kindBarrier'，
             -- 不需要屏障的计划根本不会调它；需要而没装（库层调用者用
             -- defaultExecEnv）仍整批拒绝。
-            eeBarrier = Just (runBarrier cfg)
+            eeBarrier = Just (runBarrier cfg sink)
           }
   r <- execPlan env plan
   case r of
@@ -147,9 +164,9 @@ executePlanNow' cfg sink plan = do
 --
 -- 返回**降级清单** @[(piIx, 原因)]@，新计划由内核构造（'Pm.Exec.applyDemotions'）
 -- ——屏障在类型上就写不出「升级/改写 Op/改写元数据」。
-runBarrier :: Config -> BarrierKind -> Plan -> IO [(Int, T.Text)]
-runBarrier cfg BarrierClean = recheckCleanPlan cfg
-runBarrier cfg BarrierDedupe = recheckDedupePlan cfg
+runBarrier :: Config -> (String -> IO ()) -> BarrierKind -> Plan -> IO [(Int, T.Text)]
+runBarrier cfg sink BarrierClean = recheckCleanPlan cfg sink
+runBarrier cfg sink BarrierDedupe = recheckDedupePlan cfg sink
 
 -- | 'savePlanAndMaybeRun' 的可判别结局（三十二轮 R4/R5 的根因修法）。此前
 -- 调用方只拿到一个 Int，而 1 同时表示「计划已存盘未执行（预览/用户答 n）」与
@@ -178,21 +195,54 @@ planRunCode (PrRefused _) = 2
 planRunCode PrSaved = 1
 planRunCode (PrRun c _) = c
 
+-- | 「计划 id 只在真出了计划时是 Just」（第一方自审工作流 F052）：'PrRefused'
+-- 在 savePlan **之前**返回，盘上没有文件——给出 id 就是指向一个不存在的计划
+-- （GUI 会照着它显示「pm apply <id>」）。存而未执（PrSaved）盘上有文件，id 照给。
+planIdOf :: PlanRun -> T.Text -> Maybe T.Text
+planIdOf (PrRefused _) _ = Nothing
+planIdOf _ pid = Just pid
+
+-- | 「真的全部落完」：每一项都是 DONE 或同内容 SKIP（三十二轮 R4 的判据本体，
+-- 工作流 F029/F068 自 Pm.Ingest 上提到这里——ingest 的 I7 次序闸与 push/apply
+-- 的收尾都要按**逐项结果**而不是退出码判断，定义只能有一份）。ONotExecuted
+-- （待裁决/用户 skip）不计入退出码，@c == 0@ 不等于它。
+fullyExecuted :: [(PlanItem, ItemOutcome)] -> Bool
+fullyExecuted rs = not (null rs) && all (landed . snd) rs
+
+-- | 真正落位的项（DONE / 同内容 SKIP）。收尾脚注（git 步骤）与 @git add@ 的
+-- 对象集合从这里出，不从计划面出：待裁决/未选中的项不会让 vault 多出一个
+-- 文件，却会让计划面的类目进 add 清单、让一次「零字节落位」的执行打出一份
+-- 可粘贴的 commit 配方（工作流 F029/F068）。比 'fullyExecuted' 弱：一个 NEW
+-- 落了、一个 DRIFT 待裁决的混合计划**需要**收尾。
+landedItems :: [(PlanItem, ItemOutcome)] -> [PlanItem]
+landedItems rs = [it | (it, out) <- rs, landed out]
+
+landed :: ItemOutcome -> Bool
+landed ODone {} = True
+landed OSkippedIdentical = True
+landed _ = False
+
 savePlanAndMaybeRun' :: Config -> GoOpts -> Plan -> IO PlanRun
-savePlanAndMaybeRun' cfg go plan = do
+savePlanAndMaybeRun' = savePlanAndMaybeRunTo putStrLn
+
+-- | 同上，打印口由调用方给（工作流 F051/F078：`pm ui` 下 serve 的 stdout 是
+-- 空设备，端点把这些行收进 JSON 响应体；CLI 传 putStrLn，逐字不变）。交互
+-- 确认 'confirm' 仍走真实终端——serve 传 @GoOpts False False@，走不到它。
+savePlanAndMaybeRunTo :: (String -> IO ()) -> Config -> GoOpts -> Plan -> IO PlanRun
+savePlanAndMaybeRunTo sink cfg go plan = do
   -- P3b-7 复审新 major：savePlan 写 <root>/.pm/plans/，是 .pm 写入口——root
   -- 须有可解析身份且过 I11，否则不落盘。
   w <- requireWritable (plRootPath plan)
   case w of
-    Left m -> putStrLn ("计划未保存（root 不可写）: " <> m) >> pure (PrRefused m)
+    Left m -> sink ("计划未保存（root 不可写）: " <> m) >> pure (PrRefused m)
     Right _ -> do
       fp <- savePlan plan
-      renderPlanBrief plan
-      putStrLn ("计划已存 " <> fp)
-      putStrLn ("执行: pm apply " <> T.unpack (plId plan))
+      renderPlanBriefTo sink plan
+      sink ("计划已存 " <> fp)
+      sink ("执行: pm apply " <> T.unpack (plId plan))
       ok <- confirm go
       if ok
-        then uncurry PrRun <$> executePlanNowWith cfg putStrLn plan
+        then uncurry PrRun <$> executePlanNowWith cfg sink plan
         else pure PrSaved
 
 -- | 执行后的 catalog 回写是一次「读 → 并 → 写」——execPlan 已释放锁，两次
@@ -202,10 +252,12 @@ savePlanAndMaybeRun' cfg go plan = do
 writeBackCatalog :: (String -> IO ()) -> FilePath -> [(PlanItem, ItemOutcome)] -> IO ()
 writeBackCatalog sink root results = do
   m <- withRootLock root $ do
-    (mcat, _) <- loadCatalog root
-    case mcat of
-      Nothing -> sink "（root 尚无索引，跳过 catalog 回写；之后 pm scan 会补齐）"
-      Just cat -> do
+    lc <- loadCatalog root
+    case lc of
+      CatAbsent -> sink "（root 尚无索引，跳过 catalog 回写；之后 pm scan 会补齐）"
+      -- 工作流 F021：被拒的快照不是「尚无索引」——root 有索引，是 pm 拒绝了它
+      CatRefused ws -> sink ("⚠ 快照未能载入（" <> intercalate "；" ws <> "），catalog 回写跳过——先 pm scan 重建")
+      CatLoaded cat _ -> do
         now <- getCurrentTime
         saveCatalog root (updateCatalog now results cat)
   case m of
@@ -221,34 +273,53 @@ writeBackCatalog sink root results = do
 -- 命中且 role 与槽位相符；必须**恰好一个**命中——多命中（同一标识被整盘
 -- 复制\/恢复到第二个 root）是身份危机，拒绝执行而不是按优先级猜。
 bindExecRoot :: Config -> Plan -> T.Text -> IO (Either String Plan)
-bindExecRoot cfg plan rid = do
+bindExecRoot = bindExecRootWith putStrLn
+
+-- | 同上，重绑定提示走调用方给的打印口（工作流 F022 同族：serve 端点收进 log）。
+bindExecRootWith :: (String -> IO ()) -> Config -> Plan -> T.Text -> IO (Either String Plan)
+bindExecRootWith sink cfg plan rid = do
   let mroot = cfgMainPath cfg
-  mMain <- fmap ((,) mroot) <$> readRootInfo mroot
-  mVault <- case cfgVaultPath cfg of
-    Nothing -> pure Nothing
-    Just vp -> fmap ((,) vp) <$> readRootInfo vp
+  -- 第一方自审工作流 F018：每个槽位读**四态**（'readRootState'），不经
+  -- 'readRootInfo' 的 Maybe——那会把「身份读不出/损坏/缺席」都塌成「不命中」，
+  -- 零候选时报文「均不符」宣称一次从未发生的 UUID 比对。非 Present 的槽位
+  -- 保留原因，零候选时如实列出；拒绝与退出码不变（动作本就 fail-closed）。
+  stMain <- readRootState mroot
+  stVault <- traverse readRootState (cfgVaultPath cfg)
   -- P3b-5 复审 #6：备份槽取**全部**命中（整盘克隆的两块盘都进候选集）；
   -- 候选去重按 canonicalizePath 的真实文件系统身份（解析 junction/大小写），
   -- 不再无条件字符串小写化。
   eBack <- discoverBackupRoots cfg
-  backHits <- case eBack of
+  backSts <- case eBack of
     Left _ -> pure []
-    Right (_, ps) -> forM ps $ \bp -> fmap ((,) bp) <$> readRootInfo bp
-  let hit role m = [p | Just (p, i) <- [m], riId i == rid, riRole i == role]
-      cands0 =
-        [(p, "主库" :: String) | p <- hit RoleMain mMain]
-          <> [(p, "vault") | p <- hit RoleVault mVault]
-          <> [(p, "备份盘") | m <- backHits, p <- hit RoleBackup m]
+    Right (_, ps) -> forM ps $ \bp -> (,) bp <$> readRootState bp
+  let slots =
+        [(mroot, "主库" :: String, RoleMain, stMain)]
+          <> [(vp, "vault", RoleVault, st) | (Just vp, Just st) <- [(cfgVaultPath cfg, stVault)]]
+          <> [(bp, "备份盘", RoleBackup, st) | (bp, st) <- backSts]
+      cands0 = [(p, l) | (p, l, role, RootPresent i) <- slots, riId i == rid, riRole i == role]
+      unreadable = [l <> " " <> p <> " 身份" <> why st | (p, l, _, st) <- slots, not (isPresent st)]
+      isPresent RootPresent {} = True
+      isPresent _ = False
+      why RootAbsent = "缺席（尚未 init）"
+      why (RootCorrupt m) = "损坏: " <> m
+      why (RootUntrusted m) = "读不出: " <> m
+      why RootPresent {} = ""
   canon <- forM cands0 $ \(p, l) -> (\c -> (c, (p, l))) <$> canonicalizePath p
   let uniq = map snd (nubBy ((==) `on` fst) canon)
   case uniq of
     [(p, label)] -> do
       when (p /= plRootPath plan) $
-        putStrLn ("· " <> label <> " root 按 UUID 重新绑定: " <> plRootPath plan <> " → " <> p)
+        sink ("· " <> label <> " root 按 UUID 重新绑定: " <> plRootPath plan <> " → " <> p)
       pure (Right plan {plRootPath = p})
     [] ->
       pure . Left $
-        "计划 rootId 与主库、vault、备份盘均不符（" <> T.unpack rid <> "），拒绝执行"
+        ( if null unreadable
+            then "计划 rootId 与主库、vault、备份盘均不符（" <> T.unpack rid <> "），拒绝执行"
+            else
+              "计划 rootId 与可读身份的 root 均不符（" <> T.unpack rid <> "）；"
+                <> intercalate "；" unreadable
+                <> "，拒绝执行"
+        )
           <> either (\m -> "；备份盘发现: " <> m) (const "") eBack
     many ->
       pure . Left $
@@ -260,27 +331,28 @@ bindExecRoot cfg plan rid = do
 -- 见证 + 真实重 hash），不过的降级 NEEDS-DECISION——计划生成与执行之间的
 -- 世界会变。P2.2 起没有豁免路径：`pm apply` 与 `pm clean staging --apply`
 -- 即时执行都走这里（旁路封堵）。
-recheckCleanPlan :: Config -> Plan -> IO [(Int, T.Text)]
-recheckCleanPlan cfg plan = do
+recheckCleanPlan :: Config -> (String -> IO ()) -> Plan -> IO [(Int, T.Text)]
+recheckCleanPlan cfg sink plan = do
   let mroot = cfgMainPath cfg
   -- P3b-7 复审 B1：主库见证必须来自 RoleMain root——配置主路径若与备份 root
   -- 是同一块 RoleBackup 盘，同一文件会被当成「归档副本 + 备份副本」两份见证。
   emain <- requireMain cfg
-  (mMain, _) <- loadCatalog mroot
+  lm <- loadCatalog mroot
   er <- discoverBackupRoot cfg
-  case (emain, mMain, er) of
-    (Left m, _, _) -> demoteAllPending "复验三副本" plan ("主库身份不符: " <> m)
-    (_, Just mainCat, Right broot) -> do
-      (mBak, _) <- loadCatalog broot
-      case mBak of
-        Nothing -> demoteAllPending "复验三副本" plan "备份盘无索引 → 先 pm backup"
-        Just bakCat -> recheckCleanItems mroot mainCat broot bakCat plan
-    (_, Nothing, _) -> demoteAllPending "复验三副本" plan "主库无索引"
-    (_, _, Left msg) -> demoteAllPending "复验三副本" plan ("备份盘不在线: " <> msg)
+  case (emain, lm, er) of
+    (Left m, _, _) -> demoteAllPending sink "复验三副本" plan ("主库身份不符: " <> m)
+    (_, CatLoaded mainCat _, Right broot) -> do
+      lb <- loadCatalog broot
+      case lb of
+        CatLoaded bakCat _ -> recheckCleanItems sink mroot mainCat broot bakCat plan
+        other -> demoteAllPending sink "复验三副本" plan ("备份盘" <> loadNote other <> " → 先 pm backup")
+    (_, CatLoaded _ _, Left msg) -> demoteAllPending sink "复验三副本" plan ("备份盘不在线: " <> msg)
+    -- 缺席与读不出都降级，但理由各说各的（工作流 A 簇：查不出 ≠ 不存在）
+    (_, other, _) -> demoteAllPending sink "复验三副本" plan ("主库" <> loadNote other)
 
 -- | 可测核心：给定已解析的两侧 root+catalog，逐项重验，返回**降级清单**。
-recheckCleanItems :: FilePath -> Catalog -> FilePath -> Catalog -> Plan -> IO [(Int, T.Text)]
-recheckCleanItems mroot mainCat broot bakCat plan = do
+recheckCleanItems :: (String -> IO ()) -> FilePath -> Catalog -> FilePath -> Catalog -> Plan -> IO [(Int, T.Text)]
+recheckCleanItems sink mroot mainCat broot bakCat plan = do
   dems <- forM (plItems plan) $ \it -> case (piStatus it, piOp it) of
     (StPending, OpQuarantine v sha _) -> do
       -- 将被移走的就是 victim 本身：见证与它同身份不算另一份副本
@@ -293,7 +365,7 @@ recheckCleanItems mroot mainCat broot bakCat plan = do
       if ok
         then pure []
         else do
-          putStrLn ("  ⚠ 执行期三副本复验不过，该项暂停: " <> v)
+          sink ("  ⚠ 执行期三副本复验不过，该项暂停: " <> v)
           pure [(piIx it, "执行期三副本复验不过 → pm scan / pm backup 后重新生成清理计划")]
     _ -> pure []
   pure (concat dems)
@@ -301,9 +373,9 @@ recheckCleanItems mroot mainCat broot bakCat plan = do
 -- | 复验**条件本身**不可得（主库身份不符、无索引、备份盘不在线…）时，降级
 -- 全部待执行项。fail-closed：拿不到证据就不执行，而不是按生成时的判断继续。
 -- clean 与 dedupe 共用——两者对"证据取不到"的处置必须一致。
-demoteAllPending :: String -> Plan -> String -> IO [(Int, T.Text)]
-demoteAllPending what plan why = do
-  putStrLn ("⚠ 无法" <> what <> "（" <> why <> "），全部待执行项暂停")
+demoteAllPending :: (String -> IO ()) -> String -> Plan -> String -> IO [(Int, T.Text)]
+demoteAllPending sink what plan why = do
+  sink ("⚠ 无法" <> what <> "（" <> why <> "），全部待执行项暂停")
   pure
     [ (piIx it, T.pack ("执行期无法" <> what <> ": " <> why))
     | it <- plItems plan
@@ -316,23 +388,23 @@ demoteAllPending what plan why = do
 -- 主库身份先验、**再**读 catalog（P3b-8 复审 B1 的次序纪律：任何主库侧读取
 -- 都在身份闸之后）。与 clean 不同，这里不需要备份盘——dedupe 的保证是"归档层
 -- 还留着一份"，与第三副本无关，所以一块没插的盘不该拖住它。
-recheckDedupePlan :: Config -> Plan -> IO [(Int, T.Text)]
-recheckDedupePlan cfg plan = do
+recheckDedupePlan :: Config -> (String -> IO ()) -> Plan -> IO [(Int, T.Text)]
+recheckDedupePlan cfg sink plan = do
   emain <- requireMain cfg
   case emain of
-    Left m -> demoteAllPending "复验归档层余量" plan ("主库身份不符: " <> m)
+    Left m -> demoteAllPending sink "复验归档层余量" plan ("主库身份不符: " <> m)
     Right _ -> do
-      (mcat, _) <- loadCatalog (cfgMainPath cfg)
-      case mcat of
-        Nothing -> demoteAllPending "复验归档层余量" plan "主库无索引"
-        Just cat -> recheckDedupeItems (cfgMainPath cfg) cat plan
+      lc <- loadCatalog (cfgMainPath cfg)
+      case lc of
+        CatLoaded cat _ -> recheckDedupeItems sink (cfgMainPath cfg) cat plan
+        other -> demoteAllPending sink "复验归档层余量" plan ("主库" <> loadNote other)
 
 -- | --only 选择展开为复合组闭包（评审 cx-2：supersede 配对不可拆）。
 -- Left = 语法错误；Right (plan', 因组闭包追加的序号)。
 applyOnlyToPlan :: Maybe String -> Plan -> Either String (Plan, [Int])
 applyOnlyToPlan Nothing plan = Right (plan, [])
-applyOnlyToPlan (Just spec) plan = case parseOnly spec of
-  Nothing -> Left ("--only 语法错误: " <> spec)
+applyOnlyToPlan (Just spec) plan = case parseOnly maxIx spec of
+  Nothing -> Left ("--only 语法错误或序号超出计划范围（0-" <> show maxIx <> "）: " <> spec)
   Just sel ->
     let closed = groupClosure plan sel
         added = [ix | ix <- closed, ix `notElem` sel]
@@ -344,17 +416,25 @@ applyOnlyToPlan (Just spec) plan = case parseOnly spec of
                 ]
             }
      in Right (plan', added)
-
--- "1,3-5" → [1,3,4,5]
-parseOnly :: String -> Maybe [Int]
-parseOnly spec = concat <$> mapM part (splitOn ',' spec)
  where
+  maxIx = maximum (0 : map piIx (plItems plan))
+
+-- "1,3-5" → [1,3,4,5]。第一方自审工作流 F019：端点先与计划的序号域比对
+-- （0..maxIx，同 'Pm.Exec.applyDemotions' 对不存在序号的整批拒绝），再展开
+-- ——此前 @--only 1-9000000000@ 立刻解析成功、交给下游一个 9e9 元素的惰性
+-- 列表，groupClosure 的 elem/nub 在任何盘面动作之前就把进程挂死（--dry 也挂）。
+parseOnly :: Int -> String -> Maybe [Int]
+parseOnly maxIx spec = concat <$> mapM part (splitOn ',' spec)
+ where
+  ok i = i >= 0 && i <= maxIx
   part s = case break (== '-') s of
     (a, '-' : b) -> do
       x <- readMaybe a
       y <- readMaybe b
-      if x <= y then Just [x .. y] else Nothing
-    (a, "") -> (: []) <$> readMaybe a
+      if x <= y && ok x && ok y then Just [x .. y] else Nothing
+    (a, "") -> do
+      i <- readMaybe a
+      if ok i then Just [i] else Nothing
     _ -> Nothing
   splitOn c = foldr step [[]]
    where
@@ -372,9 +452,9 @@ stagingFresh root cat = do
         Map.filterWithKey
           (\k _ -> take 1 (splitDirectories k) == [stagingTop])
           (catEntries cat)
-  (newN, changedN, goneN, errN) <- freshnessSweep root stagingTop catStaging
+  q@(newN, changedN, goneN, errN) <- freshnessSweep root stagingTop catStaging
   pure $
-    if newN + changedN + goneN + errN == 0
+    if freshPending q == 0
       then Right ()
       else
         Left
@@ -386,55 +466,63 @@ stagingFresh root cat = do
               errN
           )
 
+-- | 主库整体新鲜度守卫（工作流 F057）：@pm backup@ 的 diff 以主库快照为基准，
+-- 快照落后于盘面就是在替一个没看过的库担保「备份盘已与主库一致」。同一实现
+-- （'freshnessSweep' 的全库形态，pm status 也用它；stat 级，不 hash）。
+mainFresh :: FilePath -> Catalog -> IO (Either String ())
+mainFresh root cat = do
+  q@(newN, changedN, goneN, errN) <- freshnessSweep root "" (catEntries cat)
+  pure $
+    if freshPending q == 0
+      then Right ()
+      else Left (printf "主库与索引不一致（新增 %d / 变更 %d / 消失 %d / 读取错误 %d）→ 先 pm scan" newN changedN goneN errN)
+
 -- | 「先拿到一份**可信的**暂存区索引，再做任何目标位置判定」这道闸：
 -- 报告损坏快照 → 无索引则拒绝 → 索引与盘面不一致则拒绝。
 --
--- 只有一份定义，因为 @pm import@ / @pm clean staging@ / @pm sort@ 面对的是同
--- 一个暂存区，都要回答同一个问题：「目标位置上现在有没有东西、是不是同一份
--- 内容」。判据分成三份，迟早会一处收紧、别处留旧，对同一批文件给出不同结论。
+-- 只有一份定义（'freshStagingCatalog' 是判定本体，本函数只是"打印后退出码 2"
+-- 的包装——第一方自审工作流 F025 之前这里抄了第二份，三处文档还各指着不同
+-- 的名字），因为 @pm import@ / @pm clean staging@ / @pm sort@ 面对的是同一个
+-- 暂存区，都要回答同一个问题：「目标位置上现在有没有东西、是不是同一份
+-- 内容」。判据分成几份，迟早会一处收紧、别处留旧，对同一批文件给出不同结论。
 --
 -- 「无索引」必须是**拒绝**而不是"当作目标为空"：后者是默认覆盖的方向，
 -- 与 I5（不静默覆盖）恰好相反。
--- | 同上，但把失败**交回调用方**而不是自己打印后返回 2。
+withFreshStagingCatalog :: FilePath -> (Catalog -> IO Int) -> IO Int
+withFreshStagingCatalog root k =
+  freshStagingCatalog putStrLn root >>= either (\m -> putStrLn m >> pure 2) k
+
+-- | 判定本体：同上，但把失败**交回调用方**而不是自己打印后返回 2，且损坏
+-- 快照的告警走调用方给的打印口。
 --
 -- @pm sort@ 需要这一层：它在这里失败时，已经选中的照片一个都不会被搬走，
 -- 而调用方必须把它们逐条列出来（codex 二十八轮 #4）。自己打印就等于替调用方
 -- 决定了"说这么多就够了"。
-freshStagingCatalog :: FilePath -> IO (Either String Catalog)
-freshStagingCatalog root = do
-  (mcat, warns) <- loadCatalog root
-  mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
-  case mcat of
-    Nothing -> pure (Left "主库尚未索引 → 先 pm scan")
-    Just cat -> do
+freshStagingCatalog :: (String -> IO ()) -> FilePath -> IO (Either String Catalog)
+freshStagingCatalog sink root = do
+  lc <- loadCatalog root
+  case catalogOr "主库尚未索引 → 先 pm scan" lc of
+    Left m -> pure (Left m)
+    Right (cat, warns) -> do
+      mapM_ (\w -> sink ("⚠ 快照损坏已跳过: " <> w)) warns
       fr <- stagingFresh root cat
       pure (either Left (const (Right cat)) fr)
-
-withFreshStagingCatalog :: FilePath -> (Catalog -> IO Int) -> IO Int
-withFreshStagingCatalog root k = do
-  (mcat, warns) <- loadCatalog root
-  mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
-  case mcat of
-    Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
-    Just cat -> do
-      fr <- stagingFresh root cat
-      case fr of
-        Left msg -> putStrLn msg >> pure 2
-        Right () -> k cat
 
 reportScanIssues :: ScanResult -> IO ()
 reportScanIssues result = do
   unless (null (srVolatile result)) $ do
     printf "⚠ %d 个文件在 hash 期间被修改（本轮未入索引，重跑 pm scan）:\n" (length (srVolatile result))
     mapM_ (putStrLn . ("    ~ " <>)) (take 10 (srVolatile result))
+  when (srCarried result > 0) $
+    printf "⚠ %d 条落在本轮未能枚举的子树里，按「查不出」保留上次快照值（未核对；解除占用/权限后重跑 pm scan）\n" (srCarried result)
   unless (null (srErrors result)) $ do
     printf "⚠ %d 个条目有错误:\n" (length (srErrors result))
     mapM_ (\(p, e) -> putStrLn ("    ! " <> p <> ": " <> e)) (take 20 (srErrors result))
     when (length (srErrors result) > 20) $
       printf "    …另有 %d 条\n" (length (srErrors result) - 20)
 
-refreshBackupCache :: Config -> FilePath -> Catalog -> BackupDiff -> IO ()
-refreshBackupCache cfg broot bakCat d = do
+refreshBackupCache :: (String -> IO ()) -> Config -> FilePath -> Catalog -> BackupDiff -> IO ()
+refreshBackupCache sink cfg broot bakCat d = do
   now <- getCurrentTime
   fs <- case broot of
     (c : _) -> volumeFsType c
@@ -455,5 +543,5 @@ refreshBackupCache cfg broot bakCat d = do
       }
   case wc of
     CacheWritten -> pure ()
-    CacheLockBusy -> putStrLn "⚠ 备份缓存本轮未刷新（另一个 pm 正持有主库锁）——下一次命令会重建"
-    CacheRefused e -> putStrLn ("⚠ 备份缓存未写入: " <> e)
+    CacheLockBusy -> sink "⚠ 备份缓存本轮未刷新（另一个 pm 正持有主库锁）——下一次命令会重建"
+    CacheRefused e -> sink ("⚠ 备份缓存未写入: " <> e)

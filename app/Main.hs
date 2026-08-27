@@ -15,7 +15,7 @@ import Text.Read (readMaybe)
 
 import Pm.Cli (GoOpts (..), savePlanAndMaybeRun, savePlanAndMaybeRun')
 import Pm.Commands
-import Pm.ConfigEdit (ConfigPatch (..), runConfigSet, runConfigShow)
+import Pm.ConfigEdit (ConfigSetOpts (..), mkPatch, runConfigSet, runConfigShow)
 import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
 import Pm.Ingest (runVaultIngest)
 import Pm.Names (runNames)
@@ -46,7 +46,7 @@ data Cmd
   | CmdVaultHold Bool [FilePath] -- 暂不同步（True）/ 恢复（False）；只写主库 .pm
   | CmdVaultIngest GoOpts String [FilePath] -- --category + FILES；两份计划（主库 相册/ + vault <类目>/）
   | CmdConfigShow -- 打印配置与路径健康（只读）
-  | CmdConfigSet ConfigPatch -- 改 vault / photos.json / 并发数（主库路径只读）
+  | CmdConfigSet ConfigSetOpts -- 改 vault / photos.json / 并发数（主库路径只读）
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
   | CmdVersions -- 版本组/精确重复报告（只读）
   | CmdDedupe GoOpts -- 精确重复 → 逐份可裁决的隔离计划（全部 NEEDS-DECISION）
@@ -117,15 +117,19 @@ run (CmdBackup (BackupInit p)) = withCfg (runBackupInit p)
 run (CmdBackup (BackupRun go mworkers)) = withCfg (runBackupRun go mworkers)
 run (CmdClean go) = withCfg (runClean go)
 run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
+-- push 与 ingest 同：收尾按逐项结果判（'Pm.Cli.landedItems'），退出码由
+-- 'Pm.Cli.planRunCode' 换算（工作流 F068）。
 run (CmdVaultPush go mcat fs) =
-  withCfg (\cfg -> runVaultPush (savePlanAndMaybeRun cfg go) mcat fs cfg)
+  withCfg (\cfg -> runVaultPush (savePlanAndMaybeRun' cfg go) mcat fs cfg)
 run (CmdVaultHold hold fs) = withCfg (runVaultHold hold fs)
 -- ingest 走可判别的 'savePlanAndMaybeRun''：它要按「主库那份**真的全部落完**」
 -- 决定 vault 那份跑不跑，Int 退出码分不出这个（三十二轮 R4，见 Pm.Ingest）。
 run (CmdVaultIngest go cat fs) =
   withCfg (\cfg -> runVaultIngest (savePlanAndMaybeRun' cfg go) (goApply go) cat fs cfg)
 run CmdConfigShow = withCfg runConfigShow
-run (CmdConfigSet p) = withCfg (runConfigSet p)
+-- 工作流 F082：--X 与 --no-X 同给是矛盾，报错退出 2（与 --place/--event、
+-- --backup/--vault 同一纪律），不在解析器里替使用者猜一个
+run (CmdConfigSet o) = either (\m -> putStrLn m >> pure 2) (\p -> withCfg (runConfigSet p)) (mkPatch o)
 run (CmdNames go) = withCfg (\cfg -> runNames (savePlanAndMaybeRun cfg go) cfg)
 run CmdVersions = withCfg runVersions
 run (CmdDedupe go) = withCfg (runDedupe go)
@@ -179,22 +183,24 @@ parserInfo =
           <> command "ui" (info (pure CmdUi) (progDesc "拉起桌面 GUI（pm-ui.exe：PM_UI_EXE 或 pm.exe 同目录；GUI 自己启动并管理 pm serve）"))
       )
   -- 三态：不给 = 不动；--no-X = 清空；给值 = 设值。与 API 的 JSON 三态同构。
+  -- 解析器只收集原始 (值, 清空) 对；矛盾（两个都给）由 'Pm.ConfigEdit.mkPatch'
+  -- 拒绝（工作流 F082——旧写法在这里把矛盾静默折成清空）。
   patchP =
-    ConfigPatch
-      <$> triple "vault" "展示集（vault）目录"
-      <*> triple "photos-json" "portfolio 的 photos.json（只读引用检查）"
-      <*> ( (\mw clear -> if clear then Just Nothing else fmap Just mw)
+    ConfigSetOpts
+      <$> pair "vault" "展示集（vault）目录"
+      <*> pair "photos-json" "portfolio 的 photos.json（只读引用检查）"
+      <*> ( (,)
               <$> optional (option auto (long "workers" <> metavar "N" <> help "扫描并发数（1..64）；备份盘不读它，默认单线程防 HDD 寻道抖动，另用 pm backup --workers"))
               <*> switch (long "no-workers" <> help "清空并发数（回到默认=核数）")
           )
-      <*> triple "portfolio-dir" "portfolio 仓的本地路径（上线命令生成用）"
-      <*> triple "vault-push" "展示集仓的 push 目标（如 origin main；不设 = 裸 git push）"
-      <*> triple "portfolio-push" "portfolio 仓的 push 目标（同上）"
+      <*> pair "portfolio-dir" "portfolio 仓的本地路径（上线命令生成用）"
+      <*> pair "vault-push" "展示集仓的 push 目标（如 origin main；不设 = 裸 git push）"
+      <*> pair "portfolio-push" "portfolio 仓的 push 目标（同上）"
       -- 只为**拒绝**而存在（internal，不出现在帮助里）：与 JSON 的
       -- @"main": null@ 同构——出现即拒，不区分"设值"还是"清空"。
-      <*> (fmap Just <$> optional (strOption (long "main" <> metavar "PATH" <> internal)))
-  triple nm desc =
-    (\mv clear -> if clear then Just Nothing else fmap Just mv)
+      <*> optional (strOption (long "main" <> metavar "PATH" <> internal))
+  pair nm desc =
+    (,)
       <$> optional (strOption (long nm <> metavar "PATH" <> help ("设置" <> desc)))
       <*> switch (long ("no-" <> nm) <> help ("清空" <> desc))
   serveP =

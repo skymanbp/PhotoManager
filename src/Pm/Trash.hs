@@ -13,6 +13,7 @@ module Pm.Trash
   , quarTrashRel
   , appendManifest
   , readManifest
+  , manifestMaybe
   , listTrashFiles
   , TrashView (..)
   , trashView
@@ -117,23 +118,31 @@ appendManifest root r = do
     BSL.hPut h (encode r <> "\n")
     flushHandleToDisk h
 
-readManifest :: FilePath -> IO ([TrashRecord], [String])
+-- | Left = **整文件**读不出（可信闸拒 / 句柄拒读）；Right = 记录 + 逐行坏记录。
+-- 第一方自审工作流 F079/F038：两者此前同进一个 @[String]@，消费方要么把
+-- 坏行也算致命（doctor 报 Bad），要么把整文件失败也算坏行（trash list 打
+-- 「隔离区为空」exit 0）。整文件失败与枚举失败同级（'trashView' 的 Left）。
+readManifest :: FilePath -> IO (Either String ([TrashRecord], [String]))
 readManifest root = do
   -- 闸在 loader 里（P3b-13 十轮 major，同 loadCatalog / readJournal）
   tr <- requirePmTrusted root
   case tr of
-    Left m -> pure ([], [m])
+    Left m -> pure (Left m)
     Right () -> readManifest' root
 
-readManifest' :: FilePath -> IO ([TrashRecord], [String])
+-- | 折回旧的 @(记录, 告警)@ 形态（测试用）：整文件失败成为唯一一条告警。
+manifestMaybe :: Either String ([TrashRecord], [String]) -> ([TrashRecord], [String])
+manifestMaybe = either (\m -> ([], [m])) id
+
+readManifest' :: FilePath -> IO (Either String ([TrashRecord], [String]))
 readManifest' root = do
   -- 与 'appendManifest' 同口（P3b-14）：完整路径 resolveUnder + 句柄 link
   -- count。manifest 决定 @pm trash empty@ unlink 哪些文件，读到库外内容与写到
   -- 库外一样严重。
   rd <- readPmState root (pmSubTrash </> "manifest.ndjson")
   case rd of
-    Left m -> pure ([], [m])
-    Right Nothing -> pure ([], [])
+    Left m -> pure (Left m)
+    Right Nothing -> pure (Right ([], []))
     Right (Just raw) -> do
       -- P3b-8 六轮复审 major（同类统一修）：manifest 与 journal/plan 一样是可
       -- 手编输入，trTrashRel 会被拼到 .pm/trash 上且 **pm trash empty 按它
@@ -146,7 +155,7 @@ readManifest' root = do
               | otherwise -> Right r
             Left e -> Left ("manifest line " <> show i <> ": " <> e)
           results = zipWith step [1 ..] ls
-      pure ([r | Right r <- results], [w | Left w <- results])
+      pure (Right ([r | Right r <- results], [w | Left w <- results]))
 
 -- | Every regular file below .pm/trash/, relative to it (manifest excluded).
 --
@@ -160,8 +169,8 @@ readManifest' root = do
 -- P3b-11（八轮复审 major）：子级不跟随还不够——**基准自身**也要查。
 -- @.pm\/trash@ 本身若是指向库外的 junction，遍历会把库外目录整个列成"隔离
 -- 文件"。'requirePmTrusted' 在写入口已把这一形态挡在门外，这里是读侧的
--- 同一判定：不可信基准一律列空，让 doctor\/trash view 显示"隔离区为空"而不是
--- 库外内容。
+-- 同一判定：不可信基准一律列空。（工作流 F079 起这不再对用户显示成「隔离区
+-- 为空」：同一基准上 'readManifest' 先已整文件拒绝，'trashView' 整体 Left。）
 -- 三十五轮 F3：递归枚举包 try（Either 化）——trash 子目录被良性进程占住/
 -- 挪走时 listDirectory 抛出，doctor 与 pm trash 会当场崩掉。Left 由调用方
 -- fail-closed：doctor 报 TRASH-ENUM Bad，trash list/empty 拒绝执行（不删）。
@@ -210,11 +219,12 @@ data TrashView = TrashView
 -- 报「无可清除」，doctor 的 Q1 对账会漏报孤儿）。
 trashView :: FilePath -> IO (Either String TrashView)
 trashView root = do
-  (records, warns) <- readManifest root
+  em <- readManifest root
   efiles <- listTrashFiles root
-  pure $ case efiles of
-    Left e -> Left e
-    Right files ->
+  pure $ case (em, efiles) of
+    (Left e, _) -> Left ("manifest 读不出: " <> e)
+    (_, Left e) -> Left e
+    (Right (records, warns), Right files) ->
       let fileSet = Map.fromList [(f, ()) | f <- files]
           registered = [(r, Map.member (trTrashRel r) fileSet) | r <- records]
           known = Map.fromList [(trTrashRel r, ()) | r <- records]

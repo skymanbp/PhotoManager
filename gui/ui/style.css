@@ -124,11 +124,14 @@ pre.raw { white-space: pre-wrap; font-size: .78rem; max-height: 28rem; overflow:
 .sort-src input[type=text] { flex: 1 1 auto; }
 .sort-src input[type=number] { width: 72px; margin-left: 6px; }
 .segs { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
-.seg { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel); }
-.seg .seg-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.seg .seg-when { font-weight: 600; }
-.seg .seg-meta { color: var(--muted); font-size: 12px; }
-.seg .seg-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
-.seg .seg-row input { flex: 1 1 180px; min-width: 140px; }
-.seg .seg-merge { color: var(--muted); font-size: 12px; margin-top: 6px; }
-.seg .seg-merge b { color: var(--ink); }
+/* 这一页的"段"卡片叫 .sort-seg：类名此前与分类推送页的类目按钮行（上面
+   第 89/99 行的 .seg）撞在一起，卡片的 border/padding/background 会整块
+   糊到每张照片下面那排按钮上。两个组件，两个名字。 */
+.sort-seg { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel); }
+.sort-seg .seg-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.sort-seg .seg-when { font-weight: 600; }
+.sort-seg .seg-meta { color: var(--muted); font-size: 12px; }
+.sort-seg .seg-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.sort-seg .seg-row input { flex: 1 1 180px; min-width: 140px; }
+.sort-seg .seg-merge { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.sort-seg .seg-merge b { color: var(--ink); }

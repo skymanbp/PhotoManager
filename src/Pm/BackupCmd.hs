@@ -10,23 +10,25 @@ module Pm.BackupCmd
   , backupInitRun
   , BackupInitOutcome (..)
   , runBackupRun
+  , backupVerdict
   ) where
 
 import Control.Monad (forM_, unless, when)
 import Data.Char (isAlpha, toLower)
-import Data.List (isPrefixOf)
+import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (canonicalizePath, doesDirectoryExist, makeAbsolute)
-import System.FilePath (normalise, splitDirectories, splitDrive)
+import System.FilePath (normalise, splitDrive)
 import Text.Printf (printf)
 
 import Pm.Backup (discoverBackupRoot)
-import Pm.Catalog (loadCatalog, saveCatalog)
-import Pm.Cli (GoOpts (..), refreshBackupCache, reportScanIssues, savePlanAndMaybeRun)
+import Pm.Catalog (CatalogLoad (..), catalogMaybe, catalogOr, loadCatalog, loadNote, saveCatalog)
+import Pm.Cli (GoOpts (..), mainFresh, refreshBackupCache, reportScanIssues, savePlanAndMaybeRun)
 import Pm.Config
+import Pm.ConfigEdit (rootsNested)
 import Pm.Diff (BackupDiff (..), backupDiff, backupPlanItems)
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Plan
@@ -54,14 +56,18 @@ backupInitPreflight cfg path = do
   case splitDrive abs0 of
     (c : ':' : _, _) | isAlpha c -> do
       abs' <- canonicalizePath abs0
-      mainC <- canonicalizePath (cfgMainPath cfg)
-      let canonParts p = map (map toLower) (splitDirectories (normalise p))
-          nested a b = canonParts a `isPrefixOf` canonParts b
-      if nested mainC abs' || nested abs' mainC
-        then pure (Left ("备份路径与主库嵌套（" <> abs' <> " vs " <> mainC <> "），拒绝"))
-        else do
-          g <- pmIgnoreGuard RoleBackup abs'
-          pure (either Left (const (Right abs')) g)
+      -- 工作流 C101：嵌套判定共享 'Pm.ConfigEdit.rootsNested'（此前是私有
+      -- where，只守主库；备份对 vault 没人守——同根同修）
+      nMain <- rootsNested (cfgMainPath cfg) abs'
+      nVault <- maybe (pure False) (rootsNested abs') (cfgVaultPath cfg)
+      if nMain
+        then pure (Left ("备份路径与主库嵌套（" <> abs' <> " vs " <> cfgMainPath cfg <> "），拒绝"))
+        else
+          if nVault
+            then pure (Left ("备份路径与 vault 展示集嵌套（" <> abs' <> "），拒绝"))
+            else do
+              g <- pmIgnoreGuard RoleBackup abs'
+              pure (either Left (const (Right abs')) g)
     _ -> pure (Left ("备份路径须为盘符路径（如 E:\\Photography）：按 UUID 发现只枚举本机卷，UNC/网络路径登记后永远找不到——" <> abs0))
 
 -- | `pm backup init` 的**结果**（P4-8 拆分：`POST /api/backup-init` 要的是
@@ -172,59 +178,95 @@ runBackupRun' go mworkers cfg = do
       -- P3b-7 复审新 major：备份 root 也是 .pm 写入口（catalog/计划/trash），
       -- requireRole 内含 I11 守卫（备份盘被 git init 过也会被拒）。
       erole <- requireRole RoleBackup broot
-      (mMain, _) <- loadCatalog (cfgMainPath cfg)
-      case (erole, mMain) of
+      lm <- loadCatalog (cfgMainPath cfg)
+      case (erole, catalogOr "主库尚未索引 → 先 pm scan" lm) of
         (Left m, _) -> putStrLn ("备份 root 不可用: " <> m) >> pure 2
-        (_, Nothing) -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
+        -- 工作流 A 簇：缺席与读不出各说各的（此前 @(mMain, _)@ 一律「尚未索引」）
+        (_, Left m) -> putStrLn m >> pure 2
         -- P2.3（复审三轮新发现）：发现后重读到的身份必须仍等于**配置登记的**
         -- UUID——不采纳盘上任意 id（发现与使用之间路径/卷可能被换）。
         (Right info, _)
           | cfgBackupId cfg /= Just (riId info) ->
               putStrLn "备份 root 身份在发现后发生变化（与配置登记不符），拒绝" >> pure 2
-        (Right info, Just mainCat) -> do
+        (Right info, Right (mainCat, mwarns)) -> do
           putStrLn ("备份盘: " <> broot <> maybe "" (\t -> "（" <> T.unpack t <> "）") (riFsType info))
-          (oldBak, bwarns) <- loadCatalog broot
-          mapM_ (\w -> putStrLn ("⚠ 备份快照损坏已跳过: " <> w)) bwarns
-          let workers = fromMaybe 1 mworkers
-          result <- scanRoot ScanOpts {soWorkers = workers, soProgress = True} oldBak (riId info) broot
-          saveCatalog broot (srCatalog result)
-          reportScanIssues result
-          let bakCat = srCatalog result
-              d = backupDiff mainCat bakCat
-              addBytes = sum (map enSize (bdAdd d))
-          printf
-            "对比: 新增 %d (%.1f GiB) · 更新 %d · 一致 %d · EXTRA(备份盘多出，只读) %d\n"
-            (length (bdAdd d))
-            (fromIntegral addBytes / (1024 * 1024 * 1024 :: Double))
-            (length (bdUpdate d))
-            (bdSame d)
-            (length (bdExtra d))
-          forM_ (take 20 (bdExtra d)) $ \p -> putStrLn ("  EXTRA: " <> p)
-          when (length (bdExtra d) > 20) $
-            printf "  …另有 %d 项 EXTRA\n" (length (bdExtra d) - 20)
-          refreshBackupCache cfg broot bakCat d
-          let items = backupPlanItems (cfgMainPath cfg) d
-          if null items
-            then putStrLn "✓ 备份盘已与主库一致" >> pure 0
-            else do
-              unless (null (bdUpdate d)) $
-                putStrLn "⚠ 更新项 = supersede 复合组（不可拆）：备份盘旧字节先入其 .pm/trash，再落新字节；组内失败自动复位（§6.5）"
-              pid <- newPlanId
-              now <- getCurrentTime
-              code <-
-                savePlanAndMaybeRun
-                  cfg
-                  go
-                  Plan
-                    { plId = pid
-                    , plKind = "backup"
-                    , plRootPath = broot
-                    , plRootId = Just (riId info)
-                    , plCreated = now
-                    , plItems = items
-                    }
-              -- apply 之后备份 catalog 已被 executePlanNow 回写，缓存重算
-              when (goApply go) $ do
-                (mBak2, _) <- loadCatalog broot
-                forM_ mBak2 $ \bak2 -> refreshBackupCache cfg broot bak2 (backupDiff mainCat bak2)
-              pure code
+          -- 工作流 F056：主库侧的回退告警此前被 @_@ 丢掉——diff 基于较旧一代却打 ✓
+          mapM_ (\w -> putStrLn ("⚠ 主库快照损坏已跳过（本轮 diff 基于较旧的一代，可能漏备新文件）: " <> w)) mwarns
+          -- 工作流 F057：diff 的主库侧全来自快照，快照落后于盘面就先扫描——
+          -- 与 import/clean/sort 的暂存区闸同一纪律，此前唯独 backup 没有。
+          fr <- mainFresh (cfgMainPath cfg) mainCat
+          case fr of
+            Left m -> putStrLn m >> pure 2
+            Right () -> runBackupDiff go mworkers cfg broot info mainCat mwarns
+
+runBackupDiff :: GoOpts -> Maybe Int -> Config -> FilePath -> RootInfo -> Catalog -> [String] -> IO Int
+runBackupDiff go mworkers cfg broot info mainCat mwarns = do
+  (oldBak, bwarns) <- catalogMaybe <$> loadCatalog broot
+  mapM_ (\w -> putStrLn ("⚠ 备份快照损坏已跳过: " <> w)) bwarns
+  let workers = fromMaybe 1 mworkers
+  result <- scanRoot ScanOpts {soWorkers = workers, soProgress = True} oldBak (riId info) broot
+  saveCatalog broot (srCatalog result)
+  reportScanIssues result
+  let bakCat = srCatalog result
+      d = backupDiff mainCat bakCat
+      addBytes = sum (map enSize (bdAdd d))
+  printf
+    "对比: 新增 %d (%.1f GiB) · 更新 %d · 一致 %d · EXTRA(备份盘多出，只读) %d\n"
+    (length (bdAdd d))
+    (fromIntegral addBytes / (1024 * 1024 * 1024 :: Double))
+    (length (bdUpdate d))
+    (bdSame d)
+    (length (bdExtra d))
+  forM_ (take 20 (bdExtra d)) $ \p -> putStrLn ("  EXTRA: " <> p)
+  when (length (bdExtra d) > 20) $
+    printf "  …另有 %d 项 EXTRA\n" (length (bdExtra d) - 20)
+  refreshBackupCache putStrLn cfg broot bakCat d
+  let (verdictLines, floorCode) = backupVerdict mwarns result d
+      items = backupPlanItems (cfgMainPath cfg) d
+  mapM_ putStrLn verdictLines
+  if null items
+    then pure floorCode
+    else do
+      unless (null (bdUpdate d)) $
+        putStrLn "⚠ 更新项 = supersede 复合组（不可拆）：备份盘旧字节先入其 .pm/trash，再落新字节；组内失败自动复位（§6.5）"
+      pid <- newPlanId
+      now <- getCurrentTime
+      code <-
+        savePlanAndMaybeRun
+          cfg
+          go
+          Plan
+            { plId = pid
+            , plKind = "backup"
+            , plRootPath = broot
+            , plRootId = Just (riId info)
+            , plCreated = now
+            , plItems = items
+            }
+      -- apply 之后备份 catalog 已被 executePlanNow 回写，缓存重算
+      when (goApply go) $ do
+        lb2 <- loadCatalog broot
+        case lb2 of
+          CatLoaded bak2 _ -> refreshBackupCache putStrLn cfg broot bak2 (backupDiff mainCat bak2)
+          other -> putStrLn ("⚠ 备份缓存未刷新（备份盘" <> loadNote other <> "）")
+      -- 降级不因「计划已执行」而消失：本轮看漏的那部分仍然没备份
+      pure (max floorCode code)
+
+-- | 一轮备份的结论（纯，可钉；工作流 F056/F057）：主库侧快照回退告警、备份
+-- 侧扫描问题（读取出错 / hash 期间被改 / 未能枚举的子树）都进结论与退出码
+-- 下限——「✓ 备份盘已与主库一致」只在**零降级且零差异**时说。返回
+-- （要打印的行, 退出码下限：0 = 干净，1 = 结论不完整）。
+backupVerdict :: [String] -> ScanResult -> BackupDiff -> ([String], Int)
+backupVerdict mwarns result d = (ls, if null issues then 0 else 1)
+ where
+  issues =
+    ["主库快照坏代已跳过，diff 基于较旧一代: " <> w | w <- mwarns]
+      <> [show (length (srErrors result)) <> " 个备份盘条目读取出错" | not (null (srErrors result))]
+      <> [show (length (srVolatile result)) <> " 个备份盘文件在 hash 期间被修改" | not (null (srVolatile result))]
+      <> [show (srCarried result) <> " 条备份盘条目落在未能枚举的子树里" | srCarried result > 0]
+  noItems = null (bdAdd d) && null (bdUpdate d)
+  ls
+    | noItems && null issues = ["✓ 备份盘已与主库一致"]
+    | noItems = ["⚠ 未发现差异，但本轮结论不完整（" <> intercalate "；" issues <> "）——解决后重跑 pm backup"]
+    | null issues = []
+    | otherwise = ["⚠ 本轮结论不完整（" <> intercalate "；" issues <> "）——计划只覆盖看得见的差异，解决后重跑 pm backup"]

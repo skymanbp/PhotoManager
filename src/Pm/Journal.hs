@@ -21,12 +21,13 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import Data.Text (Text)
-import Data.Time (UTCTime)
+import Control.Monad (when)
+import Data.Time (UTCTime, getCurrentTime)
 import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.IO
 
-import Pm.Config (pmDir, readPmState, requirePmTrusted, withPmStateAppend)
+import Pm.Config (pmDir, readPmState, requirePmTrusted, withPmStateAppend')
 import Pm.Op (Op)
 import Pm.Win (flushHandleToDisk)
 
@@ -42,6 +43,10 @@ data JEntry
       }
   | JFailed {jeOpId :: Text, jeErr :: Text, jeAt :: UTCTime}
   | JCleanShutdown {jeAt :: UTCTime}
+  | -- | 第一方自审工作流 F028：追加时发现末行半截（断电撕裂）→ 先补换行、再落
+    -- 这条标记。它让读侧把**前一行**判回「撕裂尾」（Warn）而不是「中段损坏」
+    -- （Bad）；对 doctor/undo 的折叠它是透明的（既非 Intent 也非终态）。
+    JTornGap {jeAt :: UTCTime}
   deriving (Show, Eq)
 
 instance ToJSON JEntry where
@@ -50,6 +55,7 @@ instance ToJSON JEntry where
     object ["e" .= ("done" :: Text), "op" .= i, "sha256" .= sha, "trash" .= tr, "at" .= at]
   toJSON (JFailed i err at) = object ["e" .= ("failed" :: Text), "op" .= i, "err" .= err, "at" .= at]
   toJSON (JCleanShutdown at) = object ["e" .= ("clean-shutdown" :: Text), "at" .= at]
+  toJSON (JTornGap at) = object ["e" .= ("torn-gap" :: Text), "at" .= at]
 
 instance FromJSON JEntry where
   parseJSON = withObject "JEntry" $ \o -> do
@@ -59,6 +65,7 @@ instance FromJSON JEntry where
       "done" -> JDone <$> o .: "op" <*> o .: "sha256" <*> o .: "trash" <*> o .: "at"
       "failed" -> JFailed <$> o .: "op" <*> o .: "err" <*> o .: "at"
       "clean-shutdown" -> JCleanShutdown <$> o .: "at"
+      "torn-gap" -> JTornGap <$> o .: "at"
       _ -> fail ("unknown journal entry: " <> show e)
 
 newtype Journal = Journal Handle
@@ -78,7 +85,14 @@ journalPath root = pmDir root </> "journal.ndjson"
 withJournal :: FilePath -> (Journal -> IO a) -> IO a
 withJournal root act = do
   createDirectoryIfMissing True (pmDir root)
-  withPmStateAppend root "journal.ndjson" (act . Journal)
+  withPmStateAppend' root "journal.ndjson" $ \torn h -> do
+    -- F028：受信追加口发现半截尾行并已补换行 → 这里再落一条显式标记
+    -- （屏障写：它改变的是前一行的**分类**，与 Intent 同等耐久）。
+    when torn $ do
+      now <- getCurrentTime
+      BSL.hPut h (encode (JTornGap now) <> "\n")
+      flushHandleToDisk h
+    act (Journal h)
 
 -- 条目与换行合成**一次** hPut（第一方自审）：两次写之间缓冲恰好满时会落半行，
 -- 下一条接在同一行上成为 CORRUPT-JOURNAL——响亮，但本可不发生。
@@ -121,6 +135,11 @@ readJournal' root = do
                   Left err
                     | null rest ->
                         (es, ("torn tail (last line unparsable, expected after power loss): " <> err) : ws)
+                    | tornGapNext rest ->
+                        (es, ("torn tail at line " <> show i <> " (sealed by a later append, expected after power loss): " <> err) : ws)
                     | otherwise ->
                         (es, ("CORRUPT-JOURNAL line " <> show i <> ": " <> err <> " | " <> show (BS.take 80 l)) : ws)
+          -- F028：紧随其后是撕裂标记 → 这行是被后来的追加封住的撕裂尾
+          tornGapNext ((_, Right JTornGap {}) : _) = True
+          tornGapNext _ = False
       pure (go 1 parsed)

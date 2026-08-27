@@ -32,7 +32,30 @@
     const headers = Object.assign({ Authorization: "Bearer " + api.token }, o.headers || {});
     return fetch("http://127.0.0.1:" + api.port + path, Object.assign({}, o, { headers }));
   }
-  async function get(path) { const r = await req(path); if (!r.ok) throw new Error(path + " → HTTP " + r.status); return r; }
+  // 4xx/5xx 的 JSON 体：`{"error": …}` 一行，`details`/`lines` 数组每项一行。
+  // 服务端两个键都用过（details = 校验清单，lines = 逐行日志），一起认。
+  const bodyLines = (j) => { const a = j && (j.lines || j.details); return Array.isArray(a) && a.length ? "\n" + a.join("\n") : ""; };
+  // 错误响应体里写着**为什么**（服务端的 err 一律 JSON，个别路径是纯文本）。
+  // 此前 get 只抛状态码，把这段原因丢在地上——横幅上只剩一个数字，用户既
+  // 不知道是没配 vault 还是锁被占。读出来一并抛，多行原样保留（横幅 pre-wrap）。
+  async function bodyReason(r) {
+    let t;
+    try { t = (await r.text()).trim(); } catch { return ""; }
+    if (!t) return "";
+    try {
+      const j = JSON.parse(t);
+      if (j && typeof j === "object") {
+        const s = (j.error != null ? String(j.error) : "") + bodyLines(j);
+        if (s.trim()) return s;
+      }
+    } catch { /* 不是 JSON：原文照抛 */ }
+    return t;
+  }
+  async function get(path) {
+    const r = await req(path);
+    if (!r.ok) { const why = await bodyReason(r); throw new Error(path + " → HTTP " + r.status + (why ? " " + why : "")); }
+    return r;
+  }
   const getJson = async (p) => (await get(p)).json();
   function fail(e) { const c = $("#conn"); c.textContent = "⚠ " + e.message; c.className = "conn bad"; }
   // 「最新请求胜出」（40 轮 #5 的类级修法）：每个视图一个代号，await 回来时
@@ -92,6 +115,7 @@
     else if (b.state === "untrusted") { bchip.textContent = "缓存不可信"; bchip.className = "chip bad"; bsum.textContent = b.error; bdet.textContent = "人工核查 .pm/backup-cache"; steps.push(["备份缓存不可信", "人工核查"]); }
     else { const m = b.meta, lag = m.add + m.update; bchip.textContent = lag === 0 ? "上次同步无滞后" : `落后 ${lag} 项`; bchip.className = "chip " + (lag === 0 ? "ok" : "warn"); bsum.textContent = `上次同步 ${when(m.at)} · ${m.path}`; bdet.textContent = `待新增 ${m.add} · 待更新 ${m.update} · 备份盘多出 ${m.extra}（EXTRA 只报告，永不删）。插盘后运行 pm backup 刷新。`; if (lag) steps.push([`备份盘落后 ${lag} 项`, "插盘后 pm backup"]); }
     // vault（用完整差异接口，"差哪些"）
+    let vaultFailed = false;
     try {
       const v = await getJson("/api/vault/status");
       if (stale("status", gen)) return;
@@ -120,11 +144,32 @@
       const newActive = v.new.length - held;
       if (newActive) steps.push([`${newActive} 张 NEW 待分类推送`, "去「分类推送」", "vault"]);
       if ((v.held_stale || []).length) steps.push([`${v.held_stale.length} 条「暂不同步」已失效（照片换过）`, "去「分类推送」重新决定", "vault"]);
-      if (v.drift.length) steps.push([`${v.drift.length} 张 DRIFT 待裁决`, "生成推送计划后 pm resolve"]);
-    } catch (e) { $("#vault-chip").textContent = "未配置"; $("#vault-chip").className = "chip"; $("#vault-summary").textContent = e.message; }
+      // 按钮名只有一个：分类推送页的 #btn-plan =「保存决定并生成推送计划」。
+      // 这里、空网格提示、上手页三处此前各叫各的，用户按名字找不到按钮。
+      if (v.drift.length) steps.push([`${v.drift.length} 张 DRIFT 待裁决`, "「保存决定并生成推送计划」后 pm resolve"]);
+    } catch (e) {
+      // 三态，别压成两态：「没配 vault」是**状态载荷**说的（i.vault === null
+      // ⇔ 配置里没有 vault 路径），不是从抛出的异常猜的。网络断了、500、
+      // root 锁被占（409）同样会走到这个 catch——那是**读取失败**，必须挂
+      // bad 并把原因写出来；此前一律显示中性的"未配置"，读不出来看着像
+      // 没配置，用户会去设置页反复填一个早就填好的路径。
+      const chip = $("#vault-chip");
+      $("#vault-pills").innerHTML = ""; $("#vault-lists").innerHTML = "";
+      if (i.vault == null) {
+        chip.textContent = "未配置"; chip.className = "chip";
+        $("#vault-summary").textContent = "配置里还没有 vault 展示集目录——在「设置」页填一个。";
+      } else {
+        vaultFailed = true;
+        chip.textContent = "读取失败"; chip.className = "chip bad";
+        $("#vault-summary").textContent = e.message;
+      }
+    }
     // 下一步
     const ns = $("#next-steps"); ns.innerHTML = "";
-    if (!steps.length) ns.appendChild(el("li", null, "✓ 没有待办：索引、vault、备份都无需动作。"));
+    // 有区块没载出来就不能说"没有待办"——那是把未知说成已知（vault 差异
+    // 可能正好是待办本身）。
+    if (!steps.length && !vaultFailed && !s.warnings.length) ns.appendChild(el("li", null, "✓ 没有待办：索引、vault、备份都无需动作。"));
+    if (vaultFailed) ns.appendChild(el("li", null, "⚠ vault 状态没读出来，上面的清单可能不全——看 vault 卡片里的原因。"));
     for (const [what, how, tab] of steps) { const li = el("li"); li.appendChild(el("span", null, what + " → ")); if (tab) { const a = el("a", null, how); a.onclick = () => showTab(tab); li.appendChild(a); } else li.appendChild(el("code", null, how)); ns.appendChild(li); }
     for (const w of s.warnings) { const li = el("li", null, "⚠ " + w); ns.appendChild(li); }
   }
@@ -169,7 +214,10 @@
     const gen = stamp("vault");
     const grid = $("#vault-grid"); grid.innerHTML = "";
     for (const u of thumbUrls) URL.revokeObjectURL(u); thumbUrls = [];
-    assign.clear(); vaultDrift = 0; heldInitial = new Set(); $("#plan-result").className = "banner hidden";
+    // 这里**不**清 #plan-result：makePlan 成功后紧接着调 loadVault 刷新网格，
+    // 顺手就把刚写出来的「计划 id / 执行命令 / 计划文件路径」抹了——那是这一页
+    // 唯一一次说出计划 id 的机会。横幅只在用户**开始新一轮**时清（makePlan 开头）。
+    assign.clear(); vaultDrift = 0; heldInitial = new Set();
     let meta;
     try { meta = await getJson("/api/vault/new"); } catch (e) {
       if (stale("vault", gen)) return; // 旧轮失败：别动新一轮的网格
@@ -183,7 +231,7 @@
     updateProgress(items.length);
     if (!items.length) {
       grid.appendChild(el("div", "muted", vaultDrift
-        ? `没有待推送的 NEW；但有 ${vaultDrift} 项 DRIFT（同名、内容不同）——点「生成推送计划」出一份纯裁决计划，再在终端 pm resolve。`
+        ? `没有待推送的 NEW；但有 ${vaultDrift} 项 DRIFT（同名、内容不同）——点「保存决定并生成推送计划」出一份纯裁决计划，再在终端 pm resolve。`
         : "没有待推送的 NEW 照片——相册与 vault 已一致。"));
       return;
     }
@@ -248,6 +296,8 @@
   async function makePlan() {
     const btn = $("#btn-plan"); btn.disabled = true;
     const out = $("#plan-result");
+    // 新一轮开始 = 上一轮的结论作废，只有这里清横幅（loadVault 不再碰它）。
+    out.className = "banner hidden"; out.textContent = "";
     const lines = [];
     // 两步之间会 await：先把**全部**提交状态快照下来（选择 + DRIFT 数），
     // 提交期间点击、切页、数字键都不再改它（submitting）。
@@ -259,8 +309,10 @@
       const ops = holdOps();
       if (ops.hold.length || ops.unhold.length) {
         const rh = await post("/api/vault/hold", { hold: ops.hold, unhold: ops.unhold });
-        const jh = await rh.json();
-        if (!rh.ok) { out.className = "banner bad"; out.textContent = "决定未保存：" + (jh.error || rh.status) + (jh.details ? "\n" + jh.details.join("\n") : ""); btn.disabled = false; return; }
+        // 体解析失败不能把 4xx 甩进 catch：那会把服务端逐行给出的**为什么**
+        // 换成一句 "Unexpected token"，用户看不到哪一条决定不合法。
+        const jh = await rh.json().catch(() => ({}));
+        if (!rh.ok) { out.className = "banner bad"; out.textContent = "决定未保存：" + (jh.error || ("HTTP " + rh.status)) + bodyLines(jh); btn.disabled = false; return; }
         // 已落盘 → 立刻推进 baseline：第二步失败后重试不该再撤一次已撤的决定
         heldInitial = new Set(jh.held || []);
         lines.push(`已记下决定：暂不同步 +${ops.hold.length} / 恢复 ${ops.unhold.length}（名单共 ${jh.count} 条；只写主库 .pm，vault 与照片没动）`);
@@ -269,15 +321,21 @@
       const assignments = [...snap.entries()].filter(([, c]) => c !== HOLD).map(([name, category]) => ({ name, category }));
       if (assignments.length || driftSnap) {
         const r = await post("/api/vault/push-plan", { assignments });
-        const j = await r.json();
-        if (!r.ok) { out.className = "banner bad"; out.textContent = (lines.join("\n") + "\n未生成计划：" + (j.error || r.status) + (j.details ? "\n" + j.details.join("\n") : "")).trim(); btn.disabled = false; return; }
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) { out.className = "banner bad"; out.textContent = (lines.join("\n") + "\n未生成计划：" + (j.error || ("HTTP " + r.status)) + bodyLines(j)).trim(); btn.disabled = false; return; }
         lines.push(`已生成推送计划 ${j.plan.id}（${j.plan.items.length} 项）——只写了计划文件，照片未动。\n执行：${j.apply}\n计划文件：${j.path}` + (j.gitSteps.length ? "\n执行后的 git 步骤：\n" + j.gitSteps.join("\n") : ""));
       }
       out.className = "banner ok";
       out.textContent = lines.length ? lines.join("\n\n") : "没有需要保存的改动。";
       submitting = false;
-      await loadVault();
-    } catch (e) { out.className = "banner bad"; out.textContent = "请求失败：" + e.message; btn.disabled = false; }
+      // 刷新失败不改判：计划已经生成，把它作为附注接在成功文案后面，别把
+      // 横幅整段换成"请求失败"——那会让人以为计划没出来又点一次。
+      try { await loadVault(); } catch (e) { out.textContent += "\n（网格刷新失败：" + e.message + "，按 3 重进本页）"; }
+    } catch (e) {
+      // e.message 里已经带着服务端的整段原因（get/bodyReason 会把 details /
+      // lines 逐行拼进去），横幅是 pre-wrap，多行直接显示。
+      out.className = "banner bad"; out.textContent = "请求失败：" + e.message; btn.disabled = false;
+    }
     finally { submitting = false; }
   }
 
@@ -294,7 +352,16 @@
       const td0 = el("td"); td0.appendChild(el("span", "badge " + p.kind, p.kind)); tr.appendChild(td0);
       tr.appendChild(el("td", null, p.id)); tr.appendChild(el("td", null, when(p.created)));
       tr.appendChild(el("td", null, String(p.items))); tr.appendChild(el("td", null, String(p.pending))); tr.appendChild(el("td", null, String(p.skipped))); tr.appendChild(el("td", null, String(p.needsDecision)));
-      tr.onclick = async () => { for (const x of tb.children) x.classList.remove("sel"); tr.classList.add("sel"); await showPlan(p.id); };
+      tr.onclick = () => {
+        for (const x of tb.children) x.classList.remove("sel"); tr.classList.add("sel");
+        // 先把明细区清成占位再去取：载失败时留在页上的会是**上一个**计划的
+        // 明细，而高亮行已经换成了刚点的这一行——看着就像点开了它。
+        const box = $("#plan-detail"); box.innerHTML = ""; box.appendChild(el("div", "muted", "载入中…"));
+        showPlan(p.id).catch((e) => {
+          box.innerHTML = ""; box.appendChild(el("div", "muted", "载不出这个计划"));
+          const b = $("#apply-result"); b.className = "banner bad"; b.textContent = "载不出计划 " + p.id + "：" + e.message;
+        });
+      };
       tb.appendChild(tr);
     }
     if (d.errors.length) { const tr = el("tr"); const td = el("td", "muted", "⚠ 装不出来的计划：" + d.errors.map((e) => e[0] + "：" + e[1]).join("；")); td.colSpan = 7; tr.appendChild(td); tb.appendChild(tr); }
@@ -330,16 +397,24 @@
       const row = el("div", "exec-row");
       const label = `执行这个计划（${pending} 项待执行）`;
       const btn = el("button", "btn danger", label);
-      let armed = false, timer = null;
-      const disarm = () => { armed = false; clearTimeout(timer); btn.classList.remove("armed"); btn.textContent = label; };
+      let armed = false, timer = null, armedAt = 0;
+      const ARM_DWELL_MS = 400; // 双击/键盘连发落在这个窗口里，不算"第二下"
+      const disarm = () => { armed = false; armedAt = 0; clearTimeout(timer); btn.classList.remove("armed"); btn.textContent = label; };
       btn.onclick = () => {
         if (!armed) {
-          armed = true; btn.classList.add("armed");
+          armed = true; armedAt = performance.now(); btn.classList.add("armed");
           // 确认文案带计划 id：看清要执行的是哪一份再点第二下
           btn.textContent = `⚠ 再点一次确认执行 ${plan.id}（5 秒内）`;
+          // 两次点击确认的前提是**两次独立的意思表示**。焦点留在按钮上时，
+          // 一次双击、或按住 Enter 的键盘连发，会在几十毫秒内送来第二个
+          // click——那和第一下是同一个动作，却足以让照片开始搬。摘掉焦点
+          // （挡住 Enter 连发）再加一段静默期（挡住双击），窗口期内的点击
+          // 一概忽略且**保持** armed，用户重新点一下仍然生效。
+          btn.blur();
           timer = setTimeout(disarm, 5000);
           return;
         }
+        if (performance.now() - armedAt < ARM_DWELL_MS) return; // 太快 = 同一个动作，仍保持已确认态
         // 确认即**消费** armed（39 轮 #5）：此前这里不复位，请求失败后按钮
         // 恢复可点时仍处于已确认态——单击一次就能再执行。每次执行后回到
         // 全新未确认状态，失败重试也要重新点两下。
@@ -405,9 +480,18 @@
     cfgTxt("#cfg-portfolio-dir", pub.portfolioDir);
     cfgTxt("#cfg-vault-push", pub.vaultPush);
     cfgTxt("#cfg-portfolio-push", pub.portfolioPush);
-    $("#cfg-backup").textContent = c.backup && c.backup.id
-      ? "已登记：UUID " + c.backup.id + " · 盘内路径 " + c.backup.subpath + "（按 UUID 认盘，与盘符无关）"
-      : "未登记";
+    // /api/config 的 backup 恒是对象，两个字段各自可为 null（Serve.hs:425
+    // `object ["id" .= cfgBackupId cfg, "subpath" .= cfgBackupSubpath cfg]`）。
+    // 认盘要 UUID + 盘内相对路径**两样**：只看 id 会把手改 config.toml 落下的
+    // 半登记态说成"已登记"，然后在 subpath 位置印一个 undefined。
+    const bk = c.backup || {};
+    const bkId = bk.id != null && bk.id !== "" ? bk.id : null;
+    const bkSub = bk.subpath != null && bk.subpath !== "" ? bk.subpath : null;
+    $("#cfg-backup").textContent = bkId && bkSub
+      ? "已登记：UUID " + bkId + " · 盘内路径 " + bkSub + "（按 UUID 认盘，与盘符无关）"
+      : bkId || bkSub
+        ? "登记不完整（缺 " + (bkId ? "盘内相对路径 subpath" : "盘标识 id") + "）——在下面重新登记一次这块盘"
+        : "未登记";
   }
   function cfgBanner(ok, text) { const b = $("#config-result"); b.className = "banner " + (ok ? "ok" : "bad"); b.textContent = text; }
   // 提交结果与**刷新**状态分开报：写入一旦成功，后面重载页面失败也不能把横幅
@@ -472,13 +556,19 @@
     const box = $("#sort-segments"); box.innerHTML = "";
     if (!sv.segments.length) { box.appendChild(el("div", "muted", "没有可定时的照片——下面列出的每一类都不会被归位。")); }
     for (const g of sv.segments) {
-      const c = el("div", "seg");
+      // 类名是 sort-seg 不是 seg：分类推送页的类目按钮行也叫 .seg，两套规则
+      // （这边的卡片有 border/padding/background）会串到那边的按钮行上。
+      const c = el("div", "sort-seg");
       const head = el("div", "seg-head");
       head.appendChild(el("span", "seg-when", `段 ${g.index}　${g.firstAt} → ${g.lastAt}`));
       head.appendChild(el("span", "seg-meta", `${g.count} 张　首 ${base(g.firstFile)} · 尾 ${base(g.lastFile)}`));
       c.appendChild(head);
       const row = el("div", "seg-row");
       const place = el("input"); place.type = "text"; place.placeholder = "地点，如 Atlanta（相机没有 GPS，只能你给）";
+      // dataset.event 是「并入已有事件」按钮打的标记，生成计划时它压过输入框
+      // 的文本。用户点完再手改文字，标记必须作废——否则计划按旧事件名落，
+      // 屏幕上显示的却是新名字。
+      place.addEventListener("input", () => { delete place.dataset.event; });
       const from = el("input"); from.type = "date"; from.value = g.from;
       const to = el("input"); to.type = "date"; to.value = g.to;
       const btn = el("button", "btn primary", "生成计划");
@@ -496,7 +586,9 @@
         m.appendChild(el("span", null, " —— 点一下并入它"));
         c.appendChild(m);
       }
-      btn.onclick = () => makeSortPlan(sv.src, place, from.value, to.value, btn);
+      // 兜底 .catch：makeSortPlan 里 try 之前那几行（读输入框）真抛了，
+      // 异步函数只会静静地 reject 到控制台，页面上一点动静都没有。
+      btn.onclick = () => { makeSortPlan(sv.src, place, from.value, to.value, btn).catch((e) => sortNote("bad", "请求失败：" + e.message)); };
       box.appendChild(c);
     }
     const left = $("#sort-left"); left.innerHTML = "";
@@ -525,13 +617,19 @@
       payload[isEvent ? "event" : "place"] = v;
       const r = await post("/api/sort/plan", payload);
       const body = await r.json().catch(() => ({}));
-      if (!r.ok) { sortNote("bad", body.error || ("HTTP " + r.status)); return; }
+      if (!r.ok) { sortNote("bad", (body.error || ("HTTP " + r.status)) + bodyLines(body)); return; }
       if (body.planId) {
         sortNote("ok", `计划已生成：${body.planId}\n下一步到「计划」页查看明细并执行（或在终端 pm apply ${body.planId}）`);
       } else {
-        sortNote("warn", `没有生成计划（退出码 ${body.code}）——这一段里没有可归位的文件，或有需要你先处理的冲突。详情见终端。`);
+        // 「详情见终端」在 GUI 下是句空话：pm ui 拉起的 serve，stdout 挂在
+        // 空设备上，没有哪个终端会印出来。逐行日志由响应体带回来（log），
+        // 直接摆在横幅里；老服务端没这个字段就至少把退出码说清楚。
+        const log = (body.log || []).join("\n");
+        sortNote("warn", "没有生成计划——这一段里没有可归位的文件，或有需要你先处理的冲突。\n" + (log || `退出码 ${body.code}`));
       }
       await loadPlans().catch(() => {});
+    } catch (e) {
+      sortNote("bad", "请求失败：" + e.message);
     } finally { btn.disabled = false; }
   }
 
@@ -559,25 +657,34 @@
   $("#btn-reload").onclick = () => loadStatus(false).catch(fail);
   $("#btn-plans-reload").onclick = () => loadPlans().catch(fail);
   $("#btn-plan").onclick = () => makePlan();
-  $("#btn-config-reload").onclick = () => loadConfig().catch(fail);
+  // 设置页的按钮全部经 cfgClick：处理器是 async，没有 .catch 的异常只会
+  // 落进控制台——按钮看着像点过了，配置其实一个字节没改。异常（含 try 之前
+  // 读输入框那几行的同步抛出）一律渲染进本页自己的横幅 #config-result。
+  const cfgClick = (id, fn) => {
+    $(id).onclick = () => {
+      try { const p = fn(); if (p && typeof p.catch === "function") p.catch((e) => cfgBanner(false, "操作失败：" + e.message)); }
+      catch (e) { cfgBanner(false, "操作失败：" + e.message); }
+    };
+  };
+  cfgClick("#btn-config-reload", () => loadConfig());
   const val = (id) => $(id).value.trim();
-  $("#btn-cfg-vault").onclick = () => saveConfig({ vault: val("#cfg-vault") });
-  $("#btn-cfg-vault-clear").onclick = () => saveConfig({ vault: null });
-  $("#btn-cfg-photos").onclick = () => saveConfig({ photosJson: val("#cfg-photos") });
-  $("#btn-cfg-photos-clear").onclick = () => saveConfig({ photosJson: null });
-  $("#btn-cfg-workers").onclick = () => saveConfig({ workers: Number(val("#cfg-workers")) });
-  $("#btn-cfg-workers-clear").onclick = () => saveConfig({ workers: null });
+  cfgClick("#btn-cfg-vault", () => saveConfig({ vault: val("#cfg-vault") }));
+  cfgClick("#btn-cfg-vault-clear", () => saveConfig({ vault: null }));
+  cfgClick("#btn-cfg-photos", () => saveConfig({ photosJson: val("#cfg-photos") }));
+  cfgClick("#btn-cfg-photos-clear", () => saveConfig({ photosJson: null }));
+  cfgClick("#btn-cfg-workers", () => saveConfig({ workers: Number(val("#cfg-workers")) }));
+  cfgClick("#btn-cfg-workers-clear", () => saveConfig({ workers: null }));
   // 上线命令三项：placeholder 写明「留空 = 默认」，因此空着点保存 = 清空
   // （null），而不是把空串塞给字符闸吃一个「不合法」。
   const valOrNull = (id) => { const v = val(id); return v === "" ? null : v; };
-  $("#btn-cfg-portfolio-dir").onclick = () => saveConfig({ portfolioDir: valOrNull("#cfg-portfolio-dir") });
-  $("#btn-cfg-portfolio-dir-clear").onclick = () => saveConfig({ portfolioDir: null });
-  $("#btn-cfg-vault-push").onclick = () => saveConfig({ vaultPush: valOrNull("#cfg-vault-push") });
-  $("#btn-cfg-vault-push-clear").onclick = () => saveConfig({ vaultPush: null });
-  $("#btn-cfg-portfolio-push").onclick = () => saveConfig({ portfolioPush: valOrNull("#cfg-portfolio-push") });
-  $("#btn-cfg-portfolio-push-clear").onclick = () => saveConfig({ portfolioPush: null });
+  cfgClick("#btn-cfg-portfolio-dir", () => saveConfig({ portfolioDir: valOrNull("#cfg-portfolio-dir") }));
+  cfgClick("#btn-cfg-portfolio-dir-clear", () => saveConfig({ portfolioDir: null }));
+  cfgClick("#btn-cfg-vault-push", () => saveConfig({ vaultPush: valOrNull("#cfg-vault-push") }));
+  cfgClick("#btn-cfg-vault-push-clear", () => saveConfig({ vaultPush: null }));
+  cfgClick("#btn-cfg-portfolio-push", () => saveConfig({ portfolioPush: valOrNull("#cfg-portfolio-push") }));
+  cfgClick("#btn-cfg-portfolio-push-clear", () => saveConfig({ portfolioPush: null }));
+  cfgClick("#btn-cfg-backup", () => registerBackup());
   $("#btn-publish-copy").onclick = () => copyPublishCommands();
-  $("#btn-cfg-backup").onclick = () => registerBackup();
 
   try { await connect(); await loadStatus(false); } catch (e) { fail(e); $("#status-banner").className = "banner bad"; $("#status-banner").textContent = "无法连接 pm serve：" + e.message; }
 })();

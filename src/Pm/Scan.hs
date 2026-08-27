@@ -9,10 +9,15 @@ module Pm.Scan
   , scanRoot
   , listTree
   , listTreeWith
+  , listTreeCov
   , DotDirs (..)
   , freshnessSweep
+  , freshPending
   , sweepCounts
+  , uncoveredKeys
+  , coversKey
   , maxPathLen
+  , reparseSkipNote
   ) where
 
 import Control.Concurrent.Async (replicateConcurrently_)
@@ -24,7 +29,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time (getCurrentTime)
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory, pathIsSymbolicLink)
+import System.Directory (doesDirectoryExist, listDirectory, pathIsSymbolicLink)
 import System.FilePath (pathSeparator, takeExtension, takeFileName, (</>))
 import System.IO (hPutStrLn, stderr)
 import System.IO.Error (isDoesNotExistError)
@@ -38,6 +43,12 @@ import Pm.Win (NameKind (..), probeName)
 -- loudly instead of corrupting behaviour near MAX_PATH.
 maxPathLen :: Int
 maxPathLen = 240
+
+-- | 遍历对 symlink\/reparse point 的**设计内**跳过——进错误表只是为了逐条交代
+-- （SortGuardTests 钉住这一条），不是失败。'Pm.Sort.hardErrors' 按它排除后才
+-- 折进退出码（第一方自审工作流 F054）；字面量只在这里定义一次。
+reparseSkipNote :: String
+reparseSkipNote = "symlink/reparse point skipped"
 
 data ScanOpts = ScanOpts
   { soWorkers :: Int
@@ -56,6 +67,9 @@ data ScanResult = ScanResult
   , srHashedBytes :: Integer
   , srVolatile :: [FilePath]
   , srErrors :: [(FilePath, String)]
+  , srCarried :: Int
+    -- ^ 落在本轮**未枚举**子树里、按「查不出」原样保留的旧条目数
+    -- （第一方自审工作流 F040：此前它们从快照里消失并落盘）
   }
 
 -- | 遍历时对**点开头的目录**的策略。
@@ -79,7 +93,18 @@ listTree :: FilePath -> IO ([FilePath], [(FilePath, String)])
 listTree = listTreeWith SkipDotDirs
 
 listTreeWith :: DotDirs -> FilePath -> IO ([FilePath], [(FilePath, String)])
-listTreeWith dots root = go ""
+listTreeWith dots root = (\(fs, es, _) -> (fs, es)) <$> listTreeCov dots root
+
+-- | 同上，另带**未枚举覆盖**（第一方自审工作流 F039/F040）：哪些子树根本没
+-- 走进去——目录列举失败、链接属性查不出。键是 root 相对路径，**空路径 =
+-- 整棵树**（基准自身列不出）；错误表里的 @.@ 只是展示键。确定性的跳过（真
+-- 链接、超长路径、pm 状态目录）不在其中：那是「知道它不该进索引」，不是
+-- 「查不出」。此前「没枚举到」在类型上没有表示，两个消费方各自换算、各错
+-- 一处：'freshnessSweep' 拿文件前缀器换算，@.@ 换不成覆盖全树的空键（基准
+-- 列不出 → 整份 catalog 报「消失」）；'scanRoot' 压根不看，未枚举子树的条目
+-- 从快照里消失、无条件落盘、三代轮转把完整快照顶掉。
+listTreeCov :: DotDirs -> FilePath -> IO ([FilePath], [(FilePath, String)], [FilePath])
+listTreeCov dots root = go ""
  where
   go rel = do
     let dirAbs = if null rel then root else root </> rel
@@ -98,13 +123,13 @@ listTreeWith dots root = go ""
     -- 防御性代码加上一条假注释，比不加更糟**。
     er <- try (listDirectory dirAbs) :: IO (Either IOException [FilePath])
     case er of
-      Left e -> pure ([], [(here, "目录列举失败: " <> show e)])
+      Left e -> pure ([], [(here, "目录列举失败: " <> show e)], [rel])
       Right names -> do
         results <- forM names $ \name -> do
           let relPath = if null rel then name else rel </> name
               abs' = root </> relPath
           if length abs' >= maxPathLen
-            then pure ([], [(relPath, "path too long (>=240 chars)")])
+            then pure ([], [(relPath, "path too long (>=240 chars)")], [])
             else do
               symRes <- try (pathIsSymbolicLink abs') :: IO (Either IOException Bool)
               -- 三十七轮（GO 后按 quality-over-cost 收口）：探测异常（非「不存
@@ -117,11 +142,11 @@ listTreeWith dots root = go ""
               case symRes of
                 Left e
                   | not (isDoesNotExistError e) ->
-                      pure ([], [(relPath, "链接属性查不出（" <> show e <> "），按链接跳过、不递归")])
+                      pure ([], [(relPath, "链接属性查不出（" <> show e <> "），按链接跳过、不递归")], [relPath])
                 _ -> do
                   let isSym = either (const False) id symRes
                   if isSym
-                    then pure ([], [(relPath, "symlink/reparse point skipped")])
+                    then pure ([], [(relPath, reparseSkipNote)], [])
                     else do
                       isDir <- doesDirectoryExist abs'
                       if isDir
@@ -136,16 +161,20 @@ listTreeWith dots root = go ""
                           -- 的方式。按名字判两个方向都错：卡上一个普通的、名叫
                           -- @.pm@ 的用户目录会被整个跳过（里面的照片一格都不进）；
                           -- 而真状态目录被改名或经别名到达时判据根本不触发。
+                          -- 探针三态（第一方自审工作流 F041，R1 同类）：文件级 ACL
+                          -- 拒绝会让 doesFileExist 塌 False → 走进 .pm\\trash 把隔离
+                          -- 件当照片；'probeName' 对 ACL 免疫，查不出 = 不进入。
                           WalkDotDirs -> do
-                            isState <- doesFileExist (abs' </> "root-id.json")
-                            if isState
-                              then pure ([], [(relPath, "pm 状态目录（内含 root-id.json），源遍历不进入")])
-                              else go relPath
+                            k <- probeName (abs' </> "root-id.json")
+                            case k of
+                              NameMissing -> go relPath
+                              ProbeUnknown -> pure ([], [(relPath, "root-id.json 存在性查不出（ACL/介质错误？），按 pm 状态目录处理、不进入")], [relPath])
+                              _ -> pure ([], [(relPath, "pm 状态目录（内含 root-id.json），源遍历不进入")], [])
                           SkipDotDirs
-                            | take 1 (takeFileName name) == "." -> pure ([], [])
+                            | take 1 (takeFileName name) == "." -> pure ([], [], [])
                             | otherwise -> go relPath
-                        else pure ([relPath], [])
-        pure (concatMap fst results, concatMap snd results)
+                        else pure ([relPath], [], [])
+        pure (concatMap (\(a, _, _) -> a) results, concatMap (\(_, b, _) -> b) results, concatMap (\(_, _, c) -> c) results)
 
 -- | Stat-only freshness comparison of a directory tree against a catalog
 -- slice keyed by root-relative paths. @relPrefix@ narrows the walk to one
@@ -160,19 +189,43 @@ freshnessSweep root relPrefix catSlice = do
   -- fail-open），非空则整批误报「消失」。probeName 探不出（ACL/介质错误）
   -- 时按一条覆盖全树的遍历错误处理；真 ENOENT 保持现状语义（条目确实消失）。
   k <- probeName base
+  let walkBase = do
+        isDir <- doesDirectoryExist base
+        if isDir
+          then listTree base
+          else pure ([], [("", "基准不是目录（或目录性查不出），树核不了")])
   (files, errs) <- case k of
-    NamePlain -> do
-      isDir <- doesDirectoryExist base
-      if isDir
-        then listTree base
-        else pure ([], [("", "基准不是目录（或目录性查不出），树核不了")])
+    NamePlain -> walkBase
+    -- 工作流 F042：root **自身**是 junction 是合法用法（'Pm.Win.resolveUnder'
+    -- 的文档一直这么写，句柄守卫用例也钉着「root 经 junction 判是」）——只有
+    -- 库内子层的 surrogate 才是越界形态，那由遍历层「不跟随 + 登记」处理；
+    -- relPrefix 非空（暂存区守卫等子树核对）时保持拒绝。
+    NameSurrogate | null relPrefix -> walkBase
     NameMissing -> pure ([], [])
     _ -> pure ([], [("", "基准目录探不出（" <> show k <> "），树核不了")])
-  let pfx rel = if null rel then relPrefix else if null relPrefix then rel else relPrefix </> rel
   snaps <- forM files $ \rel -> do
     r <- try (statSnap (base </> rel)) :: IO (Either IOException StatSnap)
-    pure (pfx rel, r)
-  pure (sweepCounts snaps (map (pfx . fst) errs) catSlice)
+    pure (uncoveredKey relPrefix rel, r)
+  pure (sweepCounts snaps (uncoveredKeys relPrefix errs) catSlice)
+
+-- | 遍历错误表 → 调用方键空间里的**覆盖键**（第一方自审工作流 F039）：基准
+-- 自身出错（展示键 @.@，或探针分支的空键）覆盖整个 @relPrefix@ 子树（全库
+-- 核对时即空路径 = 整棵树）；子树错误按 rel 前缀换算。此前换算器是给文件
+-- rel 写的，@.@ 原样留下，三个覆盖判别一个都不命中——基准列不出时整份
+-- catalog 报「消失」。这是唯一的换算点。
+uncoveredKeys :: FilePath -> [(FilePath, String)] -> [FilePath]
+uncoveredKeys relPrefix = map (uncoveredKey relPrefix . fst)
+
+uncoveredKey :: FilePath -> FilePath -> FilePath
+uncoveredKey relPrefix rel
+  | rel == "." || null rel = relPrefix
+  | null relPrefix = rel
+  | otherwise = relPrefix </> rel
+
+-- | 键 @k@ 是否落在某个未枚举子树里（空路径 = 整棵树；前缀按路径分量对齐）。
+-- 'sweepCounts' 与 'scanRoot' 共用这一个定义。
+coversKey :: [FilePath] -> FilePath -> Bool
+coversKey uncovered k = any (\p -> null p || p == k || (p <> [pathSeparator]) `isPrefixOf` k) uncovered
 
 -- | 'freshnessSweep' 的纯分类核心（拆出顶层穷测——同 'classifyGitProbe' 的
 -- 先例：注入形态难做时，把判定做成纯函数钉死）。出错的路径（stat 失败，或
@@ -190,12 +243,11 @@ sweepCounts snaps walkErrPaths catSlice = (newN, changedN, goneN, errN)
   statFails = Set.fromList [rel | (rel, Left _) <- snaps]
   -- 遍历错误按**子树**覆盖（39 轮 #1）：目录 @sub@ 列举失败时，catalog 里
   -- @sub\a.jpg@ 同样核不了——只按精确键剔除会让后代条目被误报「消失」且与
-  -- 该目录的错误双重计数。空路径 = 基准自身出错，覆盖整棵树。
-  walkCovered k = any (\p -> null p || p == k || (p <> [pathSeparator]) `isPrefixOf` k) walkErrPaths
+  -- 该目录的错误双重计数。空路径 = 基准自身出错，覆盖整棵树（'coversKey'）。
   newN = Map.size (disk `Map.difference` catSlice)
   goneN =
     Map.size
-      (Map.filterWithKey (\k _ -> not (walkCovered k)) (Map.withoutKeys (catSlice `Map.difference` disk) statFails))
+      (Map.filterWithKey (\k _ -> not (coversKey walkErrPaths k)) (Map.withoutKeys (catSlice `Map.difference` disk) statFails))
   changedN =
     length
       [ ()
@@ -207,7 +259,7 @@ sweepCounts snaps walkErrPaths catSlice = (newN, changedN, goneN, errN)
 
 scanRoot :: ScanOpts -> Maybe Catalog -> Text -> FilePath -> IO ScanResult
 scanRoot opts oldCat rootId root = do
-  (files, walkErrs) <- listTree root
+  (files, walkErrs, uncovered) <- listTreeCov SkipDotDirs root
   -- Stat pass
   statted <- forM files $ \rel -> do
     r <- try (statSnap (root </> rel)) :: IO (Either IOException StatSnap)
@@ -287,7 +339,12 @@ scanRoot opts oldCat rootId root = do
   replicateConcurrently_ (max 1 (soWorkers opts)) worker
   (newEntries, volatiles, hashErrs) <- readIORef out
   now <- getCurrentTime
-  let entries = entryMap (reused <> newEntries)
+  -- 未枚举子树里的旧条目是「查不出」不是「不存在」（第一方自审工作流 F040）：
+  -- 原样保留上次快照值，而不是让它们从快照消失、随即无条件落盘、三代轮转把
+  -- 完整快照顶掉——与 'freshnessSweep' 对同一情形的处置（错误口，不算消失）
+  -- 同一纪律。本轮真枚举到的条目（reused/newEntries）左优先。
+  let unknown = Map.filterWithKey (\k _ -> coversKey uncovered k) oldEntries
+      entries = entryMap (reused <> newEntries) `Map.union` unknown
   pure
     ScanResult
       { srCatalog = Catalog rootId now entries
@@ -296,6 +353,7 @@ scanRoot opts oldCat rootId root = do
       , srHashedBytes = sum (map enSize newEntries)
       , srVolatile = volatiles
       , srErrors = walkErrs <> statErrs <> hashErrs
+      , srCarried = Map.size unknown
       }
  where
   progress msg = progressWhen True msg
@@ -305,3 +363,10 @@ scanRoot opts oldCat rootId root = do
 
 gib :: Integer -> Double
 gib b = fromIntegral b / (1024 * 1024 * 1024)
+
+-- | 新鲜度四元组折成「未决数」：任何一位非零都算未决——第四位读取错误也在内
+-- （核对受阻 ≠ 一致）。status 的退出码与渲染、import\/clean\/sort 的暂存区
+-- 闸、backup 的主库闸共用这一个定义（工作流 F047：此前四处各写一遍求和，
+-- 口径一旦分叉，「✓ 一致」与退出码会对同一状态给出两个答案）。
+freshPending :: (Int, Int, Int, Int) -> Int
+freshPending (n, c, m, e) = n + c + m + e

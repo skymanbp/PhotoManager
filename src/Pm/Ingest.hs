@@ -40,15 +40,15 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, makeAbsolute)
-import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FilePath (takeFileName, (</>))
 
-import Pm.Cli (PlanRun (..))
+import Pm.Cli (PlanRun (..), fullyExecuted)
 import Pm.Config (Config (..), requireMain)
-import Pm.Exec (ItemOutcome (..))
 import Pm.GitGuard (classifyGitProbe)
 import Pm.Hash (StatSnap (..), sha256File, statSnap)
 import Pm.Op
 import Pm.Plan
+import Pm.Publish (inboxDoneCommand)
 import Pm.Types
 import Pm.Vault (ensureVaultRoot, fixedCategories, gitStepsLines)
 import Pm.VaultHold (VaultHold (..), readHolds)
@@ -168,15 +168,6 @@ runTwoPlans cfg runPlan applyMode cat files vaultDir mainPlan vaultPlan = do
           putStrLn "主库（相册）那份有未完成项（失败/冲突/待裁决——待裁决不进退出码，也算未完成）：vault 那份不执行（I7：vault ⊆ 相册，相册在前）；pm resolve 处理后重跑本命令"
           pure (max c1 1)
 
--- | 「真的全部落完」：每一项都是 DONE 或同内容 SKIP。三十二轮 R4 的判据
--- 本体——ONotExecuted（待裁决\/用户 skip）不计入退出码，@c == 0@ 不等于它。
-fullyExecuted :: [(PlanItem, ItemOutcome)] -> Bool
-fullyExecuted rs = not (null rs) && all done rs
- where
-  done (_, ODone {}) = True
-  done (_, OSkippedIdentical) = True
-  done _ = False
-
 -- | I7 拓扑耦合（三十二轮 R4 的生成期闸）：主库那项待裁决时，vault 同名项
 -- 也压成待裁决。两份计划都会存盘、都可被单独 @pm apply@——vault 那项若保持
 -- PENDING，单独 apply vault 计划就能在相册尚无该字节时先写 vault，直接破
@@ -293,7 +284,11 @@ ingestOrderLines pidM pidV cat =
 -- | 结束时打印的**显式步骤**——pm 不执行的那些（同 I9 的 git 步骤）：
 -- photos.json 由 skill 写并校验；@_inbox → _done@ 由 skill 移（pm 对库外目录
 -- 零操作）；vault 仓的 git 步骤沿用 push 的同一套。只在两份计划都真的全部
--- 落完时打印（三十二轮 R5，与 push 的 @when (code == 0)@ 同一道闸）。
+-- 落完时打印（三十二轮 R5；判据 'Pm.Cli.fullyExecuted'——push 的收尾自
+-- 第一方自审工作流 F068 起同样按落位项判（'Pm.Cli.landedItems'），只是这里
+-- 要求**全部**落完：源文件搬走后未落完那半的计划就失效）。
+-- 搬移命令与 git 步骤同一纪律（第一方自审工作流 F072）：经
+-- 'Pm.Publish.inboxDoneCommand' 解析-重渲染，嵌不进命令行的路径给手动指引。
 ingestSteps :: Config -> FilePath -> T.Text -> String -> [FilePath] -> [String]
 ingestSteps cfg vaultDir pid cat files =
   [ ""
@@ -301,5 +296,9 @@ ingestSteps cfg vaultDir pid cat files =
   , "  1. 写 photos.json 并用 json.tool 校验（AI 分类与坐标归 skill）"
   , "  2. 校验通过后，把以下源文件移入各自目录的 _done\\ 子目录："
   ]
-    <> [ "       move \"" <> f <> "\" \"" <> takeDirectory f </> "_done" <> "\\\"" | f <- files]
+    <> concatMap moveLine files
     <> gitStepsLines cfg vaultDir pid [cat]
+ where
+  moveLine f = case inboxDoneCommand f of
+    Right l -> ["       " <> l]
+    Left why -> ["       （无法安全生成搬移命令：" <> why <> "）请手动把 " <> takeFileName f <> " 移进同目录的 _done\\"]

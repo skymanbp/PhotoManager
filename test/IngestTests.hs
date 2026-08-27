@@ -26,7 +26,7 @@ import Test.Tasty.HUnit
 
 import Pm.Cli (GoOpts (..), PlanRun (..), savePlanAndMaybeRun')
 import Pm.Config (Config (..), writeRootInfo)
-import Pm.Ingest (runVaultIngest)
+import Pm.Ingest (ingestSteps, runVaultIngest)
 import Pm.Journal (JEntry (..))
 import Pm.Op
 import Pm.Plan
@@ -34,7 +34,7 @@ import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.VaultHold (VaultHold (..))
 import Pm.Win (openExclusiveBinary)
 import System.IO (hClose)
-import TestUtil (captureStdout, isIntent, journalEntries, t0)
+import TestUtil (captureStdout, isIntent, journalEntries, mkVaultCfg, t0, tpid)
 
 ingestTests :: TestTree
 ingestTests =
@@ -48,6 +48,7 @@ ingestTests =
     , testCase "R5 闸：vault 那份未全落完 → 收尾步骤（move _done）不打印" caseIngestStepsGate
     , testCase "R6 闸：配置主库路径指向 backup root → requireMain 拒绝，一份计划不出" caseIngestRequireMain
     , testCase "三十三轮 F1：源/目标存在但读不出（独占占住）→ 错误清单 + 退出 2 + 零计划，不是 CLI 崩溃" caseIngestUnreadable
+    , testCase "工作流 F072：ingestSteps 搬移行经 inboxDoneCommand——展开字符文件名给手动指引而非裸拼；命令行无反斜杠" caseIngestStepsSink
     ]
 
 -- | 临时主库 + vault + 一个 _inbox。回调收 (cfg, inbox 目录)。
@@ -168,6 +169,22 @@ caseIngestConflict = withIngestEnv $ \cfg inbox -> do
       [piStatus it | it <- plItems pv, takeFileName (opDstRel (piOp it)) == "b.jpg"]
         @?= [StPending]
     _ -> assertFailure "应恰好两份计划"
+
+-- | 收尾步骤是「整块粘进终端」的文本：搬移行此前裸拼源路径（合法 NTFS 名
+-- @IMG_$(whoami).jpg@ 在 bash 双引号内照样展开；目标以 @\\"@ 收尾把闭合引号
+-- 转义掉）。经 'Pm.Publish.inboxDoneCommand' 后：嵌不进的给手动指引，能嵌的
+-- 以 @/@ 重渲染——命令行里不再有反斜杠。
+caseIngestStepsSink :: IO ()
+caseIngestStepsSink = do
+  let cfg = mkVaultCfg "D:\\main" "D:\\vault"
+      isCmd l = let t = dropWhile (== ' ') l in take 3 t == "mv " || take 4 t == "git "
+      cmdLines = filter isCmd
+      bad = ingestSteps cfg "D:\\vault" tpid "landscape" ["D:\\_inbox\\IMG_$(whoami).jpg"]
+  assertBool ("展开字符文件名不得裸拼进命令: " <> unlines bad) (not (any ("$(" `isInfixOf`) (cmdLines bad)))
+  assertBool ("应给手动指引: " <> unlines bad) (any ("请手动" `isInfixOf`) bad)
+  let ok = ingestSteps cfg "D:\\vault" tpid "landscape" ["D:\\_inbox\\a.jpg"]
+  assertBool ("应有重渲染的 mv 行: " <> unlines ok) (any ("mv -- \"D:/_inbox/a.jpg\" \"D:/_inbox/_done/\"" `isInfixOf`) ok)
+  assertBool ("命令行不得含反斜杠: " <> unlines ok) (not (any ('\\' `elem`) (cmdLines ok)))
 
 caseIngestE2E :: IO ()
 caseIngestE2E = withIngestEnv $ \cfg inbox -> do

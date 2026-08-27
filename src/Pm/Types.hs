@@ -79,6 +79,13 @@ instance FromJSON FileKind where
 --
 -- 同一份知识出现两处就迟早会分叉，所以这里不是"补几个扩展名"，而是把定义
 -- 收成一处、让 'Pm.Versions' 引用它。
+--
+-- 判据③（'Pm.Versions'）问的是"这一帧有没有 RAW 工作流"：有 → 同名 JPG 是
+-- 导出件，放进 Raw 层是误放，要报；没有 → 那个 JPG 本身就是原片（相机直出
+-- JPG／手机拍的／RAW 已遗失后用能找到的 JPG 顶替——用户 2026-08-25 指出的
+-- 三种情况，共同特征正是"没有对应的 RAW"）。列表以本库实测为准（Raw 层
+-- arw 3794 · dng 71）并补齐常见机型格式；@psd@\/@psb@\/@tif@ 是**编辑**
+-- 格式不是原始档，不计入——它们的存在不能说明这一帧有 RAW。
 rawExts :: [String]
 rawExts =
   [".arw", ".dng", ".nef", ".cr2", ".cr3", ".raf", ".orf", ".rw2", ".pef", ".srw", ".sr2", ".x3f"]

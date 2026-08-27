@@ -24,8 +24,8 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Config (Config (..), loadConfig, writeConfig)
-import Pm.ConfigEdit (ConfigPatch (..), checkPatch, emptyPatch)
-import Pm.Publish (cmdPath, pathArgOk, publishCommands, pushTarget, pushTargetOk, renderCmdPath, vaultCommands)
+import Pm.ConfigEdit (ConfigPatch (..), ConfigSetOpts (..), checkPatch, emptyPatch, mkPatch, tri)
+import Pm.Publish (cmdPath, inboxDoneCommand, pathArgOk, publishCommands, pushTarget, pushTargetOk, renderCmdPath, vaultCommands)
 import Pm.Serve (serveApp)
 import ServeTests (decodeBody, field, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvA, tok, withVault)
 
@@ -38,8 +38,12 @@ publishTests =
     , testCase "publishCommands：显式类目 add --、photos.json 仓内相对路径 add --、缺配/仓外拒绝生成、push -- 目标" casePublishCommands
     , testCase "汇点复验（39/40 轮）：手编配置绕过 checkPatch 的路径/push 目标/选项注入在生成处再拒，整体不出" casePublishSinkGuards
     , testCase "vaultCommands（第一方自审 R2）：push 收尾与上线命令同一生成点——push 目标取自设置、类目白名单、坏值拒" caseVaultCommands
+    , testCase "inboxDoneCommand（工作流 F072）：ingest 搬移命令同一纪律——解析-重渲染、'/' 分隔、操作数前 --；展开字符拒" caseInboxDoneCommand
     , testCase "配置 round-trip：发布字段 + 含单引号路径写盘后逐字段读回（39 轮 #3 tomlStr）" caseConfigRoundTrip
     , testCase "checkPatch：portfolio 仓路径须存在且可嵌命令；坏 push 目标拒；JSON 三态（null = 清空）" casePublishPatch
+    , testCase "工作流 C101 checkConfig：vault 与主库嵌套（两个方向、既有配置改无关字段）拒；旁边的 vault 放行；备份半对登记拒" caseRootDisjoint
+    , testCase "工作流 F011 备份登记 round-trip：整对写盘读回；半对（手编残余）也不被渲染器静默归零" caseConfigBackupRoundTrip
+    , testCase "工作流 F082 tri/mkPatch：--X 与 --no-X 同给 → Left「只能给一个」；三态其余三格照旧" caseTriState
     , testCase "serve：ping 带 allowApply（与授权级一致）；config 带 publish 对象" caseServePingConfig
     , testCase "GET /api/publish-commands：未配置 → 409；配置 vault 后 → 200 + 命令行数组" caseServePublishCommands
     ]
@@ -198,24 +202,40 @@ caseConfigRoundTrip = do
     Left m -> assertFailure ("写出的配置读不回来: " <> m)
     Right c2 -> c2 @?= c
 
+-- | ingest 收尾的 @_inbox → _done@ 搬移行此前裸拼源路径：@IMG_$(whoami).jpg@
+-- 是合法 NTFS 名、bash 双引号内照样展开；且目标以 @\\"@ 收尾把闭合引号转义掉
+-- （bash 直接 EOF）。同一生成纪律（cmdPath 解析-重渲染）之后两种形态都不出。
+caseInboxDoneCommand :: IO ()
+caseInboxDoneCommand = do
+  inboxDoneCommand "D:\\_inbox\\a.jpg" @?= Right "mv -- \"D:/_inbox/a.jpg\" \"D:/_inbox/_done/\""
+  let refused = either (const True) (const False) . inboxDoneCommand
+  assertBool "$( ) 应拒" (refused "D:\\_inbox\\IMG_$(whoami).jpg")
+  assertBool "反引号应拒" (refused "D:\\_inbox\\a`b.jpg")
+  assertBool "相对路径应拒" (refused "_inbox\\a.jpg")
+  case inboxDoneCommand "D:\\_in box\\b (1).jpg" of
+    Left m -> assertFailure ("合法名应生成: " <> m)
+    Right l -> assertBool ("命令行不得含反斜杠（尾随 \\\" 形态由此根除）: " <> l) ('\\' `notElem` l)
+
 casePublishPatch :: IO ()
 casePublishPatch = withSystemTempDirectory "pm-pub-patch" $ \dir -> do
+  let cfg = mkCfg (dir </> "main")
+      checkPatch' = checkPatch cfg
   -- portfolio 仓路径必须已存在（与 vault 同一原则：当场拒，不留给后续命令炸）
-  e1 <- checkPatch emptyPatch {cpPortfolioDir = Just (Just (dir </> "no-such"))}
+  e1 <- checkPatch' emptyPatch {cpPortfolioDir = Just (Just (dir </> "no-such"))}
   assertBool "不存在的目录应拒" (not (null e1))
   createDirectoryIfMissing True (dir </> "pf")
-  e2 <- checkPatch emptyPatch {cpPortfolioDir = Just (Just (dir </> "pf"))}
+  e2 <- checkPatch' emptyPatch {cpPortfolioDir = Just (Just (dir </> "pf"))}
   e2 @?= []
   -- 目录在、但嵌不进命令行（';' 是合法目录名字符）：这项只用于生成命令，入口即拒
   createDirectoryIfMissing True (dir </> "bad;dir")
-  e2b <- checkPatch emptyPatch {cpPortfolioDir = Just (Just (dir </> "bad;dir"))}
+  e2b <- checkPatch' emptyPatch {cpPortfolioDir = Just (Just (dir </> "bad;dir"))}
   assertBool ("嵌不进命令的 portfolio 路径应拒: " <> show e2b) (any ("嵌入" `isInfixOf`) e2b)
   -- push 目标过语法闸：字符类与选项类
-  e3 <- checkPatch emptyPatch {cpVaultPush = Just (Just "origin; rm -rf")}
+  e3 <- checkPatch' emptyPatch {cpVaultPush = Just (Just "origin; rm -rf")}
   assertBool "带分号的 push 目标应拒" (not (null e3))
-  e3b <- checkPatch emptyPatch {cpPortfolioPush = Just (Just "--mirror origin")}
+  e3b <- checkPatch' emptyPatch {cpPortfolioPush = Just (Just "--mirror origin")}
   assertBool "选项形态 push 目标应拒" (not (null e3b))
-  e4 <- checkPatch emptyPatch {cpPortfolioPush = Just (Just "origin main")}
+  e4 <- checkPatch' emptyPatch {cpPortfolioPush = Just (Just "origin main")}
   e4 @?= []
   -- JSON 三态：null = 清空（Just Nothing），缺省 = 不动（Nothing）
   case Aeson.eitherDecode "{\"vaultPush\":null}" :: Either String ConfigPatch of
@@ -268,3 +288,50 @@ caseServePublishCommands = withSystemTempDirectory "pm-pub-cmds" $ \dir -> do
         length xs @?= 4
         assertBool "应含带目标的 push -- 行" (any (\v -> case v of Aeson.String t -> "push -- origin main" `T.isInfixOf` t; _ -> False) (foldr (:) [] xs))
       other -> assertFailure ("commands 应为数组: " <> show other)
+
+caseRootDisjoint :: IO ()
+caseRootDisjoint = withSystemTempDirectory "pm-nest" $ \dir -> do
+  let mainP = dir </> "main"
+      cfg = mkCfg mainP
+  createDirectoryIfMissing True (mainP </> "成片" </> "pub")
+  createDirectoryIfMissing True (dir </> "vault")
+  e1 <- checkPatch cfg emptyPatch {cpVault = Just (Just (mainP </> "成片" </> "pub"))}
+  assertBool ("vault 在主库之下应拒: " <> show e1) (any ("嵌套" `isInfixOf`) e1)
+  e2 <- checkPatch cfg emptyPatch {cpVault = Just (Just dir)}
+  assertBool ("vault 包住主库应拒: " <> show e2) (any ("嵌套" `isInfixOf`) e2)
+  checkPatch cfg emptyPatch {cpVault = Just (Just (dir </> "vault"))} >>= (@?= [])
+  -- 整份记录过汇点：已嵌套的配置改无关字段也要被指出来；清掉 vault 即放行
+  let nested = cfg {cfgVaultPath = Just (mainP </> "成片" </> "pub")}
+  e4 <- checkPatch nested emptyPatch {cpWorkers = Just (Just 4)}
+  assertBool ("整份记录应过校验: " <> show e4) (any ("嵌套" `isInfixOf`) e4)
+  checkPatch nested emptyPatch {cpVault = Just Nothing} >>= (@?= [])
+  -- 备份登记半对（跨字段不变量的第二例）
+  e5 <- checkPatch cfg {cfgBackupId = Just "B"} emptyPatch {cpWorkers = Just (Just 4)}
+  assertBool ("半对登记应拒: " <> show e5) (any ("登记不完整" `isInfixOf`) e5)
+
+caseConfigBackupRoundTrip :: IO ()
+caseConfigBackupRoundTrip = do
+  let c = (mkCfg "D:\\Photography") {cfgBackupId = Just "abc123", cfgBackupSubpath = Just "Photography"}
+  _ <- writeConfig c
+  loadConfig >>= either assertFailure (@?= c)
+  -- 半对状态只能来自手编；渲染器忠实保全（此前整张表被静默归零——
+  -- 下一次任何写回把完整登记丢掉）
+  let half = c {cfgBackupSubpath = Nothing}
+  _ <- writeConfig half
+  loadConfig >>= either assertFailure (\c2 -> (cfgBackupId c2, cfgBackupSubpath c2) @?= (Just "abc123", Nothing))
+
+caseTriState :: IO ()
+caseTriState = do
+  -- 值类型钉成 String（消 -Wtype-defaults：tri 是多态的，字面量会歧义默认）
+  case tri "vault" (Just ("D:\\v" :: String), True) of
+    Left m -> assertBool m ("只能给一个" `isInfixOf` m)
+    Right r -> assertFailure ("矛盾旗标应拒，得到 " <> show r)
+  tri "vault" (Nothing, True) @?= Right (Just (Nothing :: Maybe String))
+  tri "vault" (Just "D:\\v", False) @?= Right (Just (Just ("D:\\v" :: String)))
+  tri "vault" (Nothing, False) @?= Right (Nothing :: Maybe (Maybe String))
+  -- 整份：一处矛盾整体拒（exit 2 在 Main 的接线上）；全空 = 空补丁
+  let o = ConfigSetOpts (Nothing, False) (Nothing, False) (Just 8, True) (Nothing, False) (Nothing, False) (Nothing, False) Nothing
+  either (\m -> assertBool m ("--workers 与 --no-workers" `isInfixOf` m)) (const (assertFailure "矛盾应整体拒")) (mkPatch o)
+  case mkPatch o {csWorkers = (Nothing, False)} of
+    Right p -> p @?= emptyPatch
+    Left m -> assertFailure m

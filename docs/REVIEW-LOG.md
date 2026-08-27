@@ -533,3 +533,168 @@ m-R8  盘符闸拆除                             → 1 红（UNC 拒绝钉）
 表钉住）。接受不修（方向安全）：Doctor.staleTmpFiles 查不出→不删（no-delete
 方向）、Names 成片枚举塌 False→少提议 rename（只读）、Trash.listTrashFiles
 base 塌缩（既有注释登记）。
+
+## P7-J 第一方全量自审·第二轮（ultracode 多代理工作流，基线 `0bade70`）——14 簇类级收口
+
+流程同 P7-I（用户指令 2026-08-26：聚类 → 上游根因 → 类级修），但换成多代理
+工作流把全库**重扫**：并行 finder 分维度产出 **101 项 finding**，对抗复核后
+聚成 **14 簇**；每簇一名 triage 代理在 HEAD `0bade70` 上逐 file:line 复核
+（present / fixed_at_head / registered_residual / false_positive 四档，含对
+预置 refute 判语的三处推翻），再按簇设计类级修法。全部修法落在本提交，
+测试 330 → **382**（零 GHC 警告）。行为面变化的用户可见清单见
+DESIGN-COMMANDS §11。
+
+### 第一波（送审前已并入工作树）：散簇 + GUI
+
+命令文本生成（F072：`Pm.Ingest` 搬移行绕过 `inboxDoneCommand` 裸拼）、扫描
+覆盖（F039/F040：`.` 键换算不出全树覆盖、未枚举子树条目从快照消失）、探针
+（F041）、journal/undo（F027 双侧、F028 撕裂尾追加、F033/F034、F000 报文、
+F019 `--only`、F004 重键、F018 槽位报文）、gitignore 归一（F066）、names 身份
+闸（F095）、trash 清除逐项停（C102）、serve 配置快照按戳重读（C105）、sort
+组悬置复算（F049）。钉子新落 `test/SweepTests.hs` 等；判别突变见下表轮 1
+（21/22 ✓，m-F072b 首跑 BUILD-ERROR 系突变本身笔误，改 `let src = CmdPath f`
+后重跑转红）。GUI 簇 F（app.js 加载竞态 latest-request-wins 等）同波已修。
+
+### 第二波（四阶段类级修）：五大机制簇
+
+**簇 B——「退出码答不了『真做了吗』」（F029/F068/F031/F099；F020 独根同段修）。**
+根因（triage 原文要义）：「工作是否真发生」从塌缩的 `Int` 退出码读，而不是从
+**已存在**的逐项结果通道读——`executePlanNowWith` 只按 isBad 折 Int（每个
+`ONotExecuted` 都消失），32 轮为此建的 `PlanRun`/`fullyExecuted` 只接了一个
+消费者（ingest）；`runUndoCmd` 手搓 savePlan+`pure 0`，「存而未执 = 1」的
+定义到不了它；`planCategories` 从**计划**而不是**结果**答「动了什么」。
+类级修：`PlanRun`（PrRefused/PrSaved/PrRun + 逐项结果）贯通全部计划生成器与
+收尾——undo 走 `savePlanAndMaybeRun'`（exit 1）、`afterApply`/`runVaultPush`
+按 `landedItems`/`resultCategories` 收尾、`planIdOf`/`fullyExecuted` 单一定义。
+F020（confirm 裸 `getLine`，EOF 异常逃逸）：`try` + EOF=否。
+
+**簇 C——「CLI 打印死绑 stdout，GUI 端只有退出码」（F022/F051/F053/F078/C106）。**
+类级修：`(String -> IO ())` sink 贯通全部 GUI 可达命令路径（sort/apply/
+recheck/backup 缓存刷新等），serve 用 logRef 收集回 JSON `log` 字段 + 逐项
+`status`；CLI 侧 sink=putStrLn，输出逐字不变。
+
+**簇 A——「降级走旁道，退出码写常量」（F010/F077/F032/F056/F057/F021/F046/F079 等）。**
+根因（triage 原文）：降级在类型系统允许消费者丢弃的**旁道**上返回（`(Maybe a,
+[String])` 的告警被 `_` 抹掉；loadConfig 把「缺席」与「读不出」塌进同一个
+Left；readManifest 把整文件拒绝与单条坏行混进一个 [String]），随后退出码写
+**常量**而不是从降级推导——净效果：读不出/不可信/过期的状态配上 ✓ 与 exit 0。
+类级修：三个未转换的 loader 补成三态（`CatalogLoad`、`ConfigLoad`、
+`readManifest :: IO (Either …)`）+ 消费端逐个按三态分支；退出码改为降级的
+函数（`backupVerdict` 判定表、status 的 `warns` 入码、doctor 的 CATALOG/
+DEEP-SKIPPED 行、trash 视图整体拒绝、init --force 明说「未能保留」、backup
+的 `mainFresh` 闸）。
+
+**簇 G6——「配置按字段各查各的，整份记录无人验」（C101/F011/F082）。**
+根因（triage 原文）：`checkPatch` 收不到 `Config`，结构上写不出任何跨字段
+不变量；嵌套判定是 `backupInitPreflight` 的私有 where（只守备份对主库）；
+「备份 id⇔subpath 成对」存在三份互不一致的谓词（renderer/report/GUI），
+renderer 静默归一而无人拒绝；CLI 在校验器看到之前就把「--X --no-X」矛盾折成
+清空。类级修：`rootsNested`/`checkConfig` 汇点 + `checkPatch` 收 `Config`
+终于 `checkConfig (applyPatch c p)` + `configTxn` 锁内按盘上最新配置复验 +
+init/backup init（对 vault 槽补查）/serve 四路共用 + `tri`/`mkPatch` 拒矛盾
+exit 2 + renderer 与其它表同一 `section` helper（半对登记忠实保全）。
+
+**簇 D——「单一真源纪律只写在散文里」（F002/F023/F025/F044/F047/F059/F060/F096/F097 等）。**
+根因（triage 原文要义）：所有权声明只存在于 haddock 散文，定义与站点局部
+再拼写可以无限共存，编译器两边都看不见。类级修：逐个上收唯一定义并让原站点
+引用——`trashSrcRel`（Exec 字面 `"trash"` / Undo `pmSubTrash` / 谓词硬编码
+三处同源化）、`stemOf`（Import/Sort 双份局部 stemKey）、`inArchiveLayer`
+（clean 两处局部 + status 的「任何非暂存副本都算归档」口径错位 = F058/F096
+行为修）、`archiveLayers`（Dedupe 抄本）、`freshPending`（四处求和）、
+`utcToNs`（statSnap 原地重写截断）、`pendingEditDir`（Clean 字面 "待修改"）、
+`stagingTop`（Status 字面）；死名删除：`opRelPaths`（零调用导出）、`isPng`、
+`stemKey`（Versions 的同名异义局部改名 `versionKey`）。F042 同簇落地：root
+自身是 junction 属合法用法（resolveUnder 文档 + 句柄守卫用例既有钉），
+freshnessSweep 只对**库内子层** surrogate 拒绝。
+
+**簇 E——「文档/注释清点漂移」（17 项：F003/F013/F014/F036/F043/F045/F048/F053/F055/F062/F076/F080/F089/F090/F100 等）。**
+根因：据实清点类声明（字节出口、锁调用点、旗标census、GUI 页序、CSP 逐字）
+没有哨兵，代码改一次文档错一片；另有被代码否证的机制解释（F043「与
+readPmState 逐字一致 + link count 拒绝」——probeConfined 实际按 FileId 身份
+排除、不查 link count；F048「listDirectory 惰性列表 try-WHNF」讹传）留在注释
+里教坏下一个读者。类级修：注释逐项改写（Exec 头注、Hash、Win.pathUnder、
+nsToUtc/statSnap、Config F013 错位块、Serve 孤儿文档、Status 双 `-- ^`）+
+**`test/DocDriftTests.hs` 常驻哨兵 9 例**（字节出口 census、withConfigLock
+census、`--json` 唯一、GUI 页序、CSP 逐字、死名、Haddock 标记卫生、讹传、
+freshStagingCatalog 命名）。哨兵上线当轮即抓出 3 处漏网（Exec 头注在修注里
+复述原句自指命中、Exec/Serve 各一处双标记注释段）——机制成立的直接证据。
+文档侧 A1-A10/B 表核查由并行 docs 代理完成（DESIGN.md 750/750 零余量，
+行为面变化改记 DESIGN-COMMANDS §11；`--verify-media` 未实现已在 I3b 标注）。
+
+### 驳回/存疑处置（逐项 triage 判语，全库 101 项里的非 present 部分）
+
+- **false_positive**：F006（Win.hs rawRename 判语误报）、F016、F024/F098
+  （`catRootId` "write-only" 论断被驳，两项同址）、F026（volumeFsType 取首
+  盘符幂等）、F063（侧缓存成对写非 dead work）、F087/F092（GUI 两项，机制
+  链在复核中断裂）。
+- **fixed_at_head**：F030。
+- **registered_residual**：F012（UNC `\\?\UNC\` 与 `\\server\share` 归一，
+  DESIGN.md 既有登记）、F071（VaultHold both-absent 臂复读，TOCTOU 方向无害）。
+- **接受不修（方向安全，代码级核查登记）**：Catalog removeIfExists（查不出 →
+  不删，no-delete 方向）；journal 撕裂尾 Warn 残余（既有注释登记）；
+  m-F027R（resolveOn 不重绑）预期 GREEN——loader 已绑定，纵深防御层。
+- **F090（CSP `style-src 'unsafe-inline'` 可收紧）**：代码侧证实零内联样式，
+  但 Tauri v2 webview 是否自注入内联 `<style>` 无法离线核实，需一次
+  `pm ui` + DevTools 实机验证——登记待办，不盲改 CSP。
+
+### 判别突变（轮 1：第一波散簇；轮 2：第二波五簇）
+
+每项突变恰好让配对钉子转红、邻近用例全绿后还原。轮 1 的 m-F072b 首跑
+BUILD-ERROR 是**突变本身**笔误（`let src = f` 类型不符），修正为
+`let src = CmdPath f` 后在轮 2 重跑转红（m2-F072b）。
+
+**轮 1（第一波散簇，22 项）：**
+
+| 突变 | 模式 | 预期 | 实得 | 用时 | 判定 |
+|---|---|---|---|---|---|
+| m-F072a Ingest 搬移行裸拼 f | `-p F072` | RED | RED (1/2 failed: 工作流 F072：ingestSteps 搬移行经 inboxDoneCommand——展开字符文件名给手动指引而非裸拼；命令行无反斜杠) | 191s | ✓ |
+| m-F072b Publish inboxDoneCommand 跳过 src checkPath | `-p F072` | RED | BUILD-ERROR | 25s | ✗ |
+| m-F039 uncoveredKey 丢 rel == "." | `-p F039` | RED | RED (1/1 failed: 第一方自审工作流 F039：基准目录列不出（RD 拒）→ 覆盖全树，catalog 不报「消失」) | 73s | ✓ |
+| m-F040 scanRoot unknown = Map.empty | `-p F040` | RED | RED (1/1 failed: 第一方自审工作流 F040：子树列不出 → 旧条目按「查不出」保留并计数，不从快照消失) | 204s | ✓ |
+| m-F041 WalkDotDirs 探针回退 doesFileExist | `-p F041` | RED | RED (1/1 failed: 工作流 F041：root-id.json 被 ACL 全拒 → 仍判 pm 状态目录不进入（布尔探针塌 False 会走进 .pm\tra) | 76s | ✓ |
+| m-F049 Sort 去掉 reholdKin | `-p E2E` | RED | RED (1/11 failed: ) | 96s | ✓ |
+| m-F027L loadPlan' 不绑定 root | `-p F027` | RED | RED (1/1 failed: F027 resolve 锁内重装只取条目：写回与读盘用 UUID 绑定的 root，文件里的过期 root 零字节) | 81s | ✓ |
+| m-F027R resolveOn 不重绑（loader 已绑，预期纵深防御=绿） | `-p F027` | GREEN? | GREEN (1 passed) | 66s | ✓ |
+| m-F066 gitignore 行规则回退 T.strip | `-p F066` | RED | RED (1/1 failed: F066 I11 .gitignore 前导空白是模式的一部分：「  .pm/」不算覆盖；尾随空白/CRLF 忽略) | 47s | ✓ |
+| m-F095 runNames 身份闸失效 | `-p F095` | RED | RED (1/1 failed: ) | 66s | ✓ |
+| m-F074N Names 计划闸不豁免自身 | `-p F074` | RED | RED (1/1 failed: ) | 61s | ✓ |
+| m-F074E Exec 执行闸不豁免自身 | `-p F074` | RED | RED (1/1 failed: ) | 37s | ✓ |
+| m-F028C 追加口不查尾部 | `-p F028` | RED | RED (1/1 failed: F028 撕裂尾之后再追加：新记录不黏进残行；残行仍报 torn（Warn）而非 CORRUPT；manifest 同口同修) | 78s | ✓ |
+| m-F028J 读侧不认撕裂标记 | `-p F028` | RED | RED (1/1 failed: F028 撕裂尾之后再追加：新记录不黏进残行；残行仍报 torn（Warn）而非 CORRUPT；manifest 同口同修) | 88s | ✓ |
+| m-F000 落位复核失败报文回退「交 pm doctor」 | `-p F000` | RED | RED (1/1 failed: F000 落位后复核失败：报文指向实现了的 pm resolve 路，不指向看不见该项的 pm doctor) | 60s | ✓ |
+| m-F033 用户侧 old 回退 existsAny | `-p F033` | RED | RED (1/1 failed: F033 用户侧 rename 源目录 ACL 全拒 → 仍判「在」落 R3；不落 R2、--repair 不补假 Done) | 35s | ✓ |
+| m-F034 C1 文案回退「将清除」 | `-p F034` | RED | RED (1/1 failed: F034 C1 修复文案与 --repair 实际行为一致：在途 tmp 不清除、文案不许诺清除) | 33s | ✓ |
+| m-C102 purgeLoop 不 try | `-p C102` | RED | RED (1/1 failed: C102 trash empty 逐项 unlink 失败 → 不逃顶、报已清除 k/N、exit 2、其余条目未动) | 41s | ✓ |
+| m-F019 --only 不比对序号域 | `-p F019` | RED | RED (1/1 failed: F019 --only 序号越界 → 拒绝并点名范围（不再静默全跳过 + 惰性巨列表）；范围内照常) | 74s | ✓ |
+| m-F004 重键回退 fromList 字节序 | `-p F004` | RED | RED (1/1 failed: F004 目录 rename 的 catalog 重键：改写后的条目胜过目标前缀下的过期条目（左偏），不由字节序决定) | 91s | ✓ |
+| m-F018 bindExecRoot 不列非 Present 槽位 | `-p F018` | RED | RED (1/1 failed: F018 bindExecRoot 零候选：槽位身份损坏/读不出时如实列出原因，不宣称「均不符」) | 87s | ✓ |
+| m-C105 serve 快照永不按戳重读 | `-p C105` | RED | RED (1/8 failed: 第一方自审工作流 C105：终端带外改了 config.toml → 同一 serve 的 GET /api/config 按盘上新值答；主) | 82s | ✓ |
+
+**轮 2（第二波五簇 + F072b 修正重跑，23 项）：**
+
+| 突变 | 模式 | 预期 | 实得 | 用时 | 判定 |
+|---|---|---|---|---|---|
+| m2-F032 Catalog classify 把「读不出」折成「缺席」 | `-p F032` | RED | RED (1/2 failed: 工作流 F032 快照被拒（hardlink 占名）→ doctor 报 CATALOG Bad；从未扫描的 root 不报) | - | ✓ |
+| m2-F010 Config TOML 解析失败折成 CfgAbsent | `-p F010` | RED | RED (1/1 failed: 工作流 F010/F077：init --force 遇旧配置读不出 → 明说未能保留；旧配置完好 → 登记保留且不报) | - | ✓ |
+| m2-F079 readManifest 吞整文件失败为空清单 | `-p F079` | RED | RED (1/1 failed: 工作流 F079/F038 manifest 整文件读不出（hardlink 占名）→ trash list/empty 退出 2，不报「隔) | - | ✓ |
+| m2-F046 status 退出码不看快照回退告警 | `-p F046` | RED | RED (1/1 failed: 工作流 F046：快照最新代坏、回退到 .1 → status 打 ⚠ 且退出 1（--cached 下唯一的 1 来源）) | 49s | ✓ |
+| m2-F056 backupVerdict 降级不抬码 | `-p F056` | RED | RED (1/1 failed: 工作流 F056/F057 backupVerdict 判定表：零降级零差异才 ✓/0；主库回退告警、备份盘读错/被改/未枚举 → 1) | 29s | ✓ |
+| m2-F057 mainFresh 永远放行 | `-p F057` | RED | RED (1/2 failed: 工作流 F057 mainFresh：干净库放行；多出未索引文件 → 拒绝并指向 pm scan) | 39s | ✓ |
+| m2-C101a checkPatch 不做整份复验 | `-p C101` | RED | RED (1/2 failed: 工作流 C101 checkConfig：vault 与主库嵌套（两个方向、既有配置改无关字段）拒；旁边的 vault 放行；备份半对登记拒) | 42s | ✓ |
+| m2-C101b runInit 跳过 checkConfig | `-p C101` | RED | RED (1/2 failed: ) | 39s | ✓ |
+| m2-F082 tri 矛盾折成清空（旧行为） | `-p F082` | RED | RED (1/1 failed: 工作流 F082 tri/mkPatch：--X 与 --no-X 同给 → Left「只能给一个」；三态其余三格照旧) | 35s | ✓ |
+| m2-F011 renderConfig backup 表回退全有才渲染 | `-p F011` | RED | RED (1/1 failed: 工作流 F011 备份登记 round-trip：整对写盘读回；半对（手编残余）也不被渲染器静默归零) | 53s | ✓ |
+| m2-F029 afterApply 收尾不看落位项 | `-p F029` | RED | GREEN (1 passed) | 49s | ○ 纵深防御¹ |
+| m2-F029b afterApply add 类目从计划取而非结果 | `-p F029` | RED | RED (1/1 failed: 工作流 F029/F068：push 收尾按落位项判) | 34s | ✓ |
+| m2-F069 pushableExt 丢 .jpeg | `-p F069` | RED | RED (1/1 failed: 工作流 F069 unpushable 与 push 门同谓词：.png 入列、.jpg/.jpeg 不入（pushableExt 唯一定义) | 41s | ✓ |
+| m2-F058 stagingArchivedSummary 不过层过滤 | `-p F058` | RED | RED (1/1 failed: 工作流 F058 stagingArchivedSummary：相册镜像不算「已归档」（口径 = inArchiveLayer）) | 32s | ✓ |
+| m2-F096 inArchiveLayer 加相册 | `-p F096` | RED | RED (1/1 failed: 工作流 F096 threeCopiesStillExist：主库见证只认 Raw/成片——相册镜像不算归档副本) | 26s | ✓ |
+| m2-F097 stemOf 基名不 case-fold | `-p F097` | RED | RED (1/1 failed: 工作流 F097 holdKin：主文件待裁决 → 同目录同 stem 侧车（case-fold）一并悬置；别组不受牵连) | 33s | ✓ |
+| m2-F002 isTrashSrcRel 永假（谓词与拼法脱钩） | `-p undo` | RED | RED (5/12 failed: P3b-4 #1 / P3b-5: 复位目标被占 → 占位者隔离(~displaced-N) + victim 复位；重跑用新槽位；undo; undo quarantine = 从 trash 原位复位; cx-2: 组内 Copy 失败 → Quarantine 自动复位；doctor 无 Bad；undo 无残留; P2.2: 复位后同计划重跑成功——第二次隔离不被误豁免，undo 可用; P3b-11 undo 一次复位历史 → 反向 Op 以 .pm/trash 为目标，生成时即拒) | 48s | ✓ |
+| m2-F042 子层 junction 也放行（守卫条件丢 relPrefix） | `-p F042` | RED | RED (1/1 failed: 工作流 F042：root 自身是 junction（合法）→ 照常核对；库内子层 junction 保持「探不出 = 错误」) | 42s | ✓ |
+| m2-F054 foldHardErrors 不抬码 | `-p F054` | RED | RED (1/1 failed: 工作流 F054：sort 提议/计划——子树列不出（ACL 拒）→ 退出码 1，不替没看过的目录担保；junction 跳过仍是 0) | 30s | ✓ |
+| m2-F047 freshPending 丢读取错误位 | `-p 退出码` | RED | RED (1/6 failed: ) | 38s | ✓ |
+| m2-F052 planIdOf 拒绝也给 id | `-p F052` | RED | RED (1/2 failed: 工作流 F052：planIdOf——PrRefused 无 id（盘上没有计划）；PrSaved/PrRun 带 id) | 37s | ✓ |
+| m2-F072b Publish inboxDoneCommand 跳过 src checkPath（轮1突变笔误修正版） | `-p F072` | RED | RED (2/2 failed: 工作流 F072：ingestSteps 搬移行经 inboxDoneCommand——展开字符文件名给手动指引而非裸拼；命令行无反斜杠; inboxDoneCommand（工作流 F072）：ingest 搬移命令同一纪律——解析-重渲染、'/' 分隔、操作数前 --；展开字符) | 102s | ✓ |
+| m2-F020 confirm 回退裸 getLine | `-p F020` | RED | RED (1/1 failed: ) | 37s | ✓ |
+¹ m2-F029 预期 RED 实得 GREEN 的机理已查明：外层闸（landedItems）被突变移除后，内层数据闸 resultCategories（同样从逐项结果推导）仍把全员未执行的 add 类目压成空 → 无 git 步骤。两层同源互护，与 m-F027R 同档；改打内层的 m2-F029b 转红证明钩子在承重。

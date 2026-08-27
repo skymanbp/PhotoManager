@@ -12,6 +12,7 @@
 -- 拓扑里另外两种必然的同字节关系全报成了缺陷（实测 15 组里误报 7 组）。
 module Pm.Versions
   ( normalizeStem
+  , archiveLayers
   , VersionsReport (..)
   , versionsReport
   , runVersions
@@ -26,7 +27,7 @@ import qualified Data.Text as T
 import System.FilePath (joinPath, splitDirectories, takeBaseName, takeDirectory, takeExtension)
 import Text.Printf (printf)
 
-import Pm.Catalog (loadCatalog)
+import Pm.Catalog (catalogOr, loadCatalog)
 import Pm.Config (Config (..))
 import Pm.Types
 
@@ -96,17 +97,14 @@ data VersionsReport = VersionsReport
   }
   deriving (Show, Eq)
 
+-- | dedupe\/versions 报告范围的三层（'Pm.Dedupe.archiveLayerRel' 共用）。
 archiveLayers :: [String]
 archiveLayers = ["Raw", "成片", "相册"]
 
--- | 相机**原始档**扩展名（case-fold）。判据③问的是"这一帧有没有 RAW 工作流"：
--- 有 → 同名 JPG 是导出件，放进 Raw 层是误放，要报；没有 → 那个 JPG 本身就是
--- 原片（相机直出 JPG／手机拍的／RAW 已遗失后用能找到的 JPG 顶替——用户
--- 2026-08-25 指出的三种情况，共同特征正是"没有对应的 RAW"）。
---
--- 列表以本库实测为准（Raw 层 arw 3794 · dng 71）并补齐常见机型格式。
--- @psd@\/@psb@\/@tif@ 是**编辑**格式不是原始档，不计入——它们的存在不能说明
--- 这一帧有 RAW。
+-- | 版本组（同事件同 stem 的多形态）与全库精确重复（同 sha \>1，排除
+-- 'designedGroup' 认定的设计内冗余）。「什么算相机原始档」引用
+-- 'Pm.Types.rawExts'——那是全项目唯一一份定义，完整取舍理由也在那里
+-- （工作流 F076：这里原先贴着一份 rawExts 的旧文档，正文早已收归 Types）。
 versionsReport :: Catalog -> VersionsReport
 versionsReport cat =
   VersionsReport {vgGroups = groups, vgExactDups = dups}
@@ -118,11 +116,11 @@ versionsReport cat =
     , topOf (enPath e) `elem` archiveLayers
     ]
   topOf p = case splitDirectories p of (x : _) -> x; [] -> ""
-  stemKey e =
+  versionKey e =
     ( takeDirectory (enPath e)
     , map toLower (normalizeStem (takeBaseName (enPath e)))
     )
-  grouped = Map.fromListWith (<>) [(stemKey e, [enPath e]) | e <- photos]
+  grouped = Map.fromListWith (<>) [(versionKey e, [enPath e]) | e <- photos]
   groups =
     sortOn fst
       [ (k, sort ps)
@@ -206,11 +204,11 @@ versionsReport cat =
 
 runVersions :: Config -> IO Int
 runVersions cfg = do
-  (mcat, warns) <- loadCatalog (cfgMainPath cfg)
-  mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
-  case mcat of
-    Nothing -> putStrLn "主库尚未索引 → 先 pm scan" >> pure 2
-    Just cat -> do
+  lc <- loadCatalog (cfgMainPath cfg)
+  case catalogOr "主库尚未索引 → 先 pm scan" lc of
+    Left m -> putStrLn m >> pure 2
+    Right (cat, warns) -> do
+      mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
       let rep = versionsReport cat
       printf
         "版本组（同目录同 stem 多版本）: %d 组 · 非设计内精确重复: %d 组\n"

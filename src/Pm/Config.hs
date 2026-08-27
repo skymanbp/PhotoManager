@@ -16,7 +16,10 @@
 module Pm.Config
   ( Config (..)
   , configFilePath
+  , ConfigLoad (..)
+  , loadConfigState
   , loadConfig
+  , checkAbsolute
   , writeConfig
   , withConfigLock
   , renderConfig
@@ -40,6 +43,7 @@ module Pm.Config
   , ensurePmSubdir
   , readPmState
   , withPmStateAppend
+  , withPmStateAppend'
   , resolvePmPath
   , readSideCache
   , SideCacheWrite (..)
@@ -79,7 +83,7 @@ import qualified TOML
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Types
 import Pm.Win
-  ( NameKind (..)
+  ( tailUnterminated, NameKind (..)
   , deleteBoundAt
   , flushHandleToDisk
   , moveBoundNoReplace
@@ -147,8 +151,20 @@ configFilePath = do
       dir <- getXdgDirectory XdgConfig "pm"
       pure (dir </> "config.toml")
 
+-- | 配置载入三态（工作流 F010/F077）：「不存在」与「读不出」此前同为 Left，
+-- 'Pm.Commands.runInit' 再把 Left 压回 Nothing——两次有损折叠，正好落在唯一
+-- 需要这个区别的路径上（--force 重建要保留旧登记，读不出时必须明说没保留）。
+data ConfigLoad = CfgAbsent String | CfgUnreadable String | CfgOk Config
+
 loadConfig :: IO (Either String Config)
-loadConfig = do
+loadConfig = collapse <$> loadConfigState
+ where
+  collapse (CfgOk c) = Right c
+  collapse (CfgAbsent m) = Left m
+  collapse (CfgUnreadable m) = Left m
+
+loadConfigState :: IO ConfigLoad
+loadConfigState = do
   fp <- configFilePath
   exists <- doesFileExist fp
   if not exists
@@ -159,7 +175,7 @@ loadConfig = do
       -- 这里认出它并给出恢复动作；**不自动改名**——自动提升一个来历不明的
       -- .tmp 与 'Pm.VaultHold.readHolds' 的 fail-closed 原则相悖。
       orphan <- doesFileExist (fp <> ".tmp")
-      pure . Left $
+      pure . CfgAbsent $
         if orphan
           then
             "配置缺失，但发现 " <> fp <> ".tmp —— 上次写入崩在删旧与改名之间。"
@@ -173,12 +189,12 @@ loadConfig = do
       -- 读不出 = Left，withCfg 打印后 exit 2（fail-closed，不猜内容）。
       rawE <- try (BS.readFile fp) :: IO (Either IOException BS.ByteString)
       case rawE of
-        Left e -> pure (Left ("配置读取失败（被占/被挪？）: " <> show e <> " —— 解除占用后重试"))
+        Left e -> pure (CfgUnreadable ("配置读取失败（被占/被挪？）: " <> show e <> " —— 解除占用后重试"))
         Right raw -> case TE.decodeUtf8' raw of
-          Left e -> pure (Left ("配置不是 UTF-8: " <> show e))
+          Left e -> pure (CfgUnreadable ("配置不是 UTF-8: " <> show e))
           Right txt -> case TOML.decode txt of
-            Left e -> pure (Left (T.unpack (TOML.renderTOMLError e)))
-            Right c -> pure (checkAbsolute c)
+            Left e -> pure (CfgUnreadable (T.unpack (TOML.renderTOMLError e)))
+            Right c -> pure (either CfgUnreadable CfgOk (checkAbsolute c))
 
 -- | 配置里的路径字段一律须为绝对路径（第一方自审 R4）：相对路径按进程 cwd
 -- 解析，`pm ui` 拉起的 serve 与终端里的 pm 各有各的 cwd，同一份配置会指向
@@ -234,11 +250,10 @@ renderConfig c =
     , "path = " <> tomlStr (T.pack (cfgMainPath c))
     ]
       <> maybe [] (\w -> ["workers = " <> T.pack (show w)]) (cfgWorkers c)
-      <> ( case (cfgBackupId c, cfgBackupSubpath c) of
-            (Just bid, Just sub) ->
-              ["", "[backup]", "id = " <> tomlStr bid, "subpath = " <> tomlStr (T.pack sub)]
-            _ -> []
-         )
+      -- 工作流 F011：与其它表同一 helper——此前唯独这张表全有才渲染，半对
+      -- 登记被**静默归零**；「登记成对」的判定归 'Pm.ConfigEdit.checkConfig'
+      -- （写入口当场拒），渲染器只忠实保全已设字段
+      <> section "backup" [("id", T.unpack <$> cfgBackupId c), ("subpath", cfgBackupSubpath c)]
       -- 每张表渲染**所有**已设字段：渲染器漏一个字段，下一次任何写回就把
       -- 用户设过的那项静默抹掉（round-trip 由 configTxn 的写后重读顺带验证）。
       <> section "vault" [("path", cfgVaultPath c), ("push", cfgVaultPush c)]
@@ -433,11 +448,26 @@ readPmState root rel = do
 -- 两种拒绝都以 IOException 抛出（与 'openStateAppend' 的既有契约一致）：
 -- 调用点在 Exec 的崩溃处理之内，写不成必须整项中止而不是继续。
 withPmStateAppend :: FilePath -> FilePath -> (Handle -> IO a) -> IO a
-withPmStateAppend root rel act = do
+withPmStateAppend root rel act = withPmStateAppend' root rel (const act)
+
+-- | 同上，并把「追加前尾部是否有半截行」告诉调用方（True = 本函数已补上换行，
+-- 新记录从新的一行开始）。第一方自审工作流 F028：断电可在末行留下半截 JSON；
+-- 此前追加写直接接在半截后面，新记录与残行黏成一行——一条真实记录被吞，且
+-- 残行从「末行半截」（Warn，可恢复）变成「中段 CORRUPT」（Bad，永不可修，
+-- undo 从此拒绝）。记录层只断言自己**看过**的尾部状态：先查尾字节，非换行
+-- 结尾先补换行；journal 据此再写一条显式的撕裂标记（'Pm.Journal' 的
+-- @JTornGap@），读侧把「不可解析行 + 紧随其后的标记」判回撕裂尾。尾字节
+-- 查不出 → 抛（同本函数既有契约：写不成必须整项中止，不当无事发生）。
+withPmStateAppend' :: FilePath -> FilePath -> (Bool -> Handle -> IO a) -> IO a
+withPmStateAppend' root rel act = do
   m <- resolveUnder root (".pm" </> rel)
   case m of
     Nothing -> ioError (userError (untrustedMsg (pmDir root </> rel)))
-    Just fp -> bracket (openStateAppend fp) hClose act
+    Just fp -> do
+      torn <- tailUnterminated fp
+      bracket (openStateAppend fp) hClose $ \h -> do
+        when torn (BS.hPut h (BS.singleton 10))
+        act torn h
 
 -- | 可重建侧缓存（备份盘缓存 \/ vault 缓存）的受信读取。三态：
 -- @Left@=不可信（junction\/hardlink\/ACL）、@Right Nothing@=缺席或损坏 JSON
@@ -597,19 +627,6 @@ writeRootInfo root info = do
   createDirectoryIfMissing True (pmDir root)
   BSL.writeFile (rootInfoPath root) (Aeson.encode info)
 
--- | 侧缓存目录的成对写入（catalog.json + meta.json），备份盘缓存与 vault 缓存
--- 共用：都是可重建的展示\/加速缓存，耐久层在别处（备份盘自己的 @.pm@、照片
--- 文件本身）。
---
--- P3b-12（九轮）：覆盖写能被 hardlink 引到库外 → 改「独占创建 tmp → 删旧 →
--- no-replace 落位」。
--- P3b-13（十轮复审 critical，探针实证）：接口从「给我一个目录」改成
--- 「给我 root + @.pm@ 下的子目录名」——旧签名让调用方自由拼路径
--- （'Pm.Backup.cacheDir'、'Pm.Vault.vaultCacheDir'），于是把
--- @.pm\/vault-cache@ 做成 junction 后，正常的 @pm vault status@ 会删掉并替换
--- **库外**的 catalog.json\/meta.json（实测库外文件变成了 pm 写的内容）。
--- 现在每个文件的完整路径在建目录前后各过一次 'resolveUnder'，与 Exec 的
--- tmp 落位同款。
 -- | Run the action holding the root's exclusive mutation lock; Nothing if
 -- another pm instance holds it. （原 Pm.Lock，三十一轮下沉至此——见该模块头。）
 --
@@ -650,6 +667,19 @@ data SideCacheWrite
   | CacheRefused String
   deriving (Show, Eq)
 
+-- | 侧缓存目录的成对写入（catalog.json + meta.json），备份盘缓存与 vault 缓存
+-- 共用：都是可重建的展示\/加速缓存，耐久层在别处（备份盘自己的 @.pm@、照片
+-- 文件本身）。
+--
+-- P3b-12（九轮）：覆盖写能被 hardlink 引到库外 → 改「独占创建 tmp → 删旧 →
+-- no-replace 落位」。
+-- P3b-13（十轮复审 critical，探针实证）：接口从「给我一个目录」改成
+-- 「给我 root + @.pm@ 下的子目录名」——旧签名让调用方自由拼路径
+-- （'Pm.Backup.cacheDir'、'Pm.Vault.vaultCacheDir'），于是把
+-- @.pm\/vault-cache@ 做成 junction 后，正常的 @pm vault status@ 会删掉并替换
+-- **库外**的 catalog.json\/meta.json（实测库外文件变成了 pm 写的内容）。
+-- 现在每个文件的完整路径在建目录前后各过一次 'resolveUnder'，与 Exec 的
+-- tmp 落位同款。
 writeSideCache :: Aeson.ToJSON meta => FilePath -> FilePath -> Catalog -> meta -> IO SideCacheWrite
 writeSideCache root sub cat meta = do
   -- 三十一轮 F1：catalog.json + meta.json 是**成对**状态，两文件之间没有锁时
@@ -659,12 +689,12 @@ writeSideCache root sub cat meta = do
   -- 共用本函数，十九轮登记的 vault-cache 跨进程争用残余随本条一并关闭
   -- （三十二轮更正：此前误记为二十轮；登记原文在 REVIEW-LOG 十九轮 bullet）。
   m <- withRootLock root $ do
-    let dir = pmDir root </> sub
-    pre <- resolveUnder root (".pm" </> sub)
-    case pre of
-      Nothing -> pure (Left (untrustedMsg dir))
-      Just _ -> do
-        createDirectoryIfMissing True dir
+    -- 第一方自审 R5 扫尾：子目录一律经 'ensurePmSubdir'（先限域、在返回的路径上
+    -- mkdir），不再对拼接串 mkdir。
+    ed <- ensurePmSubdir root sub
+    case ed of
+      Left e -> pure (Left e)
+      Right _ -> do
         r1 <- writeCacheFile root sub "catalog.json" (Aeson.encode cat)
         case r1 of
           Left e -> pure (Left e)

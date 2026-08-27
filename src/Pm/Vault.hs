@@ -25,6 +25,7 @@ module Pm.Vault
   , vaultIgnoreGuard
   , gitStepsLines
   , planCategories
+  , resultCategories
   , runVaultStatus
   , runVaultPush
   , newActive
@@ -37,7 +38,7 @@ module Pm.Vault
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (forM, forM_, unless)
 import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BSLC
@@ -54,8 +55,10 @@ import System.Directory (canonicalizePath, doesDirectoryExist, listDirectory)
 import System.FilePath (splitDirectories, takeExtension, (</>))
 import Text.Printf (printf)
 
-import Pm.Catalog (loadCatalog)
+import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog, loadNote)
+import Pm.Cli (PlanRun (..), landedItems, planRunCode)
 import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), createRootInfo, freshRootId, pmSubVaultCache, readRootInfo, readRootState, readSideCache, requireMain, writeSideCache)
+import Pm.Exec (ItemOutcome)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Hash (StatSnap (..), sha256File, statHitStable, statSnap)
 import Pm.Op
@@ -258,7 +261,7 @@ computeVault' quiet cfg vaultDir = do
         -- 面）；身份比对用规范路径 + vault root UUID。
         vaultCanon <- canonicalizePath vaultDir
         mVRoot <- readRootInfo vaultDir
-        (mcat, _) <- loadCatalog root
+        lc <- loadCatalog root
         eMeta <- readVaultCacheMeta root
         eVCache <- readVaultCacheCatalog root
         -- P3b-15（十二轮）：缓存失信 → 弃用内容全量重算（保守），但失信原因
@@ -269,13 +272,15 @@ computeVault' quiet cfg vaultDir = do
             dropLeft (Right x) = pure x
         mMeta <- dropLeft eMeta
         mVCache <- dropLeft eVCache
+        -- 工作流 A 簇：主库索引读不出时相册 sha 全量重算——可以，但要说
+        forM_ [() | CatRefused _ <- [lc]] $ \() -> warn ("⚠ 主库" <> loadNote lc <> "，相册 sha 全量重算")
         -- P3b-5 复审 #4：双方 root-id 都必须存在且相等才复用（Nothing==Nothing
         -- 不算身份）；路径比较用 canonicalizePath 的精确输出（它已按盘上
         -- 真实大小写解析，不再无条件小写化）。vault root 建立前每次全量重 hash。
         let cacheIdentityOk = case (mMeta, mVRoot) of
               (Just m, Just vr) -> vmVaultPath m == vaultCanon && vmRootId m == Just (riId vr)
               _ -> False
-            mainCache = maybe Map.empty catEntries mcat
+            mainCache = maybe Map.empty catEntries (fst (catalogMaybe lc))
             vaultCache =
               if cacheIdentityOk then maybe Map.empty catEntries mVCache else Map.empty
             -- 三十四轮 F1（本轮 minset）：枚举-hash 主循环与 'freshShaAt' 同款
@@ -328,10 +333,13 @@ computeVault' quiet cfg vaultDir = do
                   ]
                 d = vaultDiff srcShas vaultShas
                 vaultCount = sum [Map.size m | (_, m) <- vaultShas]
-                isPng n = map toLower (takeExtension n) == ".png"
+                -- 第一方自审工作流 F069：与 push 写路径的闸（'checkAssignments' 的
+                -- 'pushableExt'）同一谓词。此前各写一份（@".png"@ 字面量 vs 白名单），
+                -- 只因两边都先经 'photoExtFold' 预筛才碰巧相等。
+                unpushableExt n = not (pushableExt n)
                 unpushable =
-                  [(n, "相册") | n <- srcNames, isPng n]
-                    <> [(n, cat) | (cat, ps) <- perCat, (n, _, _) <- ps, isPng n]
+                  [(n, "相册") | n <- srcNames, unpushableExt n]
+                    <> [(n, cat) | (cat, ps) <- perCat, (n, _, _) <- ps, unpushableExt n]
             mapM_
               (\(n, loc) -> warn ("  ⚠ 读取不稳定（本轮退出六态分类，fail-closed）: " <> loc </> n))
               unstable
@@ -498,10 +506,22 @@ gitStepsLines cfg vaultDir pid cats =
         , "    请在 " <> vaultDir <> " 里手动：git add <类目…> → git commit → git push"
         ]
 
--- | 计划涉及的 vault 类目（= 各 Copy dst 的第一层目录；git add 的显式对象）。
+-- | 计划涉及的 vault 类目（= 各 Copy dst 的第一层目录）——**生成期的预告**
+-- （serve 的 push-plan 响应把它渲染成「执行后的 git 步骤」）。待裁决项不入列：
+-- 裁决前它落不了位（工作流 F029）。
 planCategories :: Plan -> [String]
-planCategories plan =
-  filter (/= "") (nub [topOf (opDstRel (piOp it)) | it <- plItems plan, isCopy (piOp it)])
+planCategories plan = categoriesOf [piOp it | it <- plItems plan, not (needsDecision (piStatus it))]
+ where
+  needsDecision (StNeedsDecision _) = True
+  needsDecision _ = False
+
+-- | **落位项**的 vault 类目——收尾 git 步骤 @git add@ 的显式对象（工作流
+-- F029/F068：与 'planCategories' 同一取法，但按执行结果而不是计划面）。
+resultCategories :: [(PlanItem, ItemOutcome)] -> [String]
+resultCategories rs = categoriesOf (map piOp (landedItems rs))
+
+categoriesOf :: [Op] -> [String]
+categoriesOf ops = filter (/= "") (nub [topOf (opDstRel op) | op <- ops, isCopy op])
  where
   topOf p = case splitDirectories p of (x : _) -> x; [] -> ""
   isCopy OpCopy {} = True
@@ -531,7 +551,7 @@ photosJsonRef (Just fp) name = do
 -- NEW×已定类目 → Copy 计划项；DRIFT → NEEDS-DECISION（pm resolve --keep src
 -- 走 §6.5 supersede，旧字节进 vault root 的 .pm\/trash\/）；RENAME\/MISSING
 -- 只报告（RENAME 带 photos.json BLOCKED 检查）。写路径只收 jpg\/jpeg。
-runVaultPush :: (Plan -> IO Int) -> Maybe String -> [FilePath] -> Config -> IO Int
+runVaultPush :: (Plan -> IO PlanRun) -> Maybe String -> [FilePath] -> Config -> IO Int
 runVaultPush runPlan mCat files cfg = do
   er <- computeVault False cfg
   case er of
@@ -576,10 +596,16 @@ runVaultPush runPlan mCat files cfg = do
                   case eplan of
                     Left msg -> putStrLn msg >> pure 2
                     Right plan -> do
-                      code <- runPlan plan
-                      when (code == 0) $
-                        mapM_ putStrLn (gitStepsLines cfg (vrVaultDir r) (plId plan) (planCategories plan))
-                      pure code
+                      -- 第一方自审工作流 F068：收尾按逐项结果判（'landedItems'），
+                      -- 不按退出码 0——全部待裁决的一跑退出码也是 0，却一个字节
+                      -- 没落；add 清单取自落位项。退出码换算不变（'planRunCode'）。
+                      pr <- runPlan plan
+                      case pr of
+                        PrRun _ rs
+                          | not (null (landedItems rs)) ->
+                              mapM_ putStrLn (gitStepsLines cfg (vrVaultDir r) (plId plan) (resultCategories rs))
+                        _ -> pure ()
+                      pure (planRunCode pr)
 
 -- ─── vault push 的计划构造（CLI 与 `pm serve` 的 POST /api/vault/push-plan 共用，P4-5） ──
 

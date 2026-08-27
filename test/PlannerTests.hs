@@ -8,12 +8,13 @@
 -- (mj-5), Names edge cases (mj-1).
 module PlannerTests (plannerTests) where
 
+import Control.Exception (SomeException, try)
 import Data.Aeson (eitherDecodeStrict, encode)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, setModificationTime)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory, removeFile, setModificationTime)
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
@@ -23,7 +24,7 @@ import Test.Tasty.QuickCheck (chooseInt, elements, forAll, listOf1, suchThat, te
 import Pm.Backup (discoverAmong)
 import Pm.Clean
 import Pm.Cli (bindExecRoot, recheckCleanItems)
-import Pm.Commands (TrashCmd (..), resolveKeep, runTrash)
+import Pm.Commands (RootSel (..), TrashCmd (..), resolveKeep, runTrash, runUndoCmd)
 import Pm.Config (Config (..), writeRootInfo)
 import Pm.Diff
 import Pm.Doctor (Severity (..))
@@ -168,6 +169,10 @@ importTests =
             s2 = mkE ("To-Be-Sync'd" </> "待修改" </> "y.ARW") "y"
             a1 = mkE ("成片" </> "26-06-R66" </> "c.jpg") "x"
         stagingArchivedSummary (mkCat [s1, s2, a1]) @?= (1, 1)
+    , testCase "工作流 F058 stagingArchivedSummary：相册镜像不算「已归档」（口径 = inArchiveLayer）" $ do
+        let s = mkE ("To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "c.jpg") "x"
+            alb = mkE ("相册" </> "26-06-R66" </> "c.jpg") "x"
+        stagingArchivedSummary (mkCat [s, alb]) @?= (1, 0)
     ]
 
 -- ─── 备份 diff（纯）+ 端到端 fixture ────────────────────────────────────────
@@ -364,6 +369,19 @@ cleanTests =
           -- 归档副本原封不动
           keep <- readFile (mroot </> "成片" </> "26-06-R66" </> "c.jpg")
           keep @?= "X9"
+    , testCase "工作流 F096 threeCopiesStillExist：主库见证只认 Raw/成片——相册镜像不算归档副本" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let mroot = dir </> "main"
+              broot = dir </> "bak"
+          createDirectoryIfMissing True (mroot </> "相册")
+          createDirectoryIfMissing True (broot </> "成片")
+          writeFile (mroot </> "相册" </> "c.jpg") "W1"
+          writeFile (broot </> "成片" </> "c.jpg") "W1"
+          mcat <- scanQuiet "m" mroot
+          bcat <- scanQuiet "b" broot
+          sha <- sha256File (mroot </> "相册" </> "c.jpg")
+          ok <- threeCopiesStillExist mroot mcat broot bcat [] sha
+          ok @?= False
     , testCase "cx-3: threeCopiesStillExist 见证消失 → False" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let mroot = dir </> "main"
@@ -615,7 +633,7 @@ p22Tests =
           length (plItems plan) @?= 1
           -- 计划保存后世界变了：备份见证退化
           writeFile (broot </> "成片" </> "c.jpg") "XX"
-          dem <- recheckCleanItems mroot mcat broot bcat plan
+          dem <- recheckCleanItems putStrLn mroot mcat broot bcat plan
           map fst dem @?= [piIx it | it <- plItems plan]
     , testCase "P2.2: bindExecRoot 主库 UUID 校验 + 重绑定" $
         withSystemTempDirectory "pm-test" $ \dir -> do
@@ -634,6 +652,24 @@ p22Tests =
           case r2 of
             Left msg -> assertBool msg ("不符" `elemSubstr` msg)
             Right _ -> assertFailure "expected mismatch refusal"
+    , testCase "工作流 F031/F099: pm undo 生成计划 → 与其它生成器同码：退出 1（计划已存、未执行）+ 计划落盘" $
+        withSystemTempDirectory "pm-test" $ \dir -> do
+          let root = dir </> "root"
+              cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+          createDirectoryIfMissing True (root </> "成片")
+          op <- mkCopyOp (dir </> "s.jpg") "UNDO-ME" ("成片" </> "u.jpg")
+          plan <- mkPlanIO root [op]
+          _ <- execOk plan
+          let plansDir = takeDirectory (planPath root "x")
+          before <- either (const 0) length <$> (try (listDirectory plansDir) :: IO (Either SomeException [FilePath]))
+          (out, code) <- captureStdout (runUndoCmd 1 SelMain cfg)
+          -- 此前唯独 undo 在「计划已存、未执行」这个状态报 0（DESIGN §5.1 定义为 1）
+          code @?= 1
+          assertBool ("应打印计划已存: " <> out) ("计划已存" `elemSubstr` out)
+          nAfter <- length <$> listDirectory plansDir
+          nAfter @?= before + 1
+          -- 只是生成计划：目标字节未动
+          doesFileExist (root </> "成片" </> "u.jpg") >>= (@?= True)
     , testCase "P2.2: --keep 拒绝复合组成员与非待裁决条目" $ do
         gplan <- mkGroupPlanIO "R:" [(OpCopy "S:x" "a" "bb" 1 0, Just 0)]
         c1 <- case plItems gplan of

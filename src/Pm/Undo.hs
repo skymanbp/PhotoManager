@@ -13,9 +13,8 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.FilePath ((</>))
 
-import Pm.Config (pmSubTrash, readRootInfo)
+import Pm.Config (readRootInfo)
 import Pm.Journal
 import Pm.Op
 import Pm.Plan
@@ -134,4 +133,4 @@ reverseOp' intents (oid, msha, mtrash) = case Map.lookup oid intents of
           Left ("Quarantine Done " <> T.unpack oid <> " 的 trash 路径非法（" <> trashRel <> "），拒绝生成撤销计划")
       | otherwise ->
           -- 反向 = 从 trash 原位复位（同卷 rename，目标必须不存在）。
-          Right (OpRename (".pm" </> pmSubTrash </> trashRel) victim (FpFileSha sha))
+          Right (OpRename (trashSrcRel trashRel) victim (FpFileSha sha))

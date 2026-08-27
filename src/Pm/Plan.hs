@@ -207,7 +207,12 @@ loadPlan' root pid = do
               | plId p /= pid ->
                   Left ("计划文件内 id（" <> T.unpack (plId p) <> "）与文件名（" <> T.unpack pid <> "）不符，拒绝装载")
               | Left e <- validatePlan p -> Left (e <> "，拒绝装载")
-              | otherwise -> Right p
+              -- 第一方自审工作流 F027：文件里的 @root@ 字段是生成时的挂载路径
+              -- （可手编、盘符已变），是线索不是证据。受信取用口只有这一个，
+              -- 在这里把记录绑到**字节实际来自**的目录，每个调用方（resolve 的
+              -- 锁内重装、listPlans/GUI 列表）就不必各自记得重绑。执行前仍按
+              -- 'plRootId' 走 bindExecRoot（UUID 发现），两道互不替代。
+              | otherwise -> Right p {plRootPath = root}
 
 -- | 列出 @root\/.pm\/plans@ 下装得出来的计划；装不出来的按 (文件名, 原因)
 -- 返回。目录本身经 'requirePmTrusted' + 完整路径 'resolveUnder'，每个计划经

@@ -30,7 +30,6 @@ module Pm.Win
   , deleteBoundAt
   , pathUnder
   , pathAtOrUnder
-  , isNameSurrogate
   , NameKind (..)
   , probeName
   , resolveUnder
@@ -39,10 +38,11 @@ module Pm.Win
   , openFreshBinary
   , openStateAppend
   , openStateRead
+  , tailUnterminated
   , openStateLock
-  , handleIsSingleLink
   , handleFinalPath
   , handleIsAt
+  , normPath
   , openBoundTo
   , FileId (..)
   , handleFileId
@@ -53,9 +53,10 @@ module Pm.Win
   ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (IOException, SomeException, catch, finally, mask, onException, try)
+import Control.Exception (IOException, SomeException, bracket, catch, finally, mask, onException, try)
 import Control.Monad (unless, when)
 import Data.Bits (testBit, (.&.))
+import qualified Data.ByteString as BS
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -66,6 +67,7 @@ import Foreign.Storable (peek, peekByteOff)
 import System.Directory (canonicalizePath, doesPathExist)
 import System.FilePath (hasDrive, isPathSeparator, splitDirectories, (</>))
 import System.IO
+import System.IO.Error (isDoesNotExistError)
 import qualified System.Win32.Console as Win32Console
 import qualified System.Win32.File as Win32File
 import System.Win32.Types (LPTSTR, hANDLEToHandle, peekTString, withHandleToHANDLE, withTString)
@@ -118,8 +120,10 @@ flushHandleToDisk h = do
 -- 哪里"：跟随 reparse point、消解 @..@、补齐大小写与 8.3 短名，因此同时覆盖
 -- 大小写别名、尾随点、junction 与任何未预见的等价名。
 --
--- 任一侧解析失败（路径不存在、ACL 拒绝、名字非法）一律 False —— 这是
--- fail-closed：调用点用它守卫**删除\/写入**，答不上来就不动。
+-- 任一侧解析失败（路径不存在、ACL 拒绝、名字非法）一律 False——fail-closed。
+-- P3b-11 起真正动盘口（trash empty 的 unlink、tmp 落位）改走 'resolveUnder'
+-- 的逐级下降（基准也要受检，见其文档）；本判定保留为测试与读侧的包含性
+-- 断言，语义不变（工作流 F007：原文还写着"调用点用它守卫删除\/写入"）。
 pathUnder :: FilePath -> FilePath -> IO Bool
 pathUnder base p = do
   eb <- try (canonicalizePath base) :: IO (Either IOException FilePath)
@@ -666,7 +670,9 @@ rawRename h dst =
 --      存在 → 失败，绝不覆盖）；
 --   3. **后验**：问同一个句柄"对象现在在哪条路径"。目标的某一层在窗口里被换
 --      成 junction 时对象会落到别处——后验当场发现，沿同一句柄改回原名，
---      再响亮报错。字节不丢、位置已知。
+--      再响亮报错。字节不丢、位置已知。第一方自审工作流 F074：纯大小写改名
+--      时 'normPath' 折大小写，后验只能证明对象仍在期望目录、证明不了拼写已
+--      变（原语实测只在真成功时答 ok，不会静默跳过）。
 --
 -- 目标侧做不到先验（文档明确 SetFileInformationByHandle 的 RootDirectory
 -- 必须为 NULL），后验 + 回迁是句柄能给到的最强保证。
@@ -706,3 +712,25 @@ deleteBoundAt fp = withDisposeHandle fp $ \h -> do
   case r of
     Just e -> ioError (userError (fp <> ": 句柄删除失败，Win32 错误码 " <> show e))
     Nothing -> pure ()
+
+-- | 文件非空且末字节不是换行（第一方自审工作流 F028：追加前的尾部状态）。
+-- 走同一受信读口 'openStateRead'（句柄 link count），只读末字节；不存在 =
+-- 无尾部；其它读失败 → 抛（核不了 = 不追加）。
+tailUnterminated :: FilePath -> IO Bool
+tailUnterminated fp = do
+  r <-
+    try
+      ( bracket (openStateRead fp) hClose $ \h -> do
+          n <- hFileSize h
+          if n == 0
+            then pure False
+            else do
+              hSeek h AbsoluteSeek (n - 1)
+              (/= BS.singleton 10) <$> BS.hGet h 1
+      )
+      :: IO (Either IOException Bool)
+  case r of
+    Right b -> pure b
+    Left e
+      | isDoesNotExistError e -> pure False
+      | otherwise -> ioError (userError (fp <> " 追加前尾部状态查不出（" <> show e <> "）——不追加"))

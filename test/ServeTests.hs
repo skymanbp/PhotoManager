@@ -27,6 +27,7 @@ module ServeTests
   , fixture
   , withVault
   , liftIO'
+  , seedSortSrc
   ) where
 
 import Control.Monad.IO.Class (liftIO)
@@ -547,6 +548,11 @@ caseServeApplyBarrier = withSystemTempDirectory "pm-serve-apply" $ \root -> do
           -- 精确到标签：'Pm.Exec.outcomeLabel' ONotExecuted = "未执行"。
           -- 模糊判据（比如「不含 DONE」）会被 CONFLICT 蒙混过去。
           map outcomeOf (foldr (:) [] xs) @?= [Just "未执行", Just "未执行"]
+          -- 工作流 F022/F078：页面要知道**为什么**没执行——逐项 status 随响应
+          -- 返回，降级项是 needs-decision 且 why 非空（不只给一个「未执行」标签）
+          map (field ["status", "s"]) (foldr (:) [] xs) @?= replicate 2 (Just (Aeson.String "needs-decision"))
+          assertBool "降级理由 why 应非空"
+            (all (\it -> case field ["status", "why"] it of Just (Aeson.String w) -> not (T.null w); _ -> False) (foldr (:) [] xs))
         other -> assertFailure ("items 应为两项: " <> show other)
       other -> assertFailure ("响应不是对象: " <> show other)
   -- 屏障的全部意义：两份都还在原位
