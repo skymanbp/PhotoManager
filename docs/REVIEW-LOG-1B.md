@@ -95,8 +95,8 @@
   缩略图消失的根因：相册原图 1.2–75.9 MB（94 张共 2.5 GB），15 张 NEW 全分辨率
   解码的位图撑爆 WebView，被丢弃后不再重绘——改为 GUI 侧 `createImageBitmap`
   按 640 px 解码缩放再挂上；截图自验：分类页 END 滚到底 15 张全在。渲染验证工具
-  `scratchpad/shot.ps1`（`SetProcessDPIAware` 后 `GetWindowRect` + `CopyFromScreen`，
-  否则显示缩放下截到错位区域）+ `tour.ps1`（只在 pm 窗口确为前台时 SendKeys
+  会话 scratchpad 的 `shot.ps1`（不入仓；`SetProcessDPIAware` 后 `GetWindowRect` + `CopyFromScreen`，
+  否则显示缩放下截到错位区域）+ 同处的 `tour.ps1`（只在 pm 窗口确为前台时 SendKeys
   切页——第一版没校验前台，一个 "2" 可能打进了当时前台的窗口，已改）。
 - **二十轮：GO（同日，codex 二十轮审 P4-4/5，aa21b37..5fd42f5；"未发现
   critical/major"，合并前最小修复集**空**，6 minor）**：写端点边界成立——

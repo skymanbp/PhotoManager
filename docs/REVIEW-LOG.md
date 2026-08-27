@@ -4,8 +4,8 @@
 > **v0.1→v0.2 设计评审、P3b 逐轮收口**在 [`REVIEW-LOG-1.md`](REVIEW-LOG-1.md)，
 > **P4 GUI 与用户决策记录**在 [`REVIEW-LOG-1B.md`](REVIEW-LOG-1B.md)；**第 29–34 轮（P5 后期→P6 中期）**在
 > [`REVIEW-LOG-2.md`](REVIEW-LOG-2.md)（2026-08-26 拆出）；**第 35–38 轮与
-> P7 预审登记**在 [`REVIEW-LOG-3.md`](REVIEW-LOG-3.md)（2026-08-27 拆出）；每轮评审的逐条
-> 处置表在 [`docs/reviews/`](reviews/)。本文件装第 35 轮起的评审段。
+> P7 预审登记**在 [`REVIEW-LOG-3.md`](REVIEW-LOG-3.md)（2026-08-27 拆出）；第 1–24 轮的评审
+> 原文在 [`docs/reviews/`](reviews/)，此后各轮的逐条处置就在本卷/各分卷的当轮节内。本文件装**第 39 轮**起的评审段。
 
 ## 第 39 轮（P7-F `76eaaa2` 送审，codex 钉 SHA）——NO-GO，minset 6 条全修（P7-G）
 
@@ -187,9 +187,9 @@ m-R8  盘符闸拆除                             → 1 红（UNC 拒绝钉）
 ```
 
 无从判红、代码级核查登记：R7 两处单 hPut 与 Dedupe.foldPath 收编——判别
-试针需要能观测「两次 hPut 之间」的崩溃点或语义差异，不存在；Ingest.crossCat
-的 ProbeUnknown 分支需 ACL 夹具（分类函数本身已被 caseClassifyGitProbe 判定
-表钉住）。接受不修（方向安全）：Doctor.staleTmpFiles 查不出→不删（no-delete
+试针需要能观测「两次 hPut 之间」的崩溃点或语义差异，不存在。Ingest.crossCat
+的 ProbeUnknown 分支此处曾登记「需 ACL 夹具」——不实（P7-S 收口）：非法字符名
+即得 ProbeUnknown，`caseIngestProbeUnknown` 判红。接受不修（方向安全）：Doctor.staleTmpFiles 查不出→不删（no-delete
 方向）、Names 成片枚举塌 False→少提议 rename（只读）、Trash.listTrashFiles
 base 塌缩（既有注释登记）。
 
@@ -295,7 +295,9 @@ freshStagingCatalog 命名）。哨兵上线当轮即抓出 3 处漏网（Exec �
   m-F027R（resolveOn 不重绑）预期 GREEN——loader 已绑定，纵深防御层。
 - **F090（CSP `style-src 'unsafe-inline'` 可收紧）**：代码侧证实零内联样式，
   但 Tauri v2 webview 是否自注入内联 `<style>` 无法离线核实，需一次
-  `pm ui` + DevTools 实机验证——登记待办，不盲改 CSP。
+  `pm ui` + DevTools 实机验证——登记待办，不盲改 CSP。**P7-S 收口**：发布版
+  pm-ui.exe + WebView2 远程调试（CDP）探针六页实测，`style-src 'self'` 下零违规，
+  0.6.1 收紧（见「0.6.1 收口」节）。
 
 ### 判别突变（轮 1：第一波散簇；轮 2：第二波五簇）
 

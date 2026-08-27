@@ -554,7 +554,7 @@
   }
 
   // ── tabs / buttons ──
-  // ── 整理新照片（第六页）──
+  // ── 整理新照片（第二页）──
   // 只调两个端点：/api/sort/survey（只读提议）与 /api/sort/plan（写 .pm/plans，
   // 不碰照片）。页面**不**执行任何计划——那是计划页/终端的事。
   let lastSurvey = null;

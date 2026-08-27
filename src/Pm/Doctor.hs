@@ -557,7 +557,11 @@ deepVerify root cat = do
             [ Finding "DEEP-CORRUPT" Bad ("内容与索引 sha 不符: " <> enPath e) "核查介质；如源仍在他处，重新拷贝"
             | actual /= enSha e
             ]
-  pure (concat results)
+  -- P7-S（0.6.1，端到端运行时测试的观测缺口）：干净库上 --deep 此前一个字都不多
+  -- 打，用户分不清「深验跑了没发现」与「没跑」；Info 行汇报覆盖面，不改退出码。
+  let fs = concat results
+      nOf row sev = length [() | f <- fs, fRow f == row, fSeverity f == sev]
+  pure (fs <> [Finding "DEEP-DONE" Info (show (Map.size (catEntries cat)) <> " 条目已全量重读重 hash；不符 " <> show (nOf "DEEP-CORRUPT" Bad) <> "、读取失败/消失 " <> show (nOf "DEEP" Warn)) ""])
 
 -- Safe closures only (journal appends / own-tmp deletion). C5 plans are
 -- emitted, not executed.

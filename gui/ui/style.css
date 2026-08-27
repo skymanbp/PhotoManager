@@ -119,7 +119,7 @@ h1 { font-size: 1.35rem; margin: 0; } h2.sec { font-size: 1rem; margin: 1.4rem 0
 .howto li { margin: .5rem 0; }
 pre.raw { white-space: pre-wrap; font-size: .78rem; max-height: 28rem; overflow: auto; }
 
-/* ── 第六页：整理新照片 ── */
+/* ── 第二页：整理新照片 ── */
 .sort-src { gap: 8px; margin: 4px 0 6px; }
 .sort-src input[type=text] { flex: 1 1 auto; }
 .sort-src input[type=number] { width: 72px; margin-left: 6px; }

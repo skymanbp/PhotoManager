@@ -479,7 +479,7 @@ routeWith cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
   --
   -- 逐项结果与提示**走 JSON 响应体**，不走 stdout：`pm ui` 只读一行 announce
   -- 就丢掉 BufReader，serve 的 stdout 此后无人排空，照着打会填满管道缓冲。
-  -- P5-E：GUI 第六页（整理新照片）。只读提议——与 CLI 的 `pm sort <源>` 同一个
+  -- P5-E：GUI 第二页（整理新照片）。只读提议——与 CLI 的 `pm sort <源>` 同一个
   -- 'surveySort'，所以页面上的分段与终端建议的命令不可能各说各话。
   ("GET", ["api", "sort", "survey"]) -> do
     let qs = queryString req

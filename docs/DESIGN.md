@@ -1,6 +1,6 @@
 # PhotoManager (`pm`) — 设计文档
 
-**版本**: v0.2 · **日期**: 2026-08-22 · **状态**: 已过对抗评审（见 §16）→ 待用户批准
+**版本**: v0.2 · **日期**: 2026-08-22 · **状态**: 已过对抗评审（§16）→ **用户已批准 v0.2 并开工**（裁定见 §15）；**实现现状以 [`DESIGN-COMMANDS.md`](DESIGN-COMMANDS.md) 的状态行为准**，本文件不复述版本号
 
 ---
 
@@ -93,7 +93,7 @@ R4 Haskell）落成以下**硬不变量**，每条都有机制背书，不靠自
 | I3 | 每次写盘前有可打印的 Plan 且经确认；每个文件落盘后 sha256 复读校验（**缓存级**：捕获写逻辑错误/截断/串文件与缓存副本位翻转，不覆盖介质层损坏——介质层见 I3b） | Exec 只接受 Plan；写协议 §6.1 |
 | I3b | 介质级验证为显式能力：`pm doctor --deep` 把 catalog 的**全部**条目重读重 hash 一遍（默认那次只复验上次 CleanShutdown 之后的 Done），`pm status` 显示「最久未验证字节的年龄」（`lastVerified` 随每次 hash 写进 catalog）。**没有轮转/抽样机制**——全库覆盖只有 `--deep` 一条路；落位后绕缓存重读的 `--verify-media` **尚未实现**（§6.6/§12 的它是设计预留） | §6.6 + §12 单列开销 |
 | I4 | 所有 mutation 先写 intent、成功后写 done（append-only NDJSON），**带真实持久化屏障**：intent 在其效果落盘前 `hFlush + FlushFileBuffers`；Copy 的 done 可组提交，Rename 的屏障强制且不可组提交（旧名仅存于日志）。**追加前先封尾**：`.pm/journal.ndjson` 与隔离区 manifest 的每次追加都先查末字节，不是换行（掉电写了半行）就先补 `\n`，新记录绝不与残行黏成一条——journal 另落一条 `torn-gap` 标记把残行**封**成可识别的撕裂尾（§6.4） | Journal 模块（Win32 boot 库 `flushFileBuffers`，本机已验证存在）；`pm doctor` 对账 §6.4 |
-| I5 | 目的地已存在且内容不同 → **conflict，停该项，不覆盖，无例外**。vault DRIFT 的 supersede 与备份盘更新**不是覆盖**：先 Quarantine 移出旧文件、再 Copy 落新字节（§6.5），旧字节始终在隔离区可还原 | Plan 生成期检查 + Exec 执行期二次检查 + 落位 rename 的 flags=0 语义三重防线 |
+| I5 | 目的地已存在且内容不同 → **conflict，停该项，不覆盖，无例外**。vault DRIFT 的 supersede 与备份盘更新**不是覆盖**：先 Quarantine 移出旧文件、再 Copy 落新字节（§6.5），旧字节始终在隔离区可还原 | Plan 生成期检查 + Exec 执行期二次检查 + 落位 rename 的 no-replace（ReplaceIfExists=FALSE）语义三重防线 |
 | I6 | 断电 / 拔盘 / 进程被杀后，`pm doctor` 能检出半成品并安全恢复；恢复矩阵覆盖三种 Op 的全部协议步骤与掉电（journal 尾部丢失）模型 | §6.4 矩阵 + §13 两类故障注入 |
 | I7 | 拓扑不变量持续可校验：vault ⊆ 相册；相册 ⊆ 成片 ∪ inbox-origin（journal 中有 ingest 来源记录的集合）；侧车与主文件同批移动 | vault⊆相册 由 `pm vault status` 的 MISSING 态校验；相册⊆成片∪inbox-origin **记录侧**就位（ingest 的 journal Intent 带库外 srcAbs），doctor 的判定侧未实现（§10.3 第 2 项）；侧车同批由 import/sort 的整组悬置保证 |
 | I8 | 相册↔vault 差异与 `sync_photos.py` **逐字段值形状兼容**（六态 + 位置元组 + 16 字符截断 hash + 同一文件过滤集合含 .png，case-fold）；退出码仍是 0/1/2，但**语义自 P4-7 起收窄**：NEW 里已决定「暂不同步」的不再算差异（`new` 键本身不变，见 §10.2 第九态） | §10.1 + §10.2 |
@@ -112,8 +112,8 @@ R4 Haskell）落成以下**硬不变量**，每条都有机制背书，不靠自
 ```
 Root      = { id :: UUID (写在 <root>/.pm/root-id.json，不认盘符),
               role :: Main | Backup | Vault,
-              path :: OsPath,
-              fsType, mtimeGranularity, workerCount }   -- init 时探测记录（§9）
+              created :: UTCTime, fsType :: Maybe Text }  -- init 时探测记录（§9）
+              -- 挂载路径与 worker 数不在 root-id.json，在 config.toml
 Entry     = { relPath, size, mtimeNs, sha256, lastVerified, kind :: Photo | Sidecar | Meta }
               -- mtimeNs 一律是「本 root 上 stat 回来的值」，绝不跨 root 比较
 Event     = 解析自事件夹名: { date, location, scheme :: A|B|Bare, layer }
@@ -155,8 +155,8 @@ src/Pm/Apply.hs             -- undo/apply/resolve 命令族 + pickRoot（三十�
 src/Pm/Config.hs            -- TOML 配置（roots、别名、后缀表、portfolio photos.json 路径）
 src/Pm/Catalog.hs           -- snapshot + 内存索引
 src/Pm/Journal.hs           -- NDJSON append + 持久化屏障 + replay + 对账
-src/Pm/Scan.hs              -- 增量扫描（stat 比对 → 变更集 → 并行 hash，worker 数取 Root 属性）
-src/Pm/Hash.hs              -- crypton SHA-256 流式 + 目录指纹（Handle 来自 file-io 的 OsPath API）
+src/Pm/Scan.hs              -- 增量扫描（stat 比对 → 变更集 → 并行 hash，worker 数来自 config.toml）
+src/Pm/Hash.hs              -- crypton SHA-256 流式 + 目录指纹（FilePath 句柄；校验性读经 Pm.Win.openBoundTo 限域）
 src/Pm/Diff.hs              -- 两个 Catalog → 六态差异（纯函数；只认 filename+sha，不看 mtime）
 src/Pm/Plan.hs              -- Diff/规则 → Plan（规则/校验为纯函数；计划文件的存/取/枚举 IO 同在此——listPlans 三十五轮自 Serve 迁入）
 src/Pm/Exec.hs              -- ★安全内核：唯一**写入/落位/改名**照片字节的模块（另两处只读的字节出口见下「关键结构性质 2」；pm 状态文件写口在 Config/Journal/Catalog/Plan/Trash，三十六轮收窄措辞；类型面在 Pm.ExecTypes，三十四轮拆出）
@@ -167,7 +167,7 @@ src/Pm/Vault.hs             -- 相册↔vault 差异 + push/ingest 计划（无 
 src/Pm/Status.hs            -- 仪表盘：statusReport（数据，ToJSON）+ renderStatus（终端）；serve 与 CLI 同源
 src/Pm/Serve.hs             -- wai/warp 127.0.0.1 JSON API（P4-1；供 GUI 桌面程序与 skill 消费，§11）
 gui/                        -- GUI 桌面程序（Rust/Tauri v2，P4-2；独立进程，只经 API 说话，§11）
-test/                       -- tasty: 单元 + QuickCheck + golden + 双模故障注入（§13）
+test/                       -- tasty: 单元 + QuickCheck + 双模故障注入 + 文档漂移哨兵（§13）
 ```
 
 **关键结构性质**：
@@ -194,9 +194,9 @@ test/                       -- tasty: 单元 + QuickCheck + golden + 双模故�
 4. `Op` 无 delete/overwrite 构造子 → I2 在类型层成立。
 
 **依赖清单**（boot 库注明；其余为 Hackage 主流包）：`base directory filepath
-os-string file-io aeson bytestring text time containers crypton
-optparse-applicative ansi-terminal async stm toml-reader wai warp http-types
-tasty tasty-quickcheck tasty-golden temporary` +
+aeson bytestring text time containers crypton
+optparse-applicative ansi-terminal async toml-reader wai warp http-types
+tasty tasty-hunit tasty-quickcheck temporary` +
 boot：`Win32`（flushFileBuffers / SetConsoleOutputCP / createFile 等句柄工具；
 提交型 rename/unlink 自 P6-C 起走 cbits 的 SetFileInformationByHandle）、
 `process`（拉起 GUI 进程）。P4-1 实际加入：`wai warp http-types network memory`
@@ -224,7 +224,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 二十八轮 #5 即如此，已第一方证伪）。
 零参数 `pm` = `pm status`。**`--json` 只有 `pm vault status` 一个**（`app/Main.hs`
 唯一一处 `long "json"`，为与 `sync_photos.py` 逐字段兼容，§10.1）；其余命令只有
-终端文本形态，结构化消费走 §11 的 JSON API（`GET /api/status` 与 `pm status` 同源）。
+终端文本形态，结构化消费走 §11 的 JSON API（`GET /api/status` 与 `pm status` 同源）；配置读写走 `pm config`（= `config show`）/ `pm config set`，见 §11。
 
 | 命令 | 语义 | 写盘? |
 |---|---|---|
@@ -265,7 +265,7 @@ pm · 索引 2026-08-22 21:03（4 分钟前）· 4635 文件 / 459.3 GiB
   Raw       4110 文件  429.7 GiB   ✓ 已索引
   成片       190 文件    4.9 GiB   ✓ 已索引
   相册        94 文件    2.5 GiB   ✓ 已索引
-  暂存        241 文件   22.2 GiB   ⚠ 4 个事件未归档      → pm import
+  暂存        241 文件   22.2 GiB   ⚠ 5 个事件未归档      → pm import
   备份盘     未挂载（上次同步 2026-07-30，当时落后 241 文件） → 插盘后 pm backup
   vault      79/94 已分发            ⚠ 15 NEW             → pm vault status
   命名       9 个事件夹不合规范                            → pm names
@@ -361,7 +361,7 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 **撕裂尾（掉电写了半行）不是损坏**：追加前先查末字节，不是换行就先补 `\n`
 ——新记录绝不与残行黏成一条（那会吞掉一条真实记录，并把残行从「末行半截」Warn
 升级成中段 `CORRUPT-JOURNAL` Bad，undo 从此拒绝）；journal 另落一条
-`{"type":"torn-gap",…}` 把残行**封**住，读侧据此报 Warn `torn tail at line N
+`{…,"e":"torn-gap"}` 把残行**封**住，读侧据此报 Warn `torn tail at line N
 (sealed by a later append, expected after power loss)`。隔离区 manifest 走同一
 追加口（同样先封尾，不写标记）；末字节查不出 → 抛错整项中止，不当无事发生。
 
@@ -458,7 +458,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   文本，纯函数 `Pm.Publish.publishCommands`——pm 不执行 git，GUI 只复制）、
   `GET /api/vault/status`
   （与 `pm vault status --json` 的 stdout **逐字节相同，含末尾 LF**）、
-  `GET /api/vault/new`、`GET /api/plans`、`GET /api/plan/<id>`、
+  `GET /api/vault/new`、`GET /api/config`（只读健康视图，见下「设置页与配置端点」条）、`GET /api/sort/survey`（只读提议，见下「整理新照片」条）、`GET /api/plans`、`GET /api/plan/<id>`、
   `GET /api/thumb/<sha>`（只提供 catalog 里 JPEG 条目的原字节，读取前逐级
   `resolveUnder`——扫描后被换成库外链接的条目不跟随；缩放由 GUI 做）。vault
   两个端点会刷新 `.pm/vault-cache`：进程内 MVar + 跨进程 root 锁（三十一轮
@@ -533,15 +533,15 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   模型一句话。技术：`<img src>` 带不了 Authorization → fetch→blob；旧 blob URL 每轮
   revoke；Tauri CSP（`gui/src-tauri/tauri.conf.json` 逐字）：`default-src` 与
   `script-src` 只 `'self'`；`connect-src http://127.0.0.1:* ipc: http://ipc.localhost`；
-  `img-src 'self' blob: data:`（缩略图 fetch→blob 要 `blob:`）；**`style-src` 另放行
-  `'unsafe-inline'`**——样式不是纯 `'self'`。WebView 来源 `http://tauri.localhost` 在
-  serve 的 Origin 白名单里。渲染由主线用 `scratchpad/shot.ps1`（DPI-aware 窗口截图 +
-  前台校验后的 SendKeys）自验。
+  `img-src 'self' blob: data:`（缩略图 fetch→blob 要 `blob:`）；`style-src 'self'`（0.6.1
+  收紧：F090 实机 CDP 探针证实 WebView2/Tauri 不注入内联样式、app.js 只走 CSSOM；运行时
+  头由 Tauri 重排并为其注入脚本追加 sha256）。WebView 来源 `http://tauri.localhost` 在
+  serve 的 Origin 白名单里。渲染由主线用会话 scratchpad 的 `shot.ps1`（不入仓）自验。
 - **进程生命周期（P4-3）**：serve 的生命周期归 GUI 管，`pm ui` **不**启动
   serve——它只找到 `pm-ui.exe`（`PM_UI_EXE` 或 pm.exe 同目录）、把自己的路径经
   `PM_EXE` 交给 GUI、等 GUI 退出。GUI 的 Rust 侧只做三件事：`spawn pm serve
-  --exit-on-stdin-eof`（接一条从不写的 stdin 管道）、把 announce 的 port/token
-  经 Tauri command `api_info` 交给页面、退出时 kill 子进程。GUI 异常死亡（崩溃、
+  --exit-on-stdin-eof --writable --allow-apply`（接一条从不写的 stdin 管道；授权开关见上 P7 条）、
+  把 announce 的 port/token 经 Tauri command `api_info` 交给页面、退出时 kill 子进程。GUI 异常死亡（崩溃、
   被 taskkill 不带 /T）时 Windows 关闭管道，serve 读到 EOF 自行退出——冒烟实测
   500 ms 内监听消失、零残留。Rust 工具链用 `x86_64-pc-windows-msvc`（Tauri 在
   Windows 只支持 MSVC；本机默认 gnu 工具链链接 cdylib 会 "export ordinal too
@@ -626,11 +626,11 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
   - P3b 介质损坏注入：步 4 后从 pm 背后改写 tmp 若干字节并使缓存失效 →
     协议必须报 Failed（这条测试是 I3/I3b 边界的守门人）
   - P4 `Names` roundtrip + 二次规范化不动点
-  - P5 Plan 纯函数 golden
-- **golden 测试**：fixture 照片树（小文件模拟三层库 + staging + vault，**含
-  `.JPG` 大写扩展名与 CJK 路径**）跑全命令面，输出快照比对。
-- **编码回归**：`chcp 936` 下跑真实二进制、stdout 重定向到文件，断言退出码
-  语义正确且输出可 UTF-8 解码（进程内 golden 捕不到这条路径）。
+  - P5 Plan 纯函数用例（PlannerTests；HUnit + QuickCheck，非 golden 快照）
+- **fixture 树用例**（非 golden 快照——无 tasty-golden 依赖、全仓零快照比对）：小文件
+  三层库 + staging + vault，含 `.JPG` 大写与 CJK 路径；文档漂移哨兵 DocDriftTests。
+- **编码回归**（**尚未实现**）：设计是 `chcp 936` 下跑真实二进制、stdout 重定向到
+  文件，断言退出码语义与 UTF-8 可解码；进程内用例捕不到这条路径，仍是空白。
 - **真实库验证**：每阶段收尾对真实库跑只读命令核对；mutation 命令先 fixture
   树 + 用户指定的小事件试点。
 
@@ -639,7 +639,7 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
 | P0 | 脚手架 + file-io 冒烟 + Config/Catalog/Scan/Hash + `init/scan/status` | file-io 编译判定落锤；真实主库全量扫描成功；status 数字与 §1 实测吻合（4635/459.3 GiB）；主库增量重扫 < 10 s |
-| P1 | Exec/Journal 安全内核 + `doctor/trash/undo/apply/resolve` | 双模故障注入全绿（三 Op 全步骤）；C1-Q2 矩阵逐行有测试对应 |
+| P1 | Exec/Journal 安全内核 + `doctor/trash/undo/apply/resolve` | 双模故障注入全绿（11 个协议检查点中 8 个崩溃注入：Copy 5、Rename 2、Quarantine intent 后）；C1-Q2 矩阵逐行有测试对应 |
 | P2 | `import` + `backup` + `clean staging` | fixture 试点 → 真实归档+备份，hash 复读零失配；`clean staging` 计划恰好覆盖全部冗余文件、HELD 逻辑正确、apply 后 doctor 对账通过、trash 可按相对路径还原 |
 | P3 | `vault status/push` + `names` + `versions` | vault status 与 sync_photos.py **集合逐项一致**（含 .png、.JPG case）；names 计划经用户批准执行后 undo 可完整回滚 |
 | P4 | `pm ui`（仪表盘 + 计划确认 + 看图分类） | GUI 完成 vault push 逐张分类全流程 |
@@ -706,7 +706,7 @@ REVIEW-LOG 第 28 轮。
 
 | 风险 | 对策 |
 |---|---|
-| **Windows 输出编码（ACP=936）**：GHC 默认 CP936，emoji/勾号直接崩进程、重定向输出 GBK 字节（本机已实测复现） | main 首行 `hSetEncoding stdout/stderr utf8`；`--json` 走 ByteString 直写绕开编码器与 CRLF；console 场景 `SetConsoleOutputCP(65001)`；§13 编码回归测试 |
+| **Windows 输出编码（ACP=936）**：GHC 默认 CP936，emoji/勾号直接崩进程、重定向输出 GBK 字节（本机已实测复现） | main 首行 `hSetEncoding stdout/stderr utf8`；`--json` 走 ByteString 直写绕开编码器与 CRLF；console 场景 `SetConsoleOutputCP(65001)`；§13 编码回归测试（**尚未实现**，见 §13） |
 | `directory` rename/copy 的替换语义（静默覆盖） | Exec 禁用清单 + 一律 `Pm.Win.moveBoundNoReplace`（句柄形态 no-replace，§6.1/§6.2）；P1 测试覆盖目标已存在分支 |
 | 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C3/C4 + doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`） |
 | 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤）；CJK 路径入 golden |

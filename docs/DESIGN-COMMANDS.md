@@ -283,8 +283,12 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   备份路径的 Done 仍一律即时 FlushFileBuffers（不组提交）——理由是可移动
   介质：结果打印后用户随时可能拔盘，Done 必须在汇报前已落盘；
   doctor（`--backup`）的 C3/C4 行专门接这个残余。
-- worker 数是 Root 属性：init 探测介质（seek-penalty/MediaType），
-  removable/rotational 默认 1（避免寻道抖动），NVMe/SSD 默认物理核数；可手动覆盖。
+- 备份盘 hash 并行度**恒定默认 1**（HDD 防寻道抖动，`Pm.BackupCmd` `fromMaybe 1 mworkers`；
+  **不读** `[main] workers`），只能用 `pm backup --workers N` 逐次覆盖。**pm 不探介质**
+  ——seek-penalty/MediaType 探测从未实现；`Pm.Win.listCandidateDrives` 的 `DriveKind` 仅按
+  GetDriveTypeW 筛 REMOVABLE/FIXED 做**发现**，并发数与它无关。worker 数**不是 Root 属性**：
+  `root-id.json` 只记 `id/role/created/fsType`。主库扫描是另一条口径（`[main] workers`，
+  DESIGN.md §11.4）。
 - 拔盘期间 `pm status` 用备份 root 的本地缓存快照报「上次同步时间 + 当时滞后量」。
 
 ---
@@ -334,9 +338,13 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   引用检查（路径入 Config），被引用的项标 `BLOCKED(photos.json:<行>)`，
   未被引用且用户确认的才生成 Rename。
 - MISSING：只报告（可能是有意撤下，决定权在用户）。
-- 结束打印**显式路径**的 git 步骤：`git -C "<vault>" add -- landscape portrait
-  urban`（明确禁止 `git add -A`/`git add .`，防把 `.pm/` 等误提交；操作数前
-  必有 `--`）；push 目标取自 `vault.push` 设置。命令文本与上线命令
+- 结束打印**显式路径**的 git 步骤，形如 `git -C "<vault>" add -- <本次落位的类目>`
+  ——类目取自**逐项落位结果**（`Pm.Vault.resultCategories`；一项都没落位则整段 git
+  步骤不打，见本文 §11），两条打印口同源：`pm vault push` 直跑（`Pm.Vault`）与 push
+  计划的 `pm apply`（`Pm.Apply`）都走 `gitStepsLines`；GUI 生成计划时给的是**预览**，
+  类目取计划面（`Pm.Serve`，`planCategories`）。固定三类 `landscape portrait urban`
+  只出现在上线命令里（`Pm.Publish.publishCommands`）。明确禁止 `git add -A`/`git add .`
+  （防把 `.pm/` 等误提交），操作数前必有 `--`；push 目标取自 `vault.push` 设置。命令文本与上线命令
   （DESIGN.md §11 `GET /api/publish-commands`）**同一生成点**
   （`Publish.vaultCommands`，解析-重渲染，第一方自审 R2）——生成不了（路径
   嵌不进命令行等）打印原因 + 手动指引；pm 不执行 git（I9）。
@@ -393,9 +401,10 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG.md`](REVIEW-LOG.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P7 / pm 0.6.0 / 390 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
-  门禁 37/38 轮 GO 收敛，P7 送审 39/40 轮各 NO-GO 已收口，发布前第一方全量
-  自审两轮：P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修——见 §11）。
+  当前实现对应 **P7 / pm 0.6.1 / 393 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
+  发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
+  及其后各轮门禁收口的行为面变化见 §11）。
 
 ### 10.3 P5 — 档案侧整理优化（跨仓改动，逐项经用户确认）
 
@@ -458,11 +467,11 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm sort` | 子树列不出（ACL 拒）→ 提议/计划两形态都退出 **1** 并打「未能枚举」——不替没看过的目录担保；junction 跳过仍是 0 | B |
 | `pm trash list/empty` | manifest 整文件读不出（hardlink 占名等）→ **exit 2**、视图整体拒绝，不再显示「隔离区为空」（坏基准上 empty 会"无事可做"地成功） | A（三态加载器） |
 | `pm doctor` | 快照被拒（≠缺席）→ `CATALOG` **Bad** 行；`--deep` 无快照可深验 → `DEEP-SKIPPED` **Bad** + exit 1（此前静默跳过深验照报 0） | A |
-| `pm status` | 快照坏代回退 → ⚠ 行 + **exit 1**（`--cached` 下唯一的 1 来源）；核对受阻（读取错误 >0）不打「✓ 索引与磁盘一致」 | A |
+| `pm status` | 快照坏代回退 → ⚠ 行 + **exit 1**（`--cached` 只关掉新鲜度核对那一项；exit 1 共四个来源——快照坏代回退告警、暂存区尚有事件（含内容已全部归档、只打「冗余」不打 ⚠ 的那种）、备份缓存不可信、vault 缓存不可信（仅在配置了 vault 时），见 `Pm.Status` 的退出码判定）；核对受阻（读取错误 >0）不打「✓ 索引与磁盘一致」 | A |
 | `pm backup` | 主库快照坏代 → ⚠「diff 基于较旧一代」；主库索引与盘面不一致 → **拒绝 exit 2** 指向 `pm scan`（mainFresh 闸）；「✓ 备份盘已与主库一致」只在零降级零差异时打（`backupVerdict` 判定表） | A |
 | `pm init --force` | 旧配置读不出 → 明说「未能保留」备份盘登记等字段（此前静默丢失还打 ✓）；整份新配置过 `checkConfig` 汇点 | A + G6 |
 | `pm config set` | `--X` 与 `--no-X` 同给 = 矛盾 → **exit 2**（此前解析器静默折成清空）；写入前整份配置过 `checkConfig`：主库/vault/备份盘两两不嵌套、备份登记成对、路径绝对——四条写路径（init / config set / POST config / backup init）同一汇点，且锁内按盘上最新配置复验 | G6 |
-| `pm serve` | 启动失败（端口/权限）→ **exit 2**（此前 0）；`POST /api/sort/plan` 与 `POST /api/apply` 响应含 `log`（与 CLI 同一打印流）与逐项 `status`；缩略图对「快照读不出」答 **503**（缺席仍 404） | B + A |
+| `pm serve` | 启动失败（端口/权限）→ **exit 2**（此前 0）；`POST /api/sort/plan` 与 `POST /api/apply` 响应**都含 `log`**（与 CLI 同一打印流；sort 的 log 里带渲染好的逐项计划行）；**结构化逐项结果（`ix`/`outcome`/`status`）只在 `/api/apply` 的 `items` 里**——`/api/sort/plan` 只回 `code`/`planId`/`log`；缩略图对「快照读不出」答 **503**（缺席仍 404） | B + A |
 | 配置渲染 | `[backup]` 表与其它表同一渲染 helper：半对登记（手编残余）忠实保全，不再被静默归零 | G6 |
 | freshness 判定 | root 自身是 junction 属合法用法：`pm status`/新鲜度闸照常核对（此前每轮报一条「基准探不出」读取错误）；库内子层 junction 保持「探不出 = 错误」 | D |
 
@@ -476,3 +485,13 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm backup init` | 登记步在配置锁内按**盘上最新配置**复验（嵌套判定 + checkConfig 汇点）→ 与并发配置写交错时拒绝「登记被拒（锁内按盘上最新配置复验）」，而非静默写成嵌套配置 | 41 轮 #1 |
 | catalog 载入（status/backup/apply/undo/scan 种子） | `catRootId` 与 `.pm/root-id.json` 对账：不符（整目录拷贝/恢复错位）→ 整链拒绝「索引读不出（catalog 身份不符…）」，scan 丢弃种子全量重建 | 41 轮 #5 |
 | `pm config set` / GUI 设置页 | 备份盘**在场**（UUID 可发现）时 checkConfig 把其实际路径与主库/vault 各判一次嵌套；盘不在场无从核——登记时点已在锁内验过，残余登记于 REVIEW-LOG | 41 轮 #1 |
+
+### 0.6.1 收口追加（P7-S，2026-08-27）
+
+发布后端到端运行时测试（发布版 pm.exe 于沙盒三层库跑 68 步）与文档全量审计的用户可见面：
+
+| 命令/入口 | 变化 | 出处 |
+|---|---|---|
+| `pm doctor --deep` | 结束多打一行 Info `[DEEP-DONE] N 条目已全量重读重 hash；不符 a、读取失败/消失 b`（行标独立于逐条 `DEEP` Warn，与 `DEEP-SKIPPED` 配对）——此前干净库上 `--deep` 与不带 `--deep` 输出逐字相同，用户无法分辨「深验跑了没发现」与「没跑」 | e2e 观测缺口 |
+| GUI（pm-ui） | CSP `style-src` 收紧为 `'self'`（去掉 `'unsafe-inline'`，F090 实机 CDP 探针证实零违规）；`gui/ui` 新增「无内联样式/无内联脚本」常驻哨兵 | F090 |
+| `pm resolve` / `pm undo` / `pm vault ingest` / `pm trash` | 行为不变；README 提要改为与 `--help` 同形（`--unskip`、反向计划语义、ingest 入常用命令、屏障只覆盖 clean-staging/dedupe 两类记录） | 文档审计 |

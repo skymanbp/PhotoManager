@@ -19,12 +19,12 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
 > 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
 > 为准，不在这里手抄**），凡有可观测自动化落点的闸都配"删掉它就转红"的突变
-> 验证用例（390 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
+> 验证用例（393 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
 > 性观察点）在 REVIEW-LOG 登记为残余，不冒充覆盖。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
 命令细节：[docs/DESIGN-COMMANDS.md](docs/DESIGN-COMMANDS.md)。
-开发史（P0–P6 全程）：[docs/HISTORY.md](docs/HISTORY.md)。
+开发史（P0–P7 全程）：[docs/HISTORY.md](docs/HISTORY.md)。
 对抗评审归档：[docs/reviews/](docs/reviews/)。
 
 ## 功能与工作范围
@@ -40,16 +40,20 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
   盘符；备份盘上多出来的（EXTRA）只报告永不动。
 - **功能五 · 展示集分发**：`pm vault status`（相册 ↔ vault 九态差异，`--json`
   兼容旧脚本）、`pm vault push`（定类目拷入 + DRIFT 裁决计划 + 打印显式 git
-  步骤——pm 不执行 git）、`pm vault hold`（"暂不同步"的本地决定，照片一变自动失效）。
+  步骤——pm 不执行 git）、`pm vault hold`（"暂不同步"的本地决定，照片一变自动失效）、
+  `pm vault ingest`（批量入库：源 → 相册 + vault 类目两份计划；`_inbox→_done` 与
+  photos.json 归调用方）。
 - **功能六 · 命名治理**：`pm names` 把 Raw 事件夹统一到规范命名；歧义不猜，
   报告交人。
 - **功能七 · 重复处置**：`pm versions`（版本组 / 非设计内精确重复报告，只读）、
   `pm dedupe`（每份重复都是独立待裁决项，留哪份不替你选）。
 - **功能八 · 暂存清理**：`pm clean staging` 只清理「归档层 + 备份盘」都有同 sha
   副本的暂存文件，执行期三副本重验。
-- **功能九 · 安全网**：`pm trash`（隔离区列表/清空，永久删除前重验副本）、
-  `pm undo`（整计划回滚）、`pm doctor`（崩溃恢复对账 + 完整性体检：默认复验
-  「上次干净退出之后写下的那批」，`--deep` 重读重 hash **全库**索引条目）。
+- **功能九 · 安全网**：`pm trash`（隔离区列表/清空——待删条目一律逐项列出、加
+  `--yes` 才动手；clean-staging / dedupe 记录另经真读盘复验副本仍在，其余记录不做
+  副本复验）、`pm undo`（按 journal 生成反向计划，`pm apply` 后回滚最近 N 个已完成
+  操作）、`pm doctor`（崩溃恢复对账 + 完整性体检：默认复验「上次干净退出之后写下
+  的那批」，`--deep` 重读重 hash **全库**索引条目并汇报条目数与不符数）。
 - **功能十 · GUI**：六页 Tauri 桌面前端（状态 / 整理新照片 / 分类推送 / 计划 /
   设置 / 上手）——生成计划、记录决定、改配置；0.6.0 起计划页可**直接执行**
   已存计划（同一按钮两次点击确认，执行链与 `pm apply` 同源，事后可 `pm undo`），
@@ -115,14 +119,20 @@ pm vault push --category landscape A.jpg …   # NEW 定类目拷入 vault；DRI
 pm vault hold A.jpg …            # 决定「暂不同步」：只写主库 .pm 的一条本地记录，
                                  # vault 与照片零改动；照片字节一变该决定自动失效
 pm vault unhold A.jpg …          # 撤销，文件回到 NEW
+pm vault ingest --category landscape <绝对路径…>   # 批量入库：源 → 主库 相册\ + vault <类目>\
+                                 # 两份计划（pm 打印执行次序，相册那份先 apply）；_inbox→_done
+                                 # 与 photos.json 由调用方收尾；pm 只拷不动源
 pm names                         # Raw 事件夹统一 Scheme A 计划（B 类月份从成片还原；歧义不猜）
 pm versions                      # 版本组 / 非设计内精确重复报告（只读）
-pm dedupe                        # 精确重复 → 逐份可裁决的隔离计划（全部待裁决；留哪份不替你选）
+pm dedupe                        # 精确重复 → 逐份可裁决的隔离计划（全部待裁决；留哪份不替你选，
+                                 # 用 pm resolve --item N --unskip 逐份批准）
 
 pm apply <planId>                # 执行计划（--dry 全量预览 / --only 1,3-5 部分执行）
-pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先隔离）
+pm resolve <id> --item N [--unskip]            # 跳过该项（默认动作）/ --unskip 恢复为待执行；
+                                               # dedupe 计划全部待裁决，逐份 --unskip 批准后 apply 才会执行
+pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先隔离）；只适用于 Copy 冲突项
 pm doctor                        # 崩溃恢复对账 + 完整性体检（默认只读）
-pm undo --last [N]               # 回滚最近 N 个已执行计划（默认 1；--backup/--vault 选侧）
+pm undo --last [N]               # 由 journal 生成反向计划：撤销最近 N 个已完成操作（默认 1；--backup/--vault 选侧），再 pm apply 执行
 pm config                        # 打印配置与每条路径的健康状态（只读）
 pm config set --vault <目录>     # 改 vault / --photos-json / --workers /
                                  # --portfolio-dir / --vault-push / --portfolio-push
@@ -131,14 +141,22 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
 ```
 
 所有命令默认只读（生成计划、exit 1 表示"有事可做"）；**动照片字节**要么
-`--apply` 交互确认，要么两段式 `pm apply <planId>`。唯一的例外是
-`pm vault hold|unhold`：它不碰任何照片，只在主库 `.pm` 里记一条决定。
+`--apply` 交互确认，要么两段式 `pm apply <planId>`——不经计划的字节写只有
+`pm trash empty --yes` 一条（隔离区最终清除：逐项列出、二次确认，见下文第 1 条）。
+此外若干命令直接写 pm 自己的状态与配置，**都不碰照片字节**：`pm scan`、
+`pm init` / `pm backup init`、`pm config set`、`pm vault hold|unhold`（主库 `.pm`
+里一条「暂不同步」决定）、`pm resolve`（改计划）、`pm doctor --repair`。
 
 ## 具体实现——为什么这个工具值得把照片交给它
 
 1. **没有删除原语**。Op 代数只有 Copy / Rename / Quarantine；唯一移出机制是带
-   write-ahead manifest 的隔离区，`pm trash empty` 这条全程唯一 unlink 用户数据
-   的路径在永久删除前还要**真读盘**重验副本仍在（不信 catalog——快照不是证据）。
+   write-ahead manifest 的隔离区。`pm trash empty` 是全程唯一 unlink 用户数据的
+   路径：**所有**条目一律逐项列出、`--yes` 才动手，删之前还要从 root 逐级下降复
+   核那条路径确实落在 `.pm/trash` 内，再在句柄上删；`clean-staging` 与 `dedupe`
+   两类**另加**永久删除前屏障——**真读盘重 hash** 确认「归档层 + 备份盘」各一份、
+   或归档层还留着一份活副本，且见证不能是即将删掉的那个对象自己（catalog 只用来
+   定位见证，证据是那次读盘——快照不是证据）。其余记录（`supersede:` 的旧字节、
+   `undo:`、`rollback-displaced:`、`doctor-c5:`）不受屏障管，由生成它的计划交代。
 2. **两段式 + journal + 故障注入**。计划是磁盘上可 diff 的 JSON；执行先写意图
    再落位，写完复读核 sha；测试在**每一个协议检查点**注入崩溃并断言 doctor 能
    对账、undo 能回滚——不是"崩了大概没事"，是逐点证明。
@@ -215,7 +233,7 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 |---|---|---|
 | 增量扫描（4633 文件，其中 122 新 hash / 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（390 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
+| 测试套件（393 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
 | 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | 突变验证 | 凡有可观测自动化落点的承重闸各配一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过；无落点者登记为残余） | REVIEW-LOG 各轮收敛证据 |
@@ -311,5 +329,5 @@ python ../../scripts/leakscan.py binaries/pm-x86_64-pc-windows-msvc.exe \
 
 Apache-2.0 — see [LICENSE](LICENSE). Copyright 2026 skymanbp.
 
-公开仓是脱敏快照（本机路径以 `<vault-root>` / `<stack-root>` 占位）；
-本地开发历史不推送，远端 `main` 为线性快照提交。
+公开仓即完整开发历史（2026-08-27 起）：早期提交里的本机路径已用 `<vault-root>` /
+`<stack-root>` 占位重写（`git filter-repo`，逐提交扫描零命中），远端 `main` 与本地同源。

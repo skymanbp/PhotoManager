@@ -566,7 +566,7 @@ caseServeApplyBarrier = withSystemTempDirectory "pm-serve-apply" $ \root -> do
 mkEnt :: FilePath -> T.Text -> Entry
 mkEnt p sha = Entry p 4 0 sha KindPhoto Nothing
 
--- ─── P5-E：整理新照片（GUI 第六页的两个端点） ────────────────────────────
+-- ─── P5-E：整理新照片（GUI 第二页的两个端点） ────────────────────────────
 
 -- | 铺一个库外源目录（两张相隔很久的照片 → 两段）+ 一个已索引的主库。
 seedSortSrc :: FilePath -> IO (FilePath, Config)

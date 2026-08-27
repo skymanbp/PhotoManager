@@ -333,7 +333,7 @@ data SortSegment = SortSegment
 -- | @pm sort \<源\>@ 只读提议的**结果**。
 --
 -- 与 'Pm.Status.statusReport' / 'Pm.BackupCmd.backupInitRun' 同一形态：判定与
--- 取数在这里，打印在 'renderSortSurvey'。GUI 第六页要的是结果不是那段文字，
+-- 取数在这里，打印在 'renderSortSurvey'。GUI 第二页要的是结果不是那段文字，
 -- 而两者必须同源——否则页面上看到的分段与终端建议的命令会各说各话。
 data SortSurvey = SortSurvey
   { ssSrcAbs :: FilePath
@@ -491,7 +491,7 @@ sameMonth evs d =
 -- @To-Be-Sync'd\\Raw\\\<事件\>@。
 --
 -- 是拷贝不是移动：源可能是相机卡，pm 不删任何东西（I2）。清卡由用户自己做。
--- 返回 (退出码, 生成的计划 id)。id 只在真出了计划时是 Just——GUI 第六页要用
+-- 返回 (退出码, 生成的计划 id)。id 只在真出了计划时是 Just——GUI 第二页要用
 -- 它，而从 @.pm\/plans@ 里挑"最新的那个"是猜不是知道（并发生成时会挑错）。
 runSortPlan :: GoOpts -> FilePath -> Either String String -> Day -> Day -> Config -> IO (Int, Maybe T.Text)
 runSortPlan = runSortPlanTo putStrLn

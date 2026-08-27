@@ -19,6 +19,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Apply (ResolveOpts (..), runResolve)
+import Pm.Catalog (saveCatalog)
 import Pm.Cli (applyOnlyToPlan, bindExecRoot)
 import Pm.Commands (TrashCmd (..), runTrash)
 import Pm.Config (Config (..), pmDir, writeRootInfo)
@@ -48,7 +49,33 @@ sweepTests =
     , testCase "F019 --only 序号越界 → 拒绝并点名范围（不再静默全跳过 + 惰性巨列表）；范围内照常" caseOnlyOutOfRange
     , testCase "F004 目录 rename 的 catalog 重键：改写后的条目胜过目标前缀下的过期条目（左偏），不由字节序决定" caseRekeyLeftBiased
     , testCase "F018 bindExecRoot 零候选：槽位身份损坏/读不出时如实列出原因，不宣称「均不符」" caseBindRootReportsUnreadable
+    , testCase "P7-S doctor --deep 覆盖面汇报：干净库 Info 行报条目数/不符 0 且 exit 0；翻一字节 → DEEP-CORRUPT + 不符 1 + exit 1" caseDoctorDeepSummary
     ]
+
+-- | 0.6.1 端到端运行时测试的观测缺口：干净库上 `pm doctor --deep` 与不带 `--deep`
+-- 输出逐字相同，用户分不清「深验跑了没发现」与「没跑」——只能靠翻字节证明它跑了。
+-- 现在 --deep 结束多打一行 Info（条目数 / 不符 / 读取失败或消失），不改退出码。
+caseDoctorDeepSummary :: IO ()
+caseDoctorDeepSummary = withSystemTempDirectory "pm-sweep" $ \tmp -> do
+  let root = tmp </> "root"
+  createDirectoryIfMissing True root
+  mkMain root
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  writeF (root </> "相册" </> "b.jpg") "BBB"
+  scanQuiet "main-rid" root >>= saveCatalog root
+  let deepInfo fs = [fDetail f | f <- fs, fRow f == "DEEP-DONE", fSeverity f == Info]
+  (fs, c) <- runDoctor root (DoctorOpts True False)
+  c @?= 0
+  assertBool ("干净库应有覆盖面汇报: " <> show (deepInfo fs)) (any ("2 条目已全量重读重 hash；不符 0" `isInfixOf`) (deepInfo fs))
+  -- 不带 --deep：不得冒充跑过深验
+  (fs0, _) <- runDoctor root (DoctorOpts False False)
+  deepInfo fs0 @?= []
+  -- 同长度换字节：默认那次看不出，--deep 报 DEEP-CORRUPT Bad，汇总里不符 1，退出码 1
+  writeFile (root </> "相册" </> "a.jpg") "AAB"
+  (fs2, c2) <- runDoctor root (DoctorOpts True False)
+  c2 @?= 1
+  assertBool ("应报 DEEP-CORRUPT: " <> show [(fRow f, fSeverity f) | f <- fs2]) (("DEEP-CORRUPT", Bad) `elem` [(fRow f, fSeverity f) | f <- fs2])
+  assertBool ("汇总应记不符 1: " <> show (deepInfo fs2)) (any ("不符 1" `isInfixOf`) (deepInfo fs2))
 
 -- | 计划文件里的 @plRootPath@ 是线索不是证据：'loadPlan' 不核对它与装载目录
 -- 一致，'bindExecRoot' 按 UUID 把它绑回真实 root（盘符变更是设计内场景）。

@@ -49,7 +49,24 @@ ingestTests =
     , testCase "R6 闸：配置主库路径指向 backup root → requireMain 拒绝，一份计划不出" caseIngestRequireMain
     , testCase "三十三轮 F1：源/目标存在但读不出（独占占住）→ 错误清单 + 退出 2 + 零计划，不是 CLI 崩溃" caseIngestUnreadable
     , testCase "工作流 F072：ingestSteps 搬移行经 inboxDoneCommand——展开字符文件名给手动指引而非裸拼；命令行无反斜杠" caseIngestStepsSink
+    , testCase "第一方自审 R1 的 ProbeUnknown 臂：占名查不出（非法字符名）→ 本批拒绝 exit 2 + 零计划（无需 ACL 夹具）" caseIngestProbeUnknown
     ]
+
+-- | REVIEW-LOG 曾登记「crossCat 的 ProbeUnknown 分支需 ACL 夹具」——不需要：
+-- 基名带 NTFS 非法字符时 'probeName' 得 ERROR_INVALID_NAME(123) → ProbeUnknown →
+-- 'classifyGitProbe' Left → 错误清单里出现「的占名」+「核不了」。前提：被探的
+-- 类目目录得在（父目录缺失时 Windows 先报 ERROR_PATH_NOT_FOUND(3) = NameMissing，
+-- 实测），真实 vault 三个类目目录齐全，夹具补建一个。突变配对：把 ProbeUnknown
+-- 折成 @Right False@（或删掉 Left 臂的收集）本用例转红。
+caseIngestProbeUnknown :: IO ()
+caseIngestProbeUnknown = withIngestEnv $ \cfg inbox -> do
+  mapM_ (\v -> createDirectoryIfMissing True (v </> "portrait")) (cfgVaultPath cfg)
+  (runP, gotP) <- capturePlans PrSaved
+  (out, c) <- captureStdout (runVaultIngest runP False "landscape" [inbox </> "ill<egal.jpg"] cfg)
+  c @?= 2
+  assertBool ("应报「占名核不了」: " <> out) ("的占名" `isInfixOf` out && "核不了" `isInfixOf` out)
+  ps <- gotP
+  length ps @?= 0
 
 -- | 临时主库 + vault + 一个 _inbox。回调收 (cfg, inbox 目录)。
 withIngestEnv :: (Config -> FilePath -> IO ()) -> IO ()

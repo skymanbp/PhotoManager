@@ -28,7 +28,8 @@ docDriftTests =
     , testCase "配置锁清点：withConfigLock 调用模块集合 = DESIGN 声明的四条读改写路径" caseConfigLockCensus
     , testCase "--json 清点：全 CLI 只有 vault status 一处 long \"json\"" caseJsonFlagCensus
     , testCase "GUI 页序：DESIGN ①—⑥ 的顺序与 index.html 的 nav 次序一致" caseGuiNavOrder
-    , testCase "CSP 逐字：DESIGN 引用的指令逐条出现在 tauri.conf.json 的 csp 里" caseCspQuoted
+    , testCase "CSP 逐字：DESIGN 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）" caseCspQuoted
+    , testCase "F090 前提：gui/ui 无内联样式/内联脚本/on* 属性，app.js 不写 style 属性字符串" caseGuiNoInlineStyle
     , testCase "死名清扫：opRelPaths / isPng / stemKey 不再出现在 src/app" caseNoDeadNames
     , testCase "Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记" caseHaddockMarkerHygiene
     , testCase "讹传清扫：被否证的机制解释（F048 列表脊、46 轮 openBoundTo 共享模式）不再出现在 src/app/test" caseFolkloreNotInTests
@@ -145,9 +146,24 @@ caseCspQuoted = do
         ]
   mapM_ (\d -> assertBool ("csp 应含 " <> d) (d `isInfixOf` conf)) quoted
   mapM_ (\d -> assertBool ("DESIGN 应逐字引用 " <> d) (d `isInfixOf` design)) quoted
-  assertBool "csp: style-src 放行 unsafe-inline" ("style-src 'self' 'unsafe-inline'" `isInfixOf` conf)
-  assertBool "DESIGN: style-src 例外要讲明" ("`style-src` 另放行" `isInfixOf` design)
+  -- 0.6.1（F090 收口）：实机 CDP 探针证实 WebView2/Tauri 不注入内联样式，
+  -- style-src 收紧为 'self'；'unsafe-inline' 不得回潮。
+  assertBool "csp: style-src 只 self（F090 收紧）" ("style-src 'self';" `isInfixOf` conf)
+  assertBool "csp: unsafe-inline 不得回潮" (not ("unsafe-inline" `isInfixOf` conf))
+  assertBool "DESIGN: style-src 收紧要讲明" ("`style-src 'self'`" `isInfixOf` design)
   assertBool "csp: script-src 只 self" ("script-src 'self'" `isInfixOf` conf)
+
+-- | F090 收紧后的前提：页面与脚本不得引入 CSP 会拦的内联样式/脚本形态
+-- （`<style>`、`style="…"`、`on*=` 属性、`setAttribute("style"…)`、拼字符串塞
+-- `<style`）。CSSOM 写（`el.style.x = …` / `setProperty`）不受 style-src 管，
+-- 仍允许。任一回潮 = 发布版 GUI 在 `style-src 'self'` 下静默丢样式。
+caseGuiNoInlineStyle :: IO ()
+caseGuiNoInlineStyle = do
+  html <- readUtf8 ("gui" </> "ui" </> "index.html")
+  js <- readUtf8 ("gui" </> "ui" </> "app.js")
+  let bad s ws = [w | w <- ws, w `isInfixOf` s]
+  assertEqual "index.html 不得有内联样式/内联脚本/on* 属性" [] (bad html ["<style", " style=\"", "<script>", "onclick=", "onload=", "onchange=", "oninput="])
+  assertEqual "app.js 不得写 style 属性字符串或拼 <style" [] (bad js ["setAttribute(\"style", "setAttribute('style", "<style", "style=\\\""])
 
 -- | P7-J 删掉的三个名字不得回潮：opRelPaths（无调用者的导出）、isPng
 -- （与 push 门分叉的第二份谓词）、stemKey（Import/Sort 双份局部配对键）。
@@ -238,6 +254,13 @@ caseReadmeSync = do
   let lastLine = foldl (\_ l -> l) "" (filter (not . all isSpace) (lines hist))
       nn = show dcCount <> "/" <> show dcCount
   assertBool ("HISTORY.md 末段（当期阶段行）须含 " <> nn) (nn `isInfixOf` lastLine)
+  -- P7-S（0.6.1 文档审计）：同一类「手抄」再两处——DESIGN-COMMANDS 状态行曾停在
+  -- 「37/38 轮 GO」，README「开发史（P0–P6）」在 HISTORY 已到 P7 后第二次漂移
+  -- （上一次 P5→P6）。前者与 README 同一禁令；后者从 HISTORY 标题派生。
+  assertBool "DESIGN-COMMANDS 不手抄「…轮 GO」收敛判定（委托 REVIEW-LOG）" (not ("轮 GO" `isInfixOf` dc))
+  let title = concat (take 1 (lines hist))
+  ph <- maybe (assertFailure "HISTORY.md 标题应含「P0 – P<N>」" >> pure "") (pure . takeWhile isDigit) (breakOn "P0 – P" title)
+  assertBool ("README 开发史范围须与 HISTORY 标题一致：P0–P" <> ph) (("开发史（P0–P" <> ph <> " 全程）") `isInfixOf` readme)
 
 -- | 0.6.0 发布链泄漏扫描：`Paths_photo_manager` 把构建机的六个安装目录
 -- （`D:\…\.stack-work\install\…`）烤进 pm.exe——exe 段的 Paths 对象直接进
