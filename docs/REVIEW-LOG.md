@@ -504,7 +504,8 @@ TEMP），32 次命令执行，评审后 `git status --porcelain` 空。#2（onE
   第 44 轮闭合标准：评审亲跑 exe 得 378/389、逐条核对 11 例失败点全在
   `icacls` exit 5（环境能力）而非产品断言、核对 exe SHA-256 与第一方两份
   全绿日志一致（工作树 `wt-test.log`：HEAD f0d6dd9 树净 → 389 绿；干净
-  worktree `cleanenv-test.log`：独立 .stack-work 从零编译 → 389 绿）。
+  worktree `cleanenv-test.log`：独立 .stack-work、库对象由该 worktree 自行编译
+  → 389 绿；45 轮 #2 订正措辞）。
 - **#3（minor）README:221 性能表仍「每道承重闸一个突变」**：42 轮修了两处、
   第三处漏网——`caseReadmeSync` 只管数字不管措辞，「全绿恰好证明措辞不在哨兵
   范围」。修（P7-M `f0d6dd9`）：该格限定为「凡有可观测自动化落点的承重闸」
@@ -557,3 +558,51 @@ exe 段显式 other-modules；**390 测试**）。扫描模式收敛到与 sanch
 （`skymanbp` 版权/标识）、`档案`（pm-ui.exe 内嵌中文词频表）。重建后
 pm.exe `D:\Projects` 0 命中、`pm --version` = `pm 0.6.0`；P7-O 树
 pm-test.exe SHA-256 `f42fc592a28009e92e77b5d04743eb8ab363604cb0df4c94f57a319c9668c961`、pm.exe `44aa8fd0730b96bbe5ff885ab6273406aa6ea4821187ed164d09fe515ebacb88`。
+
+## 第 45 轮（P7-O `3c263c1`，Claude Opus 5 聚焦）——FINAL NO-GO，minset {1,2}（均文档）
+
+评审亲跑 `All 390 tests passed (38.55s)`，双哈希逐字符对上（pm-test.exe
+`f42fc592…c961`、pm.exe `44aa8fd0…cb88`），跑前跑后树净；57 次工具调用 / 848 s。
+产物级机制反证：修前 sidecar（0.5.0 期 `target/…/debug/pm.exe`）`D:\Projects` ×6、
+修后三份产物 0 命中；CPP 预处理逐行 diff 仅 3 处（LINE pragma / 注释内宏展开 /
+目标行），`--help` 里 `To-Be-Sync'd` 与 CJK 帮助文本完好；反向突变 M1–M3 各判红于
+`DocDriftTests.hs:226/227/229`，**M4（`other-modules: []` 挪到 tests 段）仍绿**。
+代码侧四项 CLOSED（句柄单关闭路径、CPP 无副作用、exe 段无 Paths、运行态）。
+原文存档 `review45-opus-result.md`。
+
+- **#1（minor）HISTORY.md:369 P7 行尾「389/389」**，同句前文已是「390 测试」——
+  又是 44 轮 A/C 那一类：新写的行没从产物重读。修（P7-P）：改 390/390；**类级**：
+  `caseReadmeSync` 从同一上游再派生一处——HISTORY.md 末段（当期阶段行）须含
+  `dcCount/dcCount`（m2 判红）。
+- **#2（minor）REVIEW-LOG:507 孪生断言「独立 .stack-work 从零编译 → 389 绿」原样
+  留着**——44 轮只修了被点名的 :473，没按类扫全文件。修：`git grep 从零编译`
+  全清点（仅 :507 与 44 轮节的订正叙述），:507 改同口径；收口动作追加「同一断言
+  全文件清点后再改」。
+- **GO-note 段落定位**（`DocDriftTests.hs:229` 整文件 `isInfixOf`）：修——断言
+  限定在 `executables:` 块内（顶格键之前的缩进行；CRLF 先 strip），m1 判红。
+- **GO-note 引用面**（只查 Main.hs；库侧引用同样把 Paths 对象拉进 pm.exe）：修——
+  `refModules "Paths_photo_manager" []` 清点 src/Pm + app 全部非注释行，m3 判红。
+- **GO-note 扫描器未入仓**（抓出泄漏的 leakscan 只在 scratchpad，扫描器本身就是
+  「历次漏网」的根因）：修——`scripts/leakscan.py` 入仓，模式全部运行期从
+  `USERPROFILE`/`USERNAME`/`LOCALAPPDATA`/`APPDATA`/仓根派生（零本机字面量，
+  rule 11），vault 类模式走 `PM_LEAK_PATTERNS`/`--extra` 留在本地；README「从源码
+  构建」补发布前扫描一步；`release060.sh` 改用仓内脚本（三份产物 0 命中，
+  patterns=16）。推前树扫描器 `AppData` 模式收成路径形态 `AppData[/\\]`（裸词
+  是对假阳性的讨论，不是泄漏；44 轮节那句本会被误判）。
+- **GO-note `onException` 无钉**：评审建议的「拒绝后 `removeFile` 须成功」**不成立**
+  ——`openBoundTo`（cbits/pm_win.c:53）带 `FILE_SHARE_DELETE`，泄漏句柄挡不住删除。
+  改用 `FILE_SHARE_NONE` 独占打开（Win32 `createFile … oPEN_EXISTING`）为观测点：
+  泄漏的 GENERIC_READ|WRITE 句柄使其撞 ERROR_SHARING_VIOLATION；钉加在
+  `caseAppendTailSameHandle` hardlink 拒绝之后，m4（`onException` → `id`）判红。
+
+判别突变（`mutate4.py`，主树逐个 `git checkout` 还原）：
+
+| 突变 | 文件 | 结果 | 末行 |
+|---|---|---|---|
+| m1 | package.yaml | RED ✓ |     0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、exe 段显式 other-modules: FAIL (0.09s) / 1 out of 1 tests failed (0.09s) |
+| m2 | docs/HISTORY.md | RED ✓ |     41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托 REVIEW-LOG: FAIL (0.01s) / 1 out of 2 tests failed (0.04s) |
+| m3 | src/Pm/Versions.hs | RED ✓ |     0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、exe 段显式 other-modules: FAIL (0.08s) / 1 out of 1 tests failed (0.09s) |
+| m4 | src/Pm/Win.hs | RED ✓ |     P3b-12 journal/manifest/plan 被 hardlink 占名 → 拒绝写入，库外对象字节不变:                     FAIL /     41 轮 #6 openStateAppendTail：查尾与追加同一句柄——半截尾/换行尾/缺失三态 + hardlink 拒绝 |
+
+P7-P 树：390 测试、GHC 警告 0；pm-test.exe `b0276ba3ac817621ee8d155293ba54199c043a1db4048b8bd2547ddb6497d6f5`、pm.exe `9fbc577aaff552bb3b7301f83636f10368ece91587502b30cd6f5cc459b6ac43`；
+sancheck37 零命中；三份发布产物 leakscan 0 命中。

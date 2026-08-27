@@ -214,6 +214,12 @@ caseReadmeSync = do
   -- 43 轮 #3：突变覆盖的绝对化措辞（「每道闸都配」「每道承重闸」）与登记残余
   -- 矛盾——42 轮修了两处、第三处漏网，哨兵此前不管措辞只管数字。
   assertBool "README 不得绝对化突变覆盖（有登记残余）" (not (any (`isInfixOf` readme) ["每道闸都", "每道承重闸"]))
+  -- 45 轮 #1：HISTORY.md 当期阶段行的「N/N」在哨兵之外，P7 行曾被写成 389/389
+  -- （产物 390）——同一上游再多派生一处：末段（最新阶段行）须含 dcCount/dcCount。
+  hist <- readUtf8 ("docs" </> "HISTORY.md")
+  let lastLine = foldl (\_ l -> l) "" (filter (not . all isSpace) (lines hist))
+      nn = show dcCount <> "/" <> show dcCount
+  assertBool ("HISTORY.md 末段（当期阶段行）须含 " <> nn) (nn `isInfixOf` lastLine)
 
 -- | 0.6.0 发布链泄漏扫描：`Paths_photo_manager` 把构建机的六个安装目录
 -- （`D:\…\.stack-work\install\…`）烤进 pm.exe——exe 段的 Paths 对象直接进
@@ -222,11 +228,21 @@ caseReadmeSync = do
 -- 只查非注释行，注释里交代历史是合法的。
 caseNoPathsModule :: IO ()
 caseNoPathsModule = do
+  -- 45 轮 GO-note：库侧引用同样把 Paths 对象拉进 pm.exe（引用任一名字即整对象
+  -- 入链），所以清点 src/Pm + app 全部非注释行，不只 Main.hs。
+  refs <- refModules "Paths_photo_manager" []
+  assertEqual "src/Pm + app 非注释行不得引用 Paths_photo_manager（安装目录会烤进二进制）" [] refs
   m <- readUtf8 ("app" </> "Main.hs")
-  assertBool "app/Main.hs 不得引用 Paths_photo_manager（安装目录会烤进二进制）" (not (refsIn "Paths_photo_manager" m))
   assertBool "app/Main.hs 的版本串须取 CURRENT_PACKAGE_VERSION 宏" (refsIn "CURRENT_PACKAGE_VERSION" m)
   py <- readUtf8 "package.yaml"
-  assertBool "package.yaml exe 段须显式 other-modules: []（否则 hpack 自动加 Paths 模块）" ("other-modules: []" `isInfixOf` py)
+  -- 45 轮 GO-note：断言限定在 executables: 块内——整文件 isInfixOf 会被「把该行
+  -- 挪到 tests 段」骗绿，而 exe 段随即恢复 hpack 自动注入。块 = executables: 行
+  -- 之后直到下一个顶格键之前的缩进行（package.yaml 是 CRLF，比较前先 strip）。
+  let indented l = case l of
+        (c : _) -> isSpace c
+        [] -> True
+      exeBlock = takeWhile indented (drop 1 (dropWhile ((/= "executables:") . strip) (lines py)))
+  assertBool "package.yaml executables: 块内须显式 other-modules: []（否则 hpack 自动加 Paths 模块）" (any ("other-modules: []" `isInfixOf`) exeBlock)
 
 -- | @countsBefore suf s@：s 里所有「数字串 + suf」形态的数字。
 countsBefore :: String -> String -> [Int]

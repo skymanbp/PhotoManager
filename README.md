@@ -269,6 +269,12 @@ cd gui/src-tauri
 RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
   cargo tauri build --target x86_64-pc-windows-msvc
 # → target/x86_64-pc-windows-msvc/release/bundle/nsis/pm-ui_<版本>_x64-setup.exe
+
+# 发布前：二进制脱敏扫描（用户目录 / %APPDATA% 段 / 仓库路径，UTF-8 与 UTF-16 两种
+# 编码；模式全部运行期从环境派生；任一命中即退出 1）。0.6.0 起纳入发布链。
+python ../../scripts/leakscan.py binaries/pm-x86_64-pc-windows-msvc.exe \
+  target/x86_64-pc-windows-msvc/release/pm-ui.exe \
+  target/x86_64-pc-windows-msvc/release/bundle/nsis/pm-ui_<版本>_x64-setup.exe
 ```
 
 ## 路线图与已知限制

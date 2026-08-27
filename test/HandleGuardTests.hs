@@ -14,6 +14,7 @@ import qualified Data.ByteString.Char8 as BC
 import System.IO (Handle, IOMode (ReadMode), hClose, hGetContents', openBinaryFile, stdin, withBinaryFile)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
+import qualified System.Win32.File as Win32File
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -181,3 +182,15 @@ caseAppendTailSameHandle = withSystemTempDirectory "pm-tail" $ \tmp -> do
   case r of
     Left e -> assertBool ("应点名 hardlink: " <> show e) ("hardlink" `isInfixOf` show e)
     Right (_, h) -> hClose h >> assertFailure "hardlink 占名必须拒绝"
+  -- 45 轮 GO-note：拒绝路径的句柄由 `onException (hClose h)` 处理器收——它是唯一
+  -- 关闭路径，此前没有钉。观测点是 FILE_SHARE_NONE 的独占打开：泄漏句柄
+  -- （GENERIC_READ|WRITE 仍开着）会让它撞 ERROR_SHARING_VIOLATION。removeFile
+  -- 不是观测点：openBoundTo 带 FILE_SHARE_DELETE，泄漏句柄挡不住删除。
+  -- 删掉 Win.hs 的 onException 本断言转红。
+  ex <-
+    try
+      ( Win32File.createFile (tmp </> "hl.ndjson") Win32File.gENERIC_READ Win32File.fILE_SHARE_NONE Nothing Win32File.oPEN_EXISTING Win32File.fILE_ATTRIBUTE_NORMAL Nothing
+          >>= Win32File.closeHandle
+      ) ::
+      IO (Either SomeException ())
+  either (\e -> assertFailure ("拒绝后句柄须已关闭（独占打开应成功）: " <> show e)) pure ex
