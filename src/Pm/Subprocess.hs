@@ -1,27 +1,30 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | 外部进程的统一壳（步 9 第一方全量审，簇 B）。pm 会拉起两种外部程序：
+-- | 外部进程的统一壳（第一方全量审，簇 B）。pm 会拉起两种外部程序：
 -- @python@（转换第一段，"Pm.Convert"）与 @claude@（AI 建议，"Pm.ServeAi"）。
 -- 此前两处各写各的：claude 那份有整体超时，但 'System.Timeout.timeout' 的
 -- 异步异常只让 'withCreateProcess' 终止**直接**子进程——@claude.cmd@ 拉起的
 -- node 子树在超时后照跑，而 'seSuggestLock' 已经放开，下一次点击又开一棵；
 -- python 那份没有超时、按控制台码页解码输出（非 ASCII 会抛）。
 --
--- 这里合成一份纪律：三个管道显式 UTF-8；stdin 一次性喂完（子进程不读就退出
--- 也不算错——结果只看退出码与输出）；stdout\/stderr 并发读尽；整体超时到点
--- **先** @taskkill \/T \/F@ 杀整棵进程树，再让 'withCreateProcess' 收尾；拉不起来
--- \/ 管道异常收进 'ToolFailed'，不向上抛。
+-- 这里合成一份纪律：三个管道显式 UTF-8；喂 stdin 与读 stdout\/stderr 三路并发
+-- （子进程不读就退出也不算错——结果只看退出码与输出）；整体超时覆盖从喂 stdin
+-- 到子进程退出的全程；到点**先** @taskkill \/T \/F@ 杀整棵进程树、**再**收各路
+-- 线程。次序不能反（门禁一轮 F2 的第二层，flood 桩实测）：Windows 上阻塞在满
+-- 管道里的写是不可中断的 FFI 调用，先 cancel 会一直等到子进程读走或退出——子进程
+-- 既不读 stdin 也不退出时就是永久挂死；杀掉子进程管道即断，写端立刻醒来。
+-- 拉不起来 \/ 管道异常收进 'ToolFailed'，不向上抛。
 module Pm.Subprocess (ToolOutcome (..), runTool, envTimeout) where
 
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (concurrently, race)
-import Control.Exception (IOException, try)
+import Control.Concurrent.Async (concurrently, waitCatch, withAsync)
+import Control.Exception (IOException, SomeException, try)
 import Data.Text (Text)
 import qualified Data.Text.IO as TIO
 import System.Environment (getEnvironment, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO (hClose, hSetEncoding, utf8)
 import System.Process (CreateProcess (..), StdStream (..), getPid, proc, readCreateProcessWithExitCode, waitForProcess, withCreateProcess)
+import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
 -- | 一次外部调用的结局。
@@ -54,20 +57,22 @@ runTool exe args mcwd extraEnv stdinText secs = do
       mapM_ (`hSetEncoding` utf8) [hi, ho, he]
       -- 子进程先退出不读 stdin（如立刻报错的 claude \/ python）会让写端拿到
       -- broken pipe：那不是本次调用的失败，结局仍按退出码与输出判。
-      _ <- try (TIO.hPutStr hi stdinText >> hClose hi) :: IO (Either IOException ())
-      done <-
-        race (threadDelay (secs * 1000000)) $ do
-          (out, errT) <- concurrently (TIO.hGetContents ho) (TIO.hGetContents he)
-          code <- waitForProcess ph
-          pure (code, out, errT)
-      case done of
-        Left () -> do
-          -- 计时先到：按 pid 杀整棵树（cmd 包装器 → node \/ python 子进程都在内），
-          -- 然后 withCreateProcess 的收尾再对直接子进程 terminate + wait。
-          mpid <- getPid ph
-          mapM_ killTree mpid
-          pure (ToolTimeout secs)
-        Right (code, out, errT) -> pure (ToolRan code out errT)
+      let feed = () <$ (try (TIO.hPutStr hi stdinText >> hClose hi) :: IO (Either IOException ()))
+          body = do
+            ((), (out, errT)) <- concurrently feed (concurrently (TIO.hGetContents ho) (TIO.hGetContents he))
+            code <- waitForProcess ph
+            pure (code, out, errT)
+      -- 三路并发放在自己的线程里；主线程只在 STM 上等它（可中断），计时到点先杀树。
+      -- withAsync 的收尾会 cancel 那个线程——此时子进程已死、管道已断，阻塞的写立刻返回。
+      withAsync body $ \a -> do
+        done <- timeout (secs * 1000000) (waitCatch a)
+        case done of
+          Nothing -> do
+            mpid <- getPid ph
+            mapM_ killTree mpid
+            pure (ToolTimeout secs)
+          Just (Right (code, out, errT)) -> pure (ToolRan code out errT)
+          Just (Left (e :: SomeException)) -> pure (ToolFailed (show e))
     _ -> pure (ToolFailed "子进程管道未建立")
   pure (either (\(e :: IOException) -> ToolFailed (show e)) id r)
  where

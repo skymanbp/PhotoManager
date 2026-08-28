@@ -173,7 +173,15 @@ tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换�
   `Pm.Subprocess.runTool`（与 claude 同一壳）：`PM_CONVERT_TIMEOUT` 秒整体超时（缺省 600），到点
   `taskkill /T /F` 杀整棵进程树；`scanDerived` 的基目录本身是链接 → Left（doctor 报 Bad、不删）。
   用例 `caseDerivedGuards`（hardlink 占 tmp / symlink 与 hardlink 占终名 / 同源 / 超时，夹具
-  `test/fixtures/slow-python.cmd`）。
+  `test/fixtures/slow-python.cmd`）。门禁一轮（Opus）补两条：① 整批派生期间持有 root 锁——同一时间
+  hold / notes / apply 等写路径拿不到锁会报忙（fail-closed，不是死锁）；② 与 Exec 的 tmp 落位是
+  **同一组原语，差一处**——目标名要交给 python，pm 关掉独占句柄到 python 按名打开之间有一个窗口，
+  窗口内被主动换成库外 hardlink 会写穿库外对象（随后 `probeName` + `openStateRead` 拒绝、坏字节不
+  进计划，但库外字节已被覆盖）：登记为残余（同 DESIGN §14 Exec 的 TOCTOU 残余；Exec 全程只经自己
+  的句柄写，无此窗口）。超时覆盖从喂 stdin 到子进程退出的全程（`runTool` 三路并发），且到点**先杀树再收线程**——Windows 满管道写是
+  不可中断的 FFI 调用，先 cancel 会等到子进程读走或退出，子进程既不读也不退就永久挂死（门禁一轮突变 g3 首跑
+  实测）；杀掉子进程管道即断。用例 `caseRunToolFlood`：桩灌满 stdout 不读 stdin、睡 9 s，100 KiB 提示照样 1 s
+  超时、耗时 < 4 s、PING 孙进程被收掉。
 
 ### 20.2 doctor：`DERIVED-STALE`
 
@@ -280,7 +288,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 `PM_CLAUDE_EXE` 指向测试夹具（`test/fixtures/fake-claude.cmd` → 打印预置 JSON /
 打印垃圾 / 退出非零 / 睡到超时 / 地点预置 / `is_error:true`）六种（`PM_FAKE_CLAUDE`）；as-built 落在
 `test/ServeP8Tests.hs` 6 例：三个计划端点各一（只读 403 + 写域断言 + 计划可装回）、classify 一例
-含五道闸（只读级仍放行、413、400 ×6、409 锁 / 缺 claude / 超时、502 垃圾 / 退出非零）、place 一例
+含五道闸（只读级仍放行、413、400 ×6、409 锁 / 缺 claude / 超时、502 垃圾 / 退出非零 / `is_error`）、place 一例
 （serve 自己重跑分段、围栏 JSON、只有 RAW 的段答 null、> 12 段 400）、纯函数一例；契约：建议
 **不写** `vault-holds.json` / `vault-notes.json` / 计划文件（不出现），jpg 字节不变。
 
@@ -359,8 +367,8 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | I7 | 相册 ⊆ 成片：import 的相册项与成片项同组、成片在前；album add / convert 源就在成片 | doctor 判定侧仍未实现（§10.3 第 2 项，登记不变） |
 | I8 | `vault status --json` 的六键与 held/held_stale **零改动**；不加第十态 | D′ 的直接收益 |
 | I9 | pm 仍不执行 git；`pm vault notes` 只读反查 photos.json | — |
-| I10/I11 | notes 事务同 holds；derived 目录经 `ensurePmSubdir`，派生件 tmp/终名再各过完整路径 `resolveUnder` + CREATE_NEW 独占创建 + 根锁（§20.1 写纪律）；三条新写路径都过 `requireWritable` | — |
-| 新增边界 | `pm serve` 会拉起两种外部进程：`python`（转换）与 `claude`（建议） | 都由环境变量可覆盖、都有预检、都不写照片：python 只往 pm 先独占创建的 `.pm\derived\*.tmp` 里写，claude 在 plan 权限模式下只读；两者同走 `Pm.Subprocess.runTool`（UTF-8 管道、整体超时到点杀整棵进程树：`PM_CONVERT_TIMEOUT` 600 / `PM_SUGGEST_TIMEOUT` 180） |
+| I10/I11 | notes 事务同 holds；derived 目录经 `ensurePmSubdir`，派生件 tmp/终名再各过完整路径 `resolveUnder` + CREATE_NEW 独占创建 + 根锁（§20.1 写纪律；整批派生期间其它写路径报忙）；三条新写路径都过 `requireWritable` | — |
+| 新增边界 | `pm serve` 会拉起两种外部进程：`python`（转换）与 `claude`（建议） | 都由环境变量可覆盖、都有预检、都不写照片：python 只往 pm 先独占创建的 `.pm\derived\*.tmp` 里写，claude 在 plan 权限模式下只读；两者同走 `Pm.Subprocess.runTool`（UTF-8 管道、喂 stdin 与读两路三路并发、整体超时到点**先**杀整棵进程树再收线程：`PM_CONVERT_TIMEOUT` 600 / `PM_SUGGEST_TIMEOUT` 180）。登记残余：python 按名打开 tmp 的窗口（§20.1） |
 
 ---
 

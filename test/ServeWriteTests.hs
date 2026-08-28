@@ -21,9 +21,11 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Config (Config (..), configFilePath, loadConfig, withConfigLock, writeConfig)
+import Pm.Hash (sha256File)
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, savePlan)
 import Pm.Serve (listPlans, serveApp)
+import Pm.VaultHold (VaultHold (..), writeHolds)
 import Data.Foldable (toList)
 import Data.Time (getCurrentTime)
 import ServeTests (decodeBody, field, arrLen, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvA, mkEnvW, mkHardLink, postReq, seedConfig, seedSortSrc, tok, withVault, withVaultWritable)
@@ -189,6 +191,29 @@ caseServeHold = withVaultWritable "/api/vault/hold" "{\"hold\":[\"a.jpg\"]}" "va
     -- 不是 NEW 的名字：拒
     rGhost <- postReq "/api/vault/hold" "{\"hold\":[\"ghost.jpg\"]}"
     assertStatus 400 rGhost
+    -- 门禁 F1：相册里的 .png 是 NEW 但 UNPUSHABLE——暂不同步对它无意义，拒（否则它会以
+    -- HELD 卡回到页面、一勾整批 push-plan 400）；/api/vault/new 也不把它列进 new / held
+    liftIO' (BS.writeFile (root </> "相册" </> "n.png") "PNG-UNPUSHABLE")
+    rPng <- postReq "/api/vault/hold" "{\"hold\":[\"n.png\"]}"
+    assertStatus 400 rPng
+    liftIO' (assertBool "应点名 UNPUSHABLE" ("UNPUSHABLE" `BS.isInfixOf` BSL.toStrict (simpleBody rPng)))
+    rNew <- getReq "/api/vault/new" [] tok
+    liftIO' $ do
+      arrLen (field ["new"] (decodeBody rNew)) @?= Just 1
+      arrLen (field ["held"] (decodeBody rNew)) @?= Just 0
+      arrLen (field ["unpushable"] (decodeBody rNew)) @?= Just 1
+    -- 本闸之前记下的 .png 决定（旧名单文件）：splitHeld 归 stale 并说明，不当 HELD 卡回页面
+    liftIO' $ do
+      shaN <- sha256File (root </> "相册" </> "n.png")
+      now <- getCurrentTime
+      writeHolds root [VaultHold "n.png" shaN now Nothing] >>= either assertFailure pure
+    rLegacy <- getReq "/api/vault/new" [] tok
+    liftIO' $ do
+      arrLen (field ["held"] (decodeBody rLegacy)) @?= Just 0
+      arrLen (field ["heldStale"] (decodeBody rLegacy)) @?= Just 1
+      assertBool "stale 说明应点名 UNPUSHABLE" ("UNPUSHABLE" `BS.isInfixOf` BSL.toStrict (simpleBody rLegacy))
+    -- 照说明清掉那条旧决定（名单文件里它仍在，hold 响应的 held 是整个文件）
+    postReq "/api/vault/hold" "{\"unhold\":[\"n.png\"]}" >>= assertStatus 200
     r1 <- postReq "/api/vault/hold" "{\"hold\":[\"a.jpg\"]}"
     assertStatus 200 r1
     liftIO' (arrLen (field ["held"] (decodeBody r1)) @?= Just 1)

@@ -38,7 +38,7 @@ convertTests =
     [ testCase "参数闸：空 / 缺索引 / 已是 jpg / RAW / 层外 / 绝对与 .. / 同批撞名 / PM_PYTHON 不存在 → exit 2，.pm/derived 不出现" caseRefusals
     , testCase "端到端：16 位 tif→L≈117、RGBA→白底、RGB 原样；--also-album 同组（成片项组头）；复用派生件 / --redo 重派生；I7 成片待裁决 → 相册项不执行；坏源不出计划；源字节不动" caseE2E
     , testCase "doctor：DERIVED-STALE/ORPHAN/TMP Warn、PENDING Info；--repair 只删前三种、留 pending" caseDoctorDerived
-    , testCase "步 9 派生件写纪律：tmp 名被库外 hardlink 占住 → 清掉重建、库外字节不动；终名是 symlink / 库外 hardlink → 拒绝不复用；同 sha 同名两源 → 先拒；PM_CONVERT_TIMEOUT 到点 → 杀树 exit 2、无 .tmp" caseDerivedGuards
+    , testCase "派生件写纪律：tmp 名被库外 hardlink 占住 → 清掉重建、库外字节不动；终名是 symlink / 库外 hardlink → 拒绝不复用；同 sha 同名两源 → 先拒；派生调用 PM_CONVERT_TIMEOUT 到点 → 终止、点名变量、pm 自建的 .tmp 已清" caseDerivedGuards
     ]
 
 -- ─── 夹具：主库 + 相册层 + 闭包式 runner（索引由各用例按需重做） ───────────────
@@ -246,14 +246,18 @@ caseDerivedGuards = withLib $ \root run -> do
   (c4, mpid4) @?= (2, Nothing)
   assertBool o4 ("只转一份" `isInfixOf` o4)
   removeFile (alb </> "rgb.png")
-  -- ⑤ 超时：PM_PYTHON 指向睡 ~3 s 的桩、PM_CONVERT_TIMEOUT=1 → 预检就超时；exit 2、点名变量
+  -- ⑤ 超时：PM_PYTHON 指向的桩对 `-c`（预检）立即答 0、对派生调用睡 ~3 s；
+  --    PM_CONVERT_TIMEOUT=1 → 派生调用（root 锁内、tmp 已由 pm 独占创建）到点终止：
+  --    exit 2、点名变量、pm 自建的 .tmp 已清（杀树本身无独立判红形态，见 REVIEW-LOG）。
+  --    此刻 ddir 里没有 rgb.jpg（③ 末尾已删、④ 在派生前就被拒），派生一定真的发生。
   slow <- makeAbsolute ("test" </> "fixtures" </> "slow-python.cmd")
   bracket_ (setEnv "PM_PYTHON" slow >> setEnv "PM_CONVERT_TIMEOUT" "1") (unsetEnv "PM_PYTHON" >> unsetEnv "PM_CONVERT_TIMEOUT") $ do
     (c5, mpid5, o5) <- run False False ["成片/E1/rgb.png"]
     (c5, mpid5) @?= (2, Nothing)
     assertBool o5 ("PM_CONVERT_TIMEOUT" `isInfixOf` o5)
   leftovers <- derivedFiles root
-  assertBool ("不应留 .tmp: " <> show leftovers) (not (any (".tmp" `isInfixOf`) leftovers))
+  assertBool ("派生调用超时后不应留 .tmp: " <> show leftovers) (not (any (".tmp" `isInfixOf`) leftovers))
+  doesFileExist (ddir </> "rgb.jpg") >>= (@?= False)
 
 planItems :: FilePath -> T.Text -> IO [PlanItem]
 planItems root pid = loadPlan root pid >>= either (\e -> assertFailure e >> pure []) (pure . plItems)

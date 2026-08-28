@@ -14,14 +14,18 @@ import Control.Monad (forM_, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
+import Data.Char (toUpper)
 import Data.Foldable (toList)
+import Data.List (isInfixOf)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Time (diffUTCTime, getCurrentTime)
 import Network.Wai.Test
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, makeAbsolute)
 import System.Environment (setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
+import System.Process (readProcessWithExitCode)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -32,8 +36,10 @@ import Pm.Op (Op (..))
 import Pm.Plan (Plan (..), PlanItem (..), loadPlan)
 import Pm.Serve (serveApp)
 import Pm.ServeAi (evenSample, extractJson)
+import Pm.Subprocess (ToolOutcome (..), runTool)
 import ServeTests (arrLen, decodeBody, field, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvW, postReq, seedSortSrc, tok)
 import SortTests (photoAt)
+import System.Timeout (timeout)
 import TestUtil (mkMain, scanQuiet, writeF)
 
 serveP8Tests :: TestTree
@@ -46,6 +52,7 @@ serveP8Tests =
     , testCase "POST /api/suggest classify：只读级放行；预置回答规范化（未请求的名字丢弃、坐标规范）；400 五种；413；502 垃圾/退出非零/is_error；409 缺 claude/超时/并发；.pm 零写入" caseSuggestClassify
     , testCase "POST /api/suggest place：serve 自己重跑分段抽样；围栏 JSON 解析；只有 RAW 的段不交给模型答 null；>12 段 400" caseSuggestPlace
     , testCase "纯函数：evenSample 首/中/尾均匀；extractJson 裸/围栏/带前后文/垃圾" casePure
+    , testCase "runTool（门禁 F2）：子进程灌满 stdout 且不读 stdin，喂入 100 KiB 提示 → 超时仍生效（ToolTimeout 1），不因管道互等挂死" caseRunToolFlood
     ]
 
 -- ─── 归档页端点 ──────────────────────────────────────────────────────────────
@@ -294,6 +301,26 @@ caseSuggestPlace = withSystemTempDirectory "pm-serve-ai-place" $ \tmp -> do
   forM_ (zip [1 :: Int ..] ["2025:01", "2025:02", "2025:03", "2025:04", "2025:05", "2025:06", "2025:07", "2025:08", "2025:09", "2025:10", "2025:11", "2025:12", "2026:01"]) $ \(i, ym) ->
     BS.writeFile (src </> "DCIM" </> ("m" <> show i <> ".jpg")) (photoAt (ym <> ":10 10:00:00"))
   withFakeClaude "place" $ flip runSession (serveApp env) $ postReq "/api/suggest" body >>= assertStatus 400
+
+-- | 串行「先喂完 stdin 再读」在这里会互等：桩不读 stdin 却先往 stdout 写 24 KiB，
+-- 两边的管道都满 → 双方永久阻塞，超时如果不覆盖喂 stdin 那一段就救不了它
+-- （serve 里 seSuggestLock 会永远握住）。外层 10 s 兜底：挂死 → Nothing → 红。
+caseRunToolFlood :: IO ()
+caseRunToolFlood = do
+  exe <- makeAbsolute ("test" </> "fixtures" </> "flood.cmd")
+  t0 <- getCurrentTime
+  r <- timeout 15000000 (runTool exe [] Nothing [] (T.replicate 100000 "x") 1)
+  t1 <- getCurrentTime
+  let elapsed = realToFrac (diffUTCTime t1 t0) :: Double
+  case r of
+    Just (ToolTimeout 1) -> pure ()
+    other -> assertFailure ("应在 1 s 超时: " <> show other)
+  -- 到点必须**先杀树**再收线程：桩要睡 ~9 s 才自己退出，若实现是先 cancel 喂 stdin 的
+  -- 线程（阻塞在满管道里的写不可中断），返回时刻会拖到桩自己退出——用耗时把两者分开
+  assertBool ("超时应在 1 s 到点后立刻返回（杀树解开写端），实测 " <> show elapsed <> " s") (elapsed < 4)
+  -- 树已杀干净：桩的 ping 孙进程不再存在（否则下一个用例 / 下一次点击还挂着一棵）
+  (_, tl, _) <- readProcessWithExitCode "tasklist" ["/FI", "IMAGENAME eq PING.EXE", "/FO", "CSV", "/NH"] ""
+  assertBool ("ping 孙进程应已被 taskkill /T 收掉: " <> tl) (not ("PING.EXE" `isInfixOf` map toUpper tl))
 
 casePure :: IO ()
 casePure = do

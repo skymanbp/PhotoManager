@@ -15,6 +15,8 @@ window.pmVault = function (u) {
   let suggesting = false;      // AI 建议进行中：不提交、不再发第二次
   const HOLD = "__hold__";     // 第四个按钮的哨兵值——它不是 vault 类目
   const assign = new Map(); // name -> category | HOLD
+  const prefilled = new Set(); // 类目来自盘上记录的回显（本次没点过）——进度行分列、按钮虚线（门禁 F5）
+  const touched = new Set();   // AI 建议在途时用户改过三格的卡：响应回来不覆盖其 source / basis（门禁 F4）
   // P8-D 照片记录（DESIGN-P8 §21，用户裁定 R6 (b)）：每张卡三格（地点 / 坐标 / 标题），
   // 打开页时从 GET /api/vault/notes 回显；AI 建议只**预填**（不标已定）；用户一敲键
   // source 就成 user；提交时只把「改了的」发给 POST /api/vault/notes（差集，同 holdOps）。
@@ -65,7 +67,8 @@ window.pmVault = function (u) {
     const ops = holdOps();
     const cats = [...assign.values()].filter((c) => c !== HOLD).length;
     const nops = noteOps();
-    $("#assign-progress").textContent = `已定 ${assign.size} / ${total}（分类 ${cats} · 暂不同步 ${ops.count}）` + (nops.set.length || nops.clear.length ? ` · 记录改动 ${nops.set.length + nops.clear.length}` : "") + (vaultDrift ? ` · ${vaultDrift} 项 DRIFT 待裁决` : "");
+    const pre = [...prefilled].filter((n) => assign.get(n) !== HOLD).length;
+    $("#assign-progress").textContent = `已定 ${assign.size} / ${total}（分类 ${cats}` + (pre ? `，其中沿用记录 ${pre}` : "") + ` · 暂不同步 ${ops.count}）` + (nops.set.length || nops.clear.length ? ` · 记录改动 ${nops.set.length + nops.clear.length}` : "") + (vaultDrift ? ` · ${vaultDrift} 项 DRIFT 待裁决` : "");
     // DRIFT-only 的 vault（没有 NEW）也要能出纯裁决计划，否则按钮永远灰着（二十轮 minor）。
     $("#btn-plan").disabled = cats === 0 && vaultDrift === 0 && !ops.hold.length && !ops.unhold.length && !nops.set.length && !nops.clear.length;
   }
@@ -79,7 +82,7 @@ window.pmVault = function (u) {
       // 这里**不**清 #plan-result：makePlan 成功后紧接着调 loadVault 刷新网格，
       // 顺手就把刚写出来的「计划 id / 执行命令 / 计划文件路径」抹了——那是这一页
       // 唯一一次说出计划 id 的机会。横幅只在用户**开始新一轮**时清（makePlan 开头）。
-      assign.clear(); notes.clear(); vaultDrift = 0; heldInitial = new Set();
+      assign.clear(); notes.clear(); prefilled.clear(); touched.clear(); vaultDrift = 0; heldInitial = new Set();
       let meta;
       try { meta = await getJson("/api/vault/new"); } catch (e) {
         if (stale("vault", gen)) return; // 旧轮失败：别动新一轮的网格
@@ -112,13 +115,19 @@ window.pmVault = function (u) {
         // 一张没再碰的卡在 noteOps 里会被算成「类目改成了 null」而清掉记录。
         // 「暂不同步」优先：它是更晚、更明确的决定。
         const ini = noteMap.get(e.name);
-        if (ini && ini.category && !assign.has(e.name)) assign.set(e.name, ini.category);
+        if (ini && ini.category && !assign.has(e.name)) { assign.set(e.name, ini.category); prefilled.add(e.name); }
         // 三个 vault 类目 + 第四个「暂不同步」：后者不是 vault 目录，只是主库里
-        // 的一条本地决定，随时能改回类目。
+        // 的一条本地决定，随时能改回类目。沿用记录的类目按钮是虚线（.prefilled），
+        // 用户一点任何按钮就变成本次的选择。
         for (const c of meta.categories.concat([HOLD])) {
           const b = el("button", c === HOLD ? "hold" : null, c === HOLD ? "暂不同步" : c);
-          b.onclick = () => { if (submitting || suggesting) return; assign.set(e.name, c); for (const x of seg.children) x.classList.toggle("on", x === b); card.classList.add("done"); updateProgress(items.length); };
-          if (assign.get(e.name) === c) { b.classList.add("on"); card.classList.add("done"); }
+          b.onclick = () => {
+            if (submitting || suggesting) return;
+            assign.set(e.name, c); prefilled.delete(e.name);
+            for (const x of seg.children) { x.classList.toggle("on", x === b); x.classList.remove("prefilled"); }
+            card.classList.add("done"); updateProgress(items.length);
+          };
+          if (assign.get(e.name) === c) { b.classList.add("on"); if (prefilled.has(e.name)) b.classList.add("prefilled"); card.classList.add("done"); }
           seg.appendChild(b);
         }
         body.appendChild(seg);
@@ -127,7 +136,7 @@ window.pmVault = function (u) {
         for (const [k, phText] of [["location", "地点（如 Hallstatt）"], ["coordinates", "坐标 lat, lng"], ["title", "标题"]]) {
           const inp = document.createElement("input"); inp.type = "text"; inp.placeholder = phText; inp.spellcheck = false;
           inp.value = ini && ini[k] != null ? String(ini[k]) : "";
-          inp.addEventListener("input", () => { if (submitting) return; const n = notes.get(e.name); n.source = "user"; n.basis.textContent = ""; card.classList.toggle("noted", NOTE_KEYS.some((kk) => n.inputs[kk].value.trim())); updateProgress(items.length); });
+          inp.addEventListener("input", () => { if (submitting) return; if (suggesting) touched.add(e.name); const n = notes.get(e.name); n.source = "user"; n.basis.textContent = ""; card.classList.toggle("noted", NOTE_KEYS.some((kk) => n.inputs[kk].value.trim())); updateProgress(items.length); });
           inputs[k] = inp; nt.appendChild(inp);
         }
         const basis = el("div", "basis muted small", ini ? `记录：${ini.status}${ini.source ? " · 来源 " + ini.source : ""}` : "");
@@ -174,7 +183,7 @@ window.pmVault = function (u) {
     const names = [...notes.keys()].filter((n) => assign.get(n) !== HOLD).slice(0, 20);
     if (!names.length) { out.className = "banner warn"; out.textContent = "没有可建议的照片（这一页没有 NEW，或都已标「暂不同步」）。"; return; }
     const btn = $("#btn-vault-ai"), label = btn.textContent;
-    suggesting = true; $("#btn-plan").disabled = true;
+    suggesting = true; touched.clear(); $("#btn-plan").disabled = true;
     btn.disabled = true; btn.textContent = "AI 看图中…（claude -p，最长 3 分钟）";
     try {
       const r = await post("/api/suggest", { kind: "classify", names });
@@ -183,6 +192,7 @@ window.pmVault = function (u) {
       let filled = 0;
       for (const it of j.items || []) {
         const n = notes.get(it.name); if (!n) continue;
+        if (touched.has(it.name)) continue; // 用户在途中亲手改过：来源已是 user，AI 不覆盖（门禁 F4）
         const card = n.inputs.location.closest(".gcard");
         for (const b of card.querySelectorAll(".seg button")) b.classList.toggle("ai", it.category != null && b.textContent === it.category);
         for (const k of NOTE_KEYS) if (it[k] && !n.inputs[k].value.trim()) { n.inputs[k].value = it[k]; filled++; }

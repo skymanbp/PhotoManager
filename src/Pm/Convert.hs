@@ -13,13 +13,17 @@
 --     → 同 sha 跳过、异 sha NEEDS-DECISION（I5），判定与相册通道同一份
 --     （'classifyInto'）。原 tif\/png **原地不动**（I2）。
 --
--- 第一段的写纪律（步 9 第一方全量审 C0\/C2\/C3，与 'Pm.Exec' 的 tmp 落位同
--- 规格）：派生件的 tmp 与终名都以**完整相对路径**过 'resolveUnder'，只用返回的
--- 路径；tmp 由 pm 先 'openFreshBinary'（CREATE_NEW，残留先清）独占创建再交给
--- python 写；python 退出后复验 tmp 仍是普通名、单链接，sha 在 tmp 上经同一
--- 句柄测得，随后 'moveBoundNoReplace' 落位；复用旧派生件同样只认普通名 +
--- 单链接（'openStateRead' 的读侧规格——派生件的字节会进计划）。整段
--- 「派生 → 落位 → 测 sha」在 'withRootLock' 之内（I10）。
+-- 第一段的写纪律（第一方全量审 C0\/C2\/C3；与 'Pm.Exec' 的 tmp 落位用**同一组
+-- 原语**，差一处——目标名要交给 python）：派生件的 tmp 与终名都以**完整相对路径**
+-- 过 'resolveUnder'，只用返回的路径；tmp 由 pm 先 'openFreshBinary'（CREATE_NEW，
+-- 残留先清）独占创建再交给 python 写；python 退出后复验 tmp 仍是普通名、单链接，
+-- sha 在 tmp 上经同一句柄测得，随后 'moveBoundNoReplace' 落位；复用旧派生件同样
+-- 只认普通名 + 单链接（'openStateRead' 的读侧规格——派生件的字节会进计划）。
+-- 整段「派生 → 落位 → 测 sha」在 'withRootLock' 之内（I10；整批期间其它写路径
+-- 拿不到锁会报忙，不是死锁）。登记残余（DESIGN-P8 §25）：pm 关掉独占句柄到
+-- python 按名打开之间有窗口，窗口内被主动换成库外 hardlink 会写穿库外对象——
+-- 随后的复验拒绝它、坏字节不进计划，但库外字节已被覆盖；Exec 无此窗口，因为
+-- 它全程只经自己的句柄写。
 --
 -- python 的发现：@PM_PYTHON@ → PATH 上的 @python@（同 'Pm.Ui.locateUi' 的
 -- @PM_UI_EXE@ 先例）；预检 @import PIL@；脚本内嵌在 'pillowScript' 里经 stdin

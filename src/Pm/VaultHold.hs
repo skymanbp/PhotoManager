@@ -39,6 +39,7 @@ import Data.Time (UTCTime)
 import System.FilePath (takeFileName)
 
 import Pm.Config (readPmState, requireWritable, writePmState)
+import Pm.VaultCore (pushableExt)
 
 -- | 一条决定：名字（相册里的平铺 basename，与六态分类同键）+ 决定当时的 sha。
 data VaultHold = VaultHold
@@ -160,8 +161,9 @@ applyRecordOps key olds adds dels =
 
 -- | 按**本轮强制重算**的「名字 → sha」把名单分成两份：
 --
--- * 生效：名字在 NEW 里且 sha 与决定时相同；
--- * 失效：字节已变 / 本轮复核不稳 / 已不在 NEW（三种各有各的说明）。
+-- * 生效：名字在 NEW 里、是可推送的 jpg、且 sha 与决定时相同；
+-- * 失效：不是 jpg（UNPUSHABLE，门禁 F1：旧名单里可能有——它推不上 vault，
+--   页面不该把它当可指派的 HELD 卡）/ 字节已变 / 本轮复核不稳 / 已不在 NEW。
 --
 -- @shaOf@ 只对"在 NEW 里"的名字有定义；返回 'Nothing' 表示本轮读不稳定。
 splitHeld ::
@@ -171,12 +173,14 @@ splitHeld ::
   ([(FilePath, Text)], [(FilePath, String)])
 splitHeld hs newNames shaOf = (held, stale)
  where
-  held = [(vhName h, vhSha h) | h <- hs, vhName h `elem` newNames, shaOf (vhName h) == Just (vhSha h)]
+  held = [(vhName h, vhSha h) | h <- hs, vhName h `elem` newNames, pushableExt (vhName h), shaOf (vhName h) == Just (vhSha h)]
   heldNames = map fst held
   stale = [(vhName h, why h) | h <- hs, vhName h `notElem` heldNames]
   why h
     | vhName h `notElem` newNames =
         "已不在 NEW（可能已推送、已删除或改了名）→ pm vault unhold 清掉这条"
+    | not (pushableExt (vhName h)) =
+        "不是 jpg（UNPUSHABLE，推不上 vault，暂不同步对它无意义）→ pm vault unhold 清掉这条"
     | shaOf (vhName h) == Nothing =
         "本轮复核读取不稳定（文件正在变动）→ 暂按 NEW 处理，稍后重跑"
     | otherwise =

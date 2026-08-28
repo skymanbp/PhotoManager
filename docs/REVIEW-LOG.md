@@ -454,3 +454,33 @@ final build rc=0; P8-C2 rc=0 (All 4 tests passed (14.81s)); P8-B rc=0 (All 6 tes
 s3 未判红的原因：终名是 symlink 时 `resolveUnder` 的完整路径预筛已先拒绝（同一句「链接」消息），`probeName` 的拒绝分支是第二道（Win.hs 的设计：`resolveUnder` 只是预筛，句柄层才是边界）；叶级链接构造不出只过预筛不过 probe 的形态，登记为无独立判红形态的冗余防线，不删。
 
 修复批树：417 测试、GHC 警告 0（clang `<built-in>` 噪声同前）；`node --check` ×3 绿；pm-test.exe `148735e4875c953ab1496db6e352481a42c57bffd374caf3e59c1589ef2433c5`、pm.exe（`.stack-work/install/…/bin`）`6112149481ef861feb141acd305c0a6a0dd7919d312fc420d27ba0b204ffa6ad`。
+
+## 门禁一轮（Opus，2026-08-28，对象 a1ba887）→ NO-GO → 修复批
+
+报告存档：scratchpad `gate_opus_a1ba887.md`。verdict **NO-GO**：2 major（F1 / F2）+ 6 minor（F3–F8）+ 一条「与 Exec 同规格」措辞纠正；13 条声称试图否证而未能（hardlink 预置 / 叶级链接逐段拒 / 库外字节不进计划 / 根锁区段 / s3 解释成立 / convertibleExt 三分覆盖 / 七处产地 / mask 解析 / planPost try 范围 / scanDerived 基目录 / sameDerived case-fold / applyPlan done 位 / 计数与版本一致）。
+
+| # | 级别 | 发现 | 上游处置 |
+|---|---|---|---|
+| F1 | major | C8 只堵了 `new`：`.png` 能经 `pm vault hold` / 页面「暂不同步」进名单 → `vrHeld` → `/api/vault/new` 的 `held` → 仍渲染成可指派卡 → push-plan 整批 400 | 上游：`holdRequest` 拒收非 jpg（「UNPUSHABLE 无需暂不同步 → 归档页转换」）；存量旧名单条目由 `splitHeld` 归 stale 并说明；用例 `caseServeHold` 补 hold `n.png` 400、旧名单条目 heldStale 1 / held 0、按说明 unhold 后继续 |
+| F2 | major | `runTool` 的 stdin 写在 `race` 之外——提示超过 4 KiB 管道缓冲、子进程先灌 stdout 时串行写与子进程互等，超时救不了，`seSuggestLock` 永远握住 | 喂 stdin 移进计时窗口三路并发。**第二层**（突变 g3 首跑暴露）：Windows 满管道写是不可中断的 FFI 调用，「到点先 cancel 喂线程」会等到子进程读走或退出——子进程既不读也不退就永久挂死（g3 首版让 P8-D 组挂了 900 s，用例外层 `timeout` 也救不回）。定稿：`withAsync body` + 主线程 `timeout (waitCatch a)`（STM 可中断）→ 到点**先 `taskkill /T /F`**（管道即断、写端立刻醒来）→ `withAsync` 收尾再 cancel。用例 `caseRunToolFlood`：桩灌 24 KiB 不读 stdin、睡 9 s；断言 `ToolTimeout 1`、耗时 < 4 s（区分「杀树解开」与「桩自己退出」）、`tasklist` 无 PING 孙进程 |
+| F3 | minor | archive.js 把索引 warnings 写进结果横幅，`planCall` 收尾的 `loadArchive` 会抹掉刚出的计划 id（同 vault.js 记着的坑） | 专用行 `#archive-warnings` |
+| F4 | minor | AI 建议在途时用户改过的三格，响应回来把 `source` 从 user 改回 ai-* | `touched` 集合：在途改过的卡跳过覆盖 |
+| F5 | minor | 回显记录类目后页面分不清「上次确认的」与「本次选的」 | `.prefilled` 虚线样式 + 进度行「其中沿用记录 N」；点任一按钮即转为本次选择 |
+| F6 | minor | 用例标题写「杀树」但断言观测不到；⑤ 超时打在预检（根锁外） | 标题据实；桩对 `-c` 立即答 0、对派生调用睡 3 s → 超时打在根锁内的派生调用，`.tmp` 清理有意义 |
+| F7 | minor | 整批派生期间持 root 锁的阻塞窗口未登记 | DESIGN-P8 §20.1 / §25 补记（fail-closed 报忙，不是死锁） |
+| F8 | minor | §22.4 闸门清点漏 `is_error` | 补 |
+| 措辞 | — | 「与 Exec 的 tmp 落位同规格」不成立：Convert 要把**名字**交给 python，pm 关掉独占句柄到 python 按名打开之间有窗口 | Convert.hs 头注 + §20.1 / §25 改为「同一组原语，差一处」并登记为残余（同 DESIGN §14 Exec 的 TOCTOU 残余） |
+
+判别突变（`mutate_gate1.py`，同前纪律；驱动层对挂死的 pm-test 做 `taskkill` 并记 RED(hang)）：
+
+| id | 突变 | -p | 判定 | 突变输出 |
+|---|---|---|---|---|
+| g1 | holdRequest: UNPUSHABLE refusal disabled -> POST hold n.png answers 200, hold case red | `P4-7` | RED OK | P4-7 POST /api/vault/hold：只读 403；标记后 new 移出、held 列出；同名同时标与撤 400；撤销恢复；被 hold 的不能 push: FAIL |
+| g2 | splitHeld: pushableExt filter dropped -> legacy n.png hold stays HELD instead of stale, hold case red | `P4-7` | RED OK | P4-7 POST /api/vault/hold：只读 403；标记后 new 移出、held 列出；同名同时标与撤 400；撤销恢复；被 hold 的不能 push: FAIL (0.50s) |
+| g3 | runTool: kill-tree deferred until the feeding thread ends -> stuck pipe write, flood case red | `P8-D` | RED OK | runTool（门禁 F2）：子进程灌满 stdout 且不读 stdin，喂入 100 KiB 提示 → 超时仍生效（ToolTimeout 1），不因管道互等挂死:                                             FAIL (9.39s) |
+
+final build rc=0; P4-7 rc=0 (All 9 tests passed (3.27s)); P8-D rc=0 (All 9 tests passed (13.32s)); P8-C2 rc=0 (All 4 tests passed (17.24s))
+
+插曲（如实）：跑 g3 首版期间机器强制重启，驱动脚本停在「已改源、未还原」——`Subprocess.hs` 留在突变态、`.stack-work` 产物是突变体的构建、`%TEMP%` 留 26 个 `pm-*` 沙盒（含此前几天被中断的用例）。处置：按预期版本手工还原并 grep 核对（`VaultCmd.hs` / `VaultHold.hs` 由脚本 `finally` 已还原）、从还原源重建、临时沙盒全部删除（0 个）、杀掉挂着的 `pm-test.exe` + `flood.cmd` 树；首跑的 g1/g2「判红」因基线 P4-7 用例本身红（我的断言把旧名单条目数进 `held`）而作废，用例改为按说明先 unhold 后重跑全部三对。
+
+修复批树：418 测试、GHC 警告 0；`node --check` ×3 绿；pm-test.exe `9df1b87e036cda9f473e68b993a5037bccb43aef92bdd8382d378270fbe74751`、pm.exe（`.stack-work/install/…/bin`）`e53486c8a8cb5edeb6fa1af98d1b416cf53f1088982c89e31cfca880632dc174`。

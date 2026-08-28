@@ -89,6 +89,7 @@ h1 { font-size: 1.35rem; margin: 0; } h2.sec { font-size: 1rem; margin: 1.4rem 0
 .seg { display: flex; gap: .3rem; }
 .seg button { flex: 1; font: inherit; font-size: .8rem; padding: .3rem 0; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
 .seg button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.seg button.on.prefilled { border-style: dashed; opacity: .78; } /* 类目沿用盘上记录，本次未点 */
 .cfg { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: .8rem .9rem; margin-bottom: .7rem; }
 .cfg .k { font-weight: 600; margin-bottom: .35rem; }
 .cfg .v { font-size: .85rem; margin-bottom: .3rem; }
