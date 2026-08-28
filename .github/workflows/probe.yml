@@ -1,8 +1,28 @@
 name: probe
 on: [workflow_dispatch, push]
 jobs:
-  who:
+  acl:
     runs-on: windows-latest
     steps:
-      - run: whoami & whoami /priv & whoami /groups | findstr /i "admin S-1-16" & exit /b 0
-        shell: cmd
+      - shell: cmd
+        run: |
+          whoami & whoami /priv | findstr /i "Backup Restore Debug"
+          mkdir %TEMP%\d\sub & echo x> %TEMP%\d\sub\a.txt & echo x> %TEMP%\d\f.txt
+          icacls %TEMP%\d\sub /deny %USERNAME%:(RD)
+          icacls %TEMP%\d\f.txt /deny %USERNAME%:(F)
+          echo === acl sub & icacls %TEMP%\d\sub
+          echo === acl f & icacls %TEMP%\d\f.txt
+          echo === owner & dir /q %TEMP%\d
+          echo === dir sub (expect denied) & dir %TEMP%\d\sub
+          echo === type f (expect denied) & type %TEMP%\d\f.txt
+          echo === del f (expect denied) & del %TEMP%\d\f.txt & dir /b %TEMP%\d
+          exit /b 0
+      - shell: pwsh
+        run: |
+          $f = "$env:TEMP\d\f.txt"; $s = "$env:TEMP\d\sub"
+          try { "GetAttributes f: " + [IO.File]::GetAttributes($f) } catch { "GetAttributes f DENIED: $($_.Exception.Message)" }
+          try { "Get-Item f length: " + (Get-Item $f -Force).Length } catch { "Get-Item f DENIED" }
+          try { "LastWriteTime f: " + [IO.File]::GetLastWriteTimeUtc($f) } catch { "LastWriteTime DENIED" }
+          try { "EnumerateFiles sub: " + ([IO.Directory]::EnumerateFiles($s) -join ",") } catch { "EnumerateFiles sub DENIED: $($_.Exception.Message)" }
+          try { "OpenRead f: " + [IO.File]::OpenRead($f).Length } catch { "OpenRead f DENIED" }
+          exit 0
