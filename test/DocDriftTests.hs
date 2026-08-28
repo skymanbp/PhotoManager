@@ -85,14 +85,17 @@ refModules name excl = do
 -- | DESIGN.md:178「照片字节只有三个出口，各自职权不同（据实清点，
 -- `moveBoundNoReplace` / `deleteBoundAt` 全仓调用点）」——这里重新清点
 -- deleteBoundAt 侧。集合一变（新增出口/挪了出口），本用例转红，逼着改文档。
+-- P8-C2 起 Convert.hs 也在集合里：它只删 .pm/derived 下 pm 自建的派生件
+-- （--redo 的旧件、失败的半成品），DESIGN §4 把它归到「pm 自有状态」一句。
 caseByteExitCensus :: IO ()
 caseByteExitCensus = do
   refs <- refModules "deleteBoundAt" ["Win.hs"]
-  refs @?= ["Catalog.hs", "Commands.hs", "Config.hs", "Doctor.hs", "Exec.hs", "Plan.hs"]
+  refs @?= ["Catalog.hs", "Commands.hs", "Config.hs", "Convert.hs", "Doctor.hs", "Exec.hs", "Plan.hs"]
   exec <- readUtf8 ("src" </> "Pm" </> "Exec.hs")
   assertBool "Exec 头注不得再过度声明（工作流 F003）" (not ("no delete call anywhere" `isInfixOf` exec))
   design <- readUtf8 ("docs" </> "DESIGN.md")
   assertBool "DESIGN §4 的据实清点声明还在" ("照片字节只有三个出口" `isInfixOf` design)
+  assertBool "DESIGN §4 把 Convert 的派生件删除归入 pm 自有状态" ("`--redo` 删旧派生件、失败清半成品" `isInfixOf` design)
 
 -- | DESIGN-GUI.md §11「配置文件的写纪律」：「**四条**读改写路径共用（… 全仓
 -- `withConfigLock` 调用点即此四处）」（P8-A 起 §11 住在 DESIGN-GUI.md）。

@@ -144,8 +144,14 @@ tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换�
 - 源：`pm convert <库内相对路径…>`，只接受成片或相册下的 `KindPhoto ∧ ¬pushableExt`
   条目（19.4 的 `nonJpg` 集合）。原 tif/png **原地不动**（I2：pm 没有删除原语；
   用户要清就自己清或走 `pm dedupe`——它们不是精确重复，不会被误报）。
+  实现补两条闸（as-built）：RAW（`rawExts`）明确拒绝——它不是已渲染位图，不是
+  转换对象；同批里转换后落到同一 `<stem>.jpg`（case-fold，成片同事件夹或相册）
+  的先于任何转换整批拒绝（I1：pm 不替用户挑哪份留下）。
 - 目标已存在（同 stem 的 `.jpg` 已在成片同事件夹或相册）：同 sha 跳过；异 sha →
-  NEEDS-DECISION（I5）。派生件文件名固定小写 `.jpg`。
+  NEEDS-DECISION（I5）。派生件文件名固定小写 `.jpg`。判定与相册通道**同一份代码**：
+  `classifyAlbum` 参数化为 `classifyInto dst`（成片目标 = 源所在事件夹），`--also-album`
+  的相册项经上提的 `attachAlbumItems` 挂到成片项上——成片项 PENDING → 同组；成片项
+  待裁决 → 相册项一并待裁决且不分组（I7）；成片那份早已落位 → 相册项单独 PENDING。
 - `python` 发现：`PM_PYTHON` 环境变量 → `findExecutable "python"`（同 `PM_UI_EXE`
   的先例，Ui.hs:24）；预检 `python -c "import PIL"` 失败 → 拒绝并指引
   `pip install pillow`。脚本**内嵌在 Haskell 字符串里经 stdin 交给 `python -`**：
@@ -153,17 +159,22 @@ tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换�
 - 解码纪律：16 位样本先按 1/256 缩到 8 位再 `convert("RGB")`（直接 convert 会截顶）；
   保留 EXIF 块与 ICC profile（`img.info` 里有就带）；`quality=95, subsampling=0,
   optimize=True`；失败 → 非零退出 + stderr 一句原因，pm 原样转给用户，派生目录
-  不留半成品（tmp 名先落、成功才 rename）。
+  不留半成品（tmp 名先落、成功才 rename；Pillow 12 自己也会删掉编码失败时新建的
+  文件——pm 那句 tmp 清理因此没有可注入的判红形态，REVIEW-LOG 登记为残余）。
+  任一源转换失败 → 本轮不出计划、已派生的下次复用（脚本会打印每条 ⇢ 已派生 / = 复用）。
 - 幂等：`.pm\derived\<sha>\<stem>.jpg` 已存在 → 复用并说明（`--redo` 强制重派生）。
 
 ### 20.2 doctor：`DERIVED-STALE`
 
-`pm doctor` 新增一节：遍历 `.pm\derived\<sha>\*`，对每个派生件重 hash——
-① 该 sha 已出现在 catalog 的任一条目（已落位）→ `DERIVED-STALE`；② `<sha>` 目录名
-不再是 catalog 里任何条目的 sha（源已不在库里）→ `DERIVED-ORPHAN`；③ 其余 → Info
-`DERIVED-PENDING`（派生了还没 apply）。`--repair` 只删 ①②（`deleteBoundAt`，与
-「清自建 tmp」同一先例，Main.hs:309 的 help 文本一并改）。派生目录是 pm 自己的
-状态区，不是照片：这与 I2 的关系登记在 §25。
+`pm doctor` 新增一节：遍历 `.pm\derived\<sha>\*`（逐级只认 `NamePlain`，链接不列
+不删），对每个派生件重 hash——① 该 sha 已出现在 catalog 的任一条目（已落位）→
+`DERIVED-STALE`；② `<sha>` 目录名不再是 catalog 里任何条目的 sha（源已不在库里）→
+`DERIVED-ORPHAN`；③ `.tmp` 半成品 → `DERIVED-TMP`（as-built 加的第三种 Warn）；
+④ 其余 → Info `DERIVED-PENDING`（派生了还没 apply；无索引时同行标「未判」）；枚举
+失败 → `DERIVED-ENUM` Bad，不推导任何删除。`--repair` 只删 ①②③（`deleteBoundAt`，
+与「清自建 tmp」同一条删除线，doctor `--repair` 的 help 文本一并改；`caseByteExitCensus`
+的模块集合加 `Convert.hs`——它删的是 `--redo` 的旧派生件与失败半成品）。派生目录是
+pm 自己的状态区，不是照片：这与 I2 的关系登记在 §25。
 
 ---
 
@@ -321,7 +332,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | # | 影响 | 处置 |
 |---|---|---|
 | I1 | 无新的删除/改名 | — |
-| I2 | `doctor --repair` 删 `.pm\derived` 的 STALE/ORPHAN 派生件 | 派生件是 pm 自建状态（同「清自建 tmp」先例），不是用户字节；原 tif/png 原地不动 |
+| I2 | `doctor --repair` 删 `.pm\derived` 的 STALE/ORPHAN/TMP 派生件；`pm convert --redo` 删旧派生件、失败清半成品 | 派生件是 pm 自建状态（同「清自建 tmp」先例），不是用户字节；原 tif/png 原地不动 |
 | I3 | 转换第一段在 Plan 之外写 `.pm\derived`（pm 状态区） | 登记为**偏离**：照片层仍只经 Plan（第二段）；派生件 sha 在生成期测得并进 OpCopy 前提 |
 | I4 | 三条新计划种类 `import`(+相册项)/`album-add`/`convert` 全走 journal | — |
 | I5 | 相册同名异容 → NEEDS-DECISION；同批重名 → 拒绝 | 19.2/19.3 |
@@ -339,7 +350,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 |---|---|---|
 | P8-B | §19 | `test/AlbumTests.hs`（纯函数 + 沙盒库端到端）；突变：同批重名闸拆掉→红、异 sha 不出 NEEDS-DECISION→红、非 jpg 入相册→红、组耦合拆掉→红 |
 | P8-C | §21 | `test/VaultNoteTests.hs`；突变：坐标越界放行→红、sha 不新鲜→红、事务不取锁→红 |
-| P8-C2 | §20 | `test/ConvertTests.hs`（`PM_PYTHON` 指向夹具脚本 + 真 Pillow 各一）；doctor 三态用例 |
+| P8-C2 | §20 | `test/ConvertTests.hs` 3 例（参数闸 / 真 Pillow 端到端：16 位缩放、alpha 白底、`--also-album` 同组、`--redo`、I7 耦合、坏源 / doctor 四态 + `--repair`）；突变 m1–m6 见 REVIEW-LOG。原拟「`PM_PYTHON` 指向夹具脚本」一例改为「指向不存在 → 拒绝」：真 Pillow 已在端到端里覆盖，夹具脚本只会再抄一遍转换器接口 |
 | P8-D | §22–23 | ServeWriteTests 每端点五道闸 + `caseRouteRoster` + `caseGuiNavOrder` ①—⑦ + `node --check` |
 | P8-E | §24 | 档案 vault commit（不 push） |
 | 门禁 | 第一方全量审 → Opus 轮到 FINAL GO → 突变配对 → `caseLineBudget` → leakscan | 记 REVIEW-LOG |

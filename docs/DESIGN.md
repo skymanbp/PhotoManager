@@ -183,10 +183,12 @@ test/                       -- tasty: 单元 + QuickCheck + 双模故障注入 +
      是**自己刚建的、尚未落位的** `.pm/tmp` 文件（§6.1 步 6）；
    - `Commands.hs` 的 `pm trash empty`（`purgeLoop`）是唯一**永久删除**照片
      字节的地方，且只删已隔离、已登记、已逐项列出并经屏障复验的条目（§5）；
-   - `Doctor.hs` 的 `--repair` 只删 pm 自建的**孤儿 `.pm/tmp`**，从不碰用户
-     数据（在途 Intent 的 tmp 更是明确不删，§6.4 C1）。
-   pm 自有状态文件的写口另在 Config/Journal/Catalog/Plan/Trash（三十六轮据实
-   收窄措辞），各有锁与 fail-closed 纪律，不经 Exec；
+   - `Doctor.hs` 的 `--repair` 只删 pm 自建的**孤儿 `.pm/tmp`** 与 **`.pm/derived`
+     里已落位 / 失源 / 半成品的派生件**（P8-C2），从不碰用户数据（在途 Intent
+     的 tmp 更是明确不删，§6.4 C1）。
+   pm 自有状态文件的写口另在 Config/Journal/Catalog/Plan/Trash 与 Convert 的
+   `.pm/derived`（`--redo` 删旧派生件、失败清半成品；三十六轮据实收窄措辞，
+   P8-C2 据实扩），各有锁与 fail-closed 纪律，不经 Exec；
    **Exec 内禁用 `directory` 的 `renameFile/renamePath/copyFile`**——三者在
    Windows 上均为「目标存在即原子替换」语义（directory-1.3.8.5 haddock 实测：
    `MOVEFILE_REPLACE_EXISTING`，且声明非原子保证），与 I5 相反；
@@ -234,6 +236,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm sort <源> [--place\|--event --from --to]` | **散落新照片 → 暂存区事件夹**（§7）。不带参数=只读提议：读 EXIF 拍摄时间、按间隔给候选分段、打印每段该敲的命令；给齐地点与区间才生成拷贝计划 | apply 时 |
 | `pm import [--apply] [--also-album]` | To-Be-Sync'd 事件 → `Raw\年\` + `成片\` 归档计划；`--also-album`（P8-B）让成片里的 jpg 同源再拷一份进 `相册\`，相册项与成片项**同组**（成片没落位相册不执行）、返修项耦合成待裁决、非 jpg 只进成片（DESIGN-P8.md §19.2） | apply 时 |
 | `pm album add <事件夹>/<文件名>… [--apply]` / `pm album candidates` | 成片 → 相册（P8-B，DESIGN-P8.md §19.3/19.4）：只收 jpg，相册同名同 sha 幂等跳过、同名异容 NEEDS-DECISION（I5）、同批撞名整批拒绝；`candidates` 只读列出还没进相册的成片 jpg 与成片/相册下的非 jpg | apply 时 / 否 |
+| `pm convert <库内相对路径>… [--also-album] [--redo] [--apply]` | 非 jpg 照片 → 派生 jpg（P8-C2，DESIGN-P8.md §20）：第一段本机 python（`PM_PYTHON` → PATH）+ Pillow 经 stdin 脚本写 `.pm/derived/<源 sha>/<stem>.jpg`（16 位 1/256 缩放、alpha 合白底、EXIF/ICC 保留、q95/4:4:4；幂等复用，`--redo` 重派生），第二段 OpCopy 计划落成片同事件夹 +（`--also-album`）相册，判定与相册通道同一份（同 sha 跳过、同名异容 I5、I7 耦合分组）；RAW / 已是 jpg / 层外 / 同批撞名 一次列完 exit 2；原 tif/png **原地不动** | apply 时（第一段只写 pm 状态） |
 | `pm vault note <文件> [--category C] [--location L] [--coordinates "lat, lng"] [--title T] [--source S]` / `pm vault note --clear <文件…>` / `pm vault notes [--json]` | 照片记录（P8-C，DESIGN-P8.md §21）：主库 `.pm/vault-notes.json` 一条本地记录（记录时 sha，字节变了 `stale`），文件读写壳 / 事务壳 / 端点壳与 HELD 共用；`notes` 标 unsynced / pending / published / stale / unknown（photos.json **只读**反查，读不出不答 pending） | 否（只写 pm 状态） |
 | `pm backup [--apply]` | 主库 → 备份盘单向增量；备份盘多出的只报 EXTRA 永不动。**`pm backup init <盘上镜像路径>`（P2 落锤）**：插盘后一次性登记——写 role=Backup 的 root-id.json（含 FS 探测）+ 配置记 UUID+盘内相对路径，此后按 UUID 认盘 | apply 时 |
 | `pm clean staging [--apply]` | **隔离区入口**：仅对「Raw/成片 已有同 sha 副本 **且** 备份 root catalog 也有同 sha 副本」（三副本确认）的 staging 文件生成 Quarantine 计划；不满足的标 `HELD(缺哪份)`；备份盘未挂载 → 不生成任何项，报「无法确认第三副本」。**`待修改\` 永不入清理计划（P2 落锤，与 §7 import 不碰同源）**；catalog 声称的两侧副本在计划期再过一次活体 stat 核对，变了降级 HELD | apply 时 |
@@ -243,7 +246,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、别名登记、同批目标唯一性校验） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
 | `pm dedupe [--apply]` | **精确重复的逐份裁决计划**（§8.1）：来源就是 `pm versions` 的非设计内精确重复组，每一份出一个 Quarantine 条目、**全部** `NEEDS-DECISION`——留哪一份 pm 判不出就不猜（I1），用 `pm resolve --item N --unskip` 逐份批准。**不**绑复合组（复合组语义是不可拆，而这里要求逐份裁决）；组的完整性由执行期屏障保证：某个 sha 在归档层的最后一份**活**副本不会被隔离掉 | apply 时 |
-| `pm doctor [--deep]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留与撕裂尾）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash（工作量只有被中断那场会话，有界）；**`--deep` 另外把 catalog 的全部条目重读重 hash 一遍**（`DEEP` / `DEEP-CORRUPT` 行）。没有轮转/抽样档位：要么默认那个有界窗口，要么 `--deep` 全库 | 否 |
+| `pm doctor [--deep]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留与撕裂尾）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash（工作量只有被中断那场会话，有界）；**`--deep` 另外把 catalog 的全部条目重读重 hash 一遍**（`DEEP` / `DEEP-CORRUPT` 行）。没有轮转/抽样档位：要么默认那个有界窗口，要么 `--deep` 全库。P8-C2 起另对账 `.pm/derived` 派生件（`DERIVED-STALE` 已落位 / `DERIVED-ORPHAN` 源已不在库 / `DERIVED-TMP` 半成品 → Warn，`--repair` 删；`DERIVED-PENDING` Info；枚举失败 `DERIVED-ENUM` Bad 不修） | 否 |
 | `pm apply <planId> [--only 3,7-9]` | 执行（或部分执行）已存的计划；conflict 项只停该项、批次继续、末尾汇总。**P2.1/P2.2**：执行 root 按计划 `rootId` 重新发现绑定（Exec 拿锁后再验一次；无 rootId 的计划 CLI 层 fail-closed 拒绝，含 --apply 即时路径）；`--only` 自动扩到复合组闭包，**语法错误或序号超出 `0-N` 一律拒绝**（`--only 语法错误或序号超出计划范围（0-N）`，exit 2——不静默夹取，也不"照能认出的那几个跑"）；绑不上 root 时报文**逐槽位列出读不出身份的那些**（`缺席（尚未 init）` / `损坏: …` / `读不出: …`），而不是一句"均不符"宣称一次从未发生的 UUID 比对；clean 计划**每次执行前**逐项重验三副本（真实重 hash），不过的降级暂停——`pm apply` 与 `clean --apply` 即时路径无差别，无豁免 | 是 |
 | `pm resolve <planId> --item N --keep src\|dst\|both` | 裁决计划中标 `NEEDS-DECISION` 的冲突项（both = 新名并存）。**P2.1**：`--keep` 只接受独立的 NEEDS-DECISION Copy（复合组成员不可单独裁决）；skip/unskip 扩到全组；`--keep src` 追加的 supersede 对共享组 id | 改计划 |
 | `pm trash list / empty` | 隔离区查看（manifest ∪ journal ∪ 实际目录并集，孤儿标 UNREGISTERED）/ **唯一的最终清除入口**：逐项列出、二次确认，只 unlink 确认清单里逐项可见的条目，禁止整删目录树。**P2.1（评审 cx-3 终极屏障）**：reason 为 `clean-staging` 的条目在永久删除前按当前 catalog + 真实重 hash 再确认「Raw/成片 + 备份盘」各存一份同 sha 副本，确认不了 HELD 不删。**P5-B 起这道屏障一般化成一张表**（`barrierOf`）：`dedupe` 记录另走「归档三层还留着一份活副本吗」，与备份盘无关——一块没插的盘不该拖住与它无关的记录；无前缀的记录不受屏障管，仍需逐项确认。**清除过程中 unlink 失败即停**（占用/只读/句柄绑定不符）：打印 `✗ <路径>: <错误> —— 已清除 k/N 项，其余未动；解除占用/只读后重跑 pm trash empty`、exit 2——保守方向是少删不多删；manifest 不为失败的那批改写（清除成功的记录也照样保留为历史），重跑幂等 | empty 时 |

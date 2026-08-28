@@ -18,6 +18,7 @@ import Pm.Album (runAlbumAdd, runAlbumCandidates)
 import Pm.Cli (GoOpts (..), savePlanAndMaybeRun, savePlanAndMaybeRun')
 import Pm.Commands
 import Pm.ConfigEdit (ConfigSetOpts (..), mkPatch, runConfigSet, runConfigShow)
+import Pm.Convert (ConvertOpts (..), runConvert)
 import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
 import Pm.Ingest (runVaultIngest)
 import Pm.Names (runNames)
@@ -42,6 +43,7 @@ data Cmd
   | CmdResolve ResolveOpts
   | CmdImport GoOpts Bool -- --also-album（P8-B：成片 jpg 同源再拷一份进相册）
   | CmdAlbum AlbumCmd -- 成片 → 相册（P8-B，DESIGN-P8 §19.3/19.4）
+  | CmdConvert ConvertOpts -- 非 jpg → 派生 jpg 的两段式转换（P8-C2，DESIGN-P8 §20）
   | CmdSort SortOpts
   | CmdBackup BackupCmd
   | CmdClean GoOpts -- clean staging
@@ -112,6 +114,7 @@ run (CmdResolve o) = withCfg (runResolve o)
 run (CmdImport go also) = withCfg (runImport go also)
 run (CmdAlbum (AlbumAdd go fs)) = withCfg (runAlbumAdd go fs)
 run (CmdAlbum AlbumCandidates) = withCfg runAlbumCandidates
+run (CmdConvert o) = withCfg (runConvert o)
 -- 两种形态：地点与日期区间**给齐**才生成计划，一个都不给是只读提议；
 -- 给一半是使用者写错了，直接报错——不替他猜另一半（I1）。
 run (CmdSort o) = withCfg $ \cfg ->
@@ -174,6 +177,7 @@ parserInfo =
           <> command "status" (info statusP (progDesc "总览仪表盘（默认命令）"))
           <> command "import" (info importP (progDesc "暂存区 To-Be-Sync'd → Raw/成片 归档计划（--also-album 同时把成片 jpg 拷进相册）"))
           <> command "album" (info albumP (progDesc "成片 → 相册（平铺收藏层，只收 jpg）：add 生成拷贝计划；candidates 列出还没进相册的成片 jpg 与非 jpg"))
+          <> command "convert" (info convertP (progDesc "非 jpg 照片（tif/png/psd/heic…）→ 派生 jpg（Pillow，写 .pm/derived）→ 落成片同事件夹/相册的计划；原文件原地不动"))
           <> command "sort" (info sortP (progDesc "散落新照片按拍摄时间分段 → 暂存区事件夹（不带参数=只读提议）"))
           <> command "backup" (info backupP (progDesc "主库 → 备份盘单向增量（init 登记备份盘）"))
           <> command "clean" (info cleanP (progDesc "clean staging: 三副本确认后的暂存清理计划"))
@@ -264,6 +268,15 @@ parserInfo =
             )
             <> command "candidates" (info (pure AlbumCandidates) (progDesc "只读：成片里还没进相册的 jpg（按事件夹）与成片/相册下的非 jpg（→ pm convert）"))
         )
+  -- P8-C2：两段式——第一段派生（生成期写 .pm/derived，python 由 PM_PYTHON / PATH 发现），
+  -- 第二段照片层落位仍是计划（--apply / pm apply）。
+  convertP =
+    fmap CmdConvert $
+      ConvertOpts
+        <$> goOpts
+        <*> switch (long "also-album" <> help "派生 jpg 同时进相册（源在成片时；与成片项同组：成片没落位相册不执行）")
+        <*> switch (long "redo" <> help "已有派生件也重新派生（缺省复用 .pm/derived 里的）")
+        <*> many (strArgument (metavar "库内相对路径..." <> help "成片/<事件夹>/<文件> 或 相册/<文件>：tif/png/psd/heic 等已渲染位图；RAW 不是转换对象"))
   sortP =
     fmap CmdSort $
       SortOpts
@@ -357,11 +370,12 @@ parserInfo =
                 <*> optional (T.pack <$> strOption (long "title" <> metavar "标题" <> help "标题（≤200 字符）"))
                 <*> (T.pack <$> strOption (long "source" <> metavar "SRC" <> value "user" <> showDefault <> help "来源标签：exif|ai-high|ai-med|ai-low|user|none"))
             )
+  -- P8-C2：--repair 的删除线多了派生件（.pm/derived 里已落位 / 失源 / 半成品三态）。
   doctorP =
     CmdDoctor
       <$> ( DoctorOpts
               <$> switch (long "deep" <> help "全量重 hash 索引条目（慢，介质级验证）")
-              <*> switch (long "repair" <> help "应用安全闭环：补记 Done / 清自建 tmp / 生成 C5 隔离计划")
+              <*> switch (long "repair" <> help "应用安全闭环：补记 Done / 清自建 tmp 与已落位或失源的派生件（.pm/derived）/ 生成 C5 隔离计划")
           )
       <*> backupSw
       <*> vaultSw

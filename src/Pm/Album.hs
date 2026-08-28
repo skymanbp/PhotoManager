@@ -21,7 +21,9 @@ module Pm.Album
   , albumTop
   , processedTop
   , classifyAlbum
+  , classifyInto
   , albumPlanItems
+  , attachAlbumItems
   , withAlbumForImport
   , parseProcessedRel
   , AlbumCandidates (..)
@@ -71,10 +73,17 @@ data AlbumReport = AlbumReport
 
 -- | 纯判定：给定 catalog 与一组候选源条目，分五桶。两条入口共用这一份定义。
 classifyAlbum :: Catalog -> [Entry] -> AlbumReport
-classifyAlbum cat es =
+classifyAlbum = classifyInto albumDst
+
+-- | 同一份五桶判定，目标由调用方给：'classifyAlbum' 固定落相册平铺层；
+-- P8-C2 的 @pm convert@ 用它判派生 jpg 落**成片同事件夹**（目标 = 源目录 +
+-- @\<stem\>.jpg@）——同 stem 已在同 sha 跳过、异 sha 待裁决、同批撞名整批拒绝，
+-- 口径与相册一份。
+classifyInto :: (Entry -> FilePath) -> Catalog -> [Entry] -> AlbumReport
+classifyInto dstOf cat es =
   AlbumReport
     { arNotJpg = [enPath e | e <- es, not (pushableExt (enPath e))]
-    , arDupName = [(enPath e, albumDst e) | e <- dups]
+    , arDupName = [(enPath e, dstOf e) | e <- dups]
     , arConflict = [(e, d) | (e, d, Just False) <- judged]
     , arAlready = [(enPath e, d) | (e, d, Just True) <- judged]
     , arCopy = [(e, d) | (e, d, Nothing) <- judged]
@@ -82,14 +91,14 @@ classifyAlbum cat es =
  where
   jpgs = filter (pushableExt . enPath) es
   -- 同批目标唯一性按 NTFS 语义（'foldPath'：normalise + case-fold）
-  dstCount = Map.fromListWith (+) [(foldPath (albumDst e), 1 :: Int) | e <- jpgs]
-  isDup e = Map.findWithDefault 0 (foldPath (albumDst e)) dstCount > 1
+  dstCount = Map.fromListWith (+) [(foldPath (dstOf e), 1 :: Int) | e <- jpgs]
+  isDup e = Map.findWithDefault 0 (foldPath (dstOf e)) dstCount > 1
   (dups, uniq) = partition isDup jpgs
   catByFold = Map.fromList [(foldPath (enPath x), x) | x <- Map.elems (catEntries cat)]
   judged =
     [ (e, d, (\a -> enSha a == enSha e) <$> Map.lookup (foldPath d) catByFold)
     | e <- uniq
-    , let d = albumDst e
+    , let d = dstOf e
     ]
 
 conflictWhy, coupledWhy :: Text
@@ -117,12 +126,21 @@ albumPlanItems root ix0 rep =
 -- 「成片项 PENDING」的源才分组；成片项是返修（'irRework' \/ 'irReworkKin'）的，
 -- 相册项压成待裁决且不分组。
 withAlbumForImport :: FilePath -> Catalog -> ImportReport -> [PlanItem] -> ([PlanItem], AlbumReport)
-withAlbumForImport root cat rep base = (map regroup base <> extra, arep)
+withAlbumForImport root cat rep base = (attachAlbumItems root base pendingSrc arep, arep)
  where
   isProcessed d = take 1 (splitDirectories d) == [processedTop]
   toProcessed = [e | (e, d) <- irCopy rep <> irRework rep <> irReworkKin rep, isProcessed d]
   arep = classifyAlbum cat toProcessed
   pendingSrc = Set.fromList [enPath e | (e, d) <- irCopy rep, isProcessed d]
+
+-- | 把相册项挂到主层（成片）项上——import @--also-album@ 与 @pm convert@
+-- @--also-album@ 共用的耦合规则（P8-C2 上提）：源在 @pendingSrc@ 里（其成片项
+-- PENDING，或成片那份早已落位）→ 相册项 PENDING，且若同一计划里有成片项则
+-- 与之同组；否则（成片项待裁决 \/ 返修）→ 相册项待裁决且不分组；相册同名异容
+-- → 待裁决。@base@ 的源以 @root \</\> enPath@ 定位（'mkCopy' 的形态）。
+attachAlbumItems :: FilePath -> [PlanItem] -> Set.Set FilePath -> AlbumReport -> [PlanItem]
+attachAlbumItems root base pendingSrc arep = map regroup base <> extra
+ where
   ixBySrc = Map.fromList [(opSrcAbs (piOp it), piIx it) | it <- base]
   gidOf e = Map.lookup (root </> enPath e) ixBySrc
   planned =

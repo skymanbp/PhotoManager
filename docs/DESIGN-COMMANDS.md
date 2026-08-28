@@ -404,7 +404,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P8-C / pm 0.6.1 / 405 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **P8-C2 / pm 0.6.1 / 408 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -520,4 +520,13 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `GET /api/vault/notes` / `POST /api/vault/notes {"set":[…],"clear":[…]}` | GET 只读级、与 `--json` 同一渲染；POST `--writable` 级，写主库 `.pm/vault-notes.json`，校验与 CLI 共用 `noteRequest`，400 带 `details` | §21.2 |
 | `pm vault hold|unhold` / `POST /api/vault/hold` | 行为不变；文件读写壳（`readPmRecords`/`writePmRecords`/`validateKeyed`）、事务壳（`withHoldsTxn` → `withVaultTxn reader`）、CLI 壳（`runDecisionCli`）、端点壳（`recordPost`）四处上提与 notes 共用 | — |
 | `pm serve --writable` | 写端点五个 → **六个**（新增 `POST /api/vault/notes`）；`--json` 清点哨兵改为两处（status / notes） | DESIGN-GUI §11 |
+
+### P8-C2 转换（2026-08-27，DESIGN-P8.md §20）
+
+| 命令/入口 | 变化 | 出处 |
+|---|---|---|
+| `pm convert <库内相对路径>… [--also-album] [--redo]` | 新顶层子命令：成片/相册下的非 jpg 照片（`KindPhoto ∧ ¬pushableExt`，RAW 除外）→ 派生 jpg → 计划（`plKind = convert`）。两段式：第一段本机 python（`PM_PYTHON` 环境变量 → PATH 的 `python`；预检 `import PIL`，缺了指引 `pip install pillow`）经 stdin 跑内嵌 Pillow 脚本写 `.pm/derived/<源 sha>/<stem>.jpg.tmp`，pm 无覆盖 rename 成 `<stem>.jpg`；第二段派生件作伪条目走相册通道的判定（`classifyInto`）出 OpCopy：成片源 → 成片同事件夹 `<stem>.jpg`（`--also-album` 再进相册，相册项与成片项同组；成片项待裁决 → 相册项一并待裁决不分组），相册源 → 相册。同 stem 的 jpg 已在：同 sha 跳过、异 sha 待裁决（I5）。参数闸一次列完 exit 2：不在索引 / 非照片 / 不在成片·相册下 / 已是 jpg / RAW / 链接别名 / 绝对·盘符·`..` / 同批转换后同名同目录（case-fold）；任一源转换失败 → 本轮不出计划（已派生的下次复用）；全部已落位 → exit 0 无计划 | §20.1 |
+| `pm doctor` | 新增 `.pm/derived` 对账：`DERIVED-STALE`（派生件 sha 已在索引 = 已落位）/ `DERIVED-ORPHAN`（目录名 sha 不在索引 = 源已不在库）/ `DERIVED-TMP`（半成品）三种 Warn，`DERIVED-PENDING`（派生了还没 apply；无索引时同行标注「未判」）Info，枚举失败 `DERIVED-ENUM` Bad（不推导任何删除）。逐级只认 `NamePlain`（链接不列不删） | §20.2 |
+| `pm doctor --repair` | 删除线从「孤儿 `.pm/tmp`」扩到「+ STALE/ORPHAN/TMP 派生件」——都是 pm 自建状态，原 tif/png 原地不动；`--repair` help 文本同步 | §20.2 |
+| `pm import --also-album` / `pm album add` | 行为不变；相册项挂到成片项的耦合规则上提为 `Pm.Album.attachAlbumItems`（import 与 convert 共用），判定入口参数化为 `classifyInto`（`classifyAlbum = classifyInto albumDst`） | — |
 

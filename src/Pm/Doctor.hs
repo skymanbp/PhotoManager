@@ -26,8 +26,9 @@ import System.IO (hClose)
 import System.IO.Error (isDoesNotExistError)
 import System.FilePath (joinPath, makeRelative, splitDirectories, (</>))
 
-import Pm.Catalog (CatalogLoad (..), loadCatalog)
+import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog)
 import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
+import Pm.Convert (DerivedState (..), scanDerived)
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
 import Pm.Hash (sha256File, sha256Handle)
 import Pm.Journal
@@ -194,8 +195,16 @@ runDoctor' root opts = do
             <> deepFindings
         )
 
+  -- P8-C2：派生件（.pm/derived，DESIGN-P8 §20.2）对账——已落位 / 源已不在库 /
+  -- 半成品是 pm 自建状态，与孤儿 tmp 同一条删除线；派生了还没 apply 的只报 Info。
+  -- 枚举失败 → DERIVED-ENUM Bad（不在任何修复推导里），删除清单按空处理。
+  ederived <- scanDerived root (fst (catalogMaybe lc))
+  let (derivedDel, derivedFindings) = case ederived of
+        Left e -> ([], [Finding "DERIVED-ENUM" Bad ("派生目录枚举失败——本轮核不了: " <> e) "解除占用后重跑 pm doctor"])
+        Right xs -> ([f | (f, s) <- xs, s `elem` [DerivedStale, DerivedOrphan, DerivedTmp]], map derivedFinding xs)
+
   let findings0 =
-        journalFindings <> pendingFindings <> c4Findings <> q1 <> manifestWarns <> staleFindings <> ageFinding
+        journalFindings <> pendingFindings <> c4Findings <> q1 <> manifestWarns <> staleFindings <> ageFinding <> derivedFindings
 
   -- P3b-7 复审新 major：--repair 会写 journal / 删自建 tmp / 生成计划，属
   -- .pm 写入口——root 必须有可解析身份且过 I11（requireWritable），否则
@@ -206,13 +215,24 @@ runDoctor' root opts = do
         w <- requireWritable root
         case w of
           Left m -> pure [Finding "I11" Bad ("--repair 拒绝执行（root 不可写）: " <> m) ""]
-          Right _ -> [] <$ applyRepairs root findings0 pending stale
+          Right _ -> [] <$ applyRepairs root findings0 pending (stale <> derivedDel)
       else pure []
 
   let allFindings = findings0 <> repairFindings
       worst = maximum (Info : map fSeverity allFindings)
       code = if worst >= Warn then 1 else 0
   pure (allFindings, code)
+
+-- | 派生件状态 → 发现行（'Pm.Convert.scanDerived' 的判定，文案在这里）。
+derivedFinding :: (FilePath, DerivedState) -> Finding
+derivedFinding (f, s) = case s of
+  DerivedStale -> Finding "DERIVED-STALE" Warn ("派生件已落位（同 sha 已在索引里）: " <> f) repairNote
+  DerivedOrphan -> Finding "DERIVED-ORPHAN" Warn ("派生件的源已不在库里（目录名 sha 不在索引里）: " <> f) repairNote
+  DerivedTmp -> Finding "DERIVED-TMP" Warn ("派生半成品（转换中断）: " <> f) repairNote
+  DerivedPending -> Finding "DERIVED-PENDING" Info ("已派生、尚未 apply 落位: " <> f) ""
+  DerivedUnjudged -> Finding "DERIVED-PENDING" Info ("派生件状态未判（无索引）: " <> f) "pm scan 后重跑"
+ where
+  repairNote = "--repair 将删除（pm 自建派生件，原 tif/png 原地不动）"
 
 -- Entries after the last JCleanShutdown (whole list if none).
 lastSegment :: [JEntry] -> [JEntry]
@@ -593,6 +613,8 @@ applyRepairs root findings pending stale = do
               _ -> (Nothing, Nothing)
         jAppend j Barrier (JDone oid sha trash now)
         putStrLn ("  修复: 补记 Done " <> T.unpack oid)
+  -- 删除线上的都是 pm 自建状态：.pm/tmp 的孤儿 tmp（P6-C）与 .pm/derived 的
+  -- 已落位 / 失源 / 半成品派生件（P8-C2）；用户照片从不在这条线上。
   forM_ stale $ \f -> do
     -- P3b-14（十一轮 #4）：删除前对完整相对路径再过一次 'resolveUnder'——
     -- staleTmpFiles 枚举与这里的 unlink 之间有窗口，且枚举本身只按层探测。
@@ -601,13 +623,12 @@ applyRepairs root findings pending stale = do
     case m of
       Nothing -> putStrLn ("  跳过: " <> f <> " 不再是可信路径（junction/symlink？），不删除——人工核查")
       Just fp -> do
-        -- pm 自建的 .pm/tmp 文件，从未 rename 落位，非用户数据（P6-C 句柄形态）。
         -- 第一方自审工作流 C102（同型）：unlink 会抛（占用超预算/只读属性）；
         -- 逃顶会连带放弃后面的 C5 计划生成。逐项 try、报出、继续。
         r <- try (deleteBoundAt fp) :: IO (Either IOException ())
         putStrLn $ case r of
-          Right () -> "  修复: 清除孤儿 tmp " <> f
-          Left e -> "  ✗ 孤儿 tmp 未清除（" <> show e <> "）: " <> f <> " —— 解除占用/只读后重跑"
+          Right () -> "  修复: 清除 pm 自建文件（孤儿 tmp / 派生件）: " <> f
+          Left e -> "  ✗ pm 自建文件未清除（" <> show e <> "）: " <> f <> " —— 解除占用/只读后重跑"
   forM_ c5 $ \(oid, op) -> case op of
     OpCopy _ dstRel _ _ _ -> do
       -- 三十四轮（同型扫尽）：隔离计划记录的是 victim 当下的 sha，读不出就

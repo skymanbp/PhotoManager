@@ -356,3 +356,33 @@ final build rc=0; P8-C rc=0 (All 6 tests passed (2.15s)); P4-7 rc=0 (All 9 tests
 
 P8-C 树：405 测试、GHC 警告 0（clang `<built-in>` 噪声同前）；pm-test.exe `a0e6ab368d3919338e580e5a81ee2c5a4ddb9be1ad06c577e7b658aeeab55eab`、pm.exe（`.stack-work/install/…/bin`）`2bbb41420d01319f48448ac6ed50e7876876390beb60f546e0ebf3073c893e12`。
 
+## P8-C2 转换（第一方，2026-08-27；DESIGN-P8.md §20）
+
+两段式按 §20 落地；三处 as-built 与设计的差别都回改进 §20/§25/§26：RAW 明确拒绝、同批转换后撞名先于转换整批拒绝、
+doctor 多一种 `DERIVED-TMP`。判定不另写一套——`classifyAlbum` 参数化为 `classifyInto`，import `--also-album` 的耦合规则
+上提为 `attachAlbumItems` 供 convert 共用（聚类→上游：第三条「主层项 + 相册项」通道不该有第二份 I7 逻辑）。
+
+`caseByteExitCensus` 按设计转红（Convert.hs 成了 `deleteBoundAt` 的第七个引用模块）。处置不是把它豁免掉，而是 DESIGN §4
+据实扩：Convert 删的只有 `--redo` 的旧派生件与失败半成品——`.pm/derived` 是 pm 自建状态，与 Config/Catalog/Plan 同列，
+不是照片字节出口；哨兵集合与文档句子一并钉住。
+
+残余登记：`deriveOne` 失败路径的「清掉 .tmp」没有确定性判红形态——Pillow 12.3.0 的 `Image.save` 在编码失败时会删除它自己
+新建的文件（`created` → `os.remove`，源码核过），python 失败因此从不留 tmp；剩下的形态只有 rename 失败（`final` 在删除与
+落位之间被别人占住），无可注入形态。该行保留为防御，不冒充有覆盖。
+
+判别突变（`mutate_p8c2.py`，源码级、逐条重建、`-p P8-C2` 单点重跑、每条还原；末尾重建 + P8-C2 / P8-B 复跑绿）：
+（表内「突变输出」列的用例标签是突变跑时的文本；之后只把端到端用例的标题补成现名——`--redo` / I7 两段早已在断言里——再重建、全套 408 绿并取下方哈希。）
+
+| id | 突变 | -p | 判定 | 突变输出 |
+|---|---|---|---|---|
+| m1 | pillowScript: 1/256 scaling of 16-bit samples dropped -> deep.tif pixel clips to 255, e2e red | `P8-C2` | RED OK | 端到端：16 位 tif→L≈117、RGBA→白底、RGB 原样；--also-album 同组；复用派生件；坏源不留 .tmp；源字节不动:                  FAIL (2.94s) |
+| m2 | convertPlan: main-layer conflict sources not excluded from pendingSrc -> album copy executes while main is NEEDS-DECISION, e2e red | `P8-C2` | RED OK | 端到端：16 位 tif→L≈117、RGBA→白底、RGB 原样；--also-album 同组；复用派生件；坏源不留 .tmp；源字节不动:                  FAIL (6.77s) |
+| m3 | scanDerived: stale judged by <sha> dir name (source in index) instead of file sha -> pending misreported stale, doctor case red | `P8-C2` | RED OK | doctor：DERIVED-STALE/ORPHAN/TMP Warn、PENDING Info；--repair 只删前三种、留 pending:               FAIL (0.10s) |
+| m4 | runConvertTo: pushableExt refusal removed -> a.jpg accepted, refusals case red | `P8-C2` | RED OK | 参数闸：空 / 缺索引 / 已是 jpg / RAW / 层外 / 绝对与 .. / 同批撞名 / PM_PYTHON 不存在 → exit 2，.pm/derived 不出现: FAIL (0.85s) |
+| m5 | deriveOne: --redo ignored -> rerun with redo still says reuse, e2e red | `P8-C2` | RED OK | 端到端：16 位 tif→L≈117、RGBA→白底、RGB 原样；--also-album 同组；复用派生件；坏源不留 .tmp；源字节不动:                  FAIL (3.70s) |
+| m6 | attachAlbumItems: main item not marked as group head -> convert plan main item has no group, e2e red | `P8-C2` | RED OK | 端到端：16 位 tif→L≈117、RGBA→白底、RGB 原样；--also-album 同组；复用派生件；坏源不留 .tmp；源字节不动:                  FAIL (3.22s) |
+
+final build rc=0; P8-C2 rc=0 (All 3 tests passed (8.36s)); P8-B rc=0 (All 6 tests passed (0.69s))
+
+P8-C2 树：408 测试、GHC 警告 0（clang `<built-in>` 噪声同前）；pm-test.exe `5befd1f77bbbc72944229f9edd4cca0e47a03a50826e6d2198cc0a78c5820bed`、pm.exe（`.stack-work/install/…/bin`）`9a72474d9166be5856cf631be88e20abfc41de0cd4f1e4cf2045fa1ca058fd0f`。
+
