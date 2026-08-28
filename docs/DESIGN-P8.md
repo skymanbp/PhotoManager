@@ -387,5 +387,5 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | 门禁 | 第一方全量审 → Opus 轮到 FINAL GO → 突变配对 → `caseLineBudget` → leakscan | 记 REVIEW-LOG（一轮 NO-GO F1–F8 修 → 二轮 GO + N1–N4 收口） |
 | 提醒 | 装新构建 → 用户 GUI 审查 + **首次真实数据跑**（`pm import --also-album` / `pm album add` / `pm convert` 那 1 张 tif / GUI 分类 → 首次建 vault root）——每一步动真实照片前 AskUserQuestion 摆清单 | 用户裁定 |
 | 文档 | README（含七页、新命令、AI 与转换段）、DESIGN*、DESIGN-COMMANDS §5 命令表 + §11 表、HISTORY、本文回改 | DocDrift 哨兵 |
-| CI | `.github/workflows/build.yml`（windows-latest：stack test、版本一致闸、sidecar、tauri build 带 remap、leakscan、sha256 同 run、750 行闸）+ tag 触发 release job | 抓包分支先验 HandleGuardTests 的 symlink |
+| CI | `.github/workflows/build.yml`（windows-latest：stack test、版本一致闸、sidecar、tauri build 带 remap、leakscan、sha256 同 run、750 行闸）+ tag 触发 release job | 抓包分支 `ci-probe` 先验：symlink / hardlink / junction 夹具在提权 runner 上可用；ACL 注入用例要求套件自禁 SeBackup/SeRestore 特权（REVIEW-LOG「CI 抓包分支」）；run 33152288443 全绿后并入 main |
 | 发布 | AskUserQuestion 清单 → push main → tag `v1.0.0` → CI release → 重新下载校验 | 项目收官 |

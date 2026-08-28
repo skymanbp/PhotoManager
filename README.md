@@ -314,6 +314,8 @@ python ../../scripts/leakscan.py binaries/pm-x86_64-pc-windows-msvc.exe \
   "target/x86_64-pc-windows-msvc/release/bundle/nsis/pm-ui_${V}_x64-setup.exe"
 ```
 
+CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同一条链、同一套闸**：版本一致闸 → `stack test`（含 750 行闸与文档漂移哨兵）→ `pm --version` 闸 → sidecar → tauri build（remap）→ `scripts/leakscan.py` → zip + NSIS 安装包 + `sha256.txt` 同一 run 产出；推 tag `v<版本>` 后 release job 把**同一 run** 的产物挂到 Release，说明附每个资产的 SHA-256（上面「安装」节的承诺就是这里兑现的）。Release 里的二进制不是本机编的。
+
 ## 路线图与已知限制
 
 **路线图**（按需推进，不承诺时间）：

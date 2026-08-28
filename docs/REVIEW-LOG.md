@@ -509,3 +509,21 @@ final build rc=0; F069 rc=0 (All 1 tests passed (0.14s)); P8-D rc=0 (All 9 tests
 N1 无对应源突变（是用例自身的健壮性），以反向核验代替；N2 是 GUI JS，无单元夹具，`node --check` 绿 + 逐行读核。
 
 收口树：418 测试、GHC 警告 0；`node --check` 绿；pm-test.exe `d6eb336a1b302c3964d7e2641c2122747bd9a3fc7f4f395fff5bcfbd29b1511d`、pm.exe（`.stack-work/install/…/bin`）`a27de4fba3cb5ac373a38b70b0b5aea1f79e3eacc71a3ae0e6e9fee662070664`。
+
+## CI 抓包分支（2026-08-28，`ci-probe` → `.github/workflows/build.yml`）
+
+按 §26「抓包分支先验」先推分支不并主干。首跑 run 33150346218（windows-latest = Windows Server 2025 / 26100，runner 2.336.0；GHC + 全部依赖冷装 + 套件共 13 min）：**409/418**，9 红同一类——`TestUtil.withDenyAll` / `withDenyList` 的 icacls 拒绝对 pm 的探针不生效：RD 拒的目录照样列得出（F054 / F039 / F040 / listSource 半扫）、(F) 拒的文件照样 stat（freshnessSweep 两例）与 unlink（C102，连清理 icacls 都找不到文件），只有 GENERIC_READ 打开被拒（scan 探针例的错误落在 withBinaryFile 而非探针）。symlink / hardlink / junction 夹具（HandleGuardTests 等）在提权 runner 上全部可用。
+
+取证（临时 `probe.yml`，已删；探针提交顺带触发的 4 次 build 跑已取消，不计门禁）：
+
+| 探针 | 结果 |
+|---|---|
+| `whoami /priv` / `whoami /groups` | `runneradmin`，BUILTIN\Administrators，High 完整性；SeBackupPrivilege / SeRestorePrivilege **Disabled**（在令牌里但未启用）；SeCreateSymbolicLinkPrivilege Disabled（mklink 自己启用） |
+| 同样的 icacls 拒绝 + Win32 错误码（P/Invoke，三种 temp 根：`%TEMP%` 短名、`RUNNER_TEMP`、工作区）| 三处一致：deny(F) 文件 `GetFileAttributesW`=0、`CreateFileW(0, BACKUP_SEMANTICS)`=5、`CreateFileW(GENERIC_READ)`=5；deny(RD) 目录 `FindFirstFileW`=5、`CreateFileW(0, BACKUP)`=0；即**原语与本地一致** |
+| 同一 runner 上 `cmd` 里 `del` deny(F) 文件 | 成功（父目录 FILE_DELETE_CHILD 兜底）——pm 走 `pm_open_for_dispose`（要 DELETE 访问）不走这条，故本地 C102 成立 |
+
+原语一致而套件不一致 → 差异在**测试进程的令牌**：pwsh 探针由 runner 直接拉起（特权 Disabled），`stack test` 由 Git Bash（MSYS2）拉起——MSYS2 在提权令牌下启动时把 SeBackupPrivilege / SeRestorePrivilege **启用**，子进程继承「已启用」状态；带 backup intent 的探针（GetFileAttributesEx / FindFirstFile / `FILE_FLAG_BACKUP_SEMANTICS` 的 CreateFile / DeleteFile——恰是 pm 的探针）全部绕过 DACL，而不带该标志的 GENERIC_READ 仍被拒——与 9 红 / 409 绿的分布逐条吻合。本地是普通桌面会话，令牌里根本没有这两项，所以全绿。
+
+处置（161ef2b，上游在测试壳而不是改用例断言）：cbits `pm_disable_backup_privileges`（`OpenProcessToken` + `AdjustTokenPrivileges` 把两项置 0），`Spec.hs` 启动时调用（`TestUtil.disableBackupPrivileges`），与启动它的 shell 无关；令牌里没有这两项时是空操作（`ERROR_NOT_ALL_ASSIGNED`，视为成功）。本地 418/418、警告 0；重跑 run 33152288443：stack test 14 min，**418/418**，其后 pm.exe 版本闸 / sidecar / tauri build（`@tauri-apps/cli@2.11.4`，`--remap-path-prefix` 工作区与用户目录）/ leakscan / zip + NSIS + sha256 / artifact 全绿。
+
+登记：① pm 本身若在启用了备份特权的令牌里跑，探针会绕过 DACL——读到更多而不是更少，不处理；② 目录 RD 拒在 `cmd dir` 里显示为 "File Not Found"（cmd 自己的文案），不是错误码——取证时差点被它带偏，记一笔。
