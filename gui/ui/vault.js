@@ -16,12 +16,17 @@ window.pmVault = function (u) {
   const HOLD = "__hold__";     // 第四个按钮的哨兵值——它不是 vault 类目
   const assign = new Map(); // name -> category | HOLD
   const prefilled = new Set(); // 类目来自盘上记录的回显（本次没点过）——进度行分列、按钮虚线（门禁 F5）
-  const touched = new Set();   // AI 建议在途时用户改过三格的卡：响应回来不覆盖其 source / basis（门禁 F4）
+  const touched = new Set();   // 这一页里用户亲手改过三格的卡（含 AI 在途时）；loadVault 重建网格时清
   // P8-D 照片记录（DESIGN-P8 §21，用户裁定 R6 (b)）：每张卡三格（地点 / 坐标 / 标题），
   // 打开页时从 GET /api/vault/notes 回显；AI 建议只**预填**（不标已定）；用户一敲键
   // source 就成 user；提交时只把「改了的」发给 POST /api/vault/notes（差集，同 holdOps）。
   const notes = new Map(); // name -> { inputs: {location, coordinates, title}, initial: {…}|null, source, basis }
   const NOTE_KEYS = ["location", "coordinates", "title"];
+  // 用户拥有的卡：本页亲手改过（touched），或盘上记录本就是 user 来源且三格有内容。
+  // AI 对它不问、不填、不改 source / basis——否则用户写的地点会以 source:"ai-*" 随
+  // POST /api/vault/notes 落进 vault-notes.json，下游 /photo-publish 把它渲染成 AI 的
+  // （门禁 F4 只挡了「AI 在途时改」，二轮 N2 指出「先改再点 AI」同一根因）。
+  const userOwned = (name) => { const n = notes.get(name); return touched.has(name) || (!!n && n.source === "user" && NOTE_KEYS.some((k) => n.inputs[k].value.trim())); };
   async function shrink(blob) {
     // 原图动辄 10–75 MB：交给解码器按目标尺寸缩放，再转成小 JPEG，避免 15 张全分辨率位图撞爆 WebView。
     // 失败返回 null（挂占位符）：回退到原图 = 把已修掉的那条内存路径重新引回来（codex 二十轮 minor）。
@@ -136,7 +141,7 @@ window.pmVault = function (u) {
         for (const [k, phText] of [["location", "地点（如 Hallstatt）"], ["coordinates", "坐标 lat, lng"], ["title", "标题"]]) {
           const inp = document.createElement("input"); inp.type = "text"; inp.placeholder = phText; inp.spellcheck = false;
           inp.value = ini && ini[k] != null ? String(ini[k]) : "";
-          inp.addEventListener("input", () => { if (submitting) return; if (suggesting) touched.add(e.name); const n = notes.get(e.name); n.source = "user"; n.basis.textContent = ""; card.classList.toggle("noted", NOTE_KEYS.some((kk) => n.inputs[kk].value.trim())); updateProgress(items.length); });
+          inp.addEventListener("input", () => { if (submitting) return; touched.add(e.name); const n = notes.get(e.name); n.source = "user"; n.basis.textContent = ""; card.classList.toggle("noted", NOTE_KEYS.some((kk) => n.inputs[kk].value.trim())); updateProgress(items.length); });
           inputs[k] = inp; nt.appendChild(inp);
         }
         const basis = el("div", "basis muted small", ini ? `记录：${ini.status}${ini.source ? " · 来源 " + ini.source : ""}` : "");
@@ -180,10 +185,11 @@ window.pmVault = function (u) {
   async function suggest() {
     if (submitting || suggesting) return; // 一次一个：提交中不发建议，建议中不提交（页面级与 serve 的 409 对齐）
     const out = $("#plan-result");
-    const names = [...notes.keys()].filter((n) => assign.get(n) !== HOLD).slice(0, 20);
-    if (!names.length) { out.className = "banner warn"; out.textContent = "没有可建议的照片（这一页没有 NEW，或都已标「暂不同步」）。"; return; }
+    // 用户拥有的卡不进请求（不花钱问一张用户已经写好的），响应里也不碰
+    const names = [...notes.keys()].filter((n) => assign.get(n) !== HOLD && !userOwned(n)).slice(0, 20);
+    if (!names.length) { out.className = "banner warn"; out.textContent = "没有可建议的照片（这一页没有 NEW，或都已标「暂不同步」/ 都已由你填过记录）。"; return; }
     const btn = $("#btn-vault-ai"), label = btn.textContent;
-    suggesting = true; touched.clear(); $("#btn-plan").disabled = true;
+    suggesting = true; $("#btn-plan").disabled = true;
     btn.disabled = true; btn.textContent = "AI 看图中…（claude -p，最长 3 分钟）";
     try {
       const r = await post("/api/suggest", { kind: "classify", names });
@@ -192,7 +198,7 @@ window.pmVault = function (u) {
       let filled = 0;
       for (const it of j.items || []) {
         const n = notes.get(it.name); if (!n) continue;
-        if (touched.has(it.name)) continue; // 用户在途中亲手改过：来源已是 user，AI 不覆盖（门禁 F4）
+        if (userOwned(it.name)) continue; // 在途中亲手改过（或本就是用户的记录）：来源保持 user，AI 不覆盖（门禁 F4 / 二轮 N2）
         const card = n.inputs.location.closest(".gcard");
         for (const b of card.querySelectorAll(".seg button")) b.classList.toggle("ai", it.category != null && b.textContent === it.category);
         for (const k of NOTE_KEYS) if (it[k] && !n.inputs[k].value.trim()) { n.inputs[k].value = it[k]; filled++; }

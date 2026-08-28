@@ -106,7 +106,7 @@
   名字丢弃、模型没答的名字列进 `dropped`，类目不在三类 → null，坐标经 `parseCoordinates` 规范）；`kind:"place"`
   （`src` + `gap` → serve 自己重跑 `surveySort`，不信任客户端的分段；每段 `evenSample 5`
   取首/中/尾均匀 5 张 jpg，> 12 段 400，一张 jpg 也没有的段不交给模型、答 `place:null`）。
-  同一时刻只跑一个（`seSuggestLock` 满 → 409）；找不到 claude / 超时（`Pm.Subprocess.runTool`：`taskkill /T /F` 杀整棵进程树）/ 子进程 IO 失败 →
+  同一时刻只跑一个（`seSuggestLock` 满 → 409）；找不到 claude / 超时（`Pm.Subprocess.runTool`：子进程挂 job 对象、到点整树杀）/ 子进程 IO 失败 →
   409，模型答非 JSON → 502 带 `raw`，退出非零或信封 `is_error:true` → 502 带原文摘要。每次调用花的是用户自己 Claude 账号的钱
   （实测每次 ≈ $0.7–1.3，系统提示缓存写入占大头），响应带 `cost`、页面文案写明。测试用
   `test/fixtures/fake-claude.cmd` 顶替（`PM_FAKE_CLAUDE` 六种模式）。
@@ -129,7 +129,7 @@
   ④**分类推送**——NEW 缩略图网格（原图 4–75 MB，GUI 侧 `createImageBitmap(resizeWidth
   640)` 缩放后再挂，修掉"滚动后缩略图消失"——全分辨率位图撑爆 WebView 的根因）+ 三
   类目分段按钮 + 每卡三格照片记录（地点 / 坐标 / 标题，P8-D：打开页时从 GET notes 回显，改了的差集随下一步
-  经 POST notes 写主库）+「AI 建议分类/地点」（P8-D：类目只在按钮上描边 `.ai`、三格只填空着的）
+  经 POST notes 写主库）+「AI 建议分类/地点」（P8-D：类目只在按钮上描边 `.ai`、三格只填空着的；用户拥有的卡——本页亲手改过、或盘上记录本就是 `user` 来源且有内容——不进请求也不被改 `source`，门禁 F4 / 二轮 N2）
   + 进度「已选 x/N」+「保存决定并生成推送计划」→ hold → notes → push-plan（hold 先行：服务端拒收 held 文件的 push）→ 结果
   面板（计划 id、`pm apply` 命令、git 步骤）。⑤**计划**——表格（类型徽标、id、时间、
   项/待执行/跳过/待裁决）+ 明细（逐项 拷贝/改名/隔离 + 源→目标 + 状态徽标，原始 JSON

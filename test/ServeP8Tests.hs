@@ -308,6 +308,7 @@ caseSuggestPlace = withSystemTempDirectory "pm-serve-ai-place" $ \tmp -> do
 caseRunToolFlood :: IO ()
 caseRunToolFlood = do
   exe <- makeAbsolute ("test" </> "fixtures" </> "flood.cmd")
+  pidsBefore <- pingPids
   t0 <- getCurrentTime
   r <- timeout 15000000 (runTool exe [] Nothing [] (T.replicate 100000 "x") 1)
   t1 <- getCurrentTime
@@ -316,11 +317,21 @@ caseRunToolFlood = do
     Just (ToolTimeout 1) -> pure ()
     other -> assertFailure ("应在 1 s 超时: " <> show other)
   -- 到点必须**先杀树**再收线程：桩要睡 ~9 s 才自己退出，若实现是先 cancel 喂 stdin 的
-  -- 线程（阻塞在满管道里的写不可中断），返回时刻会拖到桩自己退出——用耗时把两者分开
+  -- 线程（阻塞在满管道里的写不可中断），返回时刻会拖到桩自己退出——用耗时把两者分开。
+  -- 杀树走 job 对象（use_process_jobs）：只杀直接子进程 cmd.exe 的话，继承了管道的 ping
+  -- 孙进程还握着 stdin，写端照样卡到它 9 s 后自己退出——同样被这条耗时断言判红
   assertBool ("超时应在 1 s 到点后立刻返回（杀树解开写端），实测 " <> show elapsed <> " s") (elapsed < 4)
-  -- 树已杀干净：桩的 ping 孙进程不再存在（否则下一个用例 / 下一次点击还挂着一棵）
-  (_, tl, _) <- readProcessWithExitCode "tasklist" ["/FI", "IMAGENAME eq PING.EXE", "/FO", "CSV", "/NH"] ""
-  assertBool ("ping 孙进程应已被 taskkill /T 收掉: " <> tl) (not ("PING.EXE" `isInfixOf` map toUpper tl))
+  -- 树已杀干净：桩的 ping 孙进程不再存在（否则下一个用例 / 下一次点击还挂着一棵）。
+  -- tasklist 是全机查询（门禁二轮 N1）：只看本用例跑前后**新增**的 PING PID，机器上
+  -- 无关的 ping（用户手敲、另一份 stack test）不算进来
+  pidsAfter <- pingPids
+  let leaked = filter (`notElem` pidsBefore) pidsAfter
+  assertBool ("桩的 ping 孙进程应随 job 一起被杀，残留 PID: " <> show leaked) (null leaked)
+ where
+  pingPids = do
+    (_, tl, _) <- readProcessWithExitCode "tasklist" ["/FI", "IMAGENAME eq PING.EXE", "/FO", "CSV", "/NH"] ""
+    -- CSV 行形如 "PING.EXE","12345","Console","1","5,000 K"：第二格是 PID
+    pure [pid | l <- lines tl, "PING.EXE" `isInfixOf` map toUpper l, (_ : pid : _) <- [words (map (\c -> if c == ',' then ' ' else c) l)]]
 
 casePure :: IO ()
 casePure = do

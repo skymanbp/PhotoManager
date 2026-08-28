@@ -24,7 +24,7 @@ import Pm.Plan (Plan (..), savePlan)
 import Pm.ServeEnv
 import Pm.ServeGuard (withJsonBody)
 import Pm.Types
-import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newActive, planCategories, renderVaultJson, vaultPushItems)
+import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newAssignable, planCategories, renderVaultJson, vaultPushItems)
 import Pm.VaultCmd (holdOpsIO, noteOpsIO, noteStatuses, renderNotesJson, withVaultTxn)
 import Pm.VaultHold (VaultHold (..), readHolds, writeHolds)
 import Pm.VaultNote (NoteFields, VaultNote (..), readNotes, writeNotes)
@@ -64,8 +64,7 @@ routeVault cfg env req jsonR err corsHdrs respond = case (requestMethod req, pat
                 -- 现在从 new 剔除、单列 unpushable，页面只读展示并指到归档页的转换。
                 "new"
                   .= [ object ["name" .= n, "sha" .= fmap enSha me, "size" .= fmap enSize me]
-                     | n <- newActive r
-                     , n `notElem` unpushableNames
+                     | n <- newAssignable r
                      , let me = Map.lookup n (vrSrcMeta r)
                      ]
               , "unpushable" .= [object ["name" .= n, "size" .= fmap enSize (Map.lookup n (vrSrcMeta r))] | n <- unpushableNames]

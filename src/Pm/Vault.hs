@@ -29,6 +29,7 @@ module Pm.Vault
   , runVaultStatus
   , runVaultPush
   , newActive
+  , newAssignable
   , freshSrcSha
   , hasDiffR
   , checkAssignments
@@ -218,6 +219,13 @@ freshSrcSha r = freshShaAt (vrSrcDir r)
 -- | 真正"待处理"的 NEW：扣掉已决定暂不同步的（P4-7）。
 newActive :: VaultReport -> [FilePath]
 newActive r = [n | n <- vdNew (vrDiff r), n `notElem` map fst (vrHeld r)]
+
+-- | 可**指派**的 NEW：'newActive' 再扣掉 UNPUSHABLE（相册里的 .png——六态里是
+-- NEW、退出码算差异，但 push 写路径拒收）。CLI 的「→ pm vault push」提示行与
+-- GUI 的可指派卡只用它；UNPUSHABLE 另有 ✋ 行 \/ 只读卡指到转换。此前 status 对
+-- 一张 .png 同时打印「+ NEW → push」与「✋ UNPUSHABLE」（门禁二轮 N4）。
+newAssignable :: VaultReport -> [FilePath]
+newAssignable = filter pushableExt . newActive
 
 -- | 退出码语义（legacy :237）：duplicate 与 unpushable 不算差异；NEW 用
 -- 'newActive'——用户已经决定暂不同步的照片不该让 `pm vault status` 永远
@@ -429,7 +437,9 @@ renderHuman r = do
     (length (vrUnstable r))
   unless (null (vrHeld r)) $
     printf "  （其中 %d 张已决定暂不同步，不计入待办；pm vault unhold <文件…> 可恢复）\n" (length (vrHeld r))
-  mapM_ (\n -> putStrLn ("  + NEW " <> n <> "  → pm vault push --category <类目> " <> n)) (newActive r)
+  -- 「→ push」提示只对可指派的 NEW；相册里的 .png 是 NEW 也是 UNPUSHABLE，
+  -- 只在下面的 ✋ 行出现并指到转换（门禁二轮 N4：此前两行都打，互相矛盾）。
+  mapM_ (\n -> putStrLn ("  + NEW " <> n <> "  → pm vault push --category <类目> " <> n)) (newAssignable r)
   mapM_ (\(n, _) -> putStrLn ("  ⏸ HELD " <> n <> "（暂不同步；pm vault unhold " <> n <> " 恢复）")) (vrHeld r)
   mapM_ (\(n, why) -> putStrLn ("  ⏵ HELD 失效 " <> n <> "：" <> why)) (vrHeldStale r)
   mapM_ (\(n, c) -> putStrLn ("  - MISSING " <> c </> n <> "  → 决定保留还是撤（只报告）")) (vdMissing d)
@@ -446,7 +456,7 @@ renderHuman r = do
     (vdDrift d)
   mapM_ (\(n, cats) -> putStrLn ("  ! DUPLICATE " <> n <> " → " <> unwords cats)) (vdDuplicate d)
   mapM_
-    (\(n, loc) -> putStrLn ("  ✋ UNPUSHABLE " <> loc </> n <> "（.png：status 可见，push 写路径拒收）"))
+    (\(n, loc) -> putStrLn ("  ✋ UNPUSHABLE " <> loc </> n <> "（非 jpg：status 可见、算差异，push 写路径拒收 → pm convert / 归档页「非 jpg 转换」派生 jpg 再推）"))
     unpushable
   mapM_
     (\(n, loc) -> putStrLn ("  ⚠ UNSTABLE " <> loc </> n <> "（读取期间持续变化，已退出六态分类；稍后重跑）"))

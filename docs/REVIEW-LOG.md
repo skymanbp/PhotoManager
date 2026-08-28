@@ -484,3 +484,28 @@ final build rc=0; P4-7 rc=0 (All 9 tests passed (3.27s)); P8-D rc=0 (All 9 tests
 插曲（如实）：跑 g3 首版期间机器强制重启，驱动脚本停在「已改源、未还原」——`Subprocess.hs` 留在突变态、`.stack-work` 产物是突变体的构建、`%TEMP%` 留 26 个 `pm-*` 沙盒（含此前几天被中断的用例）。处置：按预期版本手工还原并 grep 核对（`VaultCmd.hs` / `VaultHold.hs` 由脚本 `finally` 已还原）、从还原源重建、临时沙盒全部删除（0 个）、杀掉挂着的 `pm-test.exe` + `flood.cmd` 树；首跑的 g1/g2「判红」因基线 P4-7 用例本身红（我的断言把旧名单条目数进 `held`）而作废，用例改为按说明先 unhold 后重跑全部三对。
 
 修复批树：418 测试、GHC 警告 0；`node --check` ×3 绿；pm-test.exe `9df1b87e036cda9f473e68b993a5037bccb43aef92bdd8382d378270fbe74751`、pm.exe（`.stack-work/install/…/bin`）`e53486c8a8cb5edeb6fa1af98d1b416cf53f1088982c89e31cfca880632dc174`。
+
+## 门禁二轮（Opus，2026-08-28，对象 dba6a65）→ GO → 四条 minor 收口
+
+报告存档：scratchpad `gate_opus_dba6a65.md`。verdict **GO**：F1–F8 与措辞项全部 CLOSED（逐行引用核过：`VaultCmd.hs:133-137` / `VaultHold.hs:176,182-183` / `Subprocess.hs:60-73` / `index.html:87` + `archive.js:74` / `vault.js:139,195,186,85` / `vault.js:118,70,130,126-127` + `style.css:92` / `ConvertTests.hs:41,259` + `slow-python.cmd:7` / DESIGN-P8 §20.1 §25 §22.4 / `Convert.hs:16-24`）；REVIEW-LOG 登记的两个产物哈希实测逐字节吻合；文档计数 418 三方一致；试图否证 F2 的五个角度（`waitCatch` 可中断、`getPid` 到超时分支必 Just、`withCreateProcess` 收尾不挂、`-threaded` 前提、flood 桩能分开「先杀」与「先收」）都未能推翻。新发现四条全 minor、无阻断；按「不留开口」全部上游收口而不是只登记：
+
+| # | 级别 | 发现 | 上游处置 |
+|---|---|---|---|
+| N1 | minor（用例假红） | `caseRunToolFlood` 的 `tasklist /FI "IMAGENAME eq PING.EXE"` 是全机查询——机器上任何无关 `ping.exe` 都让这条 major 守卫假红 | 跑前快照 PING 的 PID 集合，跑后只断言「无新增」；反向核验：先起一个无关 `ping -n 30`，用例照样 OK 且那个 ping 仍存活（job 只杀自己那棵树） |
+| N2 | minor（来源落盘错） | `touched` 只覆盖「AI 在途时改」：用户**先**填三格**再**点 AI，值不被覆盖但 `source` 被改成 `ai-*`，随 `POST /api/vault/notes` 落盘——用户写的地点被标成 AI 的。与 F4 同一根因 | 单一谓词 `userOwned`（本页亲手改过 `touched`，或盘上记录本就是 `user` 来源且三格有内容）：这类卡**不进 AI 请求**（不花钱问已写好的）、响应里也不碰；`touched` 改为整页生命周期（`loadVault` 清），不再在每次点 AI 时清空 |
+| N3 | minor（残余挂死口） | `killTree` 吞掉 `taskkill` 的一切失败；taskkill 找不到 / 被拒 / 直接子进程已死只剩继承了管道的孙进程——都杀不到，杀不到就是 F2 那种不可中断的写永久挂死，`seSuggestLock` 永远握住 | 子进程挂 Windows **job 对象**（`use_process_jobs = True`，process-1.6.26.1 源码核过：`terminateProcess` → `TerminateJobObject` 整树、`KILL_ON_JOB_CLOSE`、无 breakaway），到点 `terminateProcess ph`，不再依赖外部 `taskkill`。代价登记 DESIGN-P8 §25：`waitForProcess` 等整个 job——外部工具若留下不持管道的守护子进程，会等到超时再整树杀（fail-closed 报超时；首次真实 `claude -p` 跑时核实） |
+| N4 | minor（CLI 措辞矛盾） | `pm vault status` 对相册里的 .png 同时打印「+ NEW → pm vault push」与「✋ UNPUSHABLE」，而 `checkAssignments` 必回 UNPUSHABLE；F1 只是多了一条到达路径（旧名单 .png 退出 `vrHeld` 回到 `newActive`） | 新谓词 `Vault.newAssignable = filter pushableExt . newActive`：CLI「→ push」行与 GUI `/api/vault/new` 的 `new` 都只用它（ServeVault 原地的 `notElem unpushableNames` 过滤删除，两处一谓词）；`newActive` 与退出码语义不动（.png 在六态里仍是 NEW、仍算差异——legacy 对 .png 同 jpg）；✋ 行指到 `pm convert` / 归档页「非 jpg 转换」。用例 F069 补 `newActive` / `newAssignable` / `hasDiffR` 三断言 |
+
+判别突变（`mutate_gate2.py`，同前纪律）：
+
+| id | 突变 | -p | 判定 | 突变输出 |
+|---|---|---|---|---|
+| h1 | newAssignable = newActive (UNPUSHABLE .png counted as assignable) -> F069 case red | `F069` | RED OK | 工作流 F069 unpushable 与 push 门同谓词：.png 入列、.jpg/.jpeg 不入（pushableExt 唯一定义）；N4 newAssignable 扣掉它: FAIL (0.14s) |
+| h2 | use_process_jobs = False (kill only the direct child) -> grandchild keeps the pipe, flood case red | `P8-D` | RED OK | runTool（门禁 F2）：子进程灌满 stdout 且不读 stdin，喂入 100 KiB 提示 → 超时仍生效（ToolTimeout 1），不因管道互等挂死:                                             FAIL (10.12s) |
+| h3 | /api/vault/new built from newActive (UNPUSHABLE .png back in new) -> P4-2 case red | `P4-2` | RED OK | P4-2 /api/vault/new：NEW 名字配上主库 catalog 的 sha/size；无 vault 配置 → 404: FAIL (0.13s) |
+
+final build rc=0; F069 rc=0 (All 1 tests passed (0.14s)); P8-D rc=0 (All 9 tests passed (10.57s)); P4-2 rc=0 (All 4 tests passed (0.45s))
+
+N1 无对应源突变（是用例自身的健壮性），以反向核验代替；N2 是 GUI JS，无单元夹具，`node --check` 绿 + 逐行读核。
+
+收口树：418 测试、GHC 警告 0；`node --check` 绿；pm-test.exe `d6eb336a1b302c3964d7e2641c2122747bd9a3fc7f4f395fff5bcfbd29b1511d`、pm.exe（`.stack-work/install/…/bin`）`a27de4fba3cb5ac373a38b70b0b5aea1f79e3eacc71a3ae0e6e9fee662070664`。

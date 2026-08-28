@@ -9,10 +9,17 @@
 --
 -- 这里合成一份纪律：三个管道显式 UTF-8；喂 stdin 与读 stdout\/stderr 三路并发
 -- （子进程不读就退出也不算错——结果只看退出码与输出）；整体超时覆盖从喂 stdin
--- 到子进程退出的全程；到点**先** @taskkill \/T \/F@ 杀整棵进程树、**再**收各路
--- 线程。次序不能反（门禁一轮 F2 的第二层，flood 桩实测）：Windows 上阻塞在满
--- 管道里的写是不可中断的 FFI 调用，先 cancel 会一直等到子进程读走或退出——子进程
--- 既不读 stdin 也不退出时就是永久挂死；杀掉子进程管道即断，写端立刻醒来。
+-- 到子进程退出的全程；子进程挂在 Windows **job 对象**里（'use_process_jobs'），
+-- 到点 'terminateProcess' 走 @TerminateJobObject@ 杀整棵树——含 @.cmd@ 壳拉起的
+-- node \/ ping 之类**继承了管道的孙进程**——**再**收各路线程。次序不能反（门禁
+-- 一轮 F2 的第二层，flood 桩实测）：Windows 上阻塞在满管道里的写是不可中断的
+-- FFI 调用，先 cancel 会一直等到子进程读走或退出——子进程既不读 stdin 也不退出
+-- 时就是永久挂死；杀掉所有持管道的进程，管道即断，写端立刻醒来。用 job 而不是
+-- 外部 @taskkill \/T@（门禁二轮 N3）：taskkill 找不到 \/ 被拒 \/ 直接子进程已死
+-- 只剩孙进程握着管道，这几种情形它都杀不到，而杀不到就是上面那种挂死；job 由
+-- 内核维护，孙进程逃不出去（未开 breakaway），pm 自己死掉时 job 句柄一关整树也
+-- 跟着死（@KILL_ON_JOB_CLOSE@）。代价（登记 DESIGN-P8 §25）：'waitForProcess'
+-- 等的是整个 job——外部工具若留下不持管道的守护子进程，会等到超时再被整树杀掉。
 -- 拉不起来 \/ 管道异常收进 'ToolFailed'，不向上抛。
 module Pm.Subprocess (ToolOutcome (..), runTool, envTimeout) where
 
@@ -23,7 +30,7 @@ import qualified Data.Text.IO as TIO
 import System.Environment (getEnvironment, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO (hClose, hSetEncoding, utf8)
-import System.Process (CreateProcess (..), StdStream (..), getPid, proc, readCreateProcessWithExitCode, waitForProcess, withCreateProcess)
+import System.Process (CreateProcess (..), StdStream (..), proc, terminateProcess, waitForProcess, withCreateProcess)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
@@ -32,7 +39,7 @@ data ToolOutcome
   = ToolRan ExitCode Text Text
     -- ^ 跑完了：退出码、stdout、stderr（都已按 UTF-8 解码）
   | ToolTimeout Int
-    -- ^ 超过 n 秒：整棵进程树已被杀
+    -- ^ 超过 n 秒：整棵进程树（job）已被杀
   | ToolFailed String
     -- ^ 拉不起来 \/ 管道异常（IOException 的文字）
   deriving (Show)
@@ -51,7 +58,7 @@ runTool :: FilePath -> [String] -> Maybe FilePath -> [(String, String)] -> Text 
 runTool exe args mcwd extraEnv stdinText secs = do
   env0 <- getEnvironment
   let env' = if null extraEnv then Nothing else Just (extraEnv <> filter ((`notElem` map fst extraEnv) . fst) env0)
-      cp = (proc exe args) {cwd = mcwd, env = env', std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
+      cp = (proc exe args) {cwd = mcwd, env = env', std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, use_process_jobs = True}
   r <- try $ withCreateProcess cp $ \mi mo me ph -> case (mi, mo, me) of
     (Just hi, Just ho, Just he) -> do
       mapM_ (`hSetEncoding` utf8) [hi, ho, he]
@@ -63,18 +70,14 @@ runTool exe args mcwd extraEnv stdinText secs = do
             code <- waitForProcess ph
             pure (code, out, errT)
       -- 三路并发放在自己的线程里；主线程只在 STM 上等它（可中断），计时到点先杀树。
-      -- withAsync 的收尾会 cancel 那个线程——此时子进程已死、管道已断，阻塞的写立刻返回。
+      -- withAsync 的收尾会 cancel 那个线程——此时 job 里的进程全死、管道已断，阻塞的写立刻返回。
       withAsync body $ \a -> do
         done <- timeout (secs * 1000000) (waitCatch a)
         case done of
           Nothing -> do
-            mpid <- getPid ph
-            mapM_ killTree mpid
+            terminateProcess ph -- use_process_jobs：TerminateJobObject，整树
             pure (ToolTimeout secs)
           Just (Right (code, out, errT)) -> pure (ToolRan code out errT)
           Just (Left (e :: SomeException)) -> pure (ToolFailed (show e))
     _ -> pure (ToolFailed "子进程管道未建立")
   pure (either (\(e :: IOException) -> ToolFailed (show e)) id r)
- where
-  killTree pid =
-    () <$ (try (readCreateProcessWithExitCode (proc "taskkill" ["/T", "/F", "/PID", show pid]) "") :: IO (Either IOException (ExitCode, String, String)))

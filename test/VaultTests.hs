@@ -61,7 +61,7 @@ vaultTests =
     , testCase "三十四轮 F1：相册文件被独占占住 → 入 UNSTABLE 单列报告，status 不崩、exit 1" caseUnstableOnLocked
     , testCase "三十四轮 F1 同族：photos.json 被独占占住 → Left（fail-closed，不得答「未被引用」）" casePhotosJsonRefLocked
     , testCase "三十五轮 F1：只有 UNSTABLE 的 push 无项分支 → exit 1（与 status 同谓词，不报 0）" caseUnstablePushExit
-    , testCase "工作流 F069 unpushable 与 push 门同谓词：.png 入列、.jpg/.jpeg 不入（pushableExt 唯一定义）" caseUnpushableMatchesPushGate
+    , testCase "工作流 F069 unpushable 与 push 门同谓词：.png 入列、.jpg/.jpeg 不入（pushableExt 唯一定义）；N4 newAssignable 扣掉它" caseUnpushableMatchesPushGate
     ]
 
 h :: Char -> Text
@@ -659,4 +659,10 @@ caseUnpushableMatchesPushGate = withSystemTempDirectory "pm-vault" $ \tmp -> do
   r <- computeVault True (mkVaultCfg root vdir)
   case r of
     Left e -> assertFailure ("computeVault 应成功: " <> show e)
-    Right v -> map fst (vrUnpushable v) @?= ["c.png"]
+    Right v -> do
+      map fst (vrUnpushable v) @?= ["c.png"]
+      -- 门禁二轮 N4：.png 仍是 NEW（六态契约、退出码算差异），但不可指派——CLI 的
+      -- 「→ pm vault push」行与 GUI 的 new 列表只用 newAssignable，同一谓词 pushableExt
+      newActive v @?= ["a.jpg", "b.jpeg", "c.png"]
+      newAssignable v @?= ["a.jpg", "b.jpeg"]
+      hasDiffR v @?= True

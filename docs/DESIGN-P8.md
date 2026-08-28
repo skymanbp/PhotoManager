@@ -171,7 +171,7 @@ tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换�
   测 sha」在 `withRootLock` 内（I10）。同 sha 同 stem 的两条源共用一份派生件——先于任何转换拒绝
   （此前 `convertPlan` 的目标表按伪条目路径键入，第二条会静默吞掉第一条）。python 走
   `Pm.Subprocess.runTool`（与 claude 同一壳）：`PM_CONVERT_TIMEOUT` 秒整体超时（缺省 600），到点
-  `taskkill /T /F` 杀整棵进程树；`scanDerived` 的基目录本身是链接 → Left（doctor 报 Bad、不删）。
+  杀整棵进程树（job 对象，见 §22）；`scanDerived` 的基目录本身是链接 → Left（doctor 报 Bad、不删）。
   用例 `caseDerivedGuards`（hardlink 占 tmp / symlink 与 hardlink 占终名 / 同源 / 超时，夹具
   `test/fixtures/slow-python.cmd`）。门禁一轮（Opus）补两条：① 整批派生期间持有 root 锁——同一时间
   hold / notes / apply 等写路径拿不到锁会报忙（fail-closed，不是死锁）；② 与 Exec 的 tmp 落位是
@@ -180,8 +180,10 @@ tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换�
   进计划，但库外字节已被覆盖）：登记为残余（同 DESIGN §14 Exec 的 TOCTOU 残余；Exec 全程只经自己
   的句柄写，无此窗口）。超时覆盖从喂 stdin 到子进程退出的全程（`runTool` 三路并发），且到点**先杀树再收线程**——Windows 满管道写是
   不可中断的 FFI 调用，先 cancel 会等到子进程读走或退出，子进程既不读也不退就永久挂死（门禁一轮突变 g3 首跑
-  实测）；杀掉子进程管道即断。用例 `caseRunToolFlood`：桩灌满 stdout 不读 stdin、睡 9 s，100 KiB 提示照样 1 s
-  超时、耗时 < 4 s、PING 孙进程被收掉。
+  实测）；杀掉**所有持管道的进程**管道即断——子进程挂在 Windows job 对象里（`use_process_jobs`），到点
+  `terminateProcess` 即 `TerminateJobObject` 整树，不依赖外部 `taskkill`（门禁二轮 N3：taskkill 找不到 / 被拒 / 直接子进程
+  已死只剩继承了管道的孙进程，这几种它都杀不到，杀不到就是同一种挂死）。用例 `caseRunToolFlood`：桩灌满 stdout 不读
+  stdin、睡 9 s，100 KiB 提示照样 1 s 超时、耗时 < 4 s、本用例新增的 PING 孙进程被收掉（全机 `tasklist` 只比前后差集，二轮 N1）。
 
 ### 20.2 doctor：`DERIVED-STALE`
 
@@ -214,7 +216,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 - 校验（`validateNotes`，整体拒绝不跳过坏条目）：`name` 平铺 basename、`sha` 64 hex、
   同名唯一；`category` ∈ `fixedCategories`（可缺省）；`coordinates` 形如
   `<lat>, <lng>`（−90..90 / −180..180，可缺省）；`location`/`title` ≤ 200 字符、
-  无控制符；`source` ∈ {`exif`,`ai-high`,`ai-med`,`ai-low`,`user`,`none`}。
+  无控制符；`source` ∈ {`exif`,`ai-high`,`ai-med`,`ai-low`,`user`,`none`}。GUI 侧 `user` 来源且有内容的记录归用户所有：AI 建议不问、不填、不改它的 `source`（门禁 F4 / 二轮 N2）。
 - `sha` 与 HELD 同一纪律：创建与复核都用本轮**真实重读**（`freshSrcSha`），字节变了
   → `stale`，回到「待确认」。
 - 事务：与 `withHoldsTxn`（VaultCmd.hs:31-50）同一壳——取锁前 `requireMain` 预检
@@ -254,7 +256,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 - 调用形：`claude -p --output-format json --permission-mode plan --max-turns 8 <提示>`，
   **cwd = 主库 root**（分类）或 **源目录**（地点），让 Read 工具落在工作目录内；
   `--permission-mode plan` 只放行只读工具——模型在构造上写不了任何东西。提示里给
-  **绝对路径清单**让模型 Read 看图。整体超时 180 s（`PM_SUGGEST_TIMEOUT` 可调，测试用 1），超时 `taskkill /T /F` 杀整棵进程树（`Pm.Subprocess.runTool`，与转换的 python 同一壳）、409；信封 `is_error:true` → 502。以上旗标
+  **绝对路径清单**让模型 Read 看图。整体超时 180 s（`PM_SUGGEST_TIMEOUT` 可调，测试用 1），超时 `TerminateJobObject` 杀整棵进程树（`Pm.Subprocess.runTool` 把子进程挂在 job 对象里，与转换的 python 同一壳）、409；信封 `is_error:true` → 502。以上旗标
   已用真实 `claude` 2.1.243 探针核实（cwd 内 Read 图片免提示、`permission_denials: []`；
   `--output-format json` 信封含 `result` / `is_error` / `total_cost_usd`）。as-built：提示经 stdin
   交给子进程（三根管道 utf8，不走命令行长度限制）；实测每次 ≈ $0.7–1.3（系统提示缓存写入
@@ -368,7 +370,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | I8 | `vault status --json` 的六键与 held/held_stale **零改动**；不加第十态 | D′ 的直接收益 |
 | I9 | pm 仍不执行 git；`pm vault notes` 只读反查 photos.json | — |
 | I10/I11 | notes 事务同 holds；derived 目录经 `ensurePmSubdir`，派生件 tmp/终名再各过完整路径 `resolveUnder` + CREATE_NEW 独占创建 + 根锁（§20.1 写纪律；整批派生期间其它写路径报忙）；三条新写路径都过 `requireWritable` | — |
-| 新增边界 | `pm serve` 会拉起两种外部进程：`python`（转换）与 `claude`（建议） | 都由环境变量可覆盖、都有预检、都不写照片：python 只往 pm 先独占创建的 `.pm\derived\*.tmp` 里写，claude 在 plan 权限模式下只读；两者同走 `Pm.Subprocess.runTool`（UTF-8 管道、喂 stdin 与读两路三路并发、整体超时到点**先**杀整棵进程树再收线程：`PM_CONVERT_TIMEOUT` 600 / `PM_SUGGEST_TIMEOUT` 180）。登记残余：python 按名打开 tmp 的窗口（§20.1） |
+| 新增边界 | `pm serve` 会拉起两种外部进程：`python`（转换）与 `claude`（建议） | 都由环境变量可覆盖、都有预检、都不写照片：python 只往 pm 先独占创建的 `.pm\derived\*.tmp` 里写，claude 在 plan 权限模式下只读；两者同走 `Pm.Subprocess.runTool`（UTF-8 管道、喂 stdin 与读两路三路并发、整体超时到点**先**杀整棵进程树（job 对象）再收线程：`PM_CONVERT_TIMEOUT` 600 / `PM_SUGGEST_TIMEOUT` 180）。登记残余：python 按名打开 tmp 的窗口（§20.1）；job 等待整树——外部工具若留下不持管道的守护子进程，`waitForProcess` 会等到超时再整树杀掉（fail-closed 报超时；首次真实 `claude -p` 跑时核实） |
 
 ---
 
@@ -382,7 +384,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | P8-D | §22–23 | `test/ServeP8Tests.hs` 6 例（三个计划端点 / classify 五道闸 / place / 纯函数）+ `caseRouteRoster` + `caseGuiNavOrder` ①—⑦ + `node --check`；突变见 REVIEW-LOG |
 | P8-E | §24 | 档案 vault commit（不 push） |
 | 步 9 修复批 | §20.1 写纪律 · §22 · §25 | 第一方全量审（7 视角工作流，11 项确认 / 6 项否证）聚 A–H 八簇上游修；新哨兵 `caseDerivedGuards` / `caseQuarantineCensus`，AlbumTests RAW 入成片、`is_error` 502、`/api/vault/new` 单列 `unpushable`；突变见 REVIEW-LOG |
-| 门禁 | 第一方全量审 → Opus 轮到 FINAL GO → 突变配对 → `caseLineBudget` → leakscan | 记 REVIEW-LOG |
+| 门禁 | 第一方全量审 → Opus 轮到 FINAL GO → 突变配对 → `caseLineBudget` → leakscan | 记 REVIEW-LOG（一轮 NO-GO F1–F8 修 → 二轮 GO + N1–N4 收口） |
 | 提醒 | 装新构建 → 用户 GUI 审查 + **首次真实数据跑**（`pm import --also-album` / `pm album add` / `pm convert` 那 1 张 tif / GUI 分类 → 首次建 vault root）——每一步动真实照片前 AskUserQuestion 摆清单 | 用户裁定 |
 | 文档 | README（含七页、新命令、AI 与转换段）、DESIGN*、DESIGN-COMMANDS §5 命令表 + §11 表、HISTORY、本文回改 | DocDrift 哨兵 |
 | CI | `.github/workflows/build.yml`（windows-latest：stack test、版本一致闸、sidecar、tauri build 带 remap、leakscan、sha256 同 run、750 行闸）+ tag 触发 release job | 抓包分支先验 HandleGuardTests 的 symlink |
