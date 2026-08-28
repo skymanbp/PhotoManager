@@ -333,6 +333,10 @@ CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同�
   一键复制（`[portfolio] dir` + 两仓 push 目标可配；路径与 push 目标**解析后
   重渲染**——白名单语法、`/` 分隔、操作数前 `--`，而不是黑名单过滤后原样拼；
   pm 不执行 git）；档案 vault 侧新增 `/photo-publish` skill 作代执行入口。
+- ~~相册通道 / AI 建议 / jpg 转换 / CI 发布~~ ✅ P8 → 1.0.0（用户裁定 2026-08-27）：
+  Photography 为相片 SoT——`pm import --also-album` / `pm album add`、`pm convert`（Pillow 派生 jpg）、
+  `pm vault note`、GUI 第七页「归档」+ 两个 AI 入口（`claude -p` 只读、只预填）；外部进程一把壳
+  `Pm.Subprocess`；第一方全量审 + Opus 两轮门禁 + CI 单链（本 release 二进制由 GitHub Actions 出）。
 
 **已知限制**：
 

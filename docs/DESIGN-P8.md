@@ -385,7 +385,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | P8-E | §24 | 档案 vault commit（不 push） |
 | 步 9 修复批 | §20.1 写纪律 · §22 · §25 | 第一方全量审（7 视角工作流，11 项确认 / 6 项否证）聚 A–H 八簇上游修；新哨兵 `caseDerivedGuards` / `caseQuarantineCensus`，AlbumTests RAW 入成片、`is_error` 502、`/api/vault/new` 单列 `unpushable`；突变见 REVIEW-LOG |
 | 门禁 | 第一方全量审 → Opus 轮到 FINAL GO → 突变配对 → `caseLineBudget` → leakscan | 记 REVIEW-LOG（一轮 NO-GO F1–F8 修 → 二轮 GO + N1–N4 收口） |
-| 提醒 | 装新构建 → 用户 GUI 审查 + **首次真实数据跑**（`pm import --also-album` / `pm album add` / `pm convert` 那 1 张 tif / GUI 分类 → 首次建 vault root）——每一步动真实照片前 AskUserQuestion 摆清单 | 用户裁定 |
-| 文档 | README（含七页、新命令、AI 与转换段）、DESIGN*、DESIGN-COMMANDS §5 命令表 + §11 表、HISTORY、本文回改 | DocDrift 哨兵 |
+| 提醒 | 装新构建 → 用户 GUI 审查 + **首次真实数据跑**（`pm import --also-album` / `pm album add` / `pm convert` 那 1 张 tif / GUI 分类 → 首次建 vault root）——每一步动真实照片前 AskUserQuestion 摆清单 | 用户裁定（2026-08-28）：复核两项 GUI 修（58f136d）；真实数据跑按裁定完成（REVIEW-LOG「用户复核 + 首次真实数据跑」）——import / convert / 首次 claude -p 无对象未发生，如实登记 |
+| 文档 | README（含七页、新命令、AI 与转换段）、DESIGN*、DESIGN-COMMANDS §5 命令表 + §11 表、HISTORY、本文回改 | DocDrift 哨兵；1.0.0 批：README 路线图 + 版本串（package.yaml / Cargo.toml / Cargo.lock / tauri.conf.json / DESIGN-COMMANDS 状态行）+ HISTORY 收官行 + `docs/release-notes/v1.0.0.md` |
 | CI | `.github/workflows/build.yml`（windows-latest：stack test、版本一致闸、sidecar、tauri build 带 remap、leakscan、sha256 同 run、750 行闸）+ tag 触发 release job | 抓包分支 `ci-probe` 先验：symlink / hardlink / junction 夹具在提权 runner 上可用；ACL 注入用例要求套件自禁 SeBackup/SeRestore 特权（REVIEW-LOG「CI 抓包分支」）；run 33152288443 全绿后并入 main |
-| 发布 | AskUserQuestion 清单 → push main → tag `v1.0.0` → CI release → 重新下载校验 | 项目收官 |
+| 发布 | AskUserQuestion 清单 → push main → tag `v1.0.0` → CI release → 重新下载校验 | 项目收官：release job 把 tag 所在 run 的 zip + NSIS + sha256.txt 挂上，说明 = release notes + SHA-256；下载校验记 REVIEW-LOG |

@@ -527,3 +527,21 @@ N1 无对应源突变（是用例自身的健壮性），以反向核验代替�
 处置（161ef2b，上游在测试壳而不是改用例断言）：cbits `pm_disable_backup_privileges`（`OpenProcessToken` + `AdjustTokenPrivileges` 把两项置 0），`Spec.hs` 启动时调用（`TestUtil.disableBackupPrivileges`），与启动它的 shell 无关；令牌里没有这两项时是空操作（`ERROR_NOT_ALL_ASSIGNED`，视为成功）。本地 418/418、警告 0；重跑 run 33152288443：stack test 14 min，**418/418**，其后 pm.exe 版本闸 / sidecar / tauri build（`@tauri-apps/cli@2.11.4`，`--remap-path-prefix` 工作区与用户目录）/ leakscan / zip + NSIS + sha256 / artifact 全绿。
 
 登记：① pm 本身若在启用了备份特权的令牌里跑，探针会绕过 DACL——读到更多而不是更少，不处理；② 目录 RD 拒在 `cmd dir` 里显示为 "File Not Found"（cmd 自己的文案），不是错误码——取证时差点被它带偏，记一笔。
+
+## 用户复核 + 首次真实数据跑（2026-08-28，对象：CI run 33152288443 的产物，pm 0.6.1）
+
+用户装 CI 产物复核七页，两项发现，「别的没问题」：① 侧栏左下脚注文字溢出；② 同一行按钮尺寸不齐。处置 58f136d（只改 `gui/ui/style.css`）：`.side` 钉 `min-width:0`、脚注 `overflow-wrap:anywhere`（「已连接 127.0.0.1:端口」与主库路径都是无断行点的长 token，字体回退 / 更长路径会顶出 200px 定宽列）；`.btn` `white-space:nowrap` + `.actions` `flex-shrink:0 / flex-wrap`、`.page-head` 可整体换行——页头文案长时 `.actions` 被挤窄、两个按钮各自折行成一高一矮。tour 复核截图：分类推送页头两按钮等高、脚注不溢出。
+
+首次真实数据跑——用户裁定「你模仿我直接操作，全程监控」。纪律：先只读盘点（真实库零写入），再 AskUserQuestion 摆清单，裁定后才动。盘点：暂存区 To-Be-Sync'd 只剩用户 WIP「待修改」21 件 + 4 个空的 Raw/Processed 事件夹壳 → `pm import` 无对象；唯一非 jpg `成片\26-06-R66\_DSC9621.developed.tif`（344 MB，07-13）旁已有用户 08-14 新导出的同名 jpg（72.7 MB）→ `pm convert` 会因同名拒收；成片 → 相册候选 104 张（19 夹），其中 2 张「相册有同名不同内容」（`25-11-Alaska\_DSC9274.jpg`、`26-04-Providence\_DSC9558.JPG`——sha 核过：相册 / vault 里那两张与 `24-10&11-Providence` / `24-12-New York & East Coast` 的成片逐字节一致，I7 成立；候选这两张是相机计数回绕的**另外两张照片**）；vault 15 张 NEW 全是用户 08-24 的「暂不同步」。用户裁定：不动相册；tif 只留新 jpg、旧 tif 是以前的编辑；同名问题处理掉；vault 保持暂不同步。
+
+执行（全部是同卷 `mv`，零删除、零字节改动；备份盘 E: 未挂载，所以旧 tif 不删只挪）：
+
+| 操作 | 前 sha（12） | 后 sha（12） |
+|---|---|---|
+| `成片\25-11-Alaska\_DSC9274.jpg` → `_DSC9274_Alaska.jpg` | 7ffc9f3eb926 | 7ffc9f3eb926 |
+| `成片\26-04-Providence\_DSC9558.JPG` → `_DSC9558_Providence.JPG` | e044934347c5 | e044934347c5 |
+| `成片\26-06-R66\_DSC9621.developed.tif` → `To-Be-Sync'd\待修改\`（退役旧编辑） | 4bba016c224a | 4bba016c224a |
+
+之后：`pm scan` 4633 文件（复用 4508 + 新 hash 125，20.8 s）→ `pm status` 成片 197 / 5.1 GiB、暂存 22 / 1.1 GiB、✓ 索引与磁盘一致；`pm album candidates` 104 张 · ⚠ 同名 0 · 非 jpg 0；`pm doctor` 只有 VERIFY-AGE 一行、无 Bad；`pm vault status` OK 79 · NEW 15（全 HELD）；GUI 归档页第三卡显示「成片 / 相册下没有非 jpg 照片」。
+
+未发生、如实登记：`pm import`（无对象）、`pm convert`（无对象）、首次真实 `claude -p`（用户保持暂不同步，未点 AI 建议）→ §25「`waitForProcess` 等整个 job」的残余仍未在真实 claude 上核实；首次建 vault root 未发生（无推送）。pm 本身对本轮的贡献是盘点与复核（scan / status / candidates / doctor / vault status），三次移动是用户裁定的手工整理，不在 pm 写域。
