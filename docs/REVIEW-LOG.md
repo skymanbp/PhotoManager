@@ -413,3 +413,44 @@ final build rc=0; P8-D rc=0 (All 8 tests passed (8.88s)); P7-J rc=0 (All 27 test
 残余（无判红形态，如实登记）：GUI 三个脚本只过 `node --check` + DocDrift 静态规则（无内联、脚本外链、无 setAttribute / innerHTML 赋值），交互行为待用户 GUI 审查（计划步「提醒 GUI 审查」）；真 `claude` 只探针不进测试（夹具 `fake-claude.cmd` 顶替，模型答案的质量不在 pm 的可判范围）；`seConvertLock` 排队只有并发交错才可观测，未配突变。
 
 P8-D 树：415 测试、GHC 警告 0（clang `<built-in>` 噪声同前）；pm-test.exe `cf21184799d55095bbcbb3fb5ea7a9194ccae0dc2ea182bff917d5f9fdb2db48`、pm.exe（`.stack-work/install/…/bin`）`d8e8c1a176f78b8aca3d064c930e8644d4207e36793a573d5e91e90fa4995a0d`。
+
+## 门禁步 第一方全量审 · 修复批（2026-08-27/28；DESIGN-P8.md §20.1 写纪律 / §22 / §25 / §26）
+
+范围：P8-A～P8-E 全量（`Pm.Convert` / `Pm.Album` / `Pm.ServeAlbum` / `Pm.ServeAi` / `Pm.ServeVault` / `Pm.VaultCmd` / `Pm.Vault` / GUI 三脚本 / DESIGN*）。方法：Ultracode 评审工作流——7 个视角（写纪律 / 并发与锁 / 边界与准入 / GUI 状态机 / 文档—代码漂移 / 测试证据 / 子进程）各出发现，major 以上每条 2 个独立反驳者；11 项确认（C0–C10）、6 项否证（ServeAi stdin 次序、photosJsonRef 未配置、vaultCat DRIFT 塌缩、argv 测试锚、resolveUnder 负例、--also-album 负例）、30 条 minor 逐条处置。
+
+确认项按上游根因聚成八簇（用户指令「记得聚类然后找上游根因」）：
+
+| 簇 | 确认项 | 根因 | 类级修复 |
+|---|---|---|---|
+| A | C0 / C2 critical、C3 major | `deriveOne` 的 tmp 与终名用字符串拼接、只 `doesFileExist` 一次；python 自己 open 目标——预置的 hardlink / symlink 能把库外文件当目标写穿或当派生件读入；派生—落位—测 sha 不在根锁内 | 完整相对路径各过 `resolveUnder` 只用返回值；tmp 由 pm `openFreshBinary`（CREATE_NEW，残留先清）独占创建再交 python；复验普通名 + `openStateRead` 单链接同句柄测 sha → `moveBoundNoReplace` → 落位后 size 复核；整段 `withRootLock`；复用同规格；`try` 收所有 IOException |
+| B | C5 major + python 无超时 / 码页解码 | `timeout` 只终止直接子进程，`claude.cmd` → node 子树在锁放开后照跑；python 那份根本没有超时 | 新模块 `Pm.Subprocess.runTool`：UTF-8 三管道、stdin 一次喂完、`race` 计时到点先 `taskkill /T /F` 杀整棵树；`envTimeout`（`PM_SUGGEST_TIMEOUT` 180 / `PM_CONVERT_TIMEOUT` 600）；claude 与 python 同壳 |
+| C | C1 major | 候选栏「非 jpg」= `¬pushableExt`（含 RAW），convert 准入另写一份拒 RAW——两份谓词 | `VaultCore.convertibleExt` 一处定义，`albumCandidates` 与 `runConvertTo` 共用；AlbumTests 夹具把 RAW 放进成片/相册（此前放 Raw\ 下测不到） |
+| D | C6 / C8 major、C9 critical | 页面基线越页：`heldInitial` 照单全收整个文件；UNPUSHABLE 混在 new 里渲染成可指派卡；记录类目不回显 → 未碰的卡被算成「清掉类目」 | `/api/vault/new` 剔除并单列 `unpushable`（只读卡）；`heldInitial` 只收本页名字；`assign` 从回显记录预置类目；`suggesting` 与 `submitting` 互斥 |
+| E | C7 major | `applyPlan` 的 `await loadPlans()` 在 try 内，刷新失败把「执行完成」换成「请求失败」 | 刷新移出 try 作附注（与其余四处 loader 同律）；`loadPlans` 的自动 `showPlan` 也包 try |
+| F | C4 major | 派生伪条目按 `(sha, stem)` 唯一，两条同内容同名源共用一份，`convertPlan` 的目标表按伪条目路径键入 → 第二条静默吞掉第一条、exit 0 | `sameDerived` 先于任何转换拒绝；`convertPlan` 返回 `Either`，撞名 fail-closed（不再只在交代里提一句） |
+| G | C10 major + 文案 | DESIGN §2 I2「仅三条路径可产生」quarantine，代码七处构造 | I2 行据实清点七处产地；新哨兵 `caseQuarantineCensus` 钉住引用 `OpQuarantine` 的模块集合并要求 I2 逐一点名；`vault status` / `doctor --repair` 帮助文本、DESIGN-GUI `dropped` 含义与 502 条件、README 信任项 4（hardlink 走 link count） |
+| H | minors | `planPost` 无 try（空 500）、取锁不在 mask、信封 `is_error` 未读、`scanDerived` 基目录是链接答「无派生件」、`findClaude` 注释错、archive.js 吞 warnings | 逐条修；`is_error` 夹具第六模式 + 502 用例 |
+
+未采纳 / 登记为残余（如实）：`ensureVaultRoot` 的 `putStrLn`（CLI 首建路径可见，serve 路径静音无害）；`photosJsonRef` 子串匹配（photos.json 以完整 URL 引用，误报只会更保守）；notes set∩clear 冲突已由 `VaultCmd` 拒绝但未配用例；`heldStale` 在状态页无清除入口（unhold 即清）；`withRootLock` 内派生与 `killTree` 无独立判红形态（跨进程 / 进程树只有并发交错可观测）；GUI 改动只过 `node --check` + DocDrift 静态规则，交互行为待用户 GUI 审查。
+
+新用例：`ConvertTests.caseDerivedGuards`（① tmp 名被库外 hardlink 占住 → 清掉重建、bait 字节不动；② 终名 symlink → 拒；③ 终名库外 hardlink → 复用拒；④ 同 sha 同名两源 → 先拒；⑤ `PM_CONVERT_TIMEOUT=1` + `slow-python.cmd` → 预检即超时、点名变量、无 .tmp）；`DocDriftTests.caseQuarantineCensus`；AlbumTests RAW 入成片 / 相册；ServeP8Tests `iserror` 502；ServeTests `/api/vault/new` `unpushable`。
+
+判别突变（`mutate_s9.py`，源码级、逐条重建、单组重跑、每条还原；s9 为文档突变不重建；末尾重建 + 五组复跑绿）：
+
+| id | 突变 | -p | 判定 | 突变输出 |
+|---|---|---|---|---|
+| s1 | deriveOne: openFreshBinary pre-creation removed -> python writes through hardlinked tmp, outside bytes change, guards case red | `P8-C2` | RED OK | 步 9 派生件写纪律：tmp 名被库外 hardlink 占住 → 清掉重建、库外字节不动；终名是 symlink / 库外 hardlink → 拒绝不复用；同 sha 同名两源 → 先拒；PM_CONVERT_TIMEOUT 到点 → 杀树 exit 2、无 .tmp: FAIL (1.05s) |
+| s2 | deriveOne reuse: openStateRead single-link check dropped -> outside hardlink reused as derived jpg, guards case red | `P8-C2` | RED OK | 步 9 派生件写纪律：tmp 名被库外 hardlink 占住 → 清掉重建、库外字节不动；终名是 symlink / 库外 hardlink → 拒绝不复用；同 sha 同名两源 → 先拒；PM_CONVERT_TIMEOUT 到点 → 杀树 exit 2、无 .tmp: FAIL (1.84s) |
+| s3 | deriveOne: symlinked final name not refused -> convert proceeds, guards case red | `P8-C2` | NOT RED XX | All 4 tests passed (14.18s) |
+| s4 | runConvertTo: sameDerived refusal removed -> two sources share one derived jpg silently, guards case red | `P8-C2` | RED OK | 步 9 派生件写纪律：tmp 名被库外 hardlink 占住 → 清掉重建、库外字节不动；终名是 symlink / 库外 hardlink → 拒绝不复用；同 sha 同名两源 → 先拒；PM_CONVERT_TIMEOUT 到点 → 杀树 exit 2、无 .tmp: FAIL (2.86s) |
+| s5 | runConvertTo: PM_CONVERT_TIMEOUT ignored -> slow python not killed at 1 s, timeout message missing, guards case red | `P8-C2` | RED OK | 步 9 派生件写纪律：tmp 名被库外 hardlink 占住 → 清掉重建、库外字节不动；终名是 symlink / 库外 hardlink → 拒绝不复用；同 sha 同名两源 → 先拒；PM_CONVERT_TIMEOUT 到点 → 杀树 exit 2、无 .tmp: FAIL (8.34s) |
+| s6 | albumCandidates: convertibleExt replaced by not-pushable -> RAW listed as non-jpg, candidates case red | `P8-B` | RED OK | albumCandidates：成片 jpg 未进相册的按事件夹分组、同名异容标记、非 jpg 单列、RAW 不列:             FAIL |
+| s7 | vault/new: unpushable no longer removed from new -> n.png rendered as assignable NEW, vault/new case red | `P4-2` | RED OK | P4-2 /api/vault/new：NEW 名字配上主库 catalog 的 sha/size；无 vault 配置 → 404: FAIL (0.13s) |
+| s8 | runClaude: is_error:true not mapped to 502 -> iserror fixture answers 200, classify case red | `P8-D` | RED OK | POST /api/suggest classify：只读级放行；预置回答规范化（未请求的名字丢弃、坐标规范）；400 五种；413；502 垃圾/退出非零/is_error；409 缺 claude/超时/并发；.pm 零写入:              FAIL (0.61s) |
+| s9 | DESIGN I2: pm dedupe removed from the quarantine producer list -> caseQuarantineCensus red | `P7-J` | RED OK | 隔离产地清点（步 9 C10）：引用 OpQuarantine 的模块集合固定；DESIGN §2 I2 逐一点名每个产地:                                          FAIL (0.08s) |
+
+final build rc=0; P8-C2 rc=0 (All 4 tests passed (14.81s)); P8-B rc=0 (All 6 tests passed (0.72s)); P4-2 rc=0 (All 4 tests passed (0.38s)); P8-D rc=0 (All 8 tests passed (9.86s)); P7-J rc=0 (All 28 tests passed (1.95s))
+
+s3 未判红的原因：终名是 symlink 时 `resolveUnder` 的完整路径预筛已先拒绝（同一句「链接」消息），`probeName` 的拒绝分支是第二道（Win.hs 的设计：`resolveUnder` 只是预筛，句柄层才是边界）；叶级链接构造不出只过预筛不过 probe 的形态，登记为无独立判红形态的冗余防线，不删。
+
+修复批树：417 测试、GHC 警告 0（clang `<built-in>` 噪声同前）；`node --check` ×3 绿；pm-test.exe `148735e4875c953ab1496db6e352481a42c57bffd374caf3e59c1589ef2433c5`、pm.exe（`.stack-work/install/…/bin`）`6112149481ef861feb141acd305c0a6a0dd7919d312fc420d27ba0b204ffa6ad`。

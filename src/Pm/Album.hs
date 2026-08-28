@@ -47,7 +47,7 @@ import Pm.Import (ImportReport (..), foldPath)
 import Pm.Op
 import Pm.Plan
 import Pm.Types
-import Pm.VaultCore (pushableExt)
+import Pm.VaultCore (convertibleExt, pushableExt)
 import Pm.Win (resolveUnder)
 
 albumTop, processedTop :: FilePath
@@ -170,7 +170,9 @@ parseProcessedRel s
 
 -- | 归档页 \/ @pm album candidates@ 的只读视图：成片里还没进相册的 jpg（按
 -- 事件夹分组；相册有同名**异容**的标 True），以及成片\/相册下的非 jpg 照片
--- （相册不收 → @pm convert@ 的对象；RAW 不列——原始档不是转换对象）。
+-- （相册不收 → @pm convert@ 的对象；RAW 不列——原始档不是转换对象）。「非 jpg」
+-- 栏与 convert 的准入是**同一个**谓词 'convertibleExt'（步 9 簇 C：此前这里
+-- 是 @not pushableExt@，把 RAW 也列进去，页面勾上一张 RAW 整批被 convert 拒）。
 data AlbumCandidates = AlbumCandidates
   { acEvents :: [(FilePath, [(Entry, Bool)])]
   , acNonJpg :: [Entry]
@@ -194,7 +196,7 @@ albumCandidates cat = AlbumCandidates events nonJpg
     ]
   eventOf e = case splitDirectories (enPath e) of (_ : ev : _) -> ev; _ -> ""
   events = sortOn fst (Map.toList (Map.fromListWith (flip (<>)) [(eventOf e, [c]) | c@(e, _) <- cand]))
-  nonJpg = [e | e <- photos, top e `elem` [[processedTop], [albumTop]], not (pushableExt (enPath e))]
+  nonJpg = [e | e <- photos, top e `elem` [[processedTop], [albumTop]], convertibleExt (enPath e)]
 
 -- ─── IO：pm album add / candidates ──────────────────────────────────────────
 

@@ -11,15 +11,17 @@
 --     （地点），让 Read 落在工作目录内（P8-D 探针：cwd 内 Read 图片免提示）。
 --   * 可执行：@PM_CLAUDE_EXE@ → PATH 上的 @claude@；找不到 → 409。
 --   * 一次只跑一个（'seSuggestLock'，上一次未完成 → 409）；整体超时
---     @PM_SUGGEST_TIMEOUT@ 秒（缺省 180），超时杀进程 → 409。
+--     @PM_SUGGEST_TIMEOUT@ 秒（缺省 180），超时杀**整棵**进程树 → 409
+--     （'Pm.Subprocess.runTool'：@claude.cmd@ → node 的子树也一起收掉，锁放开时
+--     没有幽灵进程还在跑）。
 --   * 上限：分类每次 ≤ 20 张；地点每次 ≤ 12 段、每段抽样 ≤ 5 张（首\/中\/尾）。
 --   * 响应解析：@result@ 文本里取第一段 JSON（裸或 ``` 围栏）；解析不了 → 502
---     并把 @raw@ 原样带回——页面显示「AI 回复无法解析」，不猜。
+--     并把 @raw@ 原样带回——页面显示「AI 回复无法解析」，不猜。信封里
+--     @is_error:true@（claude 自己报错，如额度用尽）→ 502 带原文。
 module Pm.ServeAi (routeAi, findClaude, extractJson, evenSample) where
 
-import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.MVar (putMVar, tryTakeMVar)
-import Control.Exception (IOException, finally, try)
+import Control.Exception (finally, mask)
 import Control.Monad (forM)
 import Data.Aeson (Value (..), object, (.=))
 import qualified Data.Aeson as Aeson
@@ -29,17 +31,12 @@ import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.Text.IO as TIO
 import Network.HTTP.Types
 import Network.Wai
 import System.Directory (doesFileExist, findExecutable)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (splitDirectories, takeFileName)
-import System.IO (hClose, hSetEncoding, utf8)
-import System.Process (CreateProcess (..), StdStream (..), proc, waitForProcess, withCreateProcess)
-import System.Timeout (timeout)
-import Text.Read (readMaybe)
 
 import Pm.Album (albumTop)
 import Pm.Catalog (catalogOr, loadCatalog)
@@ -47,6 +44,7 @@ import Pm.Config (Config (..), requireRole)
 import Pm.ServeEnv
 import Pm.ServeGuard (withJsonBody)
 import Pm.Sort (SortSegment (..), SortSurvey (..), surveySort)
+import Pm.Subprocess (ToolOutcome (..), envTimeout, runTool)
 import Pm.Types
 import Pm.VaultCore (fixedCategories, pushableExt)
 import Pm.VaultHold (isFlatName)
@@ -60,19 +58,26 @@ routeAi cfg env req jsonR err = case (requestMethod req, pathInfo req) of
     case eexe of
       Left m -> err status409 m
       Right exe -> do
-        got <- tryTakeMVar (seSuggestLock env)
-        case got of
-          Nothing -> err status409 "上一次 AI 建议还没结束——等它回来再点"
-          Just () ->
-            ( case sreq of
-                SuggestClassify names -> classify cfg jsonR err exe names
-                SuggestPlace src gap -> place cfg jsonR err exe src gap
-            )
-              `finally` putMVar (seSuggestLock env) ()
+        -- 取锁与登记归还在 mask 之内：取到之后、finally 装上之前若来一个异步
+        -- 异常（warp 的连接超时）锁就永远丢了，之后每次点击都 409。
+        got <- mask $ \restore -> do
+          g <- tryTakeMVar (seSuggestLock env)
+          case g of
+            Nothing -> pure Nothing
+            Just () ->
+              Just
+                <$> restore
+                  ( case sreq of
+                      SuggestClassify names -> classify cfg jsonR err exe names
+                      SuggestPlace src gap -> place cfg jsonR err exe src gap
+                  )
+                  `finally` putMVar (seSuggestLock env) ()
+        maybe (err status409 "上一次 AI 建议还没结束——等它回来再点") pure got
   _ -> Nothing
 
--- | @PM_CLAUDE_EXE@ → PATH 上的 @claude@（Windows 按 PATHEXT 认 .exe\/.cmd；
--- 本机实测是 @claude.exe@）。找不到就说找不到。
+-- | @PM_CLAUDE_EXE@ → PATH 上的 @claude@（'findExecutable' 只按 @.exe@ 找——
+-- 本机实测就是 @claude.exe@；装成 @claude.cmd@ 的用 @PM_CLAUDE_EXE@ 指过去）。
+-- 找不到就说找不到。
 findClaude :: IO (Either String FilePath)
 findClaude = do
   mEnv <- lookupEnv "PM_CLAUDE_EXE"
@@ -270,40 +275,28 @@ instance Aeson.FromJSON SuggestReq where
       _ -> fail "kind 须为 classify 或 place"
 
 -- | 跑 @claude -p --output-format json --permission-mode plan --max-turns 8@，
--- 提示经 stdin 交给它（含中文与库内路径：三个管道句柄都显式 UTF-8，不吃控制台
--- 码页）。超时（'timeout' 的异步异常）由 'withCreateProcess' 的收尾终止子进程。
--- 返回（@result@ 文本，@total_cost_usd@）。
+-- 提示经 stdin 交给它（'runTool'：三个管道显式 UTF-8、整体超时到点杀整棵进程
+-- 树）。返回（@result@ 文本，@total_cost_usd@）；信封 @is_error:true@ → 502。
 runClaude :: FilePath -> FilePath -> Text -> IO (Either (Status, String) (Text, Value))
 runClaude exe dir prompt = do
-  secs <- fromMaybe (180 :: Int) . (>>= readMaybe) <$> lookupEnv "PM_SUGGEST_TIMEOUT"
-  let cp =
-        (proc exe ["-p", "--output-format", "json", "--permission-mode", "plan", "--max-turns", "8"])
-          {cwd = Just dir, std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
-  r <-
-    try
-      ( timeout (secs * 1000000) $
-          withCreateProcess cp $ \mi mo me ph -> case (mi, mo, me) of
-            (Just hi, Just ho, Just he) -> do
-              mapM_ (`hSetEncoding` utf8) [hi, ho, he]
-              TIO.hPutStr hi prompt
-              hClose hi
-              (out, errT) <- concurrently (TIO.hGetContents ho) (TIO.hGetContents he)
-              code <- waitForProcess ph
-              pure (code, out, errT)
-            _ -> ioError (userError "子进程管道未建立")
-      ) ::
-      IO (Either IOException (Maybe (ExitCode, Text, Text)))
+  secs <- envTimeout "PM_SUGGEST_TIMEOUT" 180
+  r <- runTool exe ["-p", "--output-format", "json", "--permission-mode", "plan", "--max-turns", "8"] (Just dir) [] prompt secs
   pure $ case r of
-    Left e -> Left (status409, "拉起 claude 失败: " <> show e)
-    Right Nothing -> Left (status409, "claude 超过 " <> show secs <> " 秒未回复，已终止（PM_SUGGEST_TIMEOUT 可调）")
-    Right (Just (ExitFailure n, out, errT)) -> Left (status502, "claude 退出码 " <> show n <> ": " <> T.unpack (T.take 400 (T.strip (errT <> out))))
-    Right (Just (ExitSuccess, out, _)) -> case Aeson.eitherDecodeStrict' (TE.encodeUtf8 out) of
+    ToolFailed e -> Left (status409, "拉起 claude 失败: " <> e)
+    ToolTimeout n -> Left (status409, "claude 超过 " <> show n <> " 秒未回复，已终止整棵进程树（PM_SUGGEST_TIMEOUT 可调）")
+    ToolRan (ExitFailure n) out errT -> Left (status502, "claude 退出码 " <> show n <> ": " <> T.unpack (T.take 400 (T.strip (errT <> out))))
+    ToolRan ExitSuccess out _ -> case Aeson.eitherDecodeStrict' (TE.encodeUtf8 out) of
       Left e -> Left (status502, "claude 输出不是 JSON: " <> e)
       Right v -> case AT.parseMaybe envelope v of
         Nothing -> Left (status502, "claude 输出缺 result 字段")
-        Just (res, cost) -> Right (res, cost)
+        Just (res, _, True) -> Left (status502, "claude 报错（is_error）: " <> T.unpack (T.take 400 (T.strip res)))
+        Just (res, cost, False) -> Right (res, cost)
  where
-  envelope = Aeson.withObject "claude-json" $ \o -> (,) <$> o Aeson..: "result" <*> (fromMaybe Aeson.Null <$> o Aeson..:? "total_cost_usd")
+  envelope = Aeson.withObject "claude-json" $ \o ->
+    (,,)
+      <$> o Aeson..: "result"
+      <*> (fromMaybe Aeson.Null <$> o Aeson..:? "total_cost_usd")
+      <*> (fromMaybe False <$> o Aeson..:? "is_error")
 
 -- | @result@ 文本里的第一段 JSON：从第一个 @[@ \/ @{@ 到最后一个 @]@ \/ @}@
 -- （``` 围栏、前后说明文字都在括号之外）；解析不出 → Nothing。

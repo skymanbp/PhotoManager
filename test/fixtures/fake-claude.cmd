@@ -4,8 +4,13 @@ rem The prompt arrives on stdin and is ignored. Mode comes from PM_FAKE_CLAUDE:
 rem   (unset) -> a classify answer for a.jpg   place -> a fenced place answer
 rem   garbage -> result is not JSON            fail  -> non-zero exit
 rem   sleep   -> ~3 s delay (timeout test with PM_SUGGEST_TIMEOUT=1)
+rem   iserror -> exit 0 but the envelope says is_error:true (quota / auth failure)
 rem Output mimics `claude -p --output-format json`: one JSON object with "result".
 if "%PM_FAKE_CLAUDE%"=="fail" exit /b 1
+if "%PM_FAKE_CLAUDE%"=="iserror" (
+  echo {"result":"Rate limit reached for this account","is_error":true,"total_cost_usd":0}
+  exit /b 0
+)
 if "%PM_FAKE_CLAUDE%"=="garbage" (
   echo {"result":"sorry, I could not look at the images, no json here","is_error":false,"total_cost_usd":0.01}
   exit /b 0

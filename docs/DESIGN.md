@@ -89,7 +89,7 @@ R4 Haskell）落成以下**硬不变量**，每条都有机制背书，不靠自
 | # | 不变量 | 保证机制 |
 |---|---|---|
 | I1 | 任何 pm 操作不使任何仓库丢失字节或信息（含文件名） | I2+I4+I5；重命名旧名先持久化进日志再动盘 |
-| I2 | **pm 没有删除原语，也没有覆盖写原语**。唯一移出机制 = quarantine（移入 `.pm/trash/` 保持相对路径 + manifest），仅三条路径可产生：`pm clean`、`pm undo`、supersede 复合（§6.5） | `Op` 代数只有 `Copy/Rename/Quarantine` 构造子；落位一律走「目标存在即失败」的 rename（§6.1 步 7） |
+| I2 | **pm 没有删除原语，也没有覆盖写原语**。唯一移出机制 = quarantine（移入 `.pm/trash/` 保持相对路径 + manifest）。产地据实清点（步 9 C10；DocDrift `caseQuarantineCensus` 钉住引用 `OpQuarantine` 的模块集合，新模块一碰就转红）：`pm clean staging`（Clean）、`pm undo`（Undo）、supersede 复合——`pm resolve --keep src`（Apply，§6.5）、`pm dedupe`（Dedupe）、`pm doctor --repair` 的 C5 隔离计划（Doctor）、`pm diff` 备份盘更新的旧件（Diff，`supersede:backup-update`）、执行期回滚的位移件 `rollback-displaced:`（Exec） | `Op` 代数只有 `Copy/Rename/Quarantine` 构造子；落位一律走「目标存在即失败」的 rename（§6.1 步 7） |
 | I3 | 每次写盘前有可打印的 Plan 且经确认；每个文件落盘后 sha256 复读校验（**缓存级**：捕获写逻辑错误/截断/串文件与缓存副本位翻转，不覆盖介质层损坏——介质层见 I3b） | Exec 只接受 Plan；写协议 §6.1 |
 | I3b | 介质级验证为显式能力：`pm doctor --deep` 把 catalog 的**全部**条目重读重 hash 一遍（默认那次只复验上次 CleanShutdown 之后的 Done），`pm status` 显示「最久未验证字节的年龄」（`lastVerified` 随每次 hash 写进 catalog）。**没有轮转/抽样机制**——全库覆盖只有 `--deep` 一条路；落位后绕缓存重读的 `--verify-media` **尚未实现**（§6.6/§12 的它是设计预留） | §6.6 + §12 单列开销 |
 | I4 | 所有 mutation 先写 intent、成功后写 done（append-only NDJSON），**带真实持久化屏障**：intent 在其效果落盘前 `hFlush + FlushFileBuffers`；Copy 的 done 可组提交，Rename 的屏障强制且不可组提交（旧名仅存于日志）。**追加前先封尾**：`.pm/journal.ndjson` 与隔离区 manifest 的每次追加都先查末字节，不是换行（掉电写了半行）就先补 `\n`，新记录绝不与残行黏成一条——journal 另落一条 `torn-gap` 标记把残行**封**成可识别的撕裂尾（§6.4） | Journal 模块（Win32 boot 库 `flushFileBuffers`，本机已验证存在）；`pm doctor` 对账 §6.4 |

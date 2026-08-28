@@ -245,8 +245,13 @@
         tb.appendChild(tr);
       }
       if (d.errors.length) { const tr = el("tr"); const td = el("td", "muted", "⚠ 装不出来的计划：" + d.errors.map((e) => e[0] + "：" + e[1]).join("；")); td.colSpan = 7; tr.appendChild(td); tb.appendChild(tr); }
-      // 打开即显示最新计划的明细，不用先点
-      if (sorted.length) { tb.firstChild.classList.add("sel"); await showPlan(sorted[0].id); }
+      // 打开即显示最新计划的明细，不用先点；载不出明细不算列表失败（同行点击的处理）
+      if (sorted.length) {
+        tb.firstChild.classList.add("sel");
+        try { await showPlan(sorted[0].id); } catch (e) {
+          const box = $("#plan-detail"); box.innerHTML = ""; box.appendChild(el("div", "muted", "载不出这个计划：" + e.message));
+        }
+      }
     } catch (e) {
       if (stale("plans", gen)) return; // stale 失败不许改画面（41 轮 #2）
       throw e; // 当前代的失败照旧交给调用方兜底（fail 横幅等）
@@ -322,6 +327,7 @@
   async function applyPlan(id, btn, label) {
     const out = $("#apply-result");
     btn.disabled = true; btn.textContent = "执行中…（校验写入进行中，别关窗口）";
+    let done = false;
     try {
       const r = await post("/api/apply", { planId: id });
       const j = await r.json().catch(() => ({}));
@@ -340,13 +346,18 @@
         (summary ? `\n逐项：${summary}` : "") +
         (logTail ? `\n${logTail}` : "") +
         "\n回滚：终端 pm undo。";
-      await loadPlans();
+      done = true;
     } catch (e) {
       out.className = "banner bad"; out.textContent = "请求失败：" + e.message;
     } finally {
       // 失败路径按钮还挂在页上：恢复成未确认原文案（armed 已在点击处消费）
       btn.disabled = false; btn.textContent = label;
     }
+    // 刷新失败不改判（步 9 C7，与其余四处 loader 同律）：照片已经搬了，列表
+    // 重载失败只是附注——此前它在 try 里，会把「执行完成」整段换成「请求失败」，
+    // 用户会再点一次执行。
+    if (!done) return;
+    try { await loadPlans(); } catch (e) { out.textContent += "\n（计划列表刷新失败：" + e.message + "，按 5 重进本页）"; }
   }
 
   // ── 设置 ──

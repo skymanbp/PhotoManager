@@ -69,6 +69,8 @@ window.pmArchive = function (u) {
       }
       if (!total) grid.appendChild(el("div", "muted", "没有候选：成片里的 jpg 都已在相册（或主库还没有成片）。"));
       renderConvert(c.nonJpg);
+      // 索引里损坏跳过的快照行：与 CLI 一样说出来，不吞（步 9 minor）
+      if ((c.warnings || []).length) note("warn", "⚠ 索引快照损坏已跳过（候选可能不全，先在终端 pm scan）：\n" + c.warnings.join("\n"));
       updateButtons();
       for (const [p, ph] of cards) {
         if (stale("archive", gen)) return;

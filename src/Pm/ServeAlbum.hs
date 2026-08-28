@@ -10,6 +10,7 @@
 module Pm.ServeAlbum (routeAlbum, planPost) where
 
 import Control.Concurrent.MVar (withMVar)
+import Control.Exception (IOException, try)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
 import Data.IORef (modifyIORef', newIORef, readIORef)
@@ -78,11 +79,15 @@ planPost env req jsonR err what check
   | otherwise = withJsonBody req err $ \q -> case check q of
       Left m -> err status400 m
       Right run -> do
-        -- 工作流 F051/F078：交代清单与中止说明随 log 回页面（stdout 已静音）
+        -- 工作流 F051/F078：交代清单与中止说明随 log 回页面（stdout 已静音）。
+        -- 入口抛出的 IOException（索引读到一半被占、.pm 不可写）→ 500 带原因与
+        -- 已有的交代行，而不是 warp 的空 500（同 sort/plan 的旧例）。
         logRef <- newIORef []
-        (code, mpid) <- run (\l -> modifyIORef' logRef (l :))
+        r <- try (run (\l -> modifyIORef' logRef (l :))) :: IO (Either IOException (Int, Maybe Text))
         logs <- reverse <$> readIORef logRef
-        jsonR status200 [] (object ["code" .= code, "planId" .= mpid, "log" .= logs])
+        case r of
+          Left ex -> jsonR status500 [] (object ["error" .= (what <> "中断: " <> show ex), "log" .= logs])
+          Right (code, mpid) -> jsonR status200 [] (object ["code" .= code, "planId" .= mpid, "log" .= logs])
 
 -- | 'AlbumCandidates' 的线上形状（同 'Pm.Serve.surveyJson' 的理由：内核层不认识
 -- aeson，线上形状是 API 的事）。@rel@ 就是 @pm album add@ \/ add-plan 要的参数，

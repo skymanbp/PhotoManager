@@ -2,9 +2,10 @@
 
 -- | @pm serve@ 的会话环境（P8-A 自 "Pm.Serve" 拆出，代码逐字搬移：Serve.hs
 -- 触 750 行预算，而 P8 要往里加端点）。这里只有**被多个端点模块共用**的会话
--- 状态：'ServeEnv'（配置快照、token、授权位、两把进程内互斥）、配置快照的
--- 读与作废、以及端点应答的两个类型别名。路由与其余端点仍在 "Pm.Serve"，
--- vault 端点在 "Pm.ServeVault"，传输原语在 "Pm.ServeGuard"。
+-- 状态：'ServeEnv'（配置快照、token、授权位、四把进程内互斥：vault 缓存 /
+-- apply / convert / suggest）、配置快照的读与作废、以及端点应答的两个类型别名。
+-- 路由与其余端点仍在 "Pm.Serve"，vault 端点在 "Pm.ServeVault"，归档页端点在
+-- "Pm.ServeAlbum"，AI 建议在 "Pm.ServeAi"，传输原语在 "Pm.ServeGuard"。
 module Pm.ServeEnv
   ( ServeEnv (..)
   , newServeEnv

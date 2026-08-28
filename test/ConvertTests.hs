@@ -12,12 +12,12 @@ import Control.Monad (forM_)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, sort)
 import qualified Data.Text as T
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute, removeFile)
 import System.Environment (setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
-import System.Process (readProcessWithExitCode)
+import System.Process (readCreateProcess, readProcessWithExitCode, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -38,6 +38,7 @@ convertTests =
     [ testCase "参数闸：空 / 缺索引 / 已是 jpg / RAW / 层外 / 绝对与 .. / 同批撞名 / PM_PYTHON 不存在 → exit 2，.pm/derived 不出现" caseRefusals
     , testCase "端到端：16 位 tif→L≈117、RGBA→白底、RGB 原样；--also-album 同组（成片项组头）；复用派生件 / --redo 重派生；I7 成片待裁决 → 相册项不执行；坏源不出计划；源字节不动" caseE2E
     , testCase "doctor：DERIVED-STALE/ORPHAN/TMP Warn、PENDING Info；--repair 只删前三种、留 pending" caseDoctorDerived
+    , testCase "步 9 派生件写纪律：tmp 名被库外 hardlink 占住 → 清掉重建、库外字节不动；终名是 symlink / 库外 hardlink → 拒绝不复用；同 sha 同名两源 → 先拒；PM_CONVERT_TIMEOUT 到点 → 杀树 exit 2、无 .tmp" caseDerivedGuards
     ]
 
 -- ─── 夹具：主库 + 相册层 + 闭包式 runner（索引由各用例按需重做） ───────────────
@@ -202,6 +203,57 @@ caseE2E = withLib $ \root run -> do
   doesFileExist (e1 </> "bad.jpg") >>= (@?= False)
   leftovers <- derivedFiles root
   assertBool ("不应留 .tmp: " <> show leftovers) (not (any ((".tmp" `isInfixOf`)) leftovers))
+
+-- | 步 9 C0\/C2\/C3\/C4\/C5 的红绿配对：派生件 tmp 与终名的链接占名、同派生件的
+-- 两条源、子进程超时。链接用 cmd 内建 mklink（同 HandleGuardTests 夹具）。
+caseDerivedGuards :: IO ()
+caseDerivedGuards = withLib $ \root run -> do
+  let e1 = root </> "成片" </> "E1"
+      alb = root </> "相册"
+      outside = takeDirectory root </> "outside"
+      q s = "\"" <> s <> "\""
+  mapM_ (createDirectoryIfMissing True) [e1, outside]
+  writeRgbPng (e1 </> "rgb.png")
+  sha <- T.unpack <$> sha256File (e1 </> "rgb.png")
+  let ddir = root </> ".pm" </> "derived" </> sha
+  createDirectoryIfMissing True ddir
+  writeF (outside </> "bait.bin") "BAIT-BYTES"
+  -- ① tmp 名被库外文件的 hardlink 占住：pm 先清残留（只减一个目录项）再 CREATE_NEW，
+  --    python 写的是 pm 自建的普通文件；库外字节不动、派生成功
+  _ <- readCreateProcess (shell ("mklink /H " <> q (ddir </> "rgb.jpg.tmp") <> " " <> q (outside </> "bait.bin"))) ""
+  (c1, mpid1, o1) <- run False False ["成片/E1/rgb.png"]
+  assertEqual o1 0 c1
+  assertBool ("应有计划 id:\n" <> o1) (mpid1 /= Nothing)
+  readFile (outside </> "bait.bin") >>= (@?= "BAIT-BYTES")
+  doesFileExist (ddir </> "rgb.jpg.tmp") >>= (@?= False)
+  -- ② 终名是指向库外的 symlink → 不复用、不派生、exit 2；库外字节不动
+  removeFile (ddir </> "rgb.jpg")
+  _ <- readCreateProcess (shell ("mklink " <> q (ddir </> "rgb.jpg") <> " " <> q (outside </> "bait.bin"))) ""
+  (c2, mpid2, o2) <- run False False ["成片/E1/rgb.png"]
+  (c2, mpid2) @?= (2, Nothing)
+  assertBool o2 ("链接" `isInfixOf` o2)
+  readFile (outside </> "bait.bin") >>= (@?= "BAIT-BYTES")
+  removeFile (ddir </> "rgb.jpg")
+  -- ③ 终名是库外文件的 hardlink → 复用被单链接判定拒绝（库外字节不进计划）
+  _ <- readCreateProcess (shell ("mklink /H " <> q (ddir </> "rgb.jpg") <> " " <> q (outside </> "bait.bin"))) ""
+  (c3, mpid3, o3) <- run False False ["成片/E1/rgb.png"]
+  (c3, mpid3) @?= (2, Nothing)
+  assertBool o3 ("hardlink" `isInfixOf` o3)
+  removeFile (ddir </> "rgb.jpg")
+  -- ④ 同 sha 同名的两条源（成片 + 相册）：派生件只有一份 → 先于任何转换拒绝
+  copyFile (e1 </> "rgb.png") (alb </> "rgb.png")
+  (c4, mpid4, o4) <- run False False ["成片/E1/rgb.png", "相册/rgb.png"]
+  (c4, mpid4) @?= (2, Nothing)
+  assertBool o4 ("只转一份" `isInfixOf` o4)
+  removeFile (alb </> "rgb.png")
+  -- ⑤ 超时：PM_PYTHON 指向睡 ~3 s 的桩、PM_CONVERT_TIMEOUT=1 → 预检就超时；exit 2、点名变量
+  slow <- makeAbsolute ("test" </> "fixtures" </> "slow-python.cmd")
+  bracket_ (setEnv "PM_PYTHON" slow >> setEnv "PM_CONVERT_TIMEOUT" "1") (unsetEnv "PM_PYTHON" >> unsetEnv "PM_CONVERT_TIMEOUT") $ do
+    (c5, mpid5, o5) <- run False False ["成片/E1/rgb.png"]
+    (c5, mpid5) @?= (2, Nothing)
+    assertBool o5 ("PM_CONVERT_TIMEOUT" `isInfixOf` o5)
+  leftovers <- derivedFiles root
+  assertBool ("不应留 .tmp: " <> show leftovers) (not (any (".tmp" `isInfixOf`) leftovers))
 
 planItems :: FilePath -> T.Text -> IO [PlanItem]
 planItems root pid = loadPlan root pid >>= either (\e -> assertFailure e >> pure []) (pure . plItems)

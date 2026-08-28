@@ -10,6 +10,7 @@ module Pm.VaultCore
   , fixedCategories
   , photoExtFold
   , pushableExt
+  , convertibleExt
   , renderVaultJson
   ) where
 
@@ -24,6 +25,8 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.FilePath (takeExtension)
+
+import Pm.Types (renderExts)
 
 -- ─── 纯核心：legacy 算法逐行复刻 ────────────────────────────────────────────
 
@@ -54,6 +57,13 @@ photoExtFold p = map toLower (takeExtension p) `elem` [".jpg", ".jpeg", ".png"]
 -- | push 写路径只收 jpg\/jpeg（vault 硬规则 3；.png = UNPUSHABLE）。
 pushableExt :: FilePath -> Bool
 pushableExt p = map toLower (takeExtension p) `elem` [".jpg", ".jpeg"]
+
+-- | 转换对象（P8-C2；步 9 簇 C）：'renderExts' 里 jpg 之外的已渲染位图。RAW
+-- 与 jpg 都不是。归档页「非 jpg」栏（'Pm.Album.albumCandidates'）与
+-- @pm convert@ 的准入（'Pm.Convert.runConvertTo'）共用这一个谓词——此前两处
+-- 各写各的，候选栏把 RAW 列成「非 jpg」而 convert 拒收 RAW，勾上一张就整批中止。
+convertibleExt :: FilePath -> Bool
+convertibleExt p = not (pushableExt p) && map toLower (takeExtension p) `elem` renderExts
 
 -- | 核心 diff。输入：源侧 名→sha；vault 侧按类目次序的 (类目, 名→sha)。
 -- 次序契约与 legacy 逐点对应：new\/missing 候选按名字典序（Map 键序 =

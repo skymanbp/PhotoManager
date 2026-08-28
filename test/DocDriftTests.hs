@@ -26,6 +26,7 @@ docDriftTests =
     "P7-J 文档—代码漂移哨兵"
     [ testCase "字节出口清点：deleteBoundAt 引用模块集合固定；Exec 头注不再写 no delete call anywhere" caseByteExitCensus
     , testCase "配置锁清点：withConfigLock 调用模块集合 = DESIGN-GUI 声明的四条读改写路径" caseConfigLockCensus
+    , testCase "隔离产地清点（步 9 C10）：引用 OpQuarantine 的模块集合固定；DESIGN §2 I2 逐一点名每个产地" caseQuarantineCensus
     , testCase "--json 清点：全 CLI 只有 vault status 与 vault notes 两处 long \"json\"（P8-C）" caseJsonFlagCensus
     , testCase "GUI 页序：DESIGN-GUI ①—⑦ 的顺序与 index.html 的 nav 次序一致（P8-D 第七页归档）" caseGuiNavOrder
     , testCase "路由清点（P8-D）：src/Pm/Serve*.hs 的 (METHOD, [api,…]) 元组集合 = DESIGN-GUI 反引号里的 `METHOD /api/…` 集合" caseRouteRoster
@@ -106,6 +107,22 @@ caseConfigLockCensus = do
   refs @?= ["BackupCmd.hs", "Commands.hs", "ConfigEdit.hs", "Serve.hs"]
   design <- readUtf8 ("docs" </> "DESIGN-GUI.md")
   assertBool "DESIGN-GUI 的「四条读改写路径」声明还在" ("**四条**读改写路径共用" `isInfixOf` design)
+
+-- | DESIGN.md §2 I2 此前写「仅三条路径可产生」quarantine，代码里构造 'OpQuarantine'
+-- 的已有七处（clean \/ undo \/ supersede-resolve \/ dedupe \/ doctor C5 \/ diff 的备份盘
+-- 更新 \/ 执行期回滚位移）。这里钉住**引用**模块集合（构造与匹配不作词法区分：
+-- 新模块一碰 OpQuarantine 就转红，逼着回答「它是不是新产地」），并要求 I2 行
+-- 逐一点名每个产地。
+caseQuarantineCensus :: IO ()
+caseQuarantineCensus = do
+  refs <- refModules "OpQuarantine" ["Op.hs"]
+  refs @?= ["Apply.hs", "Clean.hs", "Cli.hs", "Dedupe.hs", "Diff.hs", "Doctor.hs", "Exec.hs", "ExecTypes.hs", "Undo.hs"]
+  design <- readUtf8 ("docs" </> "DESIGN.md")
+  let i2 = maybe "" (takeWhile (/= '\n')) (breakOn "| I2 |" design)
+  assertBool "DESIGN §2 应有 I2 行" (not (null i2))
+  mapM_
+    (\p -> assertBool ("I2 行应点名产地 " <> p) (p `isInfixOf` i2))
+    ["`pm clean staging`", "`pm undo`", "`pm resolve --keep src`", "`pm dedupe`", "`pm doctor --repair`", "`pm diff`", "`rollback-displaced:`", "caseQuarantineCensus"]
 
 -- | DESIGN.md「`--json` 只有 `pm vault status` 与 `pm vault notes` 两个」
 -- （P8-C 起：两个都是技能消费的机器可读面，其余命令仍是人读的）。

@@ -103,13 +103,13 @@
   `PM_SUGGEST_TIMEOUT` 秒超时、缺省 180），只把模型答的 JSON 规范化后交回——pm 不据此写
   任何东西，建议落不落盘由用户在页面上点「保存决定」/「生成计划」决定。
   `kind:"classify"`（≤ 20 个相册文件名 → 类目 / 地点 / 坐标 / 来源 / 依据 / 标题；未请求的
-  名字丢弃进 `dropped`，类目不在三类 → null，坐标经 `parseCoordinates` 规范）；`kind:"place"`
+  名字丢弃、模型没答的名字列进 `dropped`，类目不在三类 → null，坐标经 `parseCoordinates` 规范）；`kind:"place"`
   （`src` + `gap` → serve 自己重跑 `surveySort`，不信任客户端的分段；每段 `evenSample 5`
   取首/中/尾均匀 5 张 jpg，> 12 段 400，一张 jpg 也没有的段不交给模型、答 `place:null`）。
-  同一时刻只跑一个（`seSuggestLock` 满 → 409）；找不到 claude / 超时 / 子进程 IO 失败 →
-  409，模型退出非零或答非 JSON → 502 带 `raw`。每次调用花的是用户自己 Claude 账号的钱
+  同一时刻只跑一个（`seSuggestLock` 满 → 409）；找不到 claude / 超时（`Pm.Subprocess.runTool`：`taskkill /T /F` 杀整棵进程树）/ 子进程 IO 失败 →
+  409，模型答非 JSON → 502 带 `raw`，退出非零或信封 `is_error:true` → 502 带原文摘要。每次调用花的是用户自己 Claude 账号的钱
   （实测每次 ≈ $0.7–1.3，系统提示缓存写入占大头），响应带 `cost`、页面文案写明。测试用
-  `test/fixtures/fake-claude.cmd` 顶替（`PM_FAKE_CLAUDE` 五种模式）。
+  `test/fixtures/fake-claude.cmd` 顶替（`PM_FAKE_CLAUDE` 六种模式）。
 - **GUI 拉起时静音 stdout（P5-E）**：`pm serve --exit-on-stdin-eof` 打完
   announce 那一行之后把进程 stdout 引到空设备。`pm ui` 只读那一行就丢掉
   BufReader，此后管道无人排空；库层任何一行 `putStrLn` 都会往里灌，填满

@@ -18,6 +18,7 @@ import qualified Data.Text as T
 import Network.HTTP.Types
 import Network.Wai
 
+import Pm.Album (albumTop)
 import Pm.Config (Config (..), requireWritable)
 import Pm.Plan (Plan (..), savePlan)
 import Pm.ServeEnv
@@ -51,17 +52,23 @@ routeVault cfg env req jsonR err corsHdrs respond = case (requestMethod req, pat
     er <- vaultReport
     case er of
       Left (msg, code) -> err (if code == 2 then status404 else status500) msg
-      Right r ->
+      Right r -> do
+        let unpushableNames = [n | (n, loc) <- vrUnpushable r, loc == albumTop]
         jsonR
           status200
           []
           ( object
               [ "categories" .= fixedCategories
-              , "new"
+              , -- 步 9 C8：相册里的非 jpg（.png）是 UNPUSHABLE——status 可见、push 写路径拒收。
+                -- 此前它混在 new 里被渲染成可指派的卡，勾一张就让整批 push-plan / AI 建议 400。
+                -- 现在从 new 剔除、单列 unpushable，页面只读展示并指到归档页的转换。
+                "new"
                   .= [ object ["name" .= n, "sha" .= fmap enSha me, "size" .= fmap enSize me]
                      | n <- newActive r
+                     , n `notElem` unpushableNames
                      , let me = Map.lookup n (vrSrcMeta r)
                      ]
+              , "unpushable" .= [object ["name" .= n, "size" .= fmap enSize (Map.lookup n (vrSrcMeta r))] | n <- unpushableNames]
               , -- 第九态（P4-7）：已决定「暂不同步」的 NEW。单列出来，页面把
                 -- 决定回显成第四个按钮，随时能改回某个类目。
                 "held"

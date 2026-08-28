@@ -27,7 +27,7 @@
     "publisher": "skymanbp",
     "copyright": "Copyright 2026 skymanbp — Apache-2.0",
     "shortDescription": "pm — 三层照片库管理器",
-    "longDescription": "PhotoManager 的桌面前端：库状态可视化（分层 / vault 同步差异 / 备份盘）、相册→vault 分类推送（生成计划）或标记「暂不同步」（直接记一条本地决定，不碰照片）、计划查看。动照片字节的操作一律两段式，执行仍在终端。",
+    "longDescription": "PhotoManager 的桌面前端，七页：状态（分层 / vault 同步差异 / 备份盘）、整理新照片、归档（暂存区归档 / 成片→相册 / 非 jpg 转换）、分类推送（类目 + 照片记录，AI 建议只预填）、计划（两次点击确认执行，与 pm apply 同源、可 undo）、设置、上手。动照片字节的操作一律两段式；git 只生成命令不执行。",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

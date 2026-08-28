@@ -141,8 +141,8 @@ tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换�
                                           → 相册\<stem>.jpg（--also-album，或源本就在相册）
 ```
 
-- 源：`pm convert <库内相对路径…>`，只接受成片或相册下的 `KindPhoto ∧ ¬pushableExt`
-  条目（19.4 的 `nonJpg` 集合）。原 tif/png **原地不动**（I2：pm 没有删除原语；
+- 源：`pm convert <库内相对路径…>`，只接受成片或相册下的 `convertibleExt` 条目（`renderExts` 里 jpg 之外的已渲染位图；
+  步 9 簇 C 起与 19.4 的 `nonJpg` 栏是**同一个**谓词，RAW 两边都不列）。原 tif/png **原地不动**（I2：pm 没有删除原语；
   用户要清就自己清或走 `pm dedupe`——它们不是精确重复，不会被误报）。
   实现补两条闸（as-built）：RAW（`rawExts`）明确拒绝——它不是已渲染位图，不是
   转换对象；同批里转换后落到同一 `<stem>.jpg`（case-fold，成片同事件夹或相册）
@@ -163,6 +163,17 @@ tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换�
   文件——pm 那句 tmp 清理因此没有可注入的判红形态，REVIEW-LOG 登记为残余）。
   任一源转换失败 → 本轮不出计划、已派生的下次复用（脚本会打印每条 ⇢ 已派生 / = 复用）。
 - 幂等：`.pm\derived\<sha>\<stem>.jpg` 已存在 → 复用并说明（`--redo` 强制重派生）。
+- 第一段写纪律（步 9 第一方全量审 C0/C2/C3/C4/C5，as-built）：派生件的 tmp 与终名以**完整相对路径**
+  各过一次 `resolveUnder`，只用返回的路径；tmp 由 pm 先 `openFreshBinary`（CREATE_NEW，残留先经
+  `deleteBoundAt` 清）独占创建再交给 python 写；python 退出后复验 tmp 仍是普通名，经 `openStateRead`
+  （单链接）的同一句柄测 sha，再 `moveBoundNoReplace` 落位、落位后 size 复核；复用旧派生件同样只认
+  普通名 + 单链接（终名是 symlink / 库外 hardlink → 拒绝，不派生也不复用）；整段「派生 → 落位 →
+  测 sha」在 `withRootLock` 内（I10）。同 sha 同 stem 的两条源共用一份派生件——先于任何转换拒绝
+  （此前 `convertPlan` 的目标表按伪条目路径键入，第二条会静默吞掉第一条）。python 走
+  `Pm.Subprocess.runTool`（与 claude 同一壳）：`PM_CONVERT_TIMEOUT` 秒整体超时（缺省 600），到点
+  `taskkill /T /F` 杀整棵进程树；`scanDerived` 的基目录本身是链接 → Left（doctor 报 Bad、不删）。
+  用例 `caseDerivedGuards`（hardlink 占 tmp / symlink 与 hardlink 占终名 / 同源 / 超时，夹具
+  `test/fixtures/slow-python.cmd`）。
 
 ### 20.2 doctor：`DERIVED-STALE`
 
@@ -235,7 +246,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 - 调用形：`claude -p --output-format json --permission-mode plan --max-turns 8 <提示>`，
   **cwd = 主库 root**（分类）或 **源目录**（地点），让 Read 工具落在工作目录内；
   `--permission-mode plan` 只放行只读工具——模型在构造上写不了任何东西。提示里给
-  **绝对路径清单**让模型 Read 看图。整体超时 180 s（`PM_SUGGEST_TIMEOUT` 可调，测试用 1），超时杀进程、409。以上旗标
+  **绝对路径清单**让模型 Read 看图。整体超时 180 s（`PM_SUGGEST_TIMEOUT` 可调，测试用 1），超时 `taskkill /T /F` 杀整棵进程树（`Pm.Subprocess.runTool`，与转换的 python 同一壳）、409；信封 `is_error:true` → 502。以上旗标
   已用真实 `claude` 2.1.243 探针核实（cwd 内 Read 图片免提示、`permission_denials: []`；
   `--output-format json` 信封含 `result` / `is_error` / `total_cost_usd`）。as-built：提示经 stdin
   交给子进程（三根管道 utf8，不走命令行长度限制）；实测每次 ≈ $0.7–1.3（系统提示缓存写入
@@ -267,7 +278,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 ### 22.4 测试
 
 `PM_CLAUDE_EXE` 指向测试夹具（`test/fixtures/fake-claude.cmd` → 打印预置 JSON /
-打印垃圾 / 退出非零 / 睡到超时 / 地点预置）五种（`PM_FAKE_CLAUDE`）；as-built 落在
+打印垃圾 / 退出非零 / 睡到超时 / 地点预置 / `is_error:true`）六种（`PM_FAKE_CLAUDE`）；as-built 落在
 `test/ServeP8Tests.hs` 6 例：三个计划端点各一（只读 403 + 写域断言 + 计划可装回）、classify 一例
 含五道闸（只读级仍放行、413、400 ×6、409 锁 / 缺 claude / 超时、502 垃圾 / 退出非零）、place 一例
 （serve 自己重跑分段、围栏 JSON、只有 RAW 的段答 null、> 12 段 400）、纯函数一例；契约：建议
@@ -348,8 +359,8 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | I7 | 相册 ⊆ 成片：import 的相册项与成片项同组、成片在前；album add / convert 源就在成片 | doctor 判定侧仍未实现（§10.3 第 2 项，登记不变） |
 | I8 | `vault status --json` 的六键与 held/held_stale **零改动**；不加第十态 | D′ 的直接收益 |
 | I9 | pm 仍不执行 git；`pm vault notes` 只读反查 photos.json | — |
-| I10/I11 | notes 事务同 holds；derived 目录经 `ensurePmSubdir`；三条新写路径都过 `requireWritable` | — |
-| 新增边界 | `pm serve` 会拉起两种外部进程：`python`（转换）与 `claude`（建议） | 都由环境变量可覆盖、都有预检、都不写照片：python 只写 `.pm\derived\*.tmp`，claude 在 plan 权限模式下只读 |
+| I10/I11 | notes 事务同 holds；derived 目录经 `ensurePmSubdir`，派生件 tmp/终名再各过完整路径 `resolveUnder` + CREATE_NEW 独占创建 + 根锁（§20.1 写纪律）；三条新写路径都过 `requireWritable` | — |
+| 新增边界 | `pm serve` 会拉起两种外部进程：`python`（转换）与 `claude`（建议） | 都由环境变量可覆盖、都有预检、都不写照片：python 只往 pm 先独占创建的 `.pm\derived\*.tmp` 里写，claude 在 plan 权限模式下只读；两者同走 `Pm.Subprocess.runTool`（UTF-8 管道、整体超时到点杀整棵进程树：`PM_CONVERT_TIMEOUT` 600 / `PM_SUGGEST_TIMEOUT` 180） |
 
 ---
 
@@ -359,9 +370,10 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 |---|---|---|
 | P8-B | §19 | `test/AlbumTests.hs`（纯函数 + 沙盒库端到端）；突变：同批重名闸拆掉→红、异 sha 不出 NEEDS-DECISION→红、非 jpg 入相册→红、组耦合拆掉→红 |
 | P8-C | §21 | `test/VaultNoteTests.hs`；突变：坐标越界放行→红、sha 不新鲜→红、事务不取锁→红 |
-| P8-C2 | §20 | `test/ConvertTests.hs` 3 例（参数闸 / 真 Pillow 端到端：16 位缩放、alpha 白底、`--also-album` 同组、`--redo`、I7 耦合、坏源 / doctor 四态 + `--repair`）；突变 m1–m6 见 REVIEW-LOG。原拟「`PM_PYTHON` 指向夹具脚本」一例改为「指向不存在 → 拒绝」：真 Pillow 已在端到端里覆盖，夹具脚本只会再抄一遍转换器接口 |
+| P8-C2 | §20 | `test/ConvertTests.hs` 4 例（参数闸 / 真 Pillow 端到端：16 位缩放、alpha 白底、`--also-album` 同组、`--redo`、I7 耦合、坏源 / doctor 四态 + `--repair`）；突变 m1–m6 见 REVIEW-LOG。原拟「`PM_PYTHON` 指向夹具脚本」一例改为「指向不存在 → 拒绝」：真 Pillow 已在端到端里覆盖，夹具脚本只会再抄一遍转换器接口 |
 | P8-D | §22–23 | `test/ServeP8Tests.hs` 6 例（三个计划端点 / classify 五道闸 / place / 纯函数）+ `caseRouteRoster` + `caseGuiNavOrder` ①—⑦ + `node --check`；突变见 REVIEW-LOG |
 | P8-E | §24 | 档案 vault commit（不 push） |
+| 步 9 修复批 | §20.1 写纪律 · §22 · §25 | 第一方全量审（7 视角工作流，11 项确认 / 6 项否证）聚 A–H 八簇上游修；新哨兵 `caseDerivedGuards` / `caseQuarantineCensus`，AlbumTests RAW 入成片、`is_error` 502、`/api/vault/new` 单列 `unpushable`；突变见 REVIEW-LOG |
 | 门禁 | 第一方全量审 → Opus 轮到 FINAL GO → 突变配对 → `caseLineBudget` → leakscan | 记 REVIEW-LOG |
 | 提醒 | 装新构建 → 用户 GUI 审查 + **首次真实数据跑**（`pm import --also-album` / `pm album add` / `pm convert` 那 1 张 tif / GUI 分类 → 首次建 vault root）——每一步动真实照片前 AskUserQuestion 摆清单 | 用户裁定 |
 | 文档 | README（含七页、新命令、AI 与转换段）、DESIGN*、DESIGN-COMMANDS §5 命令表 + §11 表、HISTORY、本文回改 | DocDrift 哨兵 |

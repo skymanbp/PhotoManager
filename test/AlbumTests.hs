@@ -110,8 +110,11 @@ caseCandidates = do
       cAlb = mkE ("相册" </> "c.jpg") "s3x"
       t = mkE ("成片" </> "26-06-R66" </> "t.tif") "s4"
       p = mkE ("相册" </> "p.png") "s5"
-      raw = mkE ("Raw" </> "2026" </> "26-06-R66-Raw" </> "r.ARW") "s6"
-      ac = albumCandidates (mkCat [a, b, bAlb, c, cAlb, t, p, raw])
+      -- 步 9 簇 C：RAW 就放在成片 / 相册**之内**（此前夹具把它放在 Raw\ 下，过滤靠
+      -- 层级而不是扩展名，测不到「非 jpg 栏把 RAW 列进去」那条缺口）
+      raw = mkE ("成片" </> "26-06-R66" </> "r.ARW") "s6"
+      rawAlb = mkE ("相册" </> "q.DNG") "s7"
+      ac = albumCandidates (mkCat [a, b, bAlb, c, cAlb, t, p, raw, rawAlb])
   acEvents ac @?= [("25-01-Atlanta", [(c, True)]), ("26-06-R66", [(a, False)])]
   map enPath (acNonJpg ac) @?= [enPath t, enPath p]
 

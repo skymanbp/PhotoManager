@@ -12,6 +12,7 @@ window.pmVault = function (u) {
   let vaultDrift = 0; // 没有 NEW 但有 DRIFT 时，也能出纯裁决计划
   let heldInitial = new Set(); // 打开这一页时盘上已有的「暂不同步」决定
   let submitting = false;      // 提交期间冻结选择：两步必须看同一份快照
+  let suggesting = false;      // AI 建议进行中：不提交、不再发第二次
   const HOLD = "__hold__";     // 第四个按钮的哨兵值——它不是 vault 类目
   const assign = new Map(); // name -> category | HOLD
   // P8-D 照片记录（DESIGN-P8 §21，用户裁定 R6 (b)）：每张卡三格（地点 / 坐标 / 标题），
@@ -39,10 +40,11 @@ window.pmVault = function (u) {
       count: now.size,
     };
   }
-  // 记录的当前值 = 三格 + 已选类目（「暂不同步」不是类目）
+  // 记录的当前值 = 三格 + 已选类目。「暂不同步」不是类目：按下它时沿用盘上记录里的
+  // 类目（有就留着）——暂不同步是「先不推」，不是「把上次确认过的记录抹掉」。
   function noteNow(name) {
     const n = notes.get(name), cat = assign.get(name);
-    const o = { category: cat && cat !== HOLD ? cat : null };
+    const o = { category: cat && cat !== HOLD ? cat : (n.initial ? n.initial.category : null) };
     for (const k of NOTE_KEYS) o[k] = n.inputs[k].value.trim() || null;
     return o;
   }
@@ -106,17 +108,22 @@ window.pmVault = function (u) {
         const ph = el("div", "ph", "加载中…"); card.appendChild(ph);
         const body = el("div", "body"); body.appendChild(el("div", "name", e.name)); body.appendChild(el("div", "meta", e.size != null ? mib(e.size) : ""));
         const seg = el("div", "seg");
+        // 盘上记录里已确认的类目也回显成已选（步 9 C9）：此前只回显三格不回显类目，
+        // 一张没再碰的卡在 noteOps 里会被算成「类目改成了 null」而清掉记录。
+        // 「暂不同步」优先：它是更晚、更明确的决定。
+        const ini = noteMap.get(e.name);
+        if (ini && ini.category && !assign.has(e.name)) assign.set(e.name, ini.category);
         // 三个 vault 类目 + 第四个「暂不同步」：后者不是 vault 目录，只是主库里
         // 的一条本地决定，随时能改回类目。
         for (const c of meta.categories.concat([HOLD])) {
           const b = el("button", c === HOLD ? "hold" : null, c === HOLD ? "暂不同步" : c);
-          b.onclick = () => { if (submitting) return; assign.set(e.name, c); for (const x of seg.children) x.classList.toggle("on", x === b); card.classList.add("done"); updateProgress(items.length); };
+          b.onclick = () => { if (submitting || suggesting) return; assign.set(e.name, c); for (const x of seg.children) x.classList.toggle("on", x === b); card.classList.add("done"); updateProgress(items.length); };
           if (assign.get(e.name) === c) { b.classList.add("on"); card.classList.add("done"); }
           seg.appendChild(b);
         }
         body.appendChild(seg);
         // 照片记录三格 + 依据行（AI 的 basis / 盘上记录的状态）
-        const nt = el("div", "note"), inputs = {}, ini = noteMap.get(e.name);
+        const nt = el("div", "note"), inputs = {};
         for (const [k, phText] of [["location", "地点（如 Hallstatt）"], ["coordinates", "坐标 lat, lng"], ["title", "标题"]]) {
           const inp = document.createElement("input"); inp.type = "text"; inp.placeholder = phText; inp.spellcheck = false;
           inp.value = ini && ini[k] != null ? String(ini[k]) : "";
@@ -129,6 +136,15 @@ window.pmVault = function (u) {
         if (ini) card.classList.add("noted");
         card.appendChild(body); grid.appendChild(card);
         cards.push([e, ph]);
+      }
+      // 相册里的非 jpg（UNPUSHABLE）：只读展示，不进 notes / assign（步 9 C8）——
+      // 它推不上 vault，勾一张会让整批 push-plan 400；转成 jpg 在「归档」页。
+      for (const e of meta.unpushable || []) {
+        const card = el("div", "gcard unpushable");
+        card.appendChild(el("div", "ph", "非 jpg"));
+        const body = el("div", "body"); body.appendChild(el("div", "name", e.name));
+        body.appendChild(el("div", "meta", (e.size != null ? mib(e.size) + " · " : "") + "相册只收 jpg：推不上 vault。到「归档」页第三张卡转成 jpg 再来。"));
+        card.appendChild(body); grid.appendChild(card);
       }
       updateProgress(items.length);
       // 顺序拉图（每张原图可能几十 MB），缩小后再挂上去
@@ -153,10 +169,12 @@ window.pmVault = function (u) {
   // AI 建议（DESIGN-P8 §22）：至多 20 张未标「暂不同步」的卡；类目只在按钮上描边
   // （.ai ≠ .on，不代点），三格只填空着的；每次点击都是显式同意，花的是用户自己的账号。
   async function suggest() {
+    if (submitting || suggesting) return; // 一次一个：提交中不发建议，建议中不提交（页面级与 serve 的 409 对齐）
     const out = $("#plan-result");
     const names = [...notes.keys()].filter((n) => assign.get(n) !== HOLD).slice(0, 20);
     if (!names.length) { out.className = "banner warn"; out.textContent = "没有可建议的照片（这一页没有 NEW，或都已标「暂不同步」）。"; return; }
     const btn = $("#btn-vault-ai"), label = btn.textContent;
+    suggesting = true; $("#btn-plan").disabled = true;
     btn.disabled = true; btn.textContent = "AI 看图中…（claude -p，最长 3 分钟）";
     try {
       const r = await post("/api/suggest", { kind: "classify", names });
@@ -176,9 +194,10 @@ window.pmVault = function (u) {
       out.className = "banner ok";
       out.textContent = `AI 建议已到：${(j.items || []).length} 张有回答（预填 ${filled} 格；未回答 ${(j.dropped || []).length} 张）——只是预填：类目仍要你点，记录随「保存决定并生成推送计划」写入。` + (j.cost != null ? `\n本次约 $${Number(j.cost).toFixed(2)}（你的 Claude 账号）。` : "");
     } catch (e) { out.className = "banner bad"; out.textContent = "请求失败：" + e.message; }
-    finally { btn.disabled = false; btn.textContent = label; }
+    finally { suggesting = false; btn.disabled = false; btn.textContent = label; updateProgress(notes.size); }
   }
   async function makePlan() {
+    if (submitting || suggesting) return;
     const btn = $("#btn-plan"); btn.disabled = true;
     const out = $("#plan-result");
     // 新一轮开始 = 上一轮的结论作废，只有这里清横幅（loadVault 不再碰它）。
@@ -199,8 +218,10 @@ window.pmVault = function (u) {
         // 换成一句 "Unexpected token"，用户看不到哪一条决定不合法。
         const jh = await rh.json().catch(() => ({}));
         if (!rh.ok) { out.className = "banner bad"; out.textContent = "决定未保存：" + (jh.error || ("HTTP " + rh.status)) + bodyLines(jh); btn.disabled = false; return; }
-        // 已落盘 → 立刻推进 baseline：第二步失败后重试不该再撤一次已撤的决定
-        heldInitial = new Set(jh.held || []);
+        // 已落盘 → 立刻推进 baseline：第二步失败后重试不该再撤一次已撤的决定。
+        // 只收**这一页有的**名字（步 9 C6）：响应里的 held 是整个文件，含别的
+        // 页面 / 终端记下、本页根本没渲染的名字；照单全收会让重试把它们全 unhold。
+        heldInitial = new Set((jh.held || []).filter((n) => notes.has(n)));
         lines.push(`已记下决定：暂不同步 +${ops.hold.length} / 恢复 ${ops.unhold.length}（名单共 ${jh.count} 条；只写主库 .pm，vault 与照片没动）`);
       }
       // 2) 照片记录的差集（只写主库 .pm/vault-notes.json；photos.json 不在 pm 写域）
@@ -234,5 +255,5 @@ window.pmVault = function (u) {
     finally { submitting = false; }
   }
   // busy：提交期间 app.js 的导航按钮与数字键不切页（loadVault 会清空刚推进的 baseline）
-  return { loadVault, makePlan, suggest, shrink, busy: () => submitting };
+  return { loadVault, makePlan, suggest, shrink, busy: () => submitting || suggesting };
 };

@@ -9,6 +9,7 @@ module Pm.Types
   , Catalog (..)
   , classifyExt
   , rawExts
+  , renderExts
   , entryMap
   ) where
 

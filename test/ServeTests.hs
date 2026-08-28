@@ -395,6 +395,8 @@ caseServeVaultNew = withSystemTempDirectory "pm-serve" $ \dir -> do
     r0 <- getReq "/api/vault/new" [] tok
     assertStatus 404 r0
   cfg <- withVault vdir cfg0
+  -- 步 9 C8：相册里的 .png 是 UNPUSHABLE——不进 new（页面别把它渲染成可指派的卡），单列 unpushable
+  BS.writeFile (root </> "相册" </> "n.png") "PNG-NOT-PUSHABLE"
   env <- mkEnv cfg
   flip runSession (serveApp env) $ do
     r <- getReq "/api/vault/new" [] tok
@@ -402,6 +404,8 @@ caseServeVaultNew = withSystemTempDirectory "pm-serve" $ \dir -> do
     liftIO' $ do
       let v = decodeBody r
       arrLen (field ["new"] v) @?= Just 1
+      arrLen (field ["unpushable"] v) @?= Just 1
+      (firstOf (field ["unpushable"] v) >>= field ["name"]) @?= Just (Aeson.String "n.png")
       arrLen (field ["categories"] v) @?= Just 3
       let first = firstOf (field ["new"] v)
       (first >>= field ["name"]) @?= Just (Aeson.String "a.jpg")

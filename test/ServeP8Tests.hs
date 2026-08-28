@@ -43,7 +43,7 @@ serveP8Tests =
     [ testCase "POST /api/import/plan：只读 403 且 .pm/plans 不出现；alsoAlbum → 相册项进计划、log 有「相册 +1」" caseImportPlan
     , testCase "GET /api/album/candidates + POST /api/album/add-plan：候选按事件夹（rel 可回传）、非 jpg 单列；坏路径 code 2 / planId null / log 交代；合法 → 计划可装回、相册未动" caseCandidatesAndAddPlan
     , testCase "POST /api/convert/plan：只读 403 且 .pm/derived 不出现；真 Pillow 转换 → 派生件落 .pm/derived、计划两项同组；坏源 code 2 不出计划" caseConvertPlan
-    , testCase "POST /api/suggest classify：只读级放行；预置回答规范化（未请求的名字丢弃、坐标规范）；400 五种；413；502 垃圾/退出非零；409 缺 claude/超时/并发；.pm 零写入" caseSuggestClassify
+    , testCase "POST /api/suggest classify：只读级放行；预置回答规范化（未请求的名字丢弃、坐标规范）；400 五种；413；502 垃圾/退出非零/is_error；409 缺 claude/超时/并发；.pm 零写入" caseSuggestClassify
     , testCase "POST /api/suggest place：serve 自己重跑分段抽样；围栏 JSON 解析；只有 RAW 的段不交给模型答 null；>12 段 400" caseSuggestPlace
     , testCase "纯函数：evenSample 首/中/尾均匀；extractJson 裸/围栏/带前后文/垃圾" casePure
     ]
@@ -233,6 +233,11 @@ caseSuggestClassify = withSystemTempDirectory "pm-serve-ai" $ \dir -> do
       Just (Aeson.String raw) -> assertBool (T.unpack raw) ("no json" `T.isInfixOf` raw)
       other -> assertFailure ("502 应带 raw: " <> show other)
   withFakeClaude "fail" $ flip runSession (serveApp envR) $ postReq "/api/suggest" (classifyBody ["a.jpg"]) >>= assertStatus 502
+  -- 退出 0 但信封 is_error:true（额度 / 登录问题）→ 502 并点名 is_error（步 9 minor）
+  withFakeClaude "iserror" $ flip runSession (serveApp envR) $ do
+    r <- postReq "/api/suggest" (classifyBody ["a.jpg"])
+    assertStatus 502 r
+    liftIO' (assertBool "应点名 is_error" ("is_error" `BS.isInfixOf` BSL.toStrict (simpleBody r)))
   -- 超时：PM_SUGGEST_TIMEOUT=1 而夹具睡 ~3 s → 409 并点名可调的环境变量（断言用 ASCII 子串）
   withFakeClaude "sleep" $ bracket_ (setEnv "PM_SUGGEST_TIMEOUT" "1") (unsetEnv "PM_SUGGEST_TIMEOUT") $
     flip runSession (serveApp envR) $ do

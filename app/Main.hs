@@ -308,8 +308,8 @@ parserInfo =
       ( command
           "status"
           ( info
-              (CmdVaultStatus <$> switch (long "json" <> help "sync_photos.py 兼容的 JSON 输出（六键值形状逐字段一致 + unpushable）"))
-              (progDesc "相册 ↔ vault 六态差异（只读；退出码 0/1/2 同 sync_photos.py，但已决定「暂不同步」的 NEW 不计入差异）")
+              (CmdVaultStatus <$> switch (long "json" <> help "sync_photos.py 兼容的 JSON 输出（六键值形状逐字段一致，另加 unpushable / unstable / held / held_stale）"))
+              (progDesc "相册 ↔ vault 差异（六态 + UNPUSHABLE / UNSTABLE / HELD；只读；退出码 0/1/2 同 sync_photos.py，但已决定「暂不同步」的 NEW 不计入差异）")
           )
           <> command
             "push"
@@ -370,12 +370,13 @@ parserInfo =
                 <*> optional (T.pack <$> strOption (long "title" <> metavar "标题" <> help "标题（≤200 字符）"))
                 <*> (T.pack <$> strOption (long "source" <> metavar "SRC" <> value "user" <> showDefault <> help "来源标签：exif|ai-high|ai-med|ai-low|user|none"))
             )
-  -- P8-C2：--repair 的删除线多了派生件（.pm/derived 里已落位 / 失源 / 半成品三态）。
+  -- P8-C2：--repair 的删除线多了派生件（.pm/derived 里已落位 / 失源 / 半成品三态）；
+  -- 帮助文本把三态说全（步 9 minor：此前漏了半成品 .tmp）。
   doctorP =
     CmdDoctor
       <$> ( DoctorOpts
               <$> switch (long "deep" <> help "全量重 hash 索引条目（慢，介质级验证）")
-              <*> switch (long "repair" <> help "应用安全闭环：补记 Done / 清自建 tmp 与已落位或失源的派生件（.pm/derived）/ 生成 C5 隔离计划")
+              <*> switch (long "repair" <> help "应用安全闭环：补记 Done / 清自建 tmp / 清 .pm/derived 里已落位、失源、半成品（.tmp）的派生件 / 生成 C5 隔离计划")
           )
       <*> backupSw
       <*> vaultSw
