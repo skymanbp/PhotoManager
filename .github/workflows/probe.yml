@@ -1,0 +1,8 @@
+name: probe
+on: [workflow_dispatch, push]
+jobs:
+  who:
+    runs-on: windows-latest
+    steps:
+      - run: whoami; whoami /priv; whoami /groups | findstr /i "admin S-1-16"
+        shell: cmd
