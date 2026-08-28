@@ -4,5 +4,5 @@ jobs:
   who:
     runs-on: windows-latest
     steps:
-      - run: whoami; whoami /priv; whoami /groups | findstr /i "admin S-1-16"
+      - run: whoami & whoami /priv & whoami /groups | findstr /i "admin S-1-16" & exit /b 0
         shell: cmd
