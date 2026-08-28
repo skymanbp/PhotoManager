@@ -35,11 +35,16 @@ module TestUtil
   , trashViewOK
   , withDenyAll
   , withDenyList
+  , disableBackupPrivileges
   ) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, bracket_, finally, throwIO, try)
 import Control.Monad (forM_, void, when)
+import Data.Word (Word32)
+import Foreign.Marshal.Alloc (alloca)
+import Foreign.Ptr (Ptr)
+import Foreign.Storable (peek)
 import System.Environment (getEnv)
 import System.Process (readCreateProcess, shell)
 import Data.Text (Text)
@@ -90,6 +95,24 @@ withDenyList p act = do
   user <- getEnv "USERNAME"
   let icacls args = () <$ readCreateProcess (shell ("icacls \"" <> p <> "\" " <> args <> " >nul")) ""
   bracket_ (icacls ("/deny \"" <> user <> "\":(RD)")) (icacls ("/remove:d \"" <> user <> "\"")) act
+
+-- | 上面两种注入的**前提**：本进程的令牌里 SeBackupPrivilege / SeRestorePrivilege
+-- 没有启用。启用着的话，pm 的探针（GetFileAttributesEx / FindFirstFile / 带
+-- FILE_FLAG_BACKUP_SEMANTICS 的 CreateFile / DeleteFile）全部绕过 DACL，注入
+-- 形同虚设——CI 抓包分支实测（2026-08-28）：GitHub windows runner 是提权管理员
+-- 令牌，MSYS2 bash 启动时把这两项启用，`stack test` 从 bash 拉起就继承「已启用」，
+-- 9 例 ACL 用例全红、其余全绿。套件启动时在自己的令牌里把两项禁用（cbits
+-- @pm_disable_backup_privileges@），与启动它的 shell 无关；普通桌面会话令牌里
+-- 根本没有这两项，调用是空操作。返回 Left 错误码只在 OpenProcessToken 之类
+-- 失败时出现。
+foreign import ccall unsafe "pm_disable_backup_privileges"
+  c_pmDisableBackupPrivileges :: Ptr Word32 -> IO Word32
+
+disableBackupPrivileges :: IO (Either Word32 ())
+disableBackupPrivileges = alloca $ \errp -> do
+  ok <- c_pmDisableBackupPrivileges errp
+  err <- peek errp
+  pure (if ok /= 0 then Right () else Left err)
 
 -- | 'trashView' 三十五轮 Either 化（枚举 fail-closed）后的测试解包：正常
 -- fixture 里枚举失败即测试失败，各用例照旧拿 TrashView 断言。

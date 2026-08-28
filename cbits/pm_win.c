@@ -83,3 +83,40 @@ DWORD pm_delete_by_handle(HANDLE h, DWORD *err)
     *err = ok ? 0 : GetLastError();
     return ok ? 1 : 0;
 }
+
+/* Test-harness precondition (CI probe branch, 2026-08-28): the ACL-injection
+ * cases (TestUtil.withDenyAll / withDenyList) assert what pm does when the OS
+ * says ACCESS_DENIED.  A process whose token holds SeBackupPrivilege /
+ * SeRestorePrivilege ENABLED never sees that: every backup-intent open
+ * (GetFileAttributesEx, FindFirstFile, DeleteFile, CreateFile with
+ * FILE_FLAG_BACKUP_SEMANTICS -- i.e. exactly pm's probes) bypasses the DACL,
+ * while a plain GENERIC_READ open is still denied.  That is what happened on
+ * the GitHub windows runner: the token is an elevated administrator's, and
+ * MSYS2 bash enables both privileges in its own token at startup, so `stack
+ * test` started from bash inherited them enabled -> 9 ACL cases red, every
+ * other case green.  The suite disables the two in its OWN token at startup,
+ * so the precondition holds regardless of which shell launched it.  A token
+ * that does not hold them at all (a normal desktop session) is the normal
+ * case: AdjustTokenPrivileges reports ERROR_NOT_ALL_ASSIGNED, nothing to do.
+ * Returns 1 on success; on failure 0 with the Win32 error in *err. */
+DWORD pm_disable_backup_privileges(DWORD *err)
+{
+    static const wchar_t *names[2] = { L"SeBackupPrivilege", L"SeRestorePrivilege" };
+    HANDLE tok;
+    DWORD ok = 1;
+    *err = 0;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
+        *err = GetLastError();
+        return 0;
+    }
+    for (int i = 0; i < 2; i++) {
+        TOKEN_PRIVILEGES tp;
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Attributes = 0; /* 0 = disabled */
+        if (!LookupPrivilegeValueW(NULL, names[i], &tp.Privileges[0].Luid)) { *err = GetLastError(); ok = 0; continue; }
+        if (!AdjustTokenPrivileges(tok, FALSE, &tp, 0, NULL, NULL)) { *err = GetLastError(); ok = 0; }
+        /* returns TRUE with ERROR_NOT_ALL_ASSIGNED when the token lacks it: fine */
+    }
+    CloseHandle(tok);
+    return ok;
+}

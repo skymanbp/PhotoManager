@@ -8,8 +8,10 @@ module Main (main) where
 
 import System.Environment (setEnv)
 import System.FilePath ((</>))
+import System.IO (hPutStrLn, stderr)
 import System.IO.Temp (withSystemTempDirectory)
 import SortTests (sortTests)
+import TestUtil (disableBackupPrivileges)
 import Test.Tasty
 import Test.Tasty.Runners (NumThreads (..))
 
@@ -40,6 +42,9 @@ import VaultTests (vaultTests)
 main :: IO ()
 main = do
   setupConsole
+  -- ACL 注入用例的前提：本进程令牌里备份/还原特权未启用（见 TestUtil.disableBackupPrivileges）。
+  -- 失败只告警不中止：注入不忠实时那 9 例会自己红，红得有说明。
+  disableBackupPrivileges >>= either (\e -> hPutStrLn stderr ("警告：禁用 SeBackup/SeRestore 特权失败（Win32 错误 " <> show e <> "），ACL 注入用例可能不忠实")) pure
   -- 配置文件位置是**机器全局**的（XDG / %APPDATA%）：任何一条真的写成功的
   -- 用例都会覆盖使用者本机的 config.toml。P4-8 开发时实测踩到过（一次突变让
   -- 写端点通过，真实配置当场被 fixture 路径覆盖）。整个测试进程指到临时文件，
