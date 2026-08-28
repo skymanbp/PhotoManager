@@ -4,32 +4,28 @@ jobs:
   acl:
     runs-on: windows-latest
     steps:
-      - shell: cmd
-        run: |
-          mkdir %TEMP%\d\sub & echo x> %TEMP%\d\sub\a.txt & echo x> %TEMP%\d\f.txt & echo x> %TEMP%\d\g.txt & mkdir %TEMP%\d\sub2 & echo x> %TEMP%\d\sub2\a.txt
-          icacls %TEMP%\d\sub /deny %USERNAME%:(RD) >nul
-          icacls %TEMP%\d\f.txt /deny %USERNAME%:(F) >nul
-          icacls %TEMP%\d\g.txt /deny *S-1-1-0:(F) >nul
-          icacls %TEMP%\d\sub2 /deny *S-1-1-0:(RD) >nul
-          echo === elevated: dir sub(user RD) & dir %TEMP%\d\sub
-          echo === elevated: dir sub2(everyone RD) & dir %TEMP%\d\sub2
-          echo === elevated: type g(everyone F) & type %TEMP%\d\g.txt
-          echo === restricted token (runas /trustlevel:0x20000)
-          runas /trustlevel:0x20000 "cmd /c (whoami /groups | findstr /i S-1-16 & dir %TEMP%\d\sub & type %TEMP%\d\f.txt & del %TEMP%\d\f.txt & dir /b %TEMP%\d & mklink %TEMP%\d\ln %TEMP%\d\sub\a.txt & mklink /J %TEMP%\d\jn %TEMP%\d\sub) > %TEMP%\restricted.txt 2>&1"
-          timeout /t 8 /nobreak >nul
-          type %TEMP%\restricted.txt
-          exit /b 0
       - shell: pwsh
         run: |
           $sig = @'
           [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern uint GetFileAttributesW(string p);
           [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern IntPtr CreateFileW(string p, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr t);
+          [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern IntPtr FindFirstFileW(string p, IntPtr fd);
           '@
           $k = Add-Type -MemberDefinition $sig -Name K -Namespace P -PassThru
-          foreach ($p in @("$env:TEMP\d\f.txt", "$env:TEMP\d\g.txt", "$env:TEMP\d\sub", "$env:TEMP\d\sub2", "$env:TEMP\d\sub\a.txt", "$env:TEMP\d\nonexist")) {
-            $a = $k::GetFileAttributesW($p); $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            $h = $k::CreateFileW($p, 0, 7, [IntPtr]::Zero, 3, 0x02000000, [IntPtr]::Zero); $e2 = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            $h3 = $k::CreateFileW($p, 0x80000000, 7, [IntPtr]::Zero, 3, 0x02000000, [IntPtr]::Zero); $e3 = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            "$($p.Split('\')[-1]): GetFileAttributes=$a err=$e | CreateFile(0,BACKUP)=$h err=$e2 | CreateFile(GENERIC_READ)=$h3 err=$e3"
+          $fd = [Runtime.InteropServices.Marshal]::AllocHGlobal(2048)
+          foreach ($root in @("$env:TEMP\d", "$env:RUNNER_TEMP\d", "D:\a\PhotoManager\PhotoManager\d")) {
+            "##### root $root"
+            New-Item -ItemType Directory -Force "$root\sub" | Out-Null
+            "x" | Set-Content "$root\sub\a.txt"; "x" | Set-Content "$root\f.txt"
+            icacls "$root\sub" /deny "${env:USERNAME}:(RD)" | Out-Null
+            icacls "$root\f.txt" /deny "${env:USERNAME}:(F)" | Out-Null
+            (Get-Acl "$root\f.txt").Owner
+            foreach ($p in @("$root\f.txt", "$root\sub", "$root\sub\a.txt", "$root\nonexist")) {
+              $a = $k::GetFileAttributesW($p); $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+              $h = $k::CreateFileW($p, [uint32]0, [uint32]7, [IntPtr]::Zero, [uint32]3, [uint32]0x02000000, [IntPtr]::Zero); $e2 = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+              $h3 = $k::CreateFileW($p, [uint32]2147483648, [uint32]7, [IntPtr]::Zero, [uint32]3, [uint32]0x02000000, [IntPtr]::Zero); $e3 = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+              $h4 = $k::FindFirstFileW("$p\*", $fd); $e4 = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+              "$($p.Split('\')[-1]): GetFileAttributes err=$e | CreateFile(0,BACKUP) err=$e2 | CreateFile(GENERIC_READ) err=$e3 | FindFirstFile(p\*) err=$e4"
+            }
           }
           exit 0
