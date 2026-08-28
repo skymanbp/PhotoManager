@@ -1,0 +1,163 @@
+# pm 的 CI（DESIGN-P8 §26「CI」行）：windows-latest 一条链——版本一致闸 → stack test
+# （含 caseLineBudget 750 行闸、DocDrift 哨兵）→ pm.exe → sidecar → tauri build（remap
+# 用户目录）→ 脱敏扫描（scripts/leakscan.py，模式全部运行期从 runner 环境派生）→ 装 zip
+# → sha256 同一 run 产出。打 tag `v<版本>` 时再跑 release job：把同一 run 的产物挂到
+# GitHub Release，说明里附 SHA-256（README「安装」节的承诺）。
+#
+# 与本地发布链（README「从源码构建」）同一套步骤、同一套闸；唯一差异是 tauri CLI 走
+# npm 预编译包（@tauri-apps/cli 与 cargo tauri-cli 同版本号），省掉 runner 上编译 CLI 的
+# 十分钟。
+name: build
+
+on:
+  push:
+    branches: [main, "ci-*"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  TAURI_CLI_VERSION: "2.11.4"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本单一真源是 package.yaml；Cargo.toml / Cargo.lock / tauri.conf.json /
+      # DESIGN-COMMANDS 状态行必须一致；打 tag 时 tag 名必须是 v<版本>。
+      - name: version gate
+        id: ver
+        shell: python
+        run: |
+          import json, os, re, sys
+          rd = lambda p: open(p, encoding="utf-8").read()
+          v = re.search(r"^version:\s*(\S+)", rd("package.yaml"), re.M).group(1)
+          cargo = re.search(r'^version\s*=\s*"([^"]+)"', rd("gui/src-tauri/Cargo.toml"), re.M).group(1)
+          lock = re.search(r'name = "pm-ui"\nversion = "([^"]+)"', rd("gui/src-tauri/Cargo.lock")).group(1)
+          conf = json.load(open("gui/src-tauri/tauri.conf.json", encoding="utf-8"))["version"]
+          cmds = rd("docs/DESIGN-COMMANDS.md")
+          ref = os.environ.get("GITHUB_REF", "")
+          tag = ref.split("/")[-1] if ref.startswith("refs/tags/") else None
+          print(f"package.yaml={v} Cargo.toml={cargo} Cargo.lock={lock} tauri.conf={conf} tag={tag}")
+          if not (v == cargo == lock == conf):
+              sys.exit("version mismatch across package.yaml / Cargo.toml / Cargo.lock / tauri.conf.json")
+          if f"pm {v} /" not in cmds:
+              sys.exit(f"docs/DESIGN-COMMANDS.md status line does not say 'pm {v} /'")
+          if tag is not None and tag != f"v{v}":
+              sys.exit(f"tag {tag} != v{v}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"version={v}\n")
+
+      # 测试依赖：ConvertTests 端到端要真 Pillow；P7-J 哨兵要 node（runner 自带）。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check pillow
+
+      - uses: haskell-actions/setup@v2
+        id: hs
+        with:
+          enable-stack: true
+          stack-no-global: true
+          stack-version: "latest"
+      - name: cache stack
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.hs.outputs.stack-root }}
+            .stack-work
+          key: ${{ runner.os }}-stack-${{ hashFiles('stack.yaml', 'package.yaml') }}
+          restore-keys: ${{ runner.os }}-stack-
+
+      - name: stack test
+        shell: bash
+        run: stack test --no-interleaved-output --no-dump-logs
+
+      - name: pm.exe
+        shell: bash
+        run: |
+          stack --local-bin-path dist-bin install
+          got="$(dist-bin/pm.exe --version)"
+          test "$got" = "pm ${{ steps.ver.outputs.version }}" || { echo "pm --version says '$got'"; exit 2; }
+          mkdir -p gui/src-tauri/binaries
+          cp -f dist-bin/pm.exe gui/src-tauri/binaries/pm-x86_64-pc-windows-msvc.exe
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+
+      # 与本地一致：remap 掉用户主目录与工作区，别把 runner 路径编进公开二进制
+      # （$USERPROFILE 是 OS 环境变量，GitHub 的 env 上下文里没有，所以在 shell 里取）。
+      - name: tauri build
+        shell: bash
+        working-directory: gui/src-tauri
+        run: |
+          export RUSTFLAGS="--remap-path-prefix=$GITHUB_WORKSPACE=. --remap-path-prefix=$USERPROFILE=~"
+          npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" build --target x86_64-pc-windows-msvc
+
+      - name: leakscan
+        shell: bash
+        run: |
+          V=${{ steps.ver.outputs.version }}
+          T=gui/src-tauri/target/x86_64-pc-windows-msvc/release
+          python scripts/leakscan.py gui/src-tauri/binaries/pm-x86_64-pc-windows-msvc.exe "$T/pm-ui.exe" "$T/bundle/nsis/pm-ui_${V}_x64-setup.exe"
+
+      - name: package + sha256
+        shell: bash
+        run: |
+          V=${{ steps.ver.outputs.version }}
+          T=gui/src-tauri/target/x86_64-pc-windows-msvc/release
+          mkdir -p out/stage/pm-$V-windows-x64
+          cp -f "$T/pm-ui.exe" dist-bin/pm.exe LICENSE README.md out/stage/pm-$V-windows-x64/
+          ( cd out/stage && 7z a -tzip -mx=9 "../pm-$V-windows-x64.zip" "pm-$V-windows-x64" > /dev/null )
+          cp -f "$T/bundle/nsis/pm-ui_${V}_x64-setup.exe" out/
+          ( cd out && sha256sum "pm-$V-windows-x64.zip" "pm-ui_${V}_x64-setup.exe" | tee sha256.txt )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pm-${{ steps.ver.outputs.version }}-windows-x64
+          path: |
+            out/*.zip
+            out/*-setup.exe
+            out/sha256.txt
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: pm-${{ needs.build.outputs.version }}-windows-x64
+          path: out
+      # 说明 = docs/release-notes/v<版本>.md（有就用）+ 每个资产的 SHA-256（README 的承诺）。
+      - name: release notes
+        shell: bash
+        run: |
+          V=${{ needs.build.outputs.version }}
+          { [ -f "docs/release-notes/v$V.md" ] && cat "docs/release-notes/v$V.md"; echo; echo "## SHA-256"; echo; echo '```'; cat out/sha256.txt; echo '```'; } > out/body.md
+          cat out/body.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: pm ${{ needs.build.outputs.version }}
+          body_path: out/body.md
+          files: |
+            out/*.zip
+            out/*-setup.exe
+            out/sha256.txt
+          fail_on_unmatched_files: true
