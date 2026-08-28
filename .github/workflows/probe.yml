@@ -6,23 +6,30 @@ jobs:
     steps:
       - shell: cmd
         run: |
-          whoami & whoami /priv | findstr /i "Backup Restore Debug"
-          mkdir %TEMP%\d\sub & echo x> %TEMP%\d\sub\a.txt & echo x> %TEMP%\d\f.txt
-          icacls %TEMP%\d\sub /deny %USERNAME%:(RD)
-          icacls %TEMP%\d\f.txt /deny %USERNAME%:(F)
-          echo === acl sub & icacls %TEMP%\d\sub
-          echo === acl f & icacls %TEMP%\d\f.txt
-          echo === owner & dir /q %TEMP%\d
-          echo === dir sub (expect denied) & dir %TEMP%\d\sub
-          echo === type f (expect denied) & type %TEMP%\d\f.txt
-          echo === del f (expect denied) & del %TEMP%\d\f.txt & dir /b %TEMP%\d
+          mkdir %TEMP%\d\sub & echo x> %TEMP%\d\sub\a.txt & echo x> %TEMP%\d\f.txt & echo x> %TEMP%\d\g.txt & mkdir %TEMP%\d\sub2 & echo x> %TEMP%\d\sub2\a.txt
+          icacls %TEMP%\d\sub /deny %USERNAME%:(RD) >nul
+          icacls %TEMP%\d\f.txt /deny %USERNAME%:(F) >nul
+          icacls %TEMP%\d\g.txt /deny *S-1-1-0:(F) >nul
+          icacls %TEMP%\d\sub2 /deny *S-1-1-0:(RD) >nul
+          echo === elevated: dir sub(user RD) & dir %TEMP%\d\sub
+          echo === elevated: dir sub2(everyone RD) & dir %TEMP%\d\sub2
+          echo === elevated: type g(everyone F) & type %TEMP%\d\g.txt
+          echo === restricted token (runas /trustlevel:0x20000)
+          runas /trustlevel:0x20000 "cmd /c (whoami /groups | findstr /i S-1-16 & dir %TEMP%\d\sub & type %TEMP%\d\f.txt & del %TEMP%\d\f.txt & dir /b %TEMP%\d & mklink %TEMP%\d\ln %TEMP%\d\sub\a.txt & mklink /J %TEMP%\d\jn %TEMP%\d\sub) > %TEMP%\restricted.txt 2>&1"
+          timeout /t 8 /nobreak >nul
+          type %TEMP%\restricted.txt
           exit /b 0
       - shell: pwsh
         run: |
-          $f = "$env:TEMP\d\f.txt"; $s = "$env:TEMP\d\sub"
-          try { "GetAttributes f: " + [IO.File]::GetAttributes($f) } catch { "GetAttributes f DENIED: $($_.Exception.Message)" }
-          try { "Get-Item f length: " + (Get-Item $f -Force).Length } catch { "Get-Item f DENIED" }
-          try { "LastWriteTime f: " + [IO.File]::GetLastWriteTimeUtc($f) } catch { "LastWriteTime DENIED" }
-          try { "EnumerateFiles sub: " + ([IO.Directory]::EnumerateFiles($s) -join ",") } catch { "EnumerateFiles sub DENIED: $($_.Exception.Message)" }
-          try { "OpenRead f: " + [IO.File]::OpenRead($f).Length } catch { "OpenRead f DENIED" }
+          $sig = @'
+          [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern uint GetFileAttributesW(string p);
+          [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern IntPtr CreateFileW(string p, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr t);
+          '@
+          $k = Add-Type -MemberDefinition $sig -Name K -Namespace P -PassThru
+          foreach ($p in @("$env:TEMP\d\f.txt", "$env:TEMP\d\g.txt", "$env:TEMP\d\sub", "$env:TEMP\d\sub2", "$env:TEMP\d\sub\a.txt", "$env:TEMP\d\nonexist")) {
+            $a = $k::GetFileAttributesW($p); $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            $h = $k::CreateFileW($p, 0, 7, [IntPtr]::Zero, 3, 0x02000000, [IntPtr]::Zero); $e2 = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            $h3 = $k::CreateFileW($p, 0x80000000, 7, [IntPtr]::Zero, 3, 0x02000000, [IntPtr]::Zero); $e3 = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            "$($p.Split('\')[-1]): GetFileAttributes=$a err=$e | CreateFile(0,BACKUP)=$h err=$e2 | CreateFile(GENERIC_READ)=$h3 err=$e3"
+          }
           exit 0
