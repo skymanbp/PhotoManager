@@ -5,7 +5,9 @@
 > 而 §11 随端点与 GUI 页数线性增长——2026-08-27 P8-A 第三次触顶时按边界拆出）。
 > 编号沿用，跨文档引用照旧写 §11；不变量 I1–I11 的定义在
 > [`DESIGN.md` §2](DESIGN.md#2-需求--不变量)，命令面在 DESIGN.md §5。
-> 读本节的 DocDrift 哨兵（页序 ①—⑥、CSP 逐字、配置锁「四条读改写路径」清点）
+> 读本节的 DocDrift 哨兵（页序 ①—⑦、路由清点 `caseRouteRoster`——本文件反引号里全部
+> `METHOD /api/…` 的集合与 `src/Pm/Serve*.hs` 的路由元组集合逐项相等、CSP 逐字、配置锁
+> 「四条读改写路径」清点）
 > 自 P8-A 起以本文件为证据。
 
 ---
@@ -33,7 +35,7 @@
   文本，纯函数 `Pm.Publish.publishCommands`——pm 不执行 git，GUI 只复制）、
   `GET /api/vault/status`
   （与 `pm vault status --json` 的 stdout **逐字节相同，含末尾 LF**）、
-  `GET /api/vault/new`、`GET /api/vault/notes`（P8-C 照片记录 + 发布状态，与 `pm vault notes --json` 同一渲染）、`GET /api/config`（只读健康视图，见下「设置页与配置端点」条）、`GET /api/sort/survey`（只读提议，见下「整理新照片」条）、`GET /api/plans`、`GET /api/plan/<id>`、
+  `GET /api/vault/new`、`GET /api/vault/notes`（P8-C 照片记录 + 发布状态，与 `pm vault notes --json` 同一渲染）、`GET /api/config`（只读健康视图，见下「设置页与配置端点」条）、`GET /api/album/candidates`（P8-D：成片 jpg 未进相册的按事件夹列出 + 非 jpg 单列，`Pm.Album.albumCandidates`）、`GET /api/sort/survey`（只读提议，见下「整理新照片」条）、`GET /api/plans`、`GET /api/plan/<id>`、
   `GET /api/thumb/<sha>`（只提供 catalog 里 JPEG 条目的原字节，读取前逐级
   `resolveUnder`——扫描后被换成库外链接的条目不跟随；缩放由 GUI 做）。vault
   两个端点会刷新 `.pm/vault-cache`：进程内 MVar + 跨进程 root 锁（三十一轮
@@ -50,11 +52,12 @@
   响应体**，不走 stdout——`pm ui` 只读一行 announce 就丢掉 BufReader，serve 的
   stdout 此后无人排空，照着打会填满管道缓冲。
 - **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
-  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。共**六个** `--writable`
+  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。共**九个** `--writable`
   级写端点，都不执行、不碰照片——
   `POST /api/vault/push-plan`（P4-5，本条）、`POST /api/vault/hold`（P4-7）、`POST /api/vault/notes`（P8-C，照片记录：写主库 `.pm/vault-notes.json`，与 hold 共用 `recordPost` 壳与锁序）、
   `POST /api/config` 与 `POST /api/backup-init`（P4-8，均见下）、
-  `POST /api/sort/plan`（P5-E，见下）；执行是第 ③ 级 `POST /api/apply`
+  `POST /api/sort/plan`（P5-E，见下）、`POST /api/import/plan`、`POST /api/album/add-plan`、
+  `POST /api/convert/plan`（P8-D，见下「归档页与 AI 建议」条）；执行是第 ③ 级 `POST /api/apply`
   （P5-C 实现，P7 起由 GUI 使用，见上文三级授权与下文 P7 条）。
   第一个是 `POST /api/vault/push-plan`，
   体 `{"assignments":[{"name","category"},…]}`，上限 64 KiB（413）；校验与计划
@@ -86,25 +89,51 @@
   push-plan 同级）。页面把每段起止日期预填进去、地点留空要用户填（相机零 GPS，
   pm 不猜——I1），同年月已有事件夹一键并入（切成 `--event` 语义）。计划 id 由
   `runSortPlan` 直接交回，不从 `.pm/plans` 里挑"最新的那个"——并发生成时那是猜。
+- **归档页与 AI 建议（P8-D，GUI 第③页；DESIGN-P8.md §22–23）**：三个写端点都走
+  `ServeAlbum.planPost` 壳（`--writable` 级：403 → 体 400 → `{code, planId, log}`，
+  `POST /api/sort/plan` 自 P8-D 也改走它）：`POST /api/import/plan {alsoAlbum}` ＝
+  `pm import [--also-album]`（`runImportTo`）；`POST /api/album/add-plan {paths}` ＝
+  `pm album add`（`runAlbumAddTo`，paths 是候选给的 `<事件夹>/<文件名>` 原样回传）；
+  `POST /api/convert/plan {paths, alsoAlbum}` ＝ `pm convert`（`runConvertTo`，请求在
+  `seConvertLock` 上排队——第一段派生件写主库 `.pm/derived`，两个并发转换同一源会撞 tmp）。
+  JSON 体读取上提为 `ServeGuard.withJsonBody`（413 超 64 KiB / 400 非 JSON），此前五处
+  复制合一。`POST /api/suggest` 是**只读级**（缺省授权即可）：serve 用 `PM_CLAUDE_EXE`
+  （给了但不存在 → 409，不回退）或 PATH 上的 `claude` 拉起 `claude -p --output-format json
+  --permission-mode plan --max-turns 8`（cwd ＝ 主库 / 源目录，提示经 stdin，
+  `PM_SUGGEST_TIMEOUT` 秒超时、缺省 180），只把模型答的 JSON 规范化后交回——pm 不据此写
+  任何东西，建议落不落盘由用户在页面上点「保存决定」/「生成计划」决定。
+  `kind:"classify"`（≤ 20 个相册文件名 → 类目 / 地点 / 坐标 / 来源 / 依据 / 标题；未请求的
+  名字丢弃进 `dropped`，类目不在三类 → null，坐标经 `parseCoordinates` 规范）；`kind:"place"`
+  （`src` + `gap` → serve 自己重跑 `surveySort`，不信任客户端的分段；每段 `evenSample 5`
+  取首/中/尾均匀 5 张 jpg，> 12 段 400，一张 jpg 也没有的段不交给模型、答 `place:null`）。
+  同一时刻只跑一个（`seSuggestLock` 满 → 409）；找不到 claude / 超时 / 子进程 IO 失败 →
+  409，模型退出非零或答非 JSON → 502 带 `raw`。每次调用花的是用户自己 Claude 账号的钱
+  （实测每次 ≈ $0.7–1.3，系统提示缓存写入占大头），响应带 `cost`、页面文案写明。测试用
+  `test/fixtures/fake-claude.cmd` 顶替（`PM_FAKE_CLAUDE` 五种模式）。
 - **GUI 拉起时静音 stdout（P5-E）**：`pm serve --exit-on-stdin-eof` 打完
   announce 那一行之后把进程 stdout 引到空设备。`pm ui` 只读那一行就丢掉
   BufReader，此后管道无人排空；库层任何一行 `putStrLn` 都会往里灌，填满
   64 KiB 缓冲后 serve 卡在写上。逐个端点记得传 sink 治不住——漏一个就复发。
   手工跑 `pm serve` 时不动 stdout，诊断照旧可见。
 - **GUI（P4-4 UX 重做，用户反馈"清晰优雅、快速上手、直观可视化"+ 三项状态
-  可视化）**：左侧导航**六页**（数字键 1–6 切换；编号即 `gui/ui/index.html` 的 nav
+  可视化）**：左侧导航**七页**（数字键 1–7 切换；编号即 `gui/ui/index.html` 的 nav
   次序）。①**状态**——照片库四张分层卡（Raw / 成片 / 相册 / 暂存：文件数、体积、
   容量占比条）+ 索引时间与「核对新鲜度」；**vault 展示集同步**卡（差异数 chip、
   **九态**计数 pill = OK/NEW/HELD/MISSING/RENAME/DRIFT/DUPLICATE/UNPUSHABLE/UNSTABLE，
   其中 NEW / HELD（含失效）/ MISSING / RENAME / DRIFT / UNSTABLE 可展开清单——"差哪些"）；
   **备份硬盘同步**卡（未登记 / 上次同步时间 + 滞后 add/update/extra / 缓存不可信）；
-  「下一步」列表把 status 退出码的语义翻成可点的动作。②**整理新照片**——见上 P5-E 条。
-  ③**分类推送**——NEW 缩略图网格（原图 4–75 MB，GUI 侧 `createImageBitmap(resizeWidth
+  「下一步」列表把 status 退出码的语义翻成可点的动作。②**整理新照片**——见上 P5-E 条（P8-D 加「AI 建议地点」：
+  只预填空着的地点格，把握低的填 `<地点?>`，每段一行依据）。③**归档**——三张卡：暂存区归档
+  （勾「同时导入相册」）、成片 → 相册（按事件夹分组的缩略图网格勾选、「全选这个事件夹」）、
+  非 jpg 转换（勾选 + 「同时进相册」→「转换并生成计划」）——三者都只出计划，见上 P8-D 条。
+  ④**分类推送**——NEW 缩略图网格（原图 4–75 MB，GUI 侧 `createImageBitmap(resizeWidth
   640)` 缩放后再挂，修掉"滚动后缩略图消失"——全分辨率位图撑爆 WebView 的根因）+ 三
-  类目分段按钮 + 进度「已选 x/N」+「保存决定并生成推送计划」→ POST push-plan → 结果
-  面板（计划 id、`pm apply` 命令、git 步骤）。④**计划**——表格（类型徽标、id、时间、
+  类目分段按钮 + 每卡三格照片记录（地点 / 坐标 / 标题，P8-D：打开页时从 GET notes 回显，改了的差集随下一步
+  经 POST notes 写主库）+「AI 建议分类/地点」（P8-D：类目只在按钮上描边 `.ai`、三格只填空着的）
+  + 进度「已选 x/N」+「保存决定并生成推送计划」→ hold → notes → push-plan（hold 先行：服务端拒收 held 文件的 push）→ 结果
+  面板（计划 id、`pm apply` 命令、git 步骤）。⑤**计划**——表格（类型徽标、id、时间、
   项/待执行/跳过/待裁决）+ 明细（逐项 拷贝/改名/隔离 + 源→目标 + 状态徽标，原始 JSON
-  可展开），打开即选中最新计划。⑤**设置**（P4-8，见下）。⑥**上手**——三步说明 + 安全
+  可展开），打开即选中最新计划。⑥**设置**（P4-8，见下）。⑦**上手**——四步说明 + 安全
   模型一句话。技术：`<img src>` 带不了 Authorization → fetch→blob；旧 blob URL 每轮
   revoke；Tauri CSP（`gui/src-tauri/tauri.conf.json` 逐字）：`default-src` 与
   `script-src` 只 `'self'`；`connect-src http://127.0.0.1:* ipc: http://ipc.localhost`；

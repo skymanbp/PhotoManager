@@ -27,6 +27,7 @@ import PlannerTests (plannerTests)
 import Pm.Win (setupConsole)
 import PublishTests (publishTests)
 import ScanGuardTests (scanGuardTests)
+import ServeP8Tests (serveP8Tests)
 import ServeTests (serveTests)
 import ServeWriteTests (serveWriteTests)
 import SortGuardTests (sortGuardTests)
@@ -50,4 +51,4 @@ main = do
     -- 断言读到别人的输出、失败详情反而被吞掉。这是共享资源的正确处置：
     -- 有一个进程级资源，就不能同时跑两个用例。代价是几秒钟。
     defaultMain
-      (localOption (NumThreads 1) $ testGroup "pm" [kernelTests, plannerTests, vaultTests, vaultHoldTests, vaultNoteTests, namesTests, guardTests, pathGuardTests, handleGuardTests, stateGuardTests, serveTests, serveWriteTests, sortTests, sortGuardTests, dedupeTests, ingestTests, albumTests, convertTests, scanGuardTests, publishTests, sweepTests, docDriftTests])
+      (localOption (NumThreads 1) $ testGroup "pm" [kernelTests, plannerTests, vaultTests, vaultHoldTests, vaultNoteTests, namesTests, guardTests, pathGuardTests, handleGuardTests, stateGuardTests, serveTests, serveWriteTests, serveP8Tests, sortTests, sortGuardTests, dedupeTests, ingestTests, albumTests, convertTests, scanGuardTests, publishTests, sweepTests, docDriftTests])

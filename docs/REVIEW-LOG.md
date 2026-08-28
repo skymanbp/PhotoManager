@@ -386,3 +386,30 @@ final build rc=0; P8-C2 rc=0 (All 3 tests passed (8.36s)); P8-B rc=0 (All 6 test
 
 P8-C2 树：408 测试、GHC 警告 0（clang `<built-in>` 噪声同前）；pm-test.exe `5befd1f77bbbc72944229f9edd4cca0e47a03a50826e6d2198cc0a78c5820bed`、pm.exe（`.stack-work/install/…/bin`）`9a72474d9166be5856cf631be88e20abfc41de0cd4f1e4cf2045fa1ca058fd0f`。
 
+
+## P8-D 归档页端点 + AI 建议（第一方，2026-08-27；DESIGN-P8.md §22–23）
+
+范围：`Pm.ServeAlbum`（`POST /api/import/plan` / `GET /api/album/candidates` / `POST /api/album/add-plan` / `POST /api/convert/plan`，共用 `planPost` 壳；sort/plan 也改走它）、`Pm.ServeAi`（`POST /api/suggest`：`claude -p --output-format json --permission-mode plan --max-turns 8`，提示经 stdin，`PM_CLAUDE_EXE` / `PM_SUGGEST_TIMEOUT`，`seSuggestLock`）、`ServeGuard.withJsonBody`（五处「上限 → JSON」链合一）、`SortSegment.sgFiles`、GUI 第七页 `archive.js` + `vault.js` 三格记录/AI 建议 + `app.js` 整理页 AI 建议地点、DocDrift `caseGuiNavOrder` ①—⑦ + 新哨兵 `caseRouteRoster`。
+
+第一方自审要点：① 三个计划端点不各写一遍 403/413/400/响应壳——上提为 `planPost`，并把 sort/plan 迁进来（类级，不留第五份复制）；② JSON 体读取此前 config / sort / apply / backup-init / recordPost 五份同形代码，合一为 `withJsonBody`；③ suggest 端点是只读级但仍过 `requireRole` + catalog + `resolveUnder`（链接别名不交给模型），名字闸五种一次列完（400 带 `details`）；④ place 不信任客户端分段，serve 自己重跑 `surveySort`；⑤ 子进程三根管道显式 utf8，超时由 `timeout` + `withCreateProcess` 收尾杀进程；⑥ 页面：AI 只预填、类目只描边，记录写入次序 hold → notes → push-plan。
+
+真实 `claude` 探针（不进测试）：2.1.243，`findExecutable "claude"` 命中 `claude.exe`；`-p --permission-mode plan --output-format json` 信封含 `result` / `is_error` / `permission_denials` / `total_cost_usd`；cwd 内 Read 图片 `permission_denials: []`；每次 ≈ $0.7–1.3（系统提示缓存写入占大头）→ 页面文案写明费用与「你自己账号」。
+
+文档哨兵自证（改代码先于改文档时的一次真实判红）：`caseRouteRoster` 在 DESIGN-GUI 未登记 5 个新端点时红（expected 18 条 ≠ got 23 条，差集恰为 import/plan、album/candidates、album/add-plan、convert/plan、suggest）；`caseGuiNavOrder` 红于「DESIGN 应包含 ③**归档**」；两者在文档扫面后绿。
+
+判别突变（`mutate_p8d.py`，源码级、逐条重建、`-p P8-D` 单点重跑、每条还原；末尾重建 + P8-D / P7-J 复跑绿）：
+
+| id | 突变 | -p | 判定 | 突变输出 |
+|---|---|---|---|---|
+| m1 | planPost: writable gate removed -> read-only serve answers 200 on import/plan, 403 assertion red | `P8-D` | RED OK | POST /api/import/plan：只读 403 且 .pm/plans 不出现；alsoAlbum → 相册项进计划、log 有「相册 +1」:                                                    FAIL |
+| m2 | suggest: seSuggestLock busy answers 200 instead of 409 -> concurrency assertion red | `P8-D` | RED OK | POST /api/suggest classify：只读级放行；预置回答规范化（未请求的名字丢弃、坐标规范）；400 五种；413；502 垃圾/退出非零；409 缺 claude/超时/并发；.pm 零写入:                       FAIL |
+| m3 | classify: unrequested names not filtered -> ghost.jpg appears in items, classify case red | `P8-D` | RED OK | POST /api/suggest classify：只读级放行；预置回答规范化（未请求的名字丢弃、坐标规范）；400 五种；413；502 垃圾/退出非零；409 缺 claude/超时/并发；.pm 零写入:                       FAIL (0.25s) |
+| m4 | place: RAW-only segment not answered blind -> basis lacks 没有可看的图, place case red | `P8-D` | RED OK | POST /api/suggest place：serve 自己重跑分段抽样；围栏 JSON 解析；只有 RAW 的段不交给模型答 null；>12 段 400:                                                FAIL (0.19s) |
+| m5 | extractJson: bracket slice dropped -> fenced ```json answer becomes 502, place + pure cases red | `P8-D` | RED OK | POST /api/suggest place：serve 自己重跑分段抽样；围栏 JSON 解析；只有 RAW 的段不交给模型答 null；>12 段 400:                                                FAIL |
+| m6 | readBodyCapped: 64 KiB cap removed -> oversized suggest body no longer 413, classify case red | `P8-D` | RED OK | POST /api/import/plan：只读 403 且 .pm/plans 不出现；alsoAlbum → 相册项进计划、log 有「相册 +1」:                                                    FAIL |
+
+final build rc=0; P8-D rc=0 (All 8 tests passed (8.88s)); P7-J rc=0 (All 27 tests passed (1.78s))
+
+残余（无判红形态，如实登记）：GUI 三个脚本只过 `node --check` + DocDrift 静态规则（无内联、脚本外链、无 setAttribute / innerHTML 赋值），交互行为待用户 GUI 审查（计划步「提醒 GUI 审查」）；真 `claude` 只探针不进测试（夹具 `fake-claude.cmd` 顶替，模型答案的质量不在 pm 的可判范围）；`seConvertLock` 排队只有并发交错才可观测，未配突变。
+
+P8-D 树：415 测试、GHC 警告 0（clang `<built-in>` 噪声同前）；pm-test.exe `cf21184799d55095bbcbb3fb5ea7a9194ccae0dc2ea182bff917d5f9fdb2db48`、pm.exe（`.stack-work/install/…/bin`）`d8e8c1a176f78b8aca3d064c930e8644d4207e36793a573d5e91e90fa4995a0d`。

@@ -21,7 +21,7 @@ import Network.Wai
 import Pm.Config (Config (..), requireWritable)
 import Pm.Plan (Plan (..), savePlan)
 import Pm.ServeEnv
-import Pm.ServeGuard (maxBodyBytes, readBodyCapped)
+import Pm.ServeGuard (withJsonBody)
 import Pm.Types
 import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newActive, planCategories, renderVaultJson, vaultPushItems)
 import Pm.VaultCmd (holdOpsIO, noteOpsIO, noteStatuses, renderNotesJson, withVaultTxn)
@@ -82,55 +82,50 @@ routeVault cfg env req jsonR err corsHdrs respond = case (requestMethod req, pat
   -- 'vaultPushItems' / 'mkVaultPushPlan'），落盘前同样过 'requireWritable'。
   ("POST", ["api", "vault", "push-plan"])
     | not (seWritable env) -> Just (err status403 "serve 以只读启动（无 --writable），拒绝生成计划")
-    | otherwise -> Just $ do
-        body <- readBodyCapped req
-        case body of
-          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
-          Just raw -> case Aeson.eitherDecodeStrict' raw of
-            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
-            -- compute→校验→ensureRoot→落盘在同一次持锁里完成：两个并发 POST
-            -- 在首次建 root 时会都看到 RootAbsent，其中一次 createRootInfo
-            -- （no-replace）必失败 → 500（codex 二十轮 minor）。与 GET 刷新
-            -- vault 缓存用的是同一把 'seVaultLock'。
-            Right (PushPlanReq as) -> withMVar (seVaultLock env) $ \_ -> do
-              er <- computeVault True cfg
-              case er of
-                Left (msg, code) -> err (if code == 2 then status404 else status500) msg
-                Right r
-                  -- 空指派只在「有 DRIFT 待裁决」时有意义（纯裁决计划）——否则
-                  -- vault 只有 DRIFT 时页面按钮永远灰着（二十轮 minor）。
-                  | null as && null (vdDrift (vrDiff r)) ->
-                      err status400 "assignments 为空，且没有 DRIFT 待裁决项——无计划可生成"
-                  | otherwise -> do
-                      let pairs' = [(paCategory a, paName a) | a <- as]
-                          errs = checkAssignments r pairs'
-                      if not (null errs)
-                        then jsonR status400 [] (object ["error" .= ("指派不合法" :: String), "details" .= errs])
-                        else do
-                          let items = vaultPushItems r pairs'
-                          eplan <- mkVaultPushPlan r items
-                          case eplan of
-                            Left m -> err status500 m
-                            Right plan -> do
-                              w <- requireWritable (plRootPath plan)
-                              case w of
-                                Left m -> err status403 ("vault root 不可写: " <> m)
-                                Right _ -> do
-                                  esave <- try (savePlan plan) :: IO (Either IOException FilePath)
-                                  case esave of
-                                    Left e -> err status500 ("计划落盘失败: " <> show e)
-                                    Right fp ->
-                                      jsonR
-                                        status200
-                                        []
-                                        ( object
-                                            [ "plan" .= plan
-                                            , "path" .= fp
-                                            , "apply" .= ("pm apply " <> T.unpack (plId plan))
-                                            , -- 与 CLI 收尾、上线命令同一生成点（Pm.Publish.vaultCommands）
-                                              "gitSteps" .= gitStepsLines cfg (plRootPath plan) (plId plan) (planCategories plan)
-                                            ]
-                                        )
+    | otherwise -> Just $ withJsonBody req err $ \(PushPlanReq as) ->
+        -- compute→校验→ensureRoot→落盘在同一次持锁里完成：两个并发 POST
+        -- 在首次建 root 时会都看到 RootAbsent，其中一次 createRootInfo
+        -- （no-replace）必失败 → 500（codex 二十轮 minor）。与 GET 刷新
+        -- vault 缓存用的是同一把 'seVaultLock'。
+        withMVar (seVaultLock env) $ \_ -> do
+          er <- computeVault True cfg
+          case er of
+            Left (msg, code) -> err (if code == 2 then status404 else status500) msg
+            Right r
+              -- 空指派只在「有 DRIFT 待裁决」时有意义（纯裁决计划）——否则
+              -- vault 只有 DRIFT 时页面按钮永远灰着（二十轮 minor）。
+              | null as && null (vdDrift (vrDiff r)) ->
+                  err status400 "assignments 为空，且没有 DRIFT 待裁决项——无计划可生成"
+              | otherwise -> do
+                  let pairs' = [(paCategory a, paName a) | a <- as]
+                      errs = checkAssignments r pairs'
+                  if not (null errs)
+                    then jsonR status400 [] (object ["error" .= ("指派不合法" :: String), "details" .= errs])
+                    else do
+                      let items = vaultPushItems r pairs'
+                      eplan <- mkVaultPushPlan r items
+                      case eplan of
+                        Left m -> err status500 m
+                        Right plan -> do
+                          w <- requireWritable (plRootPath plan)
+                          case w of
+                            Left m -> err status403 ("vault root 不可写: " <> m)
+                            Right _ -> do
+                              esave <- try (savePlan plan) :: IO (Either IOException FilePath)
+                              case esave of
+                                Left e -> err status500 ("计划落盘失败: " <> show e)
+                                Right fp ->
+                                  jsonR
+                                    status200
+                                    []
+                                    ( object
+                                        [ "plan" .= plan
+                                        , "path" .= fp
+                                        , "apply" .= ("pm apply " <> T.unpack (plId plan))
+                                        , -- 与 CLI 收尾、上线命令同一生成点（Pm.Publish.vaultCommands）
+                                          "gitSteps" .= gitStepsLines cfg (plRootPath plan) (plId plan) (planCategories plan)
+                                        ]
+                                    )
   -- P4-7：第二个写端点——记录/撤销「暂不同步」的决定。写域是**主库**的
   -- @.pm/vault-holds.json@（vault 仓与照片零改动），校验与 CLI
   -- `pm vault hold|unhold` 共用 'holdRequest'；端点壳与 notes 共用 'recordPost'。
@@ -179,29 +174,23 @@ recordPost ::
   IO ResponseReceived
 recordPost cfg env req jsonR err what reader ops writer render
   | not (seWritable env) = err status403 ("serve 以只读启动（无 --writable），拒绝写入" <> what)
-  | otherwise = do
-      body <- readBodyCapped req
-      case body of
-        Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
-        Just raw -> case Aeson.eitherDecodeStrict' raw of
-          Left e -> err status400 ("请求体不是合法 JSON: " <> e)
-          Right q -> withMVar (seVaultLock env) $ \_ -> do
-            res <- withVaultTxn cfg reader $ \olds r -> do
-              eops <- ops q olds r
-              case eops of
-                Left errs -> pure (Left (unlines errs, 400))
-                Right kept -> do
-                  w <- writer (cfgMainPath cfg) kept
-                  pure $ case w of
-                    Left m -> Left ("主库 .pm 不可写: " <> m, 403)
-                    Right () -> Right kept
-            case res of
-              Left (msg, 400) -> jsonR status400 [] (object ["error" .= (what <> "不合法"), "details" .= lines msg])
-              Left (msg, 403) -> err status403 msg
-              Left (msg, 4) -> err status409 msg -- root lock 被别的 pm 占用
-              Left (msg, 2) -> err status404 msg
-              Left (msg, _) -> err status500 msg
-              Right kept -> jsonR status200 [] (render kept)
+  | otherwise = withJsonBody req err $ \q -> withMVar (seVaultLock env) $ \_ -> do
+      res <- withVaultTxn cfg reader $ \olds r -> do
+        eops <- ops q olds r
+        case eops of
+          Left errs -> pure (Left (unlines errs, 400))
+          Right kept -> do
+            w <- writer (cfgMainPath cfg) kept
+            pure $ case w of
+              Left m -> Left ("主库 .pm 不可写: " <> m, 403)
+              Right () -> Right kept
+      case res of
+        Left (msg, 400) -> jsonR status400 [] (object ["error" .= (what <> "不合法"), "details" .= lines msg])
+        Left (msg, 403) -> err status403 msg
+        Left (msg, 4) -> err status409 msg -- root lock 被别的 pm 占用
+        Left (msg, 2) -> err status404 msg
+        Left (msg, _) -> err status500 msg
+        Right kept -> jsonR status200 [] (render kept)
 
 -- | @{"assignments":[{"name":"a.jpg","category":"landscape"},…]}@
 newtype PushPlanReq = PushPlanReq [PushAssign]

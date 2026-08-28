@@ -230,7 +230,7 @@ parserInfo =
       ServeOpts
         <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
         <*> switch (long "exit-on-stdin-eof" <> help "stdin 关闭即退出（GUI 拉起时用：父进程一死 serve 随之结束，不留孤儿）")
-        <*> switch (long "writable" <> help "允许六个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）、生成 sort 计划（写主库的 .pm/plans）、记录「暂不同步」决定（写主库的 .pm/vault-holds.json）、照片记录（写主库的 .pm/vault-notes.json）、改配置（写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识）；都不执行、不碰照片；缺省只读")
+        <*> switch (long "writable" <> help "允许九个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）、生成 sort / 归档 / 相册 / 转换计划（写主库的 .pm/plans；转换另写 .pm/derived 派生件）、记录「暂不同步」决定（写主库的 .pm/vault-holds.json）、照片记录（写主库的 .pm/vault-notes.json）、改配置（写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识）；都不执行、不碰照片；缺省只读。AI 建议 POST /api/suggest 是只读级（拉起 claude -p，只出建议）")
         <*> switch (long "allow-apply" <> help "另外允许 POST /api/apply 执行已存的计划——这是唯一会动照片字节的端点，因此单独一个开关，不并进 --writable（蕴含 --writable）。装载/绑 root/--only/执行期复验全部与 CLI 的 pm apply 同源")
   initP =
     fmap CmdInit $

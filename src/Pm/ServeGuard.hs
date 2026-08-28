@@ -12,6 +12,7 @@ module Pm.ServeGuard
   , authorized
   , maxBodyBytes
   , readBodyCapped
+  , withJsonBody
   , muteStdout
   , waitStdinEof
   , bindLoopback
@@ -20,15 +21,16 @@ module Pm.ServeGuard
 
 import Control.Exception (IOException, catch, try)
 import Crypto.Random (getRandomBytes)
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteArray as BA
 import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import Data.Time (UTCTime)
 import GHC.IO.Handle (hDuplicateTo)
-import Network.HTTP.Types (RequestHeaders, hAuthorization)
+import Network.HTTP.Types (RequestHeaders, Status, hAuthorization, status400, status413)
 import Network.Socket
-import Network.Wai (Request, getRequestBodyChunk)
+import Network.Wai (Request, ResponseReceived, getRequestBodyChunk)
 import System.Directory (getFileSize, getModificationTime)
 import System.IO (IOMode (WriteMode), hClose, hIsEOF, openFile, stdin, stdout)
 
@@ -81,6 +83,18 @@ readBodyCapped req = go [] 0
       else
         let n' = n + BS.length chunk
          in if n' > maxBodyBytes then pure Nothing else go (chunk : acc) n'
+
+-- | POST 体的共用壳（P8-D 上提：此前 config \/ sort \/ apply \/ backup-init \/
+-- recordPost 各抄一份同形的「上限 → JSON」链）：超上限 413、不是合法 JSON 400，
+-- 否则把解出的请求交给端点。授权级各端点不同，写闸由调用方**先**判。
+withJsonBody :: Aeson.FromJSON q => Request -> (Status -> String -> IO ResponseReceived) -> (q -> IO ResponseReceived) -> IO ResponseReceived
+withJsonBody req err k = do
+  body <- readBodyCapped req
+  case body of
+    Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
+    Just raw -> case Aeson.eitherDecodeStrict' raw of
+      Left e -> err status400 ("请求体不是合法 JSON: " <> e)
+      Right q -> k q
 
 -- | 把进程的 stdout 换成空设备。失败即忽略：这是防管道堵塞的加固，
 -- 换不成最坏也只是回到"可能堵"的旧状态，不该因此让 serve 起不来。

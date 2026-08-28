@@ -39,6 +39,12 @@ data ServeEnv = ServeEnv
   , seApplyLock :: MVar ()
     -- ^ 同一 serve 进程内的 apply 串行化。跨进程另有 root 锁（I10）——这把只是
     -- 让页面连点两下得到的是排队，而不是一条 "lock busy"。
+  , seConvertLock :: MVar ()
+    -- ^ P8-D：转换第一段（python 写 @.pm/derived@）进程内串行化——两个并发请求
+    -- 转同一张会争用同一个 @.tmp@ 名；排队而不是拒绝（转换是幂等的，后到者复用）。
+  , seSuggestLock :: MVar ()
+    -- ^ P8-D：AI 建议一次只跑一个 @claude -p@（DESIGN-P8 §22.2）——上一次未完成
+    -- 就 409，不排队：每次点击都要是显式同意，排队会让用户以为没点上而连点。
   }
 
 -- | @allowApply@ 蕴含 writable：见 "Pm.Serve" 模块头的三级授权。
@@ -46,7 +52,7 @@ newServeEnv :: Config -> BS.ByteString -> Bool -> Bool -> IO ServeEnv
 newServeEnv cfg tok writable allowApply = do
   -- 〈配置, 戳〉一次配对写入（装载与读戳之间的毫秒级启动窗口沿旧例登记）。
   snap <- configFilePath >>= configStamp >>= \st -> newIORef (cfg, st, True)
-  ServeEnv snap tok (writable || allowApply) allowApply <$> newMVar () <*> newMVar ()
+  ServeEnv snap tok (writable || allowApply) allowApply <$> newMVar () <*> newMVar () <*> newMVar () <*> newMVar ()
 
 -- | 本次请求应答所依据的配置。第一方自审工作流 C105：此前快照只在本进程的
 -- POST 之后刷新，终端里 `pm config set` / `pm backup init` 改了 config.toml

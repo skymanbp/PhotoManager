@@ -1,11 +1,14 @@
 // pm-ui frontend: vanilla JS, no bundler. Everything comes from `pm serve`
 // over 127.0.0.1 with the session token handed over by the Rust shell.
-// Five plan-free writes: POST /api/vault/push-plan and /api/sort/plan（只生成
-// 计划文件）、/api/vault/hold（记一条「暂不同步」决定）、/api/config、
-// /api/backup-init。P7 起（用户裁定 2026-08-26）Rust 壳以 --allow-apply 拉起
+// Nine plan-free writes: POST /api/vault/push-plan、/api/sort/plan、/api/import/plan、
+// /api/album/add-plan、/api/convert/plan（只生成计划文件；convert 另写 .pm/derived
+// 派生件）、/api/vault/hold（记一条「暂不同步」决定）、/api/vault/notes（照片记录）、
+// /api/config、/api/backup-init。P7 起（用户裁定 2026-08-26）Rust 壳以 --allow-apply 拉起
 // serve：计划页可以点「执行」（两次点击确认）走 POST /api/apply——那是唯一会
 // 动照片字节的端点，执行链与 CLI 的 pm apply 同源。git 仍只生成命令不执行（I9）。
-// P8-A：「分类推送」页的逻辑在 vault.js（window.pmVault 工厂，逐字搬出）——本文件触 750 行预算。
+// 只读级的 POST /api/suggest（P8-D）拉起用户自己账号的 claude -p 看图，只出建议。
+// P8-A：「分类推送」页的逻辑在 vault.js（window.pmVault 工厂）；P8-D：「归档」页在
+// archive.js（window.pmArchive）——本文件触 750 行预算。
 (async function () {
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -111,7 +114,7 @@
       if (i.oldestVerifiedDays != null) fl.textContent += ` · 最久未验证字节 ${i.oldestVerifiedDays} 天前`;
       if (i.stagingEvents.length) {
         const all = i.stagingFiles > 0 && i.stagingArchived === i.stagingFiles;
-        steps.push(all ? [`暂存区 ${i.stagingEvents.length} 个事件 ${i.stagingFiles} 文件已全部归档（冗余）`, "pm clean staging（需插备份盘）"] : [`暂存区 ${i.stagingEvents.length} 个事件未归档`, "pm import"]);
+        steps.push(all ? [`暂存区 ${i.stagingEvents.length} 个事件 ${i.stagingFiles} 文件已全部归档（冗余）`, "pm clean staging（需插备份盘）"] : [`暂存区 ${i.stagingEvents.length} 个事件未归档`, "去「归档」", "archive"]);
       }
       // 备份盘
       const bchip = $("#backup-chip"), bsum = $("#backup-summary"), bdet = $("#backup-detail");
@@ -187,6 +190,8 @@
   const post = (path, body) => req(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   // 分类推送页（P8-A 拆到 vault.js）：用本文件的共享工具构造，页面状态封在工厂里。
   const vault = window.pmVault({ $, el, mib, get, getJson, post, stamp, stale, bodyLines });
+  // 归档页（P8-D，archive.js）：缩略图缩放复用 vault.shrink，出计划后刷新计划页（loadPlans 是函数声明，提升可见）。
+  const archive = window.pmArchive({ $, el, mib, get, getJson, post, stamp, stale, bodyLines, shrink: vault.shrink, loadPlans });
 
   // ── 上线命令（P7）──
   // 文本由服务端 GET /api/publish-commands 生成（Pm.Publish，纯函数）；这里
@@ -418,8 +423,30 @@
   // 只调两个端点：/api/sort/survey（只读提议）与 /api/sort/plan（写 .pm/plans，
   // 不碰照片）。页面**不**执行任何计划——那是计划页/终端的事。
   let lastSurvey = null;
+  const segInputs = new Map(); // index -> { place, hint }：AI 建议地点（P8-D）回填用
   function sortNote(kind, text) {
     const b = $("#sort-result"); b.className = "banner " + kind; b.textContent = text;
+  }
+  // AI 建议地点（DESIGN-P8 §22 (a)）：把当前提议的每段首/中/尾至多 5 张 jpg 交给
+  // 用户自己账号的 claude -p 看图。只**预填空着的**地点格（用户填过的不动），把握
+  // 低的填成 <地点?>——那是个明显要改的占位，不是答案；不自动生成任何计划。
+  async function sortAiPlaces() {
+    if (!lastSurvey || !lastSurvey.segments.length) { sortNote("warn", "先扫描并分段，再让 AI 建议地点"); return; }
+    const btn = $("#btn-sort-ai"), label = btn.textContent;
+    btn.disabled = true; btn.textContent = "AI 看图中…（claude -p，最长 3 分钟）";
+    try {
+      const r = await post("/api/suggest", { kind: "place", src: lastSurvey.src, gap: lastSurvey.gapHours });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { sortNote("bad", "AI 建议失败：" + (j.error || ("HTTP " + r.status)) + bodyLines(j) + (j.raw ? "\n模型原文：" + j.raw : "")); return; }
+      let filled = 0;
+      for (const s of j.segments || []) {
+        const t = segInputs.get(s.index); if (!t) continue;
+        if (s.place && !t.place.value.trim()) { t.place.value = s.confidence === "low" ? "<" + s.place + "?>" : s.place; delete t.place.dataset.event; filled++; }
+        t.hint.textContent = "AI：" + (s.place ? s.place + "（把握 " + s.confidence + "）" : "没有建议") + (s.basis ? " —— " + s.basis : "");
+      }
+      sortNote("ok", `AI 建议已到：预填 ${filled} 段的地点（<…?> 是把握低的占位，请改）。看清每段再点「生成计划」。` + (j.cost != null ? `\n本次约 $${Number(j.cost).toFixed(2)}（你的 Claude 账号）。` : ""));
+    } catch (e) { sortNote("bad", "请求失败：" + e.message); }
+    finally { btn.disabled = false; btn.textContent = label; }
   }
   async function sortScan() {
     const src = $("#sort-src").value.trim();
@@ -448,6 +475,8 @@
       `源 ${sv.src} · 照片 ${sv.photos} 个：可定时 ${sv.dated} · 读不到拍摄时间 ${sv.undated.length}` +
       ` · 候选分段 ${sv.segments.length}（间隔 > ${sv.gapHours} 小时切一刀）· 侧车 ${sv.sidecars} 个`;
     const box = $("#sort-segments"); box.innerHTML = "";
+    segInputs.clear();
+    $("#btn-sort-ai").disabled = !sv.segments.length;
     if (!sv.segments.length) { box.appendChild(el("div", "muted", "没有可定时的照片——下面列出的每一类都不会被归位。")); }
     for (const g of sv.segments) {
       // 类名是 sort-seg 不是 seg：分类推送页的类目按钮行也叫 .seg，两套规则
@@ -468,6 +497,9 @@
       const btn = el("button", "btn primary", "生成计划");
       row.append(place, from, to, btn);
       c.appendChild(row);
+      const hint = el("div", "seg-ai muted small", "");
+      c.appendChild(hint);
+      segInputs.set(g.index, { place, hint });
       if (g.sameMonthEvents.length) {
         const m = el("div", "seg-merge");
         m.appendChild(el("span", null, "↺ 已有同年月事件："));
@@ -527,7 +559,9 @@
     } finally { btn.disabled = false; }
   }
 
-  const loaders = { status: () => loadStatus(false), sort: async () => {}, plans: loadPlans, vault: vault.loadVault, config: loadConfig, help: async () => {} };
+  const loaders = { status: () => loadStatus(false), sort: async () => {}, archive: archive.loadArchive, plans: loadPlans, vault: vault.loadVault, config: loadConfig, help: async () => {} };
+  // 提交期间不切页：loadVault 会清空刚推进的 baseline；归档页出计划中也一样（P8-D）
+  const busy = () => vault.busy() || archive.busy();
   async function showTab(name) {
     for (const x of document.querySelectorAll("nav button")) x.classList.toggle("active", x.dataset.tab === name);
     for (const x of document.querySelectorAll(".tab")) x.classList.toggle("active", x.id === "tab-" + name);
@@ -535,22 +569,24 @@
     const m = document.querySelector("main"); m.tabIndex = -1; m.focus({ preventScroll: true }); m.scrollTop = 0;
     try { await loaders[name](); } catch (e) { fail(e); }
   }
-  for (const b of document.querySelectorAll("nav button")) b.onclick = () => { if (vault.busy()) return; showTab(b.dataset.tab); };
-  // 数字键 1–6 切页（键盘党；也是自动化截图验证用的入口）
-  const keys = { "1": "status", "2": "sort", "3": "vault", "4": "plans", "5": "config", "6": "help" };
+  for (const b of document.querySelectorAll("nav button")) b.onclick = () => { if (busy()) return; showTab(b.dataset.tab); };
+  // 数字键 1–7 切页（键盘党；也是自动化截图验证用的入口）；次序 = nav 次序（DocDrift caseGuiNavOrder）
+  const keys = { "1": "status", "2": "sort", "3": "archive", "4": "vault", "5": "plans", "6": "config", "7": "help" };
   document.addEventListener("keydown", (ev) => {
-    if (vault.busy()) return; // 提交期间不切页：loadVault 会清空刚推进的 baseline
+    if (busy()) return;
     if (ev.repeat || ev.ctrlKey || ev.altKey || ev.metaKey) return; // 长按连发 → 并发重载
     const t = ev.target;
     if (t && (t.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName))) return;
     if (keys[ev.key]) showTab(keys[ev.key]);
   });
   $("#btn-sort-scan").onclick = () => sortScan().catch(fail);
+  $("#btn-sort-ai").onclick = () => sortAiPlaces().catch((e) => sortNote("bad", "请求失败：" + e.message));
   $("#sort-src").addEventListener("keydown", (e) => { if (e.key === "Enter") sortScan().catch(fail); });
   $("#btn-fresh").onclick = () => loadStatus(true).catch(fail);
   $("#btn-reload").onclick = () => loadStatus(false).catch(fail);
   $("#btn-plans-reload").onclick = () => loadPlans().catch(fail);
   $("#btn-plan").onclick = () => vault.makePlan();
+  $("#btn-vault-ai").onclick = () => vault.suggest();
   // 设置页的按钮全部经 cfgClick：处理器是 async，没有 .catch 的异常只会
   // 落进控制台——按钮看着像点过了，配置其实一个字节没改。异常（含 try 之前
   // 读输入框那几行的同步抛出）一律渲染进本页自己的横幅 #config-result。

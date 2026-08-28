@@ -326,6 +326,9 @@ data SortSegment = SortSegment
   , sgLastFile :: FilePath
   , sgSameMonthEvents :: [String]
     -- ^ 已有的同年月 Raw 事件夹：要并入就用 @--event@ 而不是 @--place@
+  , sgFiles :: [FilePath]
+    -- ^ 段内全部可定时主文件（按拍摄时间序）。P8-D：AI 地点建议按首\/中\/尾
+    -- 抽样看图（"Pm.ServeAi"）；CLI 渲染与 GUI 提议 JSON 不用它。
   }
   deriving (Show, Eq)
 
@@ -398,6 +401,7 @@ surveySort src gapHours cfg = do
             , sgFirstFile = p0
             , sgLastFile = pN
             , sgSameMonthEvents = sameMonth existing (localDay t0)
+            , sgFiles = map fst seg
             }
 
 -- | 渲染 = CLI 的那段输出，逐字不变。

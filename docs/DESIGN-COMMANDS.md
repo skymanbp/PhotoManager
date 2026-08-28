@@ -404,7 +404,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P8-C2 / pm 0.6.1 / 408 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **P8-D / pm 0.6.1 / 415 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -529,4 +529,13 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm doctor` | 新增 `.pm/derived` 对账：`DERIVED-STALE`（派生件 sha 已在索引 = 已落位）/ `DERIVED-ORPHAN`（目录名 sha 不在索引 = 源已不在库）/ `DERIVED-TMP`（半成品）三种 Warn，`DERIVED-PENDING`（派生了还没 apply；无索引时同行标注「未判」）Info，枚举失败 `DERIVED-ENUM` Bad（不推导任何删除）。逐级只认 `NamePlain`（链接不列不删） | §20.2 |
 | `pm doctor --repair` | 删除线从「孤儿 `.pm/tmp`」扩到「+ STALE/ORPHAN/TMP 派生件」——都是 pm 自建状态，原 tif/png 原地不动；`--repair` help 文本同步 | §20.2 |
 | `pm import --also-album` / `pm album add` | 行为不变；相册项挂到成片项的耦合规则上提为 `Pm.Album.attachAlbumItems`（import 与 convert 共用），判定入口参数化为 `classifyInto`（`classifyAlbum = classifyInto albumDst`） | — |
+
+### P8-D 归档页端点 + AI 建议（2026-08-27，DESIGN-P8.md §22–23）
+
+| 命令/入口 | 变化 | 出处 |
+|---|---|---|
+| `pm serve --writable` | 写端点六个 → **九个**：`POST /api/import/plan`（= `pm import [--also-album]`）、`POST /api/album/add-plan`（= `pm album add`）、`POST /api/convert/plan`（= `pm convert [--also-album]`，请求在 `seConvertLock` 上排队）；三者与 `POST /api/sort/plan` 共用 `ServeAlbum.planPost` 壳（403 / 400 / `{code, planId, log}`）；JSON 体读取合一为 `ServeGuard.withJsonBody`（413 / 400，此前五处复制） | DESIGN-GUI §11 |
+| `pm serve`（只读级） | 新增 `GET /api/album/candidates`（`Pm.Album.albumCandidates`：成片 jpg 未进相册按事件夹 + 非 jpg 单列）与 `POST /api/suggest`（拉起用户自己账号的 `claude -p --permission-mode plan`，只出建议：`kind` classify ≤ 20 名 / place ≤ 12 段每段 5 张；`PM_CLAUDE_EXE`、`PM_SUGGEST_TIMEOUT`；`seSuggestLock` 满 409；退出非零 / 非 JSON 502 带 raw） | DESIGN-P8 §22 |
+| `pm ui` | 第七页「归档」（三张卡）+ 整理页「AI 建议地点」+ 分类推送页「AI 建议分类/地点」与每卡照片记录三格（保存次序 hold → notes → push-plan）；数字键 1–7 | DESIGN-P8 §23 |
+| `pm sort`（内部） | `SortSegment` 增 `sgFiles`（段内全部可定时文件，时间序）供 suggest place 抽样；CLI 输出不变 | — |
 

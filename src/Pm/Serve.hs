@@ -49,6 +49,7 @@ module Pm.Serve
   , listPlans
   ) where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent.Async (race)
 import Control.Monad (when)
 import Control.Concurrent.MVar (withMVar)
@@ -88,6 +89,8 @@ import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, listPlans)
 import Pm.Publish (publishCommands)
+import Pm.ServeAi (routeAi)
+import Pm.ServeAlbum (planPost, routeAlbum)
 import Pm.ServeEnv
 import Pm.ServeVault (routeVault)
 import Pm.Sort (SortSegment (..), SortSurvey (..), runSortPlanTo, surveySort)
@@ -196,8 +199,11 @@ route env req jsonR err corsHdrs respond = do
 
 routeWith :: Config -> ServeEnv -> Request -> Reply -> ErrReply -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 routeWith cfg env req jsonR err corsHdrs respond =
-  -- P8-A：vault 端点在 "Pm.ServeVault"（逐字搬移）先匹配，不命中再走本模块的表。
-  fromMaybe (routeMain cfg env req jsonR err corsHdrs respond) (routeVault cfg env req jsonR err corsHdrs respond)
+  -- P8-A：vault 端点在 "Pm.ServeVault"（逐字搬移）先匹配；P8-D 再问归档页端点
+  -- （"Pm.ServeAlbum"）与 AI 建议（"Pm.ServeAi"）；都不命中才走本模块的表。
+  fromMaybe
+    (routeMain cfg env req jsonR err corsHdrs respond)
+    (routeVault cfg env req jsonR err corsHdrs respond <|> routeAlbum cfg env req jsonR err <|> routeAi cfg env req jsonR err)
 
 routeMain :: Config -> ServeEnv -> Request -> Reply -> ErrReply -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, pathInfo req) of
@@ -260,30 +266,24 @@ routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
   -- 进程内 IORef 从**盘上**重读一遍，保证 serve 立刻按新配置回答。
   ("POST", ["api", "config"])
     | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝改配置"
-    | otherwise -> do
-        body <- readBodyCapped req
-        case body of
-          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
-          Just raw -> case Aeson.eitherDecodeStrict' raw of
-            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
-            Right patch -> do
-              errs <- checkPatch cfg patch
-              if not (null errs)
-                then jsonR status400 [] (object ["error" .= ("配置不合法" :: String), "details" .= errs])
-                else do
-                  -- 二十四轮 minor：进配置锁，并在锁内**重新读盘**（不再拿
-                  -- 请求作用域那份 cfg 当基准）。两个请求各读旧配置、各写回
-                  -- 自己那项会互相抹掉，还会撞同一个固定 tmp 名。
-                  ew <-
-                    try (withConfigLock (configTxn patch))
-                      :: IO (Either IOException (Maybe (Either String (Config, FilePath))))
-                  case ew of
-                    Left e -> err status500 ("配置写入失败: " <> show e)
-                    Right Nothing -> err status409 "另一个 pm 正在改配置（配置锁被占），本次没改"
-                    Right (Just (Left m)) -> err status500 m
-                    Right (Just (Right (c2, fp))) -> do
-                      setServeConfig env c2
-                      jsonR status200 [] (object ["ok" .= True, "configPath" .= fp])
+    | otherwise -> withJsonBody req err $ \patch -> do
+        errs <- checkPatch cfg patch
+        if not (null errs)
+          then jsonR status400 [] (object ["error" .= ("配置不合法" :: String), "details" .= errs])
+          else do
+            -- 二十四轮 minor：进配置锁，并在锁内**重新读盘**（不再拿
+            -- 请求作用域那份 cfg 当基准）。两个请求各读旧配置、各写回
+            -- 自己那项会互相抹掉，还会撞同一个固定 tmp 名。
+            ew <-
+              try (withConfigLock (configTxn patch))
+                :: IO (Either IOException (Maybe (Either String (Config, FilePath))))
+            case ew of
+              Left e -> err status500 ("配置写入失败: " <> show e)
+              Right Nothing -> err status409 "另一个 pm 正在改配置（配置锁被占），本次没改"
+              Right (Just (Left m)) -> err status500 m
+              Right (Just (Right (c2, fp))) -> do
+                setServeConfig env c2
+                jsonR status200 [] (object ["ok" .= True, "configPath" .= fp])
   -- P4-8：第四个写端点——登记备份盘。它会在**目标盘**上建立备份 root 标识
   -- （或沿用已有的）并把 UUID + 相对路径写进配置；守卫链与 CLI `pm backup
   -- init` 完全相同（共用 'backupInitRun'，本端点只负责渲染结果）。
@@ -311,92 +311,69 @@ routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
       _ -> err status400 "缺 src 参数（要整理的源目录）"
   -- P5-E 写端点：生成 sort 计划。只写 <主库>/.pm/plans，不执行、不碰照片
   -- （与 push-plan 同一级授权；执行仍需 --allow-apply 的 /api/apply）。
-  ("POST", ["api", "sort", "plan"])
-    | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝生成计划"
-    | otherwise -> do
-        body <- readBodyCapped req
-        case body of
-          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
-          Just raw -> case Aeson.eitherDecodeStrict' raw of
-            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
-            Right (SortPlanReq src mplace mevent from to) ->
-              case (mplace, mevent) of
-                (Nothing, Nothing) -> err status400 "place 与 event 必须给一个"
-                (Just _, Just _) -> err status400 "place 与 event 只能给一个"
-                _ -> do
-                  let poe = maybe (Right (fromMaybe "" mevent)) Left mplace
-                  -- 工作流 F051/F078：交代清单与中止说明随 log 回页面（stdout 已静音）
-                  logRef <- newIORef []
-                  (code, mpid) <- runSortPlanTo (\l -> modifyIORef' logRef (l :)) (GoOpts False False) src poe from to cfg
-                  logs <- reverse <$> readIORef logRef
-                  jsonR status200 [] (object ["code" .= code, "planId" .= mpid, "log" .= logs])
+  -- P8-D：「生成计划」类 POST 的壳上提为 'Pm.ServeAlbum.planPost'（sort / import /
+  -- album add / convert 四处同一道）；place/event 的请求级校验留在这里（Left → 400）。
+  ("POST", ["api", "sort", "plan"]) ->
+    planPost env req jsonR err "生成计划" $ \(SortPlanReq src mplace mevent from to) ->
+      case (mplace, mevent) of
+        (Nothing, Nothing) -> Left "place 与 event 必须给一个"
+        (Just _, Just _) -> Left "place 与 event 只能给一个"
+        _ -> Right (\sink -> runSortPlanTo sink (GoOpts False False) src (maybe (Right (fromMaybe "" mevent)) Left mplace) from to cfg)
   ("POST", ["api", "apply"])
     | not (seAllowApply env) ->
         err status403 "serve 未以 --allow-apply 启动，拒绝执行计划（--writable 只允许生成计划，不执行）"
-    | otherwise -> do
-        body <- readBodyCapped req
-        case body of
-          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
-          Just raw -> case Aeson.eitherDecodeStrict' raw of
-            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
-            Right (ApplyReq pid only) -> withMVar (seApplyLock env) $ \_ -> do
-              logRef <- newIORef []
-              let sink l = modifyIORef' logRef (l :)
-              prep <- prepareApply cfg sink pid only
-              case prep of
-                Left m -> err status409 m
-                Right (plan, added) -> do
-                  -- 屏障不在这里调：它随 cfg 装进 ExecEnv，由内核在 root 锁内
-                  -- 跑（二十九轮 critical）。seApplyLock 只是**进程内**互斥，
-                  -- 挡不住第二个 pm；跨进程那一半现在由 I10 锁负责。屏障的
-                  -- 降级理由、收尾 git 步骤、备份缓存告警同走这个 sink（F022/C106）。
-                  (code, results) <- executePlanNowWith cfg sink plan
-                  afterApply cfg sink plan results
-                  logs <- reverse <$> readIORef logRef
-                  jsonR
-                    status200
-                    []
-                    ( object
-                        [ "planId" .= plId plan
-                        , "kind" .= plKind plan
-                        , "root" .= plRootPath plan
-                        , "addedByGroupClosure" .= added
-                        , "code" .= code
-                        , "items"
-                            .= [ object ["ix" .= piIx it, "outcome" .= outcomeLabel out, "status" .= piStatus it]
-                               | (it, out) <- results
-                               ]
-                        , "log" .= logs
-                        ]
-                    )
+    | otherwise -> withJsonBody req err $ \(ApplyReq pid only) -> withMVar (seApplyLock env) $ \_ -> do
+        logRef <- newIORef []
+        let sink l = modifyIORef' logRef (l :)
+        prep <- prepareApply cfg sink pid only
+        case prep of
+          Left m -> err status409 m
+          Right (plan, added) -> do
+            -- 屏障不在这里调：它随 cfg 装进 ExecEnv，由内核在 root 锁内
+            -- 跑（二十九轮 critical）。seApplyLock 只是**进程内**互斥，
+            -- 挡不住第二个 pm；跨进程那一半现在由 I10 锁负责。屏障的
+            -- 降级理由、收尾 git 步骤、备份缓存告警同走这个 sink（F022/C106）。
+            (code, results) <- executePlanNowWith cfg sink plan
+            afterApply cfg sink plan results
+            logs <- reverse <$> readIORef logRef
+            jsonR
+              status200
+              []
+              ( object
+                  [ "planId" .= plId plan
+                  , "kind" .= plKind plan
+                  , "root" .= plRootPath plan
+                  , "addedByGroupClosure" .= added
+                  , "code" .= code
+                  , "items"
+                      .= [ object ["ix" .= piIx it, "outcome" .= outcomeLabel out, "status" .= piStatus it]
+                         | (it, out) <- results
+                         ]
+                  , "log" .= logs
+                  ]
+              )
   ("POST", ["api", "backup-init"])
     | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝登记备份盘"
-    | otherwise -> do
-        body <- readBodyCapped req
-        case body of
-          Nothing -> err status413 ("请求体超过 " <> show maxBodyBytes <> " 字节")
-          Just raw -> case Aeson.eitherDecodeStrict' raw of
-            Left e -> err status400 ("请求体不是合法 JSON: " <> e)
-            Right (BackupInitReq p) -> do
-              r <- backupInitRun p cfg
-              case r of
-                Left m -> jsonR status400 [] (object ["error" .= ("登记失败" :: String), "details" .= [m]])
-                Right o -> do
-                  fresh <- loadConfig
-                  case fresh of
-                    Left m -> err status500 ("登记后配置无法重新载入: " <> m)
-                    Right c2 -> do
-                      setServeConfig env c2
-                      jsonR
-                        status200
-                        []
-                        ( object
-                            [ "ok" .= True
-                            , "reused" .= case o of BiReused {} -> True; BiCreated {} -> False
-                            , "path" .= case o of BiReused p' _ -> p'; BiCreated p' _ _ _ -> p'
-                            , "id" .= case o of BiReused _ i -> i; BiCreated _ i _ _ -> i
-                            ]
-                        )
+    | otherwise -> withJsonBody req err $ \(BackupInitReq p) -> do
+        r <- backupInitRun p cfg
+        case r of
+          Left m -> jsonR status400 [] (object ["error" .= ("登记失败" :: String), "details" .= [m]])
+          Right o -> do
+            fresh <- loadConfig
+            case fresh of
+              Left m -> err status500 ("登记后配置无法重新载入: " <> m)
+              Right c2 -> do
+                setServeConfig env c2
+                jsonR
+                  status200
+                  []
+                  ( object
+                      [ "ok" .= True
+                      , "reused" .= case o of BiReused {} -> True; BiCreated {} -> False
+                      , "path" .= case o of BiReused p' _ -> p'; BiCreated p' _ _ _ -> p'
+                      , "id" .= case o of BiReused _ i -> i; BiCreated _ i _ _ -> i
+                      ]
+                  )
   -- P7 只读端点：把配置好的两仓路径/push 目标拼成上线命令文本。pm 绝不执行
   -- git（I9）——GUI 只把这段文本复制给用户，执行在用户终端。生成逻辑在
   -- 'Pm.Publish.publishCommands'（纯函数，测试直打）。

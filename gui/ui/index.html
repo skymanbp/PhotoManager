@@ -11,6 +11,7 @@
     <nav>
       <button data-tab="status" class="active"><span class="ic">◉</span>状态</button>
       <button data-tab="sort"><span class="ic">▦</span>整理新照片</button>
+      <button data-tab="archive"><span class="ic">▣</span>归档</button>
       <button data-tab="vault"><span class="ic">◈</span>分类推送</button>
       <button data-tab="plans"><span class="ic">▤</span>计划</button>
       <button data-tab="config"><span class="ic">⚙</span>设置</button>
@@ -61,6 +62,7 @@
       <header class="page-head">
         <h1>整理新照片 <span class="muted small">相机卡 / 下载目录 → 暂存区事件夹（源目录只读，绝不改动）</span></h1>
         <div class="actions">
+          <button id="btn-sort-ai" class="btn" disabled>AI 建议地点</button>
           <button id="btn-sort-scan" class="btn primary">扫描并分段</button>
         </div>
       </header>
@@ -68,24 +70,60 @@
         <input id="sort-src" type="text" spellcheck="false" placeholder="源目录，例如 E:\DCIM 或 D:\Downloads\相机卡">
         <label class="muted small">间隔阈值<input id="sort-gap" type="number" min="1" max="720" value="72" step="1"> 小时</label>
       </div>
-      <p class="muted small">分段<strong>只是提议</strong>：时间切不开首尾相接的两趟旅程，边界以你给的日期为准。地点也只能你来给——相机没有 GPS，pm 不猜（不变量 I1）。</p>
+      <p class="muted small">分段<strong>只是提议</strong>：时间切不开首尾相接的两趟旅程，边界以你给的日期为准。地点也只能你来给——相机没有 GPS，pm 不猜（不变量 I1）。「AI 建议地点」会把每段首/中/尾至多 5 张 jpg 交给<strong>你自己账号下的 Claude</strong>（<code>claude -p</code>，只读模式，每次有费用）看图猜地点：只<strong>预填</strong>进地点格、把握低的填成 <code>&lt;地点?&gt;</code>，不自动生成计划。</p>
       <div id="sort-result" class="banner hidden"></div>
       <div id="sort-summary" class="line muted"></div>
       <div id="sort-segments" class="segs"></div>
       <div id="sort-left" class="lists"></div>
     </section>
 
+    <!-- ── 归档（P8-D 第三页）── -->
+    <section id="tab-archive" class="tab">
+      <header class="page-head">
+        <h1>归档 <span class="muted small">暂存区 → Raw/成片 → 相册；非 jpg 先派生 jpg。三张卡都只生成计划，执行在「计划」页</span></h1>
+        <div class="actions"><button id="btn-archive-reload" class="btn ghost">刷新</button></div>
+      </header>
+      <div id="archive-result" class="banner hidden"></div>
+
+      <h2 class="sec">1 · 暂存区归档 <span class="muted small">To-Be-Sync'd 事件夹 → Raw\年\事件-Raw + 成片\事件（与终端 pm import 同一条计划路径）</span></h2>
+      <div class="card wide">
+        <div id="archive-staging" class="line"></div>
+        <div class="row check">
+          <label class="muted small"><input id="import-also-album" type="checkbox"> 同时导入相册（成片里的 jpg 再拷一份进相册；与成片项同组——成片没落位相册不执行）</label>
+          <button id="btn-import-plan" class="btn primary">生成归档计划</button>
+        </div>
+      </div>
+
+      <h2 class="sec">2 · 成片 → 相册 <span id="album-cand-meta" class="muted small"></span></h2>
+      <div class="row check">
+        <span id="album-progress" class="muted">已选 0</span>
+        <button id="btn-album-add" class="btn primary" disabled>加入相册（生成计划）</button>
+        <span class="muted small">相册是平铺的收藏层、只收 jpg；相册已有同名不同内容的会进计划待裁决，不覆盖。</span>
+      </div>
+      <div id="album-grid" class="grid"></div>
+
+      <h2 class="sec">3 · 非 jpg 转换 <span id="convert-meta" class="muted small"></span></h2>
+      <p class="muted small">tif / png / psd / heic 等已渲染位图 → 用本机 python + Pillow 派生一份 jpg（写进主库 <code>.pm\derived</code>，<strong>原文件原地不动</strong>），再由计划落到成片同事件夹（可勾选同时进相册）或相册。点按钮时转换就发生（第一段，pm 自建状态）；落位仍要到「计划」页执行（第二段，才动照片层）。</p>
+      <div class="row check">
+        <label class="muted small"><input id="convert-also-album" type="checkbox"> 同时进相册（成片里的源）</label>
+        <button id="btn-convert" class="btn primary" disabled>转换并生成计划</button>
+      </div>
+      <ul id="convert-list" class="steps"></ul>
+    </section>
+
     <!-- ── 分类推送 ── -->
     <section id="tab-vault" class="tab">
       <header class="page-head">
-        <h1>分类推送 <span class="muted small">相册里还没进 vault 的照片（NEW）——也可以决定「暂不同步」</span></h1>
+        <h1>分类推送 <span class="muted small">相册里还没进 vault 的照片（NEW）——也可以决定「暂不同步」；每张卡下面三格是照片记录（地点 / 坐标 / 标题）</span></h1>
         <div class="actions">
           <span id="assign-progress" class="muted">…</span>
+          <button id="btn-vault-ai" class="btn">AI 建议分类/地点</button>
           <!-- 按钮名与上手页、空网格提示、状态页「下一步」四处一字不差：
-               这个按钮两件事一起做（落「暂不同步」决定 + 出推送计划）。 -->
+               这个按钮三件事一起做（落「暂不同步」决定 + 写改过的照片记录 + 出推送计划）。 -->
           <button id="btn-plan" class="btn primary" disabled>保存决定并生成推送计划</button>
         </div>
       </header>
+      <p class="muted small">「AI 建议分类/地点」把至多 20 张交给<strong>你自己账号下的 Claude</strong>（<code>claude -p</code>，只读模式，每次有费用）看图：类目只在按钮上描边、地点/坐标/标题只<strong>预填</strong>空着的格——都不算已定，类目仍要你点，记录随「保存决定并生成推送计划」写进主库 <code>.pm\vault-notes.json</code>（photos.json 不在 pm 写域）。</p>
       <div id="plan-result" class="banner hidden"></div>
       <div id="vault-grid" class="grid"></div>
     </section>
@@ -157,13 +195,15 @@
       <header class="page-head"><h1>三步上手</h1></header>
       <ol class="howto">
         <li><b>看状态</b>：左侧「状态」一眼看清三件事——Raw / 成片 / 相册各多少、相册与 vault 差哪些、备份盘上次什么时候同步。</li>
-        <li><b>分类推送</b>：「分类推送」里给每张 NEW 照片选 landscape / portrait / urban，点「保存决定并生成推送计划」。这一步只写计划文件，不碰照片。</li>
+        <li><b>整理与归档</b>：「整理新照片」把相机卡按拍摄时间分段进暂存区；「归档」把暂存区事件夹归入 Raw/成片（可同时导入相册）、把成片 jpg 挑进相册、把 tif/png 派生成 jpg。每一步都只生成计划。</li>
+        <li><b>分类推送</b>：「分类推送」里给每张 NEW 照片选 landscape / portrait / urban（可先点「AI 建议分类/地点」预填），点「保存决定并生成推送计划」。这一步只写计划文件与主库 <code>.pm</code> 里的记录，不碰照片。</li>
         <li><b>执行</b>：到「计划」页点「执行这个计划」（点两次确认），或在终端跑 <code>pm apply &lt;id&gt;</code>——同一套校验写入 + 日志，随时 <code>pm undo</code>。之后按提示做 git 提交，或用「状态」页的「复制上线命令」（pm 从不替你执行 git）。</li>
       </ol>
-      <p class="muted">安全模型：GUI 是独立进程，从不直接触碰照片文件；一切经 <code>pm serve</code> 的本机 API。pm 没有删除与覆盖原语——唯一的移出机制是带清单的隔离区。</p>
+      <p class="muted">安全模型：GUI 是独立进程，从不直接触碰照片文件；一切经 <code>pm serve</code> 的本机 API。pm 没有删除与覆盖原语——唯一的移出机制是带清单的隔离区。AI 只出建议：跑在你自己账号的 <code>claude -p</code> 只读模式下，构造上写不了任何东西。</p>
     </section>
   </main>
   <script src="vault.js"></script>
+  <script src="archive.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -444,7 +444,7 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 
 本节**已移到配套文档** [`DESIGN-GUI.md`](DESIGN-GUI.md)（2026-08-27，P8-A）：架构
 边界（GUI 独立进程、永不直接触碰照片）、`pm serve` 的端点花名册与三级授权、写端点
-契约、GUI 六页与 CSP、进程生命周期、设置页与配置写纪律、`PM_CONFIG`、打包发布。
+契约、GUI 七页与 CSP、进程生命周期、设置页与配置写纪律、`PM_CONFIG`、打包发布。
 搬家理由同 §7–10：P8 要往 §11 加端点与入口，而本文件 750 行预算已零余量。编号
 沿用，跨文档引用照旧写 §11；读本节的三条 DocDrift 哨兵（页序、CSP 逐字、配置锁
 清点）随之改读 `DESIGN-GUI.md`。
@@ -575,7 +575,7 @@ REVIEW-LOG 第 28 轮。
 | file-io 未经上游在 GHC 9.10.3 测试 | P0 冒烟 + FilePath 降级预案（§4） |
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |
 | GUI 工具链 | 2026-08-24 改判 Rust/Tauri：cargo、tauri-cli、WebView2、MSVC 本机均已在，零安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
-| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable` 开六个生成计划类写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）、记录「暂不同步」决定 / 照片记录（写主库的 `.pm/vault-holds.json`）、改配置（写 XDG 的 config.toml，主库路径只读）、登记备份盘（在目标盘上建备份 root 标识，守卫链同 CLI）、生成 sort 计划（写主库 `.pm/plans`）（§11），照片零改动。P7 起 `pm ui` 以 `--allow-apply` 拉起：同用户进程若拿到 token 还能经 `POST /api/apply` 执行**已存的计划**——本节威胁模型本就不防同机同用户恶意进程（这样的进程不需要 token，直接跑 `pm apply` 甚至直接改文件即可），token 不是对同用户进程的防线；apply 能做的仍只限两段式的第二段（有计划文件才有动作，journal 全程记录、可 undo，无删除/覆盖原语） |
+| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable` 开九个生成计划类写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）、记录「暂不同步」决定 / 照片记录（写主库的 `.pm/vault-holds.json` / `.pm/vault-notes.json`）、改配置（写 XDG 的 config.toml，主库路径只读）、登记备份盘（在目标盘上建备份 root 标识，守卫链同 CLI）、生成 sort / 归档 / 相册 / 转换计划（写主库 `.pm/plans`；转换另写 `.pm/derived` 派生件）（§11），照片零改动；只读级 `POST /api/suggest` 拉起用户自己账号的 `claude -p --permission-mode plan`，只出建议、不写 `.pm`。P7 起 `pm ui` 以 `--allow-apply` 拉起：同用户进程若拿到 token 还能经 `POST /api/apply` 执行**已存的计划**——本节威胁模型本就不防同机同用户恶意进程（这样的进程不需要 token，直接跑 `pm apply` 甚至直接改文件即可），token 不是对同用户进程的防线；apply 能做的仍只限两段式的第二段（有计划文件才有动作，journal 全程记录、可 undo，无删除/覆盖原语） |
 | 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：**下一次比对**（`pm vault status` / GUI 刷新）复核到字节已变即失效并回到 NEW——不是实时监视；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |

@@ -10,13 +10,13 @@ module DocDriftTests (docDriftTests) where
 
 import qualified Data.ByteString as BS
 import Data.Char (isAlpha, isDigit, isSpace, toLower)
-import Data.List (dropWhileEnd, isInfixOf, isPrefixOf, isSuffixOf, sort, tails)
+import Data.List (dropWhileEnd, intercalate, isInfixOf, isPrefixOf, isSuffixOf, nub, sort, stripPrefix, tails)
 import Data.Maybe (mapMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
-import System.FilePath ((</>))
+import System.FilePath (takeFileName, (</>))
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -27,7 +27,8 @@ docDriftTests =
     [ testCase "字节出口清点：deleteBoundAt 引用模块集合固定；Exec 头注不再写 no delete call anywhere" caseByteExitCensus
     , testCase "配置锁清点：withConfigLock 调用模块集合 = DESIGN-GUI 声明的四条读改写路径" caseConfigLockCensus
     , testCase "--json 清点：全 CLI 只有 vault status 与 vault notes 两处 long \"json\"（P8-C）" caseJsonFlagCensus
-    , testCase "GUI 页序：DESIGN-GUI ①—⑥ 的顺序与 index.html 的 nav 次序一致" caseGuiNavOrder
+    , testCase "GUI 页序：DESIGN-GUI ①—⑦ 的顺序与 index.html 的 nav 次序一致（P8-D 第七页归档）" caseGuiNavOrder
+    , testCase "路由清点（P8-D）：src/Pm/Serve*.hs 的 (METHOD, [api,…]) 元组集合 = DESIGN-GUI 反引号里的 `METHOD /api/…` 集合" caseRouteRoster
     , testCase "CSP 逐字：DESIGN-GUI 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）" caseCspQuoted
     , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链" caseGuiNoInlineStyle
     , testCase "750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）" caseLineBudget
@@ -124,15 +125,50 @@ caseGuiNavOrder = do
       tabOf l = case breakOn "data-tab=\"" l of
         Nothing -> Nothing
         Just rest -> Just (takeWhile (/= '"') rest)
-  tabs @?= ["status", "sort", "vault", "plans", "config", "help"]
+  -- P8-D（用户裁定 R7）：第七页「归档」插在整理与分类推送之间——流水线次序。
+  tabs @?= ["status", "sort", "archive", "vault", "plans", "config", "help"]
   mapM_ (\lbl -> assertBool ("nav label: " <> lbl) (("</span>" <> lbl <> "</button>") `isInfixOf` html))
-    ["状态", "整理新照片", "分类推送", "计划", "设置", "上手"]
+    ["状态", "整理新照片", "归档", "分类推送", "计划", "设置", "上手"]
   design <- readUtf8 ("docs" </> "DESIGN-GUI.md")
-  let marks = ["①**状态**", "②**整理新照片**", "③**分类推送**", "④**计划**", "⑤**设置**", "⑥**上手**"]
+  let marks = ["①**状态**", "②**整理新照片**", "③**归档**", "④**分类推送**", "⑤**计划**", "⑥**设置**", "⑦**上手**"]
       pos mk = T.length (fst (T.breakOn (T.pack mk) (T.pack design)))
   mapM_ (\mk -> assertBool ("DESIGN 应包含 " <> mk) (mk `isInfixOf` design)) marks
   let ps = map pos marks
-  assertBool ("①—⑥ 在 DESIGN 里应按序出现: " <> show ps) (and (zipWith (<) ps (drop 1 ps)))
+  assertBool ("①—⑦ 在 DESIGN 里应按序出现: " <> show ps) (and (zipWith (<) ps (drop 1 ps)))
+
+-- | P8-D：路由表 ↔ DESIGN-GUI 端点清单逐项对账。代码侧从 src/Pm/Serve*.hs 抽
+-- @("GET"|"POST", ["api", …])@ 元组（变量段 → @<…>@）；文档侧取 DESIGN-GUI.md 里
+-- 全部反引号 @`GET /api/…`@ / @`POST /api/…`@（@<id>@/@<sha>@ 同样归一为 @<…>@，
+-- 查询串 / 体示例截掉）。两边集合必须相等：加了端点不写文档、文档写了没有的
+-- 端点，都转红。
+caseRouteRoster :: IO ()
+caseRouteRoster = do
+  files <- filter (\f -> "Serve" `isPrefixOf` takeFileName f && ".hs" `isSuffixOf` f) <$> listDirectory ("src" </> "Pm")
+  codeRoutes <- concat <$> mapM (\f -> mapMaybe routeOf . lines <$> readUtf8 ("src" </> "Pm" </> f)) files
+  design <- readUtf8 ("docs" </> "DESIGN-GUI.md")
+  assertBool "代码侧至少应抽到 20 条路由（抽取器没坏）" (length (nub codeRoutes) >= 20)
+  sort (nub codeRoutes) @?= sort (nub (docRoutes design))
+ where
+  routeOf l =
+    let s = dropWhile isSpace l
+     in case (stripPrefix "(\"GET\", [" s, stripPrefix "(\"POST\", [" s) of
+          (Just rest, _) -> Just ("GET " <> segs rest)
+          (_, Just rest) -> Just ("POST " <> segs rest)
+          _ -> Nothing
+  segs rest = "/" <> intercalate "/" (map seg (words (map (\c -> if c == ',' then ' ' else c) (takeWhile (/= ']') rest))))
+  seg t = case t of
+    ('"' : xs) -> takeWhile (/= '"') xs
+    _ -> "<…>"
+  docRoutes d = case breakOn "`" d of
+    Nothing -> []
+    Just rest -> let (tokn, more) = span (/= '`') rest in maybe id (:) (routeTok tokn) (docRoutes (drop 1 more))
+  routeTok t = case words t of
+    (m : p : _) | m `elem` ["GET", "POST"], "/api/" `isPrefixOf` p -> Just (m <> " " <> norm p)
+    _ -> Nothing
+  norm p = intercalate "/" (map (\x -> if take 1 x == "<" then "<…>" else x) (splitSlash (takeWhile (`notElem` ("[?{" :: String)) p)))
+  splitSlash s = case break (== '/') s of
+    (a, []) -> [a]
+    (a, _ : r) -> a : splitSlash r
 
 breakOn :: String -> String -> Maybe String
 breakOn pat s = case T.breakOn (T.pack pat) (T.pack s) of

@@ -5,7 +5,7 @@
 -- 源原地不动；@--also-album@ 分组），以及 doctor 对 @.pm\/derived@ 的四态对账
 -- 与 @--repair@ 的删除线。真转换用本机 python（@PM_PYTHON@ → PATH）——找不到
 -- python 或没装 Pillow 时用例直接失败（不跳过：这台机的发布前提）。
-module ConvertTests (convertTests) where
+module ConvertTests (convertTests, writeRgbPng) where
 
 import Control.Exception (bracket_)
 import Control.Monad (forM_)
@@ -15,7 +15,7 @@ import qualified Data.Text as T
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
 import System.Environment (setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
+import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readProcessWithExitCode)
 import Test.Tasty
@@ -85,6 +85,13 @@ makeImages exe rgbDir alphaDir =
       ])
     [rgbDir, alphaDir]
 
+-- | 一张 2×2 的 RGB png（ServeP8Tests 的 convert/plan 端点用例也用它）。
+writeRgbPng :: FilePath -> IO ()
+writeRgbPng p = do
+  exe <- python
+  createDirectoryIfMissing True (takeDirectory p)
+  () <$ py exe "import sys\nfrom PIL import Image\nImage.new('RGB', (2, 2), (1, 2, 3)).save(sys.argv[1])" [p]
+
 -- | 读 jpg 左上像素：@mode r g b@ 或 @L v@（只出 ASCII）。
 pixel :: FilePath -> FilePath -> IO (String, [Int])
 pixel exe p = do
@@ -131,7 +138,7 @@ caseE2E = withLib $ \root run -> do
       alb = root </> "相册"
   mapM_ (createDirectoryIfMissing True) [e1, e2]
   makeImages exe e1 alb
-  _ <- py exe "import sys\nfrom PIL import Image\nImage.new('RGB', (2, 2), (1, 2, 3)).save(sys.argv[1])" [e2 </> "solo.png"]
+  writeRgbPng (e2 </> "solo.png")
   srcShas <- mapM sha256File [e1 </> "rgb.png", e1 </> "deep.tif", alb </> "alpha.png"]
   let three = ["成片/E1/rgb.png", "成片/E1/deep.tif", "相册/alpha.png"]
   (c1, mpid1, o1) <- run True False three

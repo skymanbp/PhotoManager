@@ -230,14 +230,16 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 
 ### 22.2 后端：`pm serve` 拉起 `claude -p`
 
-- 可执行：`PM_CLAUDE_EXE` → PATH 上的 `claude`（Windows 要按 `PATHEXT` 认 `.exe/.cmd`，
-  实现时探针核实 `findExecutable` 的行为）。找不到 → 409「未安装 claude CLI」。
+- 可执行：`PM_CLAUDE_EXE` → PATH 上的 `claude`（as-built：`findExecutable "claude"` 直接命中
+  `claude.exe`；`PM_CLAUDE_EXE` 给了但不存在 → 409，不回退 PATH）。找不到 → 409「未安装 claude CLI」。
 - 调用形：`claude -p --output-format json --permission-mode plan --max-turns 8 <提示>`，
   **cwd = 主库 root**（分类）或 **源目录**（地点），让 Read 工具落在工作目录内；
   `--permission-mode plan` 只放行只读工具——模型在构造上写不了任何东西。提示里给
-  **绝对路径清单**让模型 Read 看图。整体超时 180 s，超时杀进程、409。以上旗标
-  **P8-D 实现前先用真实 `claude` 探针核实**（cwd 内 Read 图片是否免提示、
-  `--permission-mode plan` 是否接受、`--output-format json` 的 `result` 字段）。
+  **绝对路径清单**让模型 Read 看图。整体超时 180 s（`PM_SUGGEST_TIMEOUT` 可调，测试用 1），超时杀进程、409。以上旗标
+  已用真实 `claude` 2.1.243 探针核实（cwd 内 Read 图片免提示、`permission_denials: []`；
+  `--output-format json` 信封含 `result` / `is_error` / `total_cost_usd`）。as-built：提示经 stdin
+  交给子进程（三根管道 utf8，不走命令行长度限制）；实测每次 ≈ $0.7–1.3（系统提示缓存写入
+  占大头），响应带 `cost`，页面文案写明「你自己账号、每次有费用」。
 - 并发：`seSuggestLock`（进程内 MVar）；上一次未完成 → 409。
 - 上限：分类每次 ≤ 20 张；地点每次 ≤ 12 段、每段抽样 ≤ 5 张（首/中/尾）；超出 400
   让页面分批。请求体上限沿用 64 KiB（ServeGuard.hs:71）。
@@ -248,15 +250,16 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 
 ```
 {"kind":"classify","names":["a.jpg",…]}          // 相册里的名字（NEW 或 HELD 都可）
-→ {"items":[{"name","category","location","coordinates","source","basis","title"}],"raw":"…"}
+→ {"items":[{"name","category","location","coordinates","source","basis","title"}],"dropped":[未回答的名字],"raw":"…","cost":0.03}
 {"kind":"place","src":"E:\\DCIM","gap":72}        // serve 自己重跑 surveySort 抽样，不信任客户端路径
-→ {"segments":[{"index","place","basis","confidence"}],"raw":"…"}
+→ {"segments":[{"index","place","basis","confidence"}],"raw":"…","cost":…}
 ```
 
 - 分类提示要求模型按图像内容判 landscape/urban/portrait（不按宽高比），坐标只在
-  能说出具体依据时给、否则 `null` + `source:"none"`；`SortSegment` 增 `sgSample`
-  （首/中/尾至多 5 个可读 jpg；RAW 段取同 stem 的 JPG，没有就整段 `place:null`
-  并说明「没有可看的图」——与 photo-place §2 逐字同规）。
+  能说出具体依据时给、否则 `null` + `source:"none"`；`SortSegment` 增 `sgFiles`
+  （as-built：段内全部可定时文件、时间序；抽样在 `ServeAi.evenSample 5` 做——首/中/尾均匀 5 张 jpg，
+  RAW 同 stem 的 JPG 本就在段内；一张 jpg 也没有的段整段 `place:null` 并说明「没有可看的图」、
+  不交给模型——与 photo-place §2 逐字同规）。
 - 响应解析：`result` 文本里取第一段 JSON（裸或 ``` 围栏），解析失败 → 502 并把
   `raw` 原样带回（页面显示「AI 回复无法解析」，不猜）。
 - 地点建议的把握「低」→ 页面预填 `<地点?>`（photo-place 契约第 3 步）。
@@ -264,9 +267,11 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 ### 22.4 测试
 
 `PM_CLAUDE_EXE` 指向测试夹具（`test/fixtures/fake-claude.cmd` → 打印预置 JSON /
-打印垃圾 / 退出非零 / 睡到超时）四种；ServeWriteTests 五道闸（只读级仍放行、413、
-400、409 锁、502 解析失败）+ 契约用例：建议**不改** `vault-holds.json`/计划文件的
-字节（前后 sha 相同）。
+打印垃圾 / 退出非零 / 睡到超时 / 地点预置）五种（`PM_FAKE_CLAUDE`）；as-built 落在
+`test/ServeP8Tests.hs` 6 例：三个计划端点各一（只读 403 + 写域断言 + 计划可装回）、classify 一例
+含五道闸（只读级仍放行、413、400 ×6、409 锁 / 缺 claude / 超时、502 垃圾 / 退出非零）、place 一例
+（serve 自己重跑分段、围栏 JSON、只有 RAW 的段答 null、> 12 段 400）、纯函数一例；契约：建议
+**不写** `vault-holds.json` / `vault-notes.json` / 计划文件（不出现），jpg 字节不变。
 
 ---
 
@@ -277,14 +282,16 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | 端点 | 级 | 写域 | 同源 CLI |
 |---|---|---|---|
 | `POST /api/import/plan {"alsoAlbum"}` | ② | 主库 `.pm/plans` | `pm import [--also-album]`（`runImportTo sink`） |
-| `GET /api/album/candidates` | ① | — | `pm album candidates` |
+| `GET /api/album/candidates` | ① | — | 无（`Pm.Album.albumCandidates`，只读数据面） |
 | `POST /api/album/add-plan {"paths":[…]}` | ② | 主库 `.pm/plans` | `pm album add` |
 | `POST /api/convert/plan {"paths":[…],"alsoAlbum"}` | ② | 主库 `.pm/derived` + `.pm/plans` | `pm convert` |
 | `GET /api/vault/notes` / `POST /api/vault/notes` | ① / ② | 主库 `.pm/vault-notes.json` | `pm vault notes` / `note` |
 | `POST /api/suggest` | ① | —（拉起 `claude -p`） | 无（技能自己看图） |
 
-- `--writable` 级 POST 从五个变**九个**：`app/Main.hs:214` 的 help、DESIGN-GUI.md:53、
-  README:185 三处计数同 commit 改；新增 DocDrift 哨兵 `caseRouteRoster`：从
+- `--writable` 级 POST 从六个变**九个**：`app/Main.hs` 的 `--writable` help、DESIGN-GUI.md §11、
+  README 三处计数同 commit 改；as-built：三个计划端点与 `POST /api/sort/plan` 共用
+  `ServeAlbum.planPost` 壳，JSON 体读取上提为 `ServeGuard.withJsonBody`（五处复制合一）；
+  convert 请求在 `seConvertLock` 上排队而非 409；新增 DocDrift 哨兵 `caseRouteRoster`：从
   `Serve.hs`/`ServeVault.hs`/新端点模块里抽 `("GET"|"POST", [...])` 路由元组与
   DESIGN-GUI.md 的端点表逐项对账。
 - 端点模块按边界拆：`Pm.ServeAlbum`（import/album/convert）、`Pm.ServeAi`（suggest）、
@@ -309,9 +316,11 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
    「同时进相册」→ 「转换并生成计划」→ convert/plan；转换在生成期发生（第一段），
    落位仍要到计划页执行（第二段），页面文案把两段说清。
 
-其余两页各加一个入口：整理新照片页「AI 建议地点」（按段预填 place 输入框 +
-把握/依据徽标）；分类推送页「AI 建议分类/定位」（预填类目下拉 + 每卡新增地点/坐标
-输入，随「保存决定并生成推送计划」先 `POST /api/vault/notes` 再 hold 再 push-plan）。
+其余两页各加一个入口：整理新照片页「AI 建议地点」（只预填空着的 place 输入框、把握低填
+`<地点?>`、每段一行依据）；分类推送页「AI 建议分类/地点」（类目按钮只描边 `.ai`、不代点；
+每卡新增地点/坐标/标题三格，打开页时从 `GET /api/vault/notes` 回显；随「保存决定并生成推送
+计划」按 **hold → notes（改了的差集）→ push-plan** 的次序写——hold 先行是因为服务端拒收 held
+文件的 push，与 P4-7 同理）。
 
 ---
 
@@ -351,7 +360,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | P8-B | §19 | `test/AlbumTests.hs`（纯函数 + 沙盒库端到端）；突变：同批重名闸拆掉→红、异 sha 不出 NEEDS-DECISION→红、非 jpg 入相册→红、组耦合拆掉→红 |
 | P8-C | §21 | `test/VaultNoteTests.hs`；突变：坐标越界放行→红、sha 不新鲜→红、事务不取锁→红 |
 | P8-C2 | §20 | `test/ConvertTests.hs` 3 例（参数闸 / 真 Pillow 端到端：16 位缩放、alpha 白底、`--also-album` 同组、`--redo`、I7 耦合、坏源 / doctor 四态 + `--repair`）；突变 m1–m6 见 REVIEW-LOG。原拟「`PM_PYTHON` 指向夹具脚本」一例改为「指向不存在 → 拒绝」：真 Pillow 已在端到端里覆盖，夹具脚本只会再抄一遍转换器接口 |
-| P8-D | §22–23 | ServeWriteTests 每端点五道闸 + `caseRouteRoster` + `caseGuiNavOrder` ①—⑦ + `node --check` |
+| P8-D | §22–23 | `test/ServeP8Tests.hs` 6 例（三个计划端点 / classify 五道闸 / place / 纯函数）+ `caseRouteRoster` + `caseGuiNavOrder` ①—⑦ + `node --check`；突变见 REVIEW-LOG |
 | P8-E | §24 | 档案 vault commit（不 push） |
 | 门禁 | 第一方全量审 → Opus 轮到 FINAL GO → 突变配对 → `caseLineBudget` → leakscan | 记 REVIEW-LOG |
 | 提醒 | 装新构建 → 用户 GUI 审查 + **首次真实数据跑**（`pm import --also-album` / `pm album add` / `pm convert` 那 1 张 tif / GUI 分类 → 首次建 vault root）——每一步动真实照片前 AskUserQuestion 摆清单 | 用户裁定 |
