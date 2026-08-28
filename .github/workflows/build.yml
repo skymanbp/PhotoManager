@@ -119,7 +119,7 @@ jobs:
           V=${{ steps.ver.outputs.version }}
           T=gui/src-tauri/target/x86_64-pc-windows-msvc/release
           mkdir -p out/stage/pm-$V-windows-x64
-          cp -f "$T/pm-ui.exe" dist-bin/pm.exe LICENSE README.md out/stage/pm-$V-windows-x64/
+          cp -f "$T/pm-ui.exe" dist-bin/pm.exe LICENSE README.md README.zh.md out/stage/pm-$V-windows-x64/
           ( cd out/stage && 7z a -tzip -mx=9 "../pm-$V-windows-x64.zip" "pm-$V-windows-x64" > /dev/null )
           cp -f "$T/bundle/nsis/pm-ui_${V}_x64-setup.exe" out/
           ( cd out && sha256sum "pm-$V-windows-x64.zip" "pm-ui_${V}_x64-setup.exe" | tee sha256.txt )

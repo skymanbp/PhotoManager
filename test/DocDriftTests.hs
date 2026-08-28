@@ -311,22 +311,35 @@ caseRepoRootCwd = do
 -- undo 提要写着不存在的 `pm undo <planId>`、收敛叙事停在 37/38 轮。数字只
 -- 允许一个上游（DESIGN-COMMANDS 状态行），提要必须是真 CLI 形态，轮次收敛
 -- 判定整段委托 REVIEW-LOG——README 不再手抄「第 N 轮 GO」。
+-- 1.0.0 后（用户 2026-08-28 裁定）README.md 改英文主入口、README.zh.md 为中文镜像：
+-- 同一组哨兵两份都盯；英文侧的形态是「N tests」/「round … GO」/「every gate」/
+-- 「Development history (P0–P<n>)」，中文侧形态不变。
 caseReadmeSync :: IO ()
 caseReadmeSync = do
   readme <- readUtf8 "README.md"
+  zh <- readUtf8 "README.zh.md"
   dc <- readUtf8 ("docs" </> "DESIGN-COMMANDS.md")
   dcCount <- case countsBefore " 测试**" dc of
     [n] -> pure n
     other -> assertFailure ("DESIGN-COMMANDS 状态行应恰有一个「N 测试」: " <> show other) >> pure 0
-  let rCounts = countsBefore " 例" readme
-  assertBool "README 至少报一次测试计数（N 例）" (not (null rCounts))
-  assertEqual ("README 全部「N 例」须等于 DESIGN-COMMANDS 状态行的 " <> show dcCount) [] (filter (/= dcCount) rCounts)
-  assertBool "README 的 undo 提要须是真 CLI 形态 pm undo --last" ("pm undo --last" `isInfixOf` readme)
-  assertBool "README 不得出现 pm undo <planId>（CLI 无此形态）" (not ("pm undo <planId>" `isInfixOf` readme))
-  assertBool "README 不手抄「…轮 GO」收敛判定（委托 REVIEW-LOG）" (not ("轮 GO" `isInfixOf` readme))
+  let rCounts = countsBefore " tests" readme
+      zCounts = countsBefore " 例" zh
+  assertBool "README.md（英文主入口）至少报一次测试计数（N tests）" (not (null rCounts))
+  assertBool "README.zh.md 至少报一次测试计数（N 例）" (not (null zCounts))
+  assertEqual ("README.md 全部「N tests」须等于 DESIGN-COMMANDS 状态行的 " <> show dcCount) [] (filter (/= dcCount) rCounts)
+  assertEqual ("README.zh.md 全部「N 例」须等于 DESIGN-COMMANDS 状态行的 " <> show dcCount) [] (filter (/= dcCount) zCounts)
+  mapM_
+    ( \(nm, s) -> do
+        assertBool (nm <> " 的 undo 提要须是真 CLI 形态 pm undo --last") ("pm undo --last" `isInfixOf` s)
+        assertBool (nm <> " 不得出现 pm undo <planId>（CLI 无此形态）") (not ("pm undo <planId>" `isInfixOf` s))
+    )
+    [("README.md", readme), ("README.zh.md", zh)]
+  assertBool "README.zh.md 不手抄「…轮 GO」收敛判定（委托 REVIEW-LOG）" (not ("轮 GO" `isInfixOf` zh))
+  assertBool "README.md 不手抄「round N GO」收敛判定（委托 REVIEW-LOG）" (not (any (`isInfixOf` readme) ["round GO", "GO at round", "GO in round", "GO on round"]))
   -- 43 轮 #3：突变覆盖的绝对化措辞（「每道闸都配」「每道承重闸」）与登记残余
   -- 矛盾——42 轮修了两处、第三处漏网，哨兵此前不管措辞只管数字。
-  assertBool "README 不得绝对化突变覆盖（有登记残余）" (not (any (`isInfixOf` readme) ["每道闸都", "每道承重闸"]))
+  assertBool "README.zh.md 不得绝对化突变覆盖（有登记残余）" (not (any (`isInfixOf` zh) ["每道闸都", "每道承重闸"]))
+  assertBool "README.md 不得绝对化突变覆盖（有登记残余）" (not (any (`isInfixOf` readme) ["every gate", "every load-bearing gate", "all gates"]))
   -- 45 轮 #1：HISTORY.md 当期阶段行的「N/N」在哨兵之外，P7 行曾被写成 389/389
   -- （产物 390）——同一上游再多派生一处：末段（最新阶段行）须含 dcCount/dcCount。
   hist <- readUtf8 ("docs" </> "HISTORY.md")
@@ -339,7 +352,8 @@ caseReadmeSync = do
   assertBool "DESIGN-COMMANDS 不手抄「…轮 GO」收敛判定（委托 REVIEW-LOG）" (not ("轮 GO" `isInfixOf` dc))
   let title = concat (take 1 (lines hist))
   ph <- maybe (assertFailure "HISTORY.md 标题应含「P0 – P<N>」" >> pure "") (pure . takeWhile isDigit) (breakOn "P0 – P" title)
-  assertBool ("README 开发史范围须与 HISTORY 标题一致：P0–P" <> ph) (("开发史（P0–P" <> ph <> " 全程）") `isInfixOf` readme)
+  assertBool ("README.zh.md 开发史范围须与 HISTORY 标题一致：P0–P" <> ph) (("开发史（P0–P" <> ph <> " 全程）") `isInfixOf` zh)
+  assertBool ("README.md 开发史范围须与 HISTORY 标题一致：P0–P" <> ph) (("Development history (P0–P" <> ph <> ")") `isInfixOf` readme)
 
 -- | 0.6.0 发布链泄漏扫描：`Paths_photo_manager` 把构建机的六个安装目录
 -- （`D:\…\.stack-work\install\…`）烤进 pm.exe——exe 段的 Paths 对象直接进
@@ -395,7 +409,7 @@ caseLineBudget = do
         , ("scripts", [".py"])
         , ("cbits", [".c", ".h"])
         ]
-  let files = map snd ms <> dirs <> ["README.md"]
+  let files = map snd ms <> dirs <> ["README.md", "README.zh.md"]
   over <- concat <$> mapM (\f -> (\s -> [(f, n) | let n = length (lines s), n > 750]) <$> readUtf8 f) files
   assertEqual "超过 750 行预算的手写文件（DESIGN §16）" [] over
  where

@@ -9,6 +9,7 @@ language: GHC2021
 # 登记进 sdist，契约从「碰巧在」变成「声明在」。
 extra-source-files:
 - README.md
+- README.zh.md
 - docs/DESIGN.md
 - docs/DESIGN-COMMANDS.md
 - docs/DESIGN-GUI.md

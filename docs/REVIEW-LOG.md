@@ -545,3 +545,14 @@ N1 无对应源突变（是用例自身的健壮性），以反向核验代替�
 之后：`pm scan` 4633 文件（复用 4508 + 新 hash 125，20.8 s）→ `pm status` 成片 197 / 5.1 GiB、暂存 22 / 1.1 GiB、✓ 索引与磁盘一致；`pm album candidates` 104 张 · ⚠ 同名 0 · 非 jpg 0；`pm doctor` 只有 VERIFY-AGE 一行、无 Bad；`pm vault status` OK 79 · NEW 15（全 HELD）；GUI 归档页第三卡显示「成片 / 相册下没有非 jpg 照片」。
 
 未发生、如实登记：`pm import`（无对象）、`pm convert`（无对象）、首次真实 `claude -p`（用户保持暂不同步，未点 AI 建议）→ §25「`waitForProcess` 等整个 job」的残余仍未在真实 claude 上核实；首次建 vault root 未发生（无推送）。pm 本身对本轮的贡献是盘点与复核（scan / status / candidates / doctor / vault status），三次移动是用户裁定的手工整理，不在 pm 写域。
+
+## 1.0.0 发布（2026-08-28，tag `v1.0.0` = a99535e，release run 33171920358）
+
+用户 AskUserQuestion 批准「main 绿了就打 tag 发 release」。main 上 1.0.0 收官批 run 全绿后 `git tag -a v1.0.0 a99535e` + push tag → build job 重跑同一条链 → release job 建 https://github.com/skymanbp/PhotoManager/releases/tag/v1.0.0（说明 = `docs/release-notes/v1.0.0.md` + SHA-256 块，资产 zip + NSIS + `sha256.txt`）。回下载校验：`sha256sum -c sha256.txt` 全 OK、本地 `scripts/leakscan.py`（含 `PM_LEAK_PATTERNS` 本地附加模式）三件产物 clean、zip 里 `pm.exe --version` → `pm 1.0.0`。本机不再编发布二进制；`release061.sh` / `publish061.sh` 链退役为对照。
+
+| 资产 | SHA-256 |
+|---|---|
+| `pm-1.0.0-windows-x64.zip` | `ae7f37f379680321f3429e3957034cf8b843da9bca177bd79b1d0412c8390507` |
+| `pm-ui_1.0.0_x64-setup.exe` | `ca55d30e77b40c7b374f7668329015e0537d1fa7f486a4bf612c3446cfb7a60d` |
+
+项目收官：P8 七项（相册通道 / AI 入口 / jpg 转换 / 档案侧技能 / 用户复核 / 全量文档 / CI 发布）全部落地；vault 15 张「暂不同步」与首次真实 `claude -p` 留给用户日常使用（§25「job 等待整树」残余据此仍未核实，已登记）。
