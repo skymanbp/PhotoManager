@@ -26,6 +26,7 @@ module ServeTests
   , decodeBody
   , fixture
   , withVault
+  , withVaultWritable
   , liftIO'
   , seedSortSrc
   ) where
@@ -191,6 +192,26 @@ withVault :: FilePath -> Config -> IO Config
 withVault vdir cfg0 = do
   mapM_ (\c -> createDirectoryIfMissing True (vdir </> c)) ["landscape", "portrait", "urban"]
   pure cfg0 {cfgVaultPath = Just vdir}
+
+-- | 主库侧记录写端点用例的共同开场（P4-7 hold 与 P8-C notes 共用）：'fixture'
+-- + 'withVault' → **只读** serve 先拒一次 @readOnlyPost@（403，且主库
+-- @.pm/<stateFile>@ 不出现）→ 再把 --writable 的 env 交给 @body@。
+withVaultWritable ::
+  BS.ByteString ->
+  BSL.ByteString ->
+  FilePath ->
+  (FilePath -> FilePath -> Config -> BS.ByteString -> ServeEnv -> IO ()) ->
+  IO ()
+withVaultWritable path readOnlyPost stateFile body = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, jpgBytes, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  envR <- mkEnv cfg
+  flip runSession (serveApp envR) $ postReq path readOnlyPost >>= assertStatus 403
+  doesFileExist (root </> ".pm" </> stateFile) >>= (@?= False)
+  envW <- mkEnvW cfg
+  body root vdir cfg jpgBytes envW
 
 caseServeToken :: IO ()
 caseServeToken = withSystemTempDirectory "pm-serve" $ \dir -> do

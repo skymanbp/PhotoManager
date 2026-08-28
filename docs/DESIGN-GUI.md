@@ -33,7 +33,7 @@
   文本，纯函数 `Pm.Publish.publishCommands`——pm 不执行 git，GUI 只复制）、
   `GET /api/vault/status`
   （与 `pm vault status --json` 的 stdout **逐字节相同，含末尾 LF**）、
-  `GET /api/vault/new`、`GET /api/config`（只读健康视图，见下「设置页与配置端点」条）、`GET /api/sort/survey`（只读提议，见下「整理新照片」条）、`GET /api/plans`、`GET /api/plan/<id>`、
+  `GET /api/vault/new`、`GET /api/vault/notes`（P8-C 照片记录 + 发布状态，与 `pm vault notes --json` 同一渲染）、`GET /api/config`（只读健康视图，见下「设置页与配置端点」条）、`GET /api/sort/survey`（只读提议，见下「整理新照片」条）、`GET /api/plans`、`GET /api/plan/<id>`、
   `GET /api/thumb/<sha>`（只提供 catalog 里 JPEG 条目的原字节，读取前逐级
   `resolveUnder`——扫描后被换成库外链接的条目不跟随；缩放由 GUI 做）。vault
   两个端点会刷新 `.pm/vault-cache`：进程内 MVar + 跨进程 root 锁（三十一轮
@@ -50,9 +50,9 @@
   响应体**，不走 stdout——`pm ui` 只读一行 announce 就丢掉 BufReader，serve 的
   stdout 此后无人排空，照着打会填满管道缓冲。
 - **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
-  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。共**五个** `--writable`
+  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。共**六个** `--writable`
   级写端点，都不执行、不碰照片——
-  `POST /api/vault/push-plan`（P4-5，本条）、`POST /api/vault/hold`（P4-7）、
+  `POST /api/vault/push-plan`（P4-5，本条）、`POST /api/vault/hold`（P4-7）、`POST /api/vault/notes`（P8-C，照片记录：写主库 `.pm/vault-notes.json`，与 hold 共用 `recordPost` 壳与锁序）、
   `POST /api/config` 与 `POST /api/backup-init`（P4-8，均见下）、
   `POST /api/sort/plan`（P5-E，见下）；执行是第 ③ 级 `POST /api/apply`
   （P5-C 实现，P7 起由 GUI 使用，见上文三级授权与下文 P7 条）。

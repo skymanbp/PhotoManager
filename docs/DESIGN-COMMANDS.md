@@ -375,6 +375,9 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
     静默清零。
   - `pm vault push` **拒收**已 HELD 的文件（先 `pm vault unhold`）；CLI 是
     `pm vault hold|unhold <文件…>`，GUI 是分类卡上的第四个按钮。
+  - **照片记录（P8-C）**：同一纪律的第二份主库侧记录 `.pm/vault-notes.json`（类目/地点/坐标/标题
+    + 记录时 sha），`pm vault note|notes`；文件读写壳、事务壳、端点壳三处与 HELD 共用
+    （`readPmRecords` / `withVaultTxn` / `recordPost`），DESIGN-P8.md §21。
   - 决定不走两段式计划：它不碰任何照片字节，撤销就是 unhold。身份闸**四道**，
     次序与 `pm apply` 一致——**取锁前**先做零写入的 `requireMain` 预检（否则
     `withRootLock` 会先把 `.pm/lock` 建出来再拒绝，二十二轮 major），然后
@@ -401,7 +404,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P8-B / pm 0.6.1 / 400 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **P8-C / pm 0.6.1 / 405 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -505,4 +508,16 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm album candidates` | 新子命令（只读）：成片里还没进相册的 jpg 按事件夹列出（相册同名异容标 ⚠）+ 成片/相册下的非 jpg（→ `pm convert`）；P8-D 再接 `GET /api/album/candidates`（DESIGN-P8.md §23） | §19.4 |
 | `pm vault ingest` | 行为不变；jpg 谓词改用 `pushableExt`（此前 Ingest 自带第二份 `jpegExt`），`caseNoDeadNames` 钉住 | §19.1 |
 | `pm sort` / `pm import` 计划收尾 | 行为不变；「造计划 → 存盘 → 确认 → 执行 → (退出码, 计划 id)」上提为 `Pm.Cli.emitPlanTo`，sort / import / album add 三处共用 | — |
+
+
+### P8-C 照片记录（2026-08-27，DESIGN-P8.md §21）
+
+| 命令/入口 | 变化 | 出处 |
+|---|---|---|
+| `pm vault note <文件> [--category C] [--location L] [--coordinates "lat, lng"] [--title T] [--source S]` | 新子命令：一次记一张（给且只给一个文件名）；只对**相册里的 jpg**（NEW / HELD / 已推送都可）；字段全部可缺省但至少一项；坐标 `lat, lng` 越界即拒、地点/标题 ≤200 字符无控制符、source ∈ {exif, ai-high, ai-med, ai-low, user, none}；sha 本轮真实重读（不吃 catalog 缓存）；错误全部一次列完，exit 2 零写入 | §21.1 |
+| `pm vault note --clear <文件…>` | 删记录（不接受字段）；不存在的名字 → exit 2 | §21.2 |
+| `pm vault notes [--json]` | 只读：每条标 `unsynced`（还在 NEW/HELD）/ `pending`（已在 vault 类目、photos.json 未引用）/ `published`（引用行号）/ `stale`（字节变了 / 已不在相册 / 读不稳定）/ `unknown`（photos.json 读不出——fail-closed，不答 pending）；有 stale/unknown → exit 1 | §21.2 |
+| `GET /api/vault/notes` / `POST /api/vault/notes {"set":[…],"clear":[…]}` | GET 只读级、与 `--json` 同一渲染；POST `--writable` 级，写主库 `.pm/vault-notes.json`，校验与 CLI 共用 `noteRequest`，400 带 `details` | §21.2 |
+| `pm vault hold|unhold` / `POST /api/vault/hold` | 行为不变；文件读写壳（`readPmRecords`/`writePmRecords`/`validateKeyed`）、事务壳（`withHoldsTxn` → `withVaultTxn reader`）、CLI 壳（`runDecisionCli`）、端点壳（`recordPost`）四处上提与 notes 共用 | — |
+| `pm serve --writable` | 写端点五个 → **六个**（新增 `POST /api/vault/notes`）；`--json` 清点哨兵改为两处（status / notes） | DESIGN-GUI §11 |
 

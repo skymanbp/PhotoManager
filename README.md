@@ -19,7 +19,7 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
 > 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
 > 为准，不在这里手抄**），凡有可观测自动化落点的闸都配"删掉它就转红"的突变
-> 验证用例（400 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
+> 验证用例（405 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
 > 性观察点）在 REVIEW-LOG 登记为残余，不冒充覆盖。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
@@ -43,6 +43,8 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 - **功能五 · 展示集分发**：`pm vault status`（相册 ↔ vault 九态差异，`--json`
   兼容旧脚本）、`pm vault push`（定类目拷入 + DRIFT 裁决计划 + 打印显式 git
   步骤——pm 不执行 git）、`pm vault hold`（"暂不同步"的本地决定，照片一变自动失效）、
+  `pm vault note|notes`（照片记录：类目/地点/坐标/标题的主库侧本地记录，存记录时 sha、字节变了失效；
+  `/photo-publish` 读 `notes --json` 的 pending 写 photos.json——photos.json 仍不在 pm 写域）、
   `pm vault ingest`（批量入库：源 → 相册 + vault 类目两份计划；`_inbox→_done` 与
   photos.json 归调用方）。
 - **功能六 · 命名治理**：`pm names` 把 Raw 事件夹统一到规范命名；歧义不猜，
@@ -123,6 +125,9 @@ pm vault push --category landscape A.jpg …   # NEW 定类目拷入 vault；DRI
 pm vault hold A.jpg …            # 决定「暂不同步」：只写主库 .pm 的一条本地记录，
                                  # vault 与照片零改动；照片字节一变该决定自动失效
 pm vault unhold A.jpg …          # 撤销，文件回到 NEW
+pm vault note A.jpg --category landscape --location "Hallstatt, AT" --coordinates "47.556533, 13.648033"
+                                 # 照片记录：只写主库 .pm/vault-notes.json（记录时 sha，字节变了 → stale）；--clear 清除
+pm vault notes [--json]          # 列出记录与发布状态 unsynced/pending/published/stale/unknown（/photo-publish 消费 pending）
 pm vault ingest --category landscape <绝对路径…>   # 批量入库：源 → 主库 相册\ + vault <类目>\
                                  # 两份计划（pm 打印执行次序，相册那份先 apply）；_inbox→_done
                                  # 与 photos.json 由调用方收尾；pm 只拷不动源
@@ -148,9 +153,9 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
 `--apply` 交互确认，要么两段式 `pm apply <planId>`——不经计划的字节写只有
 `pm trash empty --yes` 一条（隔离区最终清除：逐项列出、二次确认，见下文第 1 条）。
 此外若干命令直接写 pm 自己的状态与配置，**都不碰照片字节**：`pm scan`、
-`pm init` / `pm backup init`、`pm config set`、`pm vault hold|unhold`（主库 `.pm`
-里一条「暂不同步」决定）、`pm resolve`（改计划）、`pm doctor --repair`、`pm serve --writable`
-（GUI 背后：写计划/配置/「暂不同步」名单；`--allow-apply` 执行计划仍走同一条计划路径）。
+`pm init` / `pm backup init`、`pm config set`、`pm vault hold|unhold` / `pm vault note`（主库 `.pm`
+里一条「暂不同步」决定 / 一条照片记录）、`pm resolve`（改计划）、`pm doctor --repair`、`pm serve --writable`
+（GUI 背后：写计划/配置/「暂不同步」名单/照片记录；`--allow-apply` 执行计划仍走同一条计划路径）。
 
 ## 具体实现——为什么这个工具值得把照片交给它
 
@@ -186,8 +191,8 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
    的标签、统一边界检查、读不到即交人判断（fail-closed），不猜文件修改时间。
 8. **GUI 永不直接碰照片**。Rust 壳层只做 spawn / 交 token / kill 三件事，一切经
    `pm serve`（127.0.0.1 + 随机端口 + Bearer token 常量时间比对 + Host/Origin
-   校验）；serve 三级授权：**缺省只读**；`--writable` 开五个写端点——生成
-   推送计划与 sort 计划（写 `.pm/plans`）、记「暂不同步」决定、改配置（主库
+   校验）；serve 三级授权：**缺省只读**；`--writable` 开六个写端点——生成
+   推送计划与 sort 计划（写 `.pm/plans`）、记「暂不同步」决定与照片记录、改配置（主库
    路径只读）、登记备份盘——**没有一个碰照片字节**；`--allow-apply` 才开
    `POST /api/apply`（唯一动照片字节的端点，0.6.0 起 GUI 拉起时传它，页面
    两次点击确认；执行发生在 serve 进程里，走与 CLI 同一条装载/复验/journal 链）。
@@ -238,7 +243,7 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 |---|---|---|
 | 增量扫描（4633 文件，其中 122 新 hash / 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（400 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
+| 测试套件（405 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
 | 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | 突变验证 | 凡有可观测自动化落点的承重闸各配一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过；无落点者登记为残余） | REVIEW-LOG 各轮收敛证据 |

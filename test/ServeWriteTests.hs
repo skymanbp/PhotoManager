@@ -26,7 +26,7 @@ import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, 
 import Pm.Serve (listPlans, serveApp)
 import Data.Foldable (toList)
 import Data.Time (getCurrentTime)
-import ServeTests (decodeBody, field, arrLen, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvA, mkEnvW, mkHardLink, postReq, seedConfig, seedSortSrc, tok, withVault)
+import ServeTests (decodeBody, field, arrLen, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvA, mkEnvW, mkHardLink, postReq, seedConfig, seedSortSrc, tok, withVault, withVaultWritable)
 
 serveWriteTests :: TestTree
 serveWriteTests =
@@ -179,17 +179,7 @@ caseServePushPlanDrift = withSystemTempDirectory "pm-serve" $ \dir -> do
 -- 且不再能 push；撤销后回到 new。去掉 seWritable 闸或 holdRequest 的任一条
 -- 判定，本例转红。
 caseServeHold :: IO ()
-caseServeHold = withSystemTempDirectory "pm-serve" $ \dir -> do
-  let root = dir </> "root"
-      vdir = dir </> "vault"
-  (cfg0, jpgBytes, _, _) <- fixture root
-  cfg <- withVault vdir cfg0
-  envR <- mkEnv cfg
-  flip runSession (serveApp envR) $ do
-    r <- postReq "/api/vault/hold" "{\"hold\":[\"a.jpg\"]}"
-    assertStatus 403 r
-  doesFileExist (root </> ".pm" </> "vault-holds.json") >>= (@?= False)
-  envW <- mkEnvW cfg
+caseServeHold = withVaultWritable "/api/vault/hold" "{\"hold\":[\"a.jpg\"]}" "vault-holds.json" $ \root vdir _ jpgBytes envW -> do
   flip runSession (serveApp envW) $ do
     r0 <- getReq "/api/vault/new" [] tok
     liftIO' (arrLen (field ["new"] (decodeBody r0)) @?= Just 1)

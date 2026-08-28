@@ -5,27 +5,21 @@
 -- （mkVaultCfg\/writeF\/mkMain\/execNow）上移 TestUtil。
 module VaultHoldTests (vaultHoldTests) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Monad (void)
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy.Char8 as BSLC
 import Data.List (isInfixOf)
 import qualified Data.Text as T
-import Data.Time (addUTCTime, getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile, setModificationTime)
+import Data.Time (getCurrentTime)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removeFile)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Catalog (saveCatalog)
-import Pm.Hash (StatSnap (..), nsToUtc, sha256File, statSnap)
-import Pm.Lock (withRootLock)
-import Pm.Types (Entry (..), FileKind (..))
 import Pm.Vault
 import Pm.VaultCmd (runVaultHold)
 import Pm.VaultHold (VaultHold (..), readHolds)
-import TestUtil (execNow, mkCat, mkMain, mkVaultCfg, writeF)
+import TestUtil (execNow, mkMain, mkVaultCfg, plantStaleCatalog, withForeignLock, writeF)
 
 vaultHoldTests :: TestTree
 vaultHoldTests =
@@ -81,29 +75,11 @@ caseHoldStaleEqualLen = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"
       vdir = tmp </> "vault"
       cfg = mkVaultCfg root vdir
-      jpg = root </> "相册" </> "a.jpg"
   mkMain root
-  writeF jpg "AAA"
   createDirectoryIfMissing True (vdir </> "landscape")
-  runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
-  -- 造一条必然 statHitStable 的主库 catalog 条目（sha 是旧的）
-  snap <- statSnap jpg
-  oldSha <- sha256File jpg
-  saveCatalog
-    root
-    ( mkCat
-        [ Entry
-            ("相册" </> "a.jpg")
-            (ssSize snap)
-            (ssMtimeNs snap)
-            oldSha
-            KindPhoto
-            (Just (addUTCTime 3600 (nsToUtc (ssMtimeNs snap))))
-        ]
-    )
-  -- 等长替换 + 还原 mtime：(size,mtime) 完全不变
-  writeF jpg "BBB"
-  setModificationTime jpg (nsToUtc (ssMtimeNs snap))
+  -- 决定记的是 AAA；随后造一条必然 statHitStable 的主库 catalog 条目（sha 是旧的）
+  -- 并等长替换 + 还原 mtime：(size,mtime) 完全不变（'plantStaleCatalog'）
+  _ <- plantStaleCatalog root (root </> "相册" </> "a.jpg") (runVaultHold True ["a.jpg"] cfg >>= (@?= 0))
   er <- computeVault True cfg
   case er of
     Left (m, _) -> assertFailure ("computeVault: " <> m)
@@ -124,13 +100,7 @@ caseHoldLock = withSystemTempDirectory "pm-vault" $ \tmp -> do
   writeF (root </> "相册" </> "b.jpg") "BBB"
   createDirectoryIfMissing True (vdir </> "landscape")
   runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
-  gotLock <- newEmptyMVar
-  release <- newEmptyMVar
-  void . forkIO . void $ withRootLock root (putMVar gotLock () >> takeMVar release)
-  takeMVar gotLock
-  code <- runVaultHold True ["b.jpg"] cfg
-  putMVar release ()
-  code @?= 2 -- 拒绝
+  withForeignLock root (runVaultHold True ["b.jpg"] cfg) >>= (@?= 2) -- 拒绝
   hs <- readHolds root
   case hs of
     Left m -> assertFailure ("readHolds: " <> m)
@@ -182,29 +152,10 @@ caseHoldCreateFreshSha = withSystemTempDirectory "pm-vault" $ \tmp -> do
   let root = tmp </> "main"
       vdir = tmp </> "vault"
       cfg = mkVaultCfg root vdir
-      jpg = root </> "相册" </> "a.jpg"
   mkMain root
-  writeF jpg "AAA"
   createDirectoryIfMissing True (vdir </> "landscape")
-  snap <- statSnap jpg
-  staleSha <- sha256File jpg
-  -- 盘上等长替换 + 还原 mtime：catalog 的 (size,mtime) 仍然命中
-  writeF jpg "BBB"
-  setModificationTime jpg (nsToUtc (ssMtimeNs snap))
-  realSha <- sha256File jpg
-  assertBool "构造前提：两个 sha 必须不同" (staleSha /= realSha)
-  saveCatalog
-    root
-    ( mkCat
-        [ Entry
-            ("相册" </> "a.jpg")
-            (ssSize snap)
-            (ssMtimeNs snap)
-            staleSha
-            KindPhoto
-            (Just (addUTCTime 3600 (nsToUtc (ssMtimeNs snap))))
-        ]
-    )
+  -- 盘上等长替换 + 还原 mtime：catalog 的 (size,mtime) 仍然命中（'plantStaleCatalog'）
+  (_, realSha) <- plantStaleCatalog root (root </> "相册" </> "a.jpg") (pure ())
   runVaultHold True ["a.jpg"] cfg >>= (@?= 0)
   hs <- readHolds root
   case hs of

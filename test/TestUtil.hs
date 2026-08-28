@@ -29,37 +29,45 @@ module TestUtil
   , writeF
   , mkMain
   , execNow
+  , plantStaleCatalog
+  , withForeignLock
   , captureStdout
   , trashViewOK
   , withDenyAll
   , withDenyList
   ) where
 
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, bracket_, finally, throwIO, try)
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, void, when)
 import System.Environment (getEnv)
 import System.Process (readCreateProcess, shell)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Time (UTCTime (..), fromGregorian, getCurrentTime)
+import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist)
-import System.FilePath (takeDirectory, (</>))
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, setModificationTime)
+import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO (IOMode (..), hClose, hFlush, hGetContents, hSetEncoding, openFile, stdout, utf8)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty.HUnit
 
+import Pm.Catalog (saveCatalog)
 import Pm.Cli (PlanRun (..), executePlanNowWith)
 import Pm.Config (Config (..), RootIdState (..), createRootInfo, readRootState, writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity, runDoctor)
 import Pm.Exec
 import Pm.Hash
 import Pm.Journal
+import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
 import Pm.Scan (ScanOpts (..), ScanResult (..), scanRoot)
 import Pm.Trash (TrashView, trashView)
 import Pm.Types
+-- 'plantStaleCatalog' 的前提断言用（限定导入：与上面的显式清单分开，读起来一眼看出是夹具自检用）
+import qualified Pm.Catalog as Cat
+import qualified Pm.Config as Cfg
 
 -- | 对路径挂「当前用户全拒 (F)」ACE 跑动作，结束必解除（bracket_；文件
 -- 所有者恒可改回自己文件的 DACL，不会被自己锁死）。三十九轮（P7）实验：
@@ -282,3 +290,44 @@ mkMain root = writeRootInfo root (RootInfo "main-rid" RoleMain t0 Nothing)
 -- 返回 'PlanRun'：push 的收尾自工作流 F068 起按逐项结果判，不按退出码。
 execNow :: Config -> Plan -> IO PlanRun
 execNow cfg p = savePlan p >> uncurry PrRun <$> executePlanNowWith cfg putStrLn p
+
+-- | 「陈旧 catalog 命中 stat」夹具（P4-7 hold 与 P8-C note 共用）：@jpg@ 先写
+-- "AAA"，跑完 @between@ 后取 stat 快照与旧 sha，再**等长替换**成 "BBB" 并还原
+-- mtime——主库 catalog 里那条 (size,mtime) 仍然命中，但盘上字节已不是那张。
+-- 返回 (陈旧 sha, 真实 sha)：决定 \/ 记录的**创建与复核**都必须取到真实 sha
+-- （codex 二十一 \/ 二十二轮 major）。
+plantStaleCatalog :: FilePath -> FilePath -> IO () -> IO (Text, Text)
+plantStaleCatalog root jpg between = do
+  writeF jpg "AAA"
+  between
+  snap <- statSnap jpg
+  staleSha <- sha256File jpg
+  writeF jpg "BBB"
+  setModificationTime jpg (nsToUtc (ssMtimeNs snap))
+  realSha <- sha256File jpg
+  assertBool "构造前提：两个 sha 必须不同" (staleSha /= realSha)
+  -- catalog 必须带**这个 root 的真实 id**：41 轮起 'loadCatalog' 核对
+  -- catRootId ≡ root-id.json，身份不符整份拒载 → 主库缓存为空 → 每个 sha 都
+  -- 真实重读，「缓存命中」的前提静默失效（P8-C 突变 m2 未判红才发现：此前
+  -- 用 'mkCat' 的固定 "m" 配 'mkMain' 的 "main-rid"，P4-7 两条同型用例空转）。
+  rid <- maybe (assertFailure (root <> " 没有 root-id（先 mkMain）")) (pure . riId) =<< Cfg.readRootInfo root
+  let verified = addUTCTime 3600 (nsToUtc (ssMtimeNs snap))
+  saveCatalog root (Catalog rid t0 (entryMap [Entry ("相册" </> takeFileName jpg) (ssSize snap) (ssMtimeNs snap) staleSha KindPhoto (Just verified)]))
+  -- 前提写成断言：catalog 载得进 + (size,mtime,lastVerified) 对盘上文件命中
+  lc <- Cat.loadCatalog root
+  case lc of
+    Cat.CatLoaded _ _ -> pure ()
+    other -> assertFailure ("陈旧 catalog 未能载入，缓存命中前提不成立: " <> Cat.loadNote other)
+  snap2 <- statSnap jpg
+  assertBool "陈旧 catalog 条目必须 statHitStable 命中" (statHitStable (ssSize snap) (ssMtimeNs snap) (Just verified) snap2)
+  pure (staleSha, realSha)
+
+-- | 另一个「pm 进程」正持有主库 root lock 时跑动作（I10 事务用例共用）：
+-- 动作结束（含异常）必释放，不留一条挂起的持锁线程影响后续用例。
+withForeignLock :: FilePath -> IO a -> IO a
+withForeignLock root act = do
+  gotLock <- newEmptyMVar
+  release <- newEmptyMVar
+  void . forkIO . void $ withRootLock root (putMVar gotLock () >> takeMVar release)
+  takeMVar gotLock
+  act `finally` putMVar release ()

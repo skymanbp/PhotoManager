@@ -197,7 +197,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 |---|---|
 | `pm vault note <文件> [--category C] [--location L] [--coordinates "lat, lng"] [--title T] [--source S]` | 增/改一条（覆盖同名旧记录） |
 | `pm vault note --clear <文件…>` | 删 |
-| `pm vault notes [--json]` | 列出并标状态：`unsynced`（仍是 NEW/HELD）/ `pending`（已在 vault 类目、photos.json 未引用）/ `published`（`photosJsonRef` 命中）/ `stale`（sha 已变） |
+| `pm vault notes [--json]` | 列出并标状态：`unsynced`（仍是 NEW/HELD）/ `pending`（已在 vault 类目、photos.json 未引用）/ `published`（`photosJsonRef` 命中）/ `stale`（sha 已变 / 已不在相册 / 读不稳定）/ `unknown`（photos.json 读不出：不答 pending——技能会重复上线，fail-closed；实现时新增） |
 | `GET /api/vault/notes` | 同 `--json` |
 | `POST /api/vault/notes {"set":[…],"clear":[…]}` | `--writable` 级；与 hold 端点同一锁序 |
 

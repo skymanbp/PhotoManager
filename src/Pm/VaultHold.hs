@@ -14,17 +14,23 @@
 module Pm.VaultHold
   ( VaultHold (..)
   , holdsFileName
-  , holdsTmpName
   , validateHolds
   , readHolds
   , writeHolds
   , applyHoldOps
   , splitHeld
+
+    -- * 主库 .pm 记录文件的共用纪律（vault-holds 与 vault-notes 同一份，P8-C 上提）
+  , isFlatName
+  , isSha256Hex
+  , validateKeyed
+  , readPmRecords
+  , writePmRecords
+  , applyRecordOps
   ) where
 
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
 import qualified Data.Aeson as Aeson
-import qualified Data.ByteString as BS
 import Data.Char (isHexDigit)
 import Data.List (nub, sort, sortOn)
 import Data.Text (Text)
@@ -50,88 +56,107 @@ instance FromJSON VaultHold where
   parseJSON = withObject "VaultHold" $ \o ->
     VaultHold <$> o .: "name" <*> o .: "sha" <*> o .: "at" <*> o .:? "note"
 
--- | @.pm@ 下的文件名（'readPmState' / 'writePmState' 的 rel）与覆盖写的中间名。
-holdsFileName, holdsTmpName :: FilePath
+-- | @.pm@ 下的文件名（'readPmState' / 'writePmState' 的 rel）。
+holdsFileName :: FilePath
 holdsFileName = "vault-holds.json"
-holdsTmpName = holdsFileName <> ".tmp"
 
--- | 名单的语义校验（二十一轮 minor）：名字必须是**平铺 basename**（不能带
--- 路径分隔符、不能是 @.@ \/ @..@），sha 必须是 64 位 hex，名字必须唯一——
--- 同名两条不同 sha 会让同一个名字既算 HELD 又算失效。任一条不合法整体拒绝，
--- 不做"跳过坏条目"式的宽容：那等于悄悄改写用户的决定。
+-- | 名单的语义校验（二十一轮 minor）：名字必须是**平铺 basename**，sha 必须是
+-- 64 位 hex，名字必须唯一——同名两条不同 sha 会让同一个名字既算 HELD 又算
+-- 失效。任一条不合法整体拒绝，不做"跳过坏条目"式的宽容：那等于悄悄改写
+-- 用户的决定。三项检查与照片记录（'Pm.VaultNote'）共用 'validateKeyed'。
 validateHolds :: [VaultHold] -> Either String [VaultHold]
-validateHolds hs
-  | (b : _) <- badName = Left ("暂不同步名单里的 name 不是平铺文件名: " <> show b)
-  | (b : _) <- badSha = Left ("暂不同步名单里的 sha 不是 64 位 hex: " <> show b)
-  | (d : _) <- dups = Left ("暂不同步名单里同一名字出现多次: " <> d)
-  | otherwise = Right (sortOn vhName hs)
+validateHolds hs = sortOn vhName hs <$ validateKeyed "暂不同步名单" vhName vhSha hs
+
+-- | 读名单：'readPmRecords' 的纪律（缺席 = 空；.tmp 残留 / 解析失败 / 语义
+-- 非法 = 硬错）。
+readHolds :: FilePath -> IO (Either String [VaultHold])
+readHolds = readPmRecords holdsFileName validateHolds
+
+-- | 写名单：'writePmRecords'（校验 → 'requireWritable' → 覆盖写）。调用方还须
+-- 持主库 root lock（I10），见 'Pm.VaultCmd.withVaultTxn'。
+writeHolds :: FilePath -> [VaultHold] -> IO (Either String ())
+writeHolds = writePmRecords holdsFileName validateHolds
+
+-- | 施加一组增删：@adds@ 覆盖同名旧记录（sha 会刷新——显式重新标记一张已
+-- 失效的照片正是这个语义），@dels@ 按名字删除。
+applyHoldOps :: [VaultHold] -> [VaultHold] -> [FilePath] -> [VaultHold]
+applyHoldOps = applyRecordOps vhName
+
+-- ─── 主库 .pm 记录文件的共用纪律（P8-C 上提：holds 与 notes 同一份） ────────
+
+-- | 平铺 basename：不带路径分隔符、不是 @.@ \/ @..@（六态分类的键）。
+isFlatName :: FilePath -> Bool
+isFlatName n = not (null n) && n == takeFileName n && n `notElem` [".", ".."]
+
+-- | 64 位 hex。
+isSha256Hex :: Text -> Bool
+isSha256Hex s = T.length s == 64 && T.all isHexDigit s
+
+-- | 按名字键的记录集合的三项共同校验：平铺名、64 hex sha、名字唯一。@label@
+-- 进错误文本（「暂不同步名单」/「照片记录」）。
+validateKeyed :: String -> (a -> FilePath) -> (a -> Text) -> [a] -> Either String ()
+validateKeyed label key sha xs
+  | (b : _) <- [n | n <- names, not (isFlatName n)] = Left (label <> "里的 name 不是平铺文件名: " <> show b)
+  | (b : _) <- [sha x | x <- xs, not (isSha256Hex (sha x))] = Left (label <> "里的 sha 不是 64 位 hex: " <> show b)
+  | (d : _) <- dups = Left (label <> "里同一名字出现多次: " <> d)
+  | otherwise = Right ()
  where
-  names = map vhName hs
-  badName = [n | n <- names, null n || n /= takeFileName n || n `elem` [".", ".."]]
-  badSha = [vhSha h | h <- hs, T.length (vhSha h) /= 64 || not (T.all isHexDigit (vhSha h))]
+  names = map key xs
   dups = [n | (n, k) <- counts, k > (1 :: Int)]
   counts = [(n, length (filter (== n) names)) | n <- nub (sort names)]
 
--- | 读名单。缺席 = 空名单；**解析失败、语义非法都是硬错**——把手编坏/半写的
--- 决定文件当成"没有决定"，等于把用户的决定悄悄丢掉。
+-- | 读一份记录文件。缺席 = 空；**解析失败、语义非法都是硬错**——把手编坏/
+-- 半写的记录文件当成"没有记录"，等于把用户的决定悄悄丢掉。
 --
 -- 另一种"缺席"必须区分（二十一轮 minor）：覆盖写在删旧文件与 rename 之间
--- 崩溃，会留下 @vault-holds.json.tmp@ 而正文缺席。这时按空名单继续，等于
--- 整份决定静默清零 —— fail-closed 并给出恢复指引。
-readHolds :: FilePath -> IO (Either String [VaultHold])
-readHolds root = do
-  r <- readPmState root holdsFileName
+-- 崩溃，会留下 @<file>.tmp@ 而正文缺席。这时按空继续，等于整份记录静默清零
+-- —— fail-closed 并给出恢复指引。正文与 tmp 都不在：可能真没有记录，也可能
+-- 撞上正常覆盖写的 delete→rename 窗口（读者先看到正文缺失，写者随后 rename
+-- 完成，读者再看 tmp 也已不在），再读一次正文消歧（二十二轮 minor）。
+readPmRecords :: FromJSON a => FilePath -> ([a] -> Either String [a]) -> FilePath -> IO (Either String [a])
+readPmRecords file validate root = do
+  r <- readPmState root file
   case r of
     Left m -> pure (Left m)
-    Right (Just bytes) -> pure (decodeHolds root bytes)
+    Right (Just bytes) -> pure (decode bytes)
     Right Nothing -> do
-      t <- readPmState root holdsTmpName
+      t <- readPmState root tmpName
       case t of
         Left m -> pure (Left m)
-        -- 正文与 tmp 都不在：可能真没有决定，也可能撞上正常覆盖写的
-        -- delete→rename 窗口（读者先看到正文缺失，写者随后 rename 完成，
-        -- 读者再看 tmp 也已不在）。再读一次正文消歧（二十二轮 minor）。
         Right Nothing -> do
-          again <- readPmState root holdsFileName
+          again <- readPmState root file
           pure $ case again of
             Left m -> Left m
-            Right Nothing -> Right [] -- 真的没有决定
-            Right (Just bytes) -> decodeHolds root bytes
+            Right Nothing -> Right [] -- 真的没有记录
+            Right (Just bytes) -> decode bytes
         Right (Just _) ->
           pure . Left $
-            ( root <> " 的 .pm/" <> holdsFileName <> " 缺失，但残留 " <> holdsTmpName
+            ( root <> " 的 .pm/" <> file <> " 缺失，但残留 " <> tmpName
                 <> "（覆盖写中途崩溃）——拒绝按「无决定」处理：核对 .tmp 内容后改名回来，或确认清空后删掉它"
             )
+ where
+  tmpName = file <> ".tmp"
+  decode bytes = case Aeson.eitherDecodeStrict' bytes of
+    Left e -> Left (root <> " 的 .pm/" <> file <> " 无法解析（" <> e <> "）——拒绝按「无决定」处理；人工核查修复")
+    Right xs -> validate xs
 
--- | 解析 + 语义校验（'readHolds' 的两个入口共用）。
-decodeHolds :: FilePath -> BS.ByteString -> Either String [VaultHold]
-decodeHolds root bytes = case Aeson.eitherDecodeStrict' bytes of
-  Left e ->
-    Left
-      ( root <> " 的 .pm/" <> holdsFileName <> " 无法解析（" <> e
-          <> "）——拒绝按「无决定」处理；人工核查修复"
-      )
-  Right hs -> validateHolds hs
-
--- | 写名单（覆盖写：完整路径解析 → 独占 tmp → flush → no-replace rename）。
--- 先过 'requireWritable'（I11 + 身份），与其它 @.pm@ 写入口同一道闸；调用方
--- 还须持主库 root lock（I10），见 'Pm.VaultCmd.withHoldsTxn'。
-writeHolds :: FilePath -> [VaultHold] -> IO (Either String ())
-writeHolds root hs = case validateHolds hs of
-  Left m -> pure (Left ("拒绝写出非法名单: " <> m))
+-- | 写一份记录文件（覆盖写：完整路径解析 → 独占 tmp → flush → no-replace
+-- rename）。先过 'requireWritable'（I11 + 身份），与其它 @.pm@ 写入口同一道闸。
+writePmRecords :: ToJSON a => FilePath -> ([a] -> Either String [a]) -> FilePath -> [a] -> IO (Either String ())
+writePmRecords file validate root xs = case validate xs of
+  Left m -> pure (Left ("拒绝写出非法记录到 .pm/" <> file <> ": " <> m))
   Right ok -> do
     w <- requireWritable root
     case w of
       Left m -> pure (Left m)
-      Right _ -> writePmState root holdsFileName (Aeson.encode ok)
+      Right _ -> writePmState root file (Aeson.encode ok)
 
--- | 施加一组增删：@adds@ 覆盖同名旧记录（sha 会刷新——显式重新标记一张已
--- 失效的照片正是这个语义），@dels@ 按名字删除。纯函数，便于单测。
-applyHoldOps :: [VaultHold] -> [VaultHold] -> [FilePath] -> [VaultHold]
-applyHoldOps olds adds dels =
-  sortOn vhName (adds <> [o | o <- olds, vhName o `notElem` addNames, vhName o `notElem` dels])
+-- | 施加一组增删：@adds@ 覆盖同名旧记录，@dels@ 按名字删除。纯函数，便于单测。
+applyRecordOps :: (a -> FilePath) -> [a] -> [a] -> [FilePath] -> [a]
+applyRecordOps key olds adds dels =
+  sortOn key (adds <> [o | o <- olds, key o `notElem` addNames, key o `notElem` dels])
  where
-  addNames = map vhName adds
+  addNames = map key adds
 
 -- | 按**本轮强制重算**的「名字 → sha」把名单分成两份：
 --

@@ -26,7 +26,7 @@ docDriftTests =
     "P7-J 文档—代码漂移哨兵"
     [ testCase "字节出口清点：deleteBoundAt 引用模块集合固定；Exec 头注不再写 no delete call anywhere" caseByteExitCensus
     , testCase "配置锁清点：withConfigLock 调用模块集合 = DESIGN-GUI 声明的四条读改写路径" caseConfigLockCensus
-    , testCase "--json 清点：全 CLI 只有 vault status 一处 long \"json\"" caseJsonFlagCensus
+    , testCase "--json 清点：全 CLI 只有 vault status 与 vault notes 两处 long \"json\"（P8-C）" caseJsonFlagCensus
     , testCase "GUI 页序：DESIGN-GUI ①—⑥ 的顺序与 index.html 的 nav 次序一致" caseGuiNavOrder
     , testCase "CSP 逐字：DESIGN-GUI 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）" caseCspQuoted
     , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链" caseGuiNoInlineStyle
@@ -103,13 +103,14 @@ caseConfigLockCensus = do
   design <- readUtf8 ("docs" </> "DESIGN-GUI.md")
   assertBool "DESIGN-GUI 的「四条读改写路径」声明还在" ("**四条**读改写路径共用" `isInfixOf` design)
 
--- | DESIGN.md:225「`--json` 只有 `pm vault status` 一个」。
+-- | DESIGN.md「`--json` 只有 `pm vault status` 与 `pm vault notes` 两个」
+-- （P8-C 起：两个都是技能消费的机器可读面，其余命令仍是人读的）。
 caseJsonFlagCensus :: IO ()
 caseJsonFlagCensus = do
   m <- readUtf8 ("app" </> "Main.hs")
-  length (filter (\l -> not (isCommentLine l) && "long \"json\"" `isInfixOf` l) (lines m)) @?= 1
+  length (filter (\l -> not (isCommentLine l) && "long \"json\"" `isInfixOf` l) (lines m)) @?= 2
   design <- readUtf8 ("docs" </> "DESIGN.md")
-  assertBool "DESIGN 的 --json 唯一性声明还在" ("`--json` 只有 `pm vault status` 一个" `isInfixOf` design)
+  assertBool "DESIGN 的 --json 清点声明还在" ("`--json` 只有 `pm vault status` 与 `pm vault notes` 两个" `isInfixOf` design)
 
 -- | DESIGN-GUI.md §11「GUI（P4-4 UX 重做…）」的 ①—⑥ 与 gui/ui/index.html 的 nav
 -- 次序：编号即次序（P8-A 起 §11 住在 DESIGN-GUI.md）。

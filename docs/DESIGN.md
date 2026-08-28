@@ -222,8 +222,8 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 读的就是它，命令末尾也明明白白打印「计划已存 …／执行: pm apply …」。把这句话
 读成"没有 `--apply` 就一个字节都不许写"会得出计划器违反不变量的结论（codex
 二十八轮 #5 即如此，已第一方证伪）。
-零参数 `pm` = `pm status`。**`--json` 只有 `pm vault status` 一个**（`app/Main.hs`
-唯一一处 `long "json"`，为与 `sync_photos.py` 逐字段兼容，§10.1）；其余命令只有
+零参数 `pm` = `pm status`。**`--json` 只有 `pm vault status` 与 `pm vault notes` 两个**（`app/Main.hs`
+两处 `long "json"`：status 为与 `sync_photos.py` 逐字段兼容，§10.1；notes 供 `/photo-publish` 消费，DESIGN-P8.md §21）；其余命令只有
 终端文本形态，结构化消费走 §11 的 JSON API（`GET /api/status` 与 `pm status` 同源）；配置读写走 `pm config`（= `config show`）/ `pm config set`，见 §11。
 
 | 命令 | 语义 | 写盘? |
@@ -234,6 +234,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm sort <源> [--place\|--event --from --to]` | **散落新照片 → 暂存区事件夹**（§7）。不带参数=只读提议：读 EXIF 拍摄时间、按间隔给候选分段、打印每段该敲的命令；给齐地点与区间才生成拷贝计划 | apply 时 |
 | `pm import [--apply] [--also-album]` | To-Be-Sync'd 事件 → `Raw\年\` + `成片\` 归档计划；`--also-album`（P8-B）让成片里的 jpg 同源再拷一份进 `相册\`，相册项与成片项**同组**（成片没落位相册不执行）、返修项耦合成待裁决、非 jpg 只进成片（DESIGN-P8.md §19.2） | apply 时 |
 | `pm album add <事件夹>/<文件名>… [--apply]` / `pm album candidates` | 成片 → 相册（P8-B，DESIGN-P8.md §19.3/19.4）：只收 jpg，相册同名同 sha 幂等跳过、同名异容 NEEDS-DECISION（I5）、同批撞名整批拒绝；`candidates` 只读列出还没进相册的成片 jpg 与成片/相册下的非 jpg | apply 时 / 否 |
+| `pm vault note <文件> [--category C] [--location L] [--coordinates "lat, lng"] [--title T] [--source S]` / `pm vault note --clear <文件…>` / `pm vault notes [--json]` | 照片记录（P8-C，DESIGN-P8.md §21）：主库 `.pm/vault-notes.json` 一条本地记录（记录时 sha，字节变了 `stale`），文件读写壳 / 事务壳 / 端点壳与 HELD 共用；`notes` 标 unsynced / pending / published / stale / unknown（photos.json **只读**反查，读不出不答 pending） | 否（只写 pm 状态） |
 | `pm backup [--apply]` | 主库 → 备份盘单向增量；备份盘多出的只报 EXTRA 永不动。**`pm backup init <盘上镜像路径>`（P2 落锤）**：插盘后一次性登记——写 role=Backup 的 root-id.json（含 FS 探测）+ 配置记 UUID+盘内相对路径，此后按 UUID 认盘 | apply 时 |
 | `pm clean staging [--apply]` | **隔离区入口**：仅对「Raw/成片 已有同 sha 副本 **且** 备份 root catalog 也有同 sha 副本」（三副本确认）的 staging 文件生成 Quarantine 计划；不满足的标 `HELD(缺哪份)`；备份盘未挂载 → 不生成任何项，报「无法确认第三副本」。**`待修改\` 永不入清理计划（P2 落锤，与 §7 import 不碰同源）**；catalog 声称的两侧副本在计划期再过一次活体 stat 核对，变了降级 HELD | apply 时 |
 | `pm vault status` | 相册↔vault **九态**差异：与 `sync_photos.py` 兼容的六态核心（OK/NEW/MISSING/RENAME/DRIFT/DUPLICATE，§10.1 兼容 schema）+ pm 自加的 UNPUSHABLE / UNSTABLE / HELD | 否 |
@@ -571,7 +572,7 @@ REVIEW-LOG 第 28 轮。
 | file-io 未经上游在 GHC 9.10.3 测试 | P0 冒烟 + FilePath 降级预案（§4） |
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |
 | GUI 工具链 | 2026-08-24 改判 Rust/Tauri：cargo、tauri-cli、WebView2、MSVC 本机均已在，零安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
-| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable` 开五个生成计划类写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）、记录「暂不同步」决定（写主库的 `.pm/vault-holds.json`）、改配置（写 XDG 的 config.toml，主库路径只读）、登记备份盘（在目标盘上建备份 root 标识，守卫链同 CLI）、生成 sort 计划（写主库 `.pm/plans`）（§11），照片零改动。P7 起 `pm ui` 以 `--allow-apply` 拉起：同用户进程若拿到 token 还能经 `POST /api/apply` 执行**已存的计划**——本节威胁模型本就不防同机同用户恶意进程（这样的进程不需要 token，直接跑 `pm apply` 甚至直接改文件即可），token 不是对同用户进程的防线；apply 能做的仍只限两段式的第二段（有计划文件才有动作，journal 全程记录、可 undo，无删除/覆盖原语） |
+| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable` 开六个生成计划类写端点：生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）、记录「暂不同步」决定 / 照片记录（写主库的 `.pm/vault-holds.json`）、改配置（写 XDG 的 config.toml，主库路径只读）、登记备份盘（在目标盘上建备份 root 标识，守卫链同 CLI）、生成 sort 计划（写主库 `.pm/plans`）（§11），照片零改动。P7 起 `pm ui` 以 `--allow-apply` 拉起：同用户进程若拿到 token 还能经 `POST /api/apply` 执行**已存的计划**——本节威胁模型本就不防同机同用户恶意进程（这样的进程不需要 token，直接跑 `pm apply` 甚至直接改文件即可），token 不是对同用户进程的防线；apply 能做的仍只限两段式的第二段（有计划文件才有动作，journal 全程记录、可 undo，无删除/覆盖原语） |
 | 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：**下一次比对**（`pm vault status` / GUI 刷新）复核到字节已变即失效并回到 NEW——不是实时监视；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |

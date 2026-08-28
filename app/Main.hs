@@ -8,6 +8,7 @@ module Main (main) where
 
 -- 两摞、各自按字母序：先 base/外部，再 Pm.*。P4-8 与 P5-A 各自把新 import
 -- 塞在了中间（Data.Time / Text.Read / Pm.ConfigEdit），本次归位。
+import qualified Data.Text as T
 import Data.Time (Day)
 import Options.Applicative
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
@@ -25,7 +26,8 @@ import Pm.Sort (runSortPlan, runSortSurvey)
 import Pm.Status (StatusOpts (..), runStatus)
 import Pm.Ui (runUi)
 import Pm.Vault (runVaultPush, runVaultStatus)
-import Pm.VaultCmd (runVaultHold)
+import Pm.VaultCmd (NoteArgs (..), runVaultHold, runVaultNote, runVaultNotes)
+import Pm.VaultNote (NoteFields (..))
 import Pm.Versions (runVersions)
 import Pm.Win (setupConsole)
 
@@ -46,6 +48,8 @@ data Cmd
   | CmdVaultStatus Bool -- --json（sync_photos.py 兼容输出）
   | CmdVaultPush GoOpts (Maybe String) [FilePath] -- --category + FILES
   | CmdVaultHold Bool [FilePath] -- 暂不同步（True）/ 恢复（False）；只写主库 .pm
+  | CmdVaultNote NoteArgs -- 照片记录（P8-C）：类目/地点/坐标/标题；只写主库 .pm/vault-notes.json
+  | CmdVaultNotes Bool -- --json；列出照片记录与发布状态（只读）
   | CmdVaultIngest GoOpts String [FilePath] -- --category + FILES；两份计划（主库 相册/ + vault <类目>/）
   | CmdConfigShow -- 打印配置与路径健康（只读）
   | CmdConfigSet ConfigSetOpts -- 改 vault / photos.json / 并发数（主库路径只读）
@@ -130,6 +134,8 @@ run (CmdVaultStatus asJson) = withCfg (runVaultStatus asJson)
 run (CmdVaultPush go mcat fs) =
   withCfg (\cfg -> runVaultPush (savePlanAndMaybeRun' cfg go) mcat fs cfg)
 run (CmdVaultHold hold fs) = withCfg (runVaultHold hold fs)
+run (CmdVaultNote a) = withCfg (runVaultNote a)
+run (CmdVaultNotes asJson) = withCfg (runVaultNotes asJson)
 -- ingest 走可判别的 'savePlanAndMaybeRun''：它要按「主库那份**真的全部落完**」
 -- 决定 vault 那份跑不跑，Int 退出码分不出这个（三十二轮 R4，见 Pm.Ingest）。
 run (CmdVaultIngest go cat fs) =
@@ -220,7 +226,7 @@ parserInfo =
       ServeOpts
         <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
         <*> switch (long "exit-on-stdin-eof" <> help "stdin 关闭即退出（GUI 拉起时用：父进程一死 serve 随之结束，不留孤儿）")
-        <*> switch (long "writable" <> help "允许五个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）、生成 sort 计划（写主库的 .pm/plans）、记录「暂不同步」决定（写主库的 .pm/vault-holds.json）、改配置（写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识）；都不执行、不碰照片；缺省只读")
+        <*> switch (long "writable" <> help "允许六个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）、生成 sort 计划（写主库的 .pm/plans）、记录「暂不同步」决定（写主库的 .pm/vault-holds.json）、照片记录（写主库的 .pm/vault-notes.json）、改配置（写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识）；都不执行、不碰照片；缺省只读")
         <*> switch (long "allow-apply" <> help "另外允许 POST /api/apply 执行已存的计划——这是唯一会动照片字节的端点，因此单独一个开关，不并进 --writable（蕴含 --writable）。装载/绑 root/--only/执行期复验全部与 CLI 的 pm apply 同源")
   initP =
     fmap CmdInit $
@@ -315,6 +321,18 @@ parserInfo =
                 (progDesc "撤销「暂不同步」，文件回到 NEW")
             )
           <> command
+            "note"
+            ( info
+                noteP
+                (progDesc "记一条照片记录（类目/地点/坐标/标题）到主库 .pm/vault-notes.json：vault 与照片零改动；/photo-publish 据此写 photos.json；--clear 清除")
+            )
+          <> command
+            "notes"
+            ( info
+                (CmdVaultNotes <$> switch (long "json" <> help "机器可读：每条带 status（unsynced/pending/published/stale/unknown）与 vault_category/photos_json_line/why"))
+                (progDesc "列出照片记录及其发布状态（只读；有 stale/unknown 时退出码 1）")
+            )
+          <> command
             "ingest"
             ( info
                 ( CmdVaultIngest
@@ -325,6 +343,20 @@ parserInfo =
                 (progDesc "批量入库：源 → 主库 相册/ + vault <类目>/ 两份计划（I5 冲突出裁决项）；_inbox→_done 与 photos.json 由调用方收尾（pm 打印显式步骤）")
             )
       )
+  -- P8-C：记录时给且只给一个文件名（字段跟着它）；--clear 可多个。组合校验在
+  -- 'runVaultNote'（同 --place/--event 的纪律：不在解析器里替使用者猜）。
+  noteP =
+    fmap CmdVaultNote $
+      NoteArgs
+        <$> switch (long "clear" <> help "清除给定文件的记录（可多个文件）")
+        <*> many (strArgument (metavar "FILES..." <> help "相册里的文件名（记录时给且只给一个；--clear 可多个）"))
+        <*> ( NoteFields
+                <$> optional (strOption (long "category" <> metavar "CAT" <> help "landscape|portrait|urban"))
+                <*> optional (T.pack <$> strOption (long "location" <> metavar "地点" <> help "地点文字，如「Hallstatt, AT」（≤200 字符）"))
+                <*> optional (T.pack <$> strOption (long "coordinates" <> metavar "\"lat, lng\"" <> help "十进制坐标，如「47.556533, 13.648033」"))
+                <*> optional (T.pack <$> strOption (long "title" <> metavar "标题" <> help "标题（≤200 字符）"))
+                <*> (T.pack <$> strOption (long "source" <> metavar "SRC" <> value "user" <> showDefault <> help "来源标签：exif|ai-high|ai-med|ai-low|user|none"))
+            )
   doctorP =
     CmdDoctor
       <$> ( DoctorOpts

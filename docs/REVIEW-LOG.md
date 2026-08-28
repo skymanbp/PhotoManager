@@ -327,3 +327,32 @@ final build rc=0; P8-B rc=0 (All 6 tests passed (0.62s)); jpegExt sentinel rc=0 
 
 P8-B 树：400 测试、GHC 警告 0（clang `<built-in>` 噪声同前）；pm-test.exe `94880e3881c347b7b2f16c41d080e3de4a38a36d222b74e5920f30308cbd1cfa`、pm.exe（`.stack-work/install/…/bin`）`a51af3fa80b7e5156cae175efdacb26ca0428b3ef40040259352eb30f72d86c6`。
 
+
+## P8-C 照片记录（第一方，2026-08-27；DESIGN-P8.md §21）
+
+第二份主库侧记录。设计上与「暂不同步」名单同一纪律，因此实现上先把 HELD 的四层壳上提为共用（文件读写 /
+事务 / CLI / 端点），再把 notes 挂上去——两份记录一份代码，hold 行为零改动（P4-7 用例只改夹具、净减）。
+状态判定加了设计没写的第五态 `unknown`：photos.json 读不出时若答 `pending`，`/photo-publish` 会把已上线的照片再渲染一条
+（重复上线）；按 photosJsonRef 既有的 fail-closed 口径改为「未知，要人看一眼」并计入退出码。
+
+突变 m2（记录取 catalog 缓存 sha 而不真实重读）首跑**未判红**。根因不在 notes：「陈旧 catalog 命中 stat」夹具写的
+catalog 带固定 id `"m"`，而 `mkMain` 的 root-id 是 `"main-rid"`——41 轮加的 catalog 身份闸把它整份拒载，主库缓存为空，
+每个 sha 都真实重读，前提静默失效；P4-7 的 `caseHoldStaleEqualLen` / `caseHoldCreateFreshSha` 自那轮起同样空转（绿得毫无
+意义）。类级修：`plantStaleCatalog` 读真实 root id 写 catalog，并把「载得进（`CatLoaded`）+ `statHitStable` 命中」写成夹具内
+断言；hold 侧补 m6。二次跑 m2 / m6 都红——旧的 hold 突变结论（codex 二十一/二十二轮）此前已无守卫，现在重新有了。
+
+判别突变（`mutate_p8c.py`，源码级、逐条重建、`-p P8-C` / `-p P4-7` 单点重跑、每条还原；末尾重建 + P8-C / P4-7 复跑绿）：
+
+| id | 突变 | -p | 判定 | 突变输出 |
+|---|---|---|---|---|
+| m1 | parseCoordinates: -90..90 / -180..180 range gate removed -> pure validation + lifecycle red | `P8-C` | RED OK | P8-C 纯校验：坐标格式/越界、source、控制符/超长、类目、无字段 → 拒；同名两条/带路径名/坏 sha → 拒；合法通过并按名排序:                                                       FAIL |
+| m2 | noteOpsIO: sha taken from vrSrcMeta (stat-hit cache) instead of freshSrcSha -> create-fresh-sha case red | `P8-C` | RED OK | FAIL (0.10s) |
+| m3 | withVaultTxn: root lock dropped -> foreign-lock case red (hold case would also go red) | `P8-C` | RED OK | FAIL (0.15s) |
+| m4 | noteStatuses: photos.json unreadable reported as pending instead of unknown -> lifecycle red | `P8-C` | RED OK | FAIL (0.77s) |
+| m5 | recordPost: --writable gate removed -> serve notes case red (read-only POST lands) | `P8-C` | RED OK | P8-C serve GET/POST /api/vault/notes：只读 403 而 GET 仍可；坏坐标/非相册名/空请求 400 带 details；set 后 GET 列出 unsynced 且字段已规范化；clear 后 count 0: FAIL |
+| m6 | holdOpsIO: sha taken from vrSrcMeta instead of freshSrcSha -> hold create-fresh-sha case red (fixture now really hits the cache) | `P4-7` | RED OK | FAIL (0.10s) |
+
+final build rc=0; P8-C rc=0 (All 6 tests passed (2.15s)); P4-7 rc=0 (All 9 tests passed (3.14s))
+
+P8-C 树：405 测试、GHC 警告 0（clang `<built-in>` 噪声同前）；pm-test.exe `a0e6ab368d3919338e580e5a81ee2c5a4ddb9be1ad06c577e7b658aeeab55eab`、pm.exe（`.stack-work/install/…/bin`）`2bbb41420d01319f48448ac6ed50e7876876390beb60f546e0ebf3073c893e12`。
+
