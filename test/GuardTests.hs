@@ -530,14 +530,14 @@ caseCleanImportGuardFirst = withSystemTempDirectory "pm-guard" $ \tmp -> do
   saveCatalog mainP (mkCat [])
   c1 <- runClean (GoOpts False False) cfg
   c1 @?= 2
-  c2 <- runImport (GoOpts False False) cfg
+  c2 <- runImport (GoOpts False False) False cfg
   c2 @?= 2
   doesDirectoryExist (pmDir mainP </> "plans") >>= (@?= False)
   -- 同一 fixture 换成 RoleMain：证明上面的 exit 2 确由身份校验产生（而非索引/暂存）
   writeRootInfo mainP (RootInfo "m" RoleMain now Nothing)
   c3 <- runClean (GoOpts False False) cfg
   c3 @?= 1 -- 备份 root 未登记 → 无法确认第三副本
-  c4 <- runImport (GoOpts False False) cfg
+  c4 <- runImport (GoOpts False False) False cfg
   c4 @?= 0 -- 暂存区无需归档
 
 caseFixtureKeepsCorrupt :: IO ()

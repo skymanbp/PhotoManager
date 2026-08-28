@@ -13,6 +13,7 @@ import Options.Applicative
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import Text.Read (readMaybe)
 
+import Pm.Album (runAlbumAdd, runAlbumCandidates)
 import Pm.Cli (GoOpts (..), savePlanAndMaybeRun, savePlanAndMaybeRun')
 import Pm.Commands
 import Pm.ConfigEdit (ConfigSetOpts (..), mkPatch, runConfigSet, runConfigShow)
@@ -37,7 +38,8 @@ data Cmd
   | CmdUndo Int Bool Bool
   | CmdApply ApplyOpts
   | CmdResolve ResolveOpts
-  | CmdImport GoOpts
+  | CmdImport GoOpts Bool -- --also-album（P8-B：成片 jpg 同源再拷一份进相册）
+  | CmdAlbum AlbumCmd -- 成片 → 相册（P8-B，DESIGN-P8 §19.3/19.4）
   | CmdSort SortOpts
   | CmdBackup BackupCmd
   | CmdClean GoOpts -- clean staging
@@ -52,6 +54,10 @@ data Cmd
   | CmdDedupe GoOpts -- 精确重复 → 逐份可裁决的隔离计划（全部 NEEDS-DECISION）
   | CmdServe ServeOpts -- 127.0.0.1 JSON API（缺省只读；--writable 才开生成计划端点）
   | CmdUi -- 拉起 Tauri 桌面 GUI（P4-3；GUI 自己跑 serve）
+
+-- | @pm album@ 的两个子命令（P8-B）：@add@ 生成成片→相册的拷贝计划；
+-- @candidates@ 只读列出还没进相册的成片 jpg 与非 jpg。
+data AlbumCmd = AlbumAdd GoOpts [String] | AlbumCandidates
 
 -- | @pm sort@ 的参数（两种形态见 'run'）。
 data SortOpts = SortOpts
@@ -99,7 +105,9 @@ run (CmdTrash tc bku vlt) = withCfg $ \cfg -> withSel bku vlt $ \sel -> do
 run (CmdUndo n bku vlt) = withCfg $ \cfg -> withSel bku vlt $ \sel -> runUndoCmd n sel cfg
 run (CmdApply o) = withCfg (runApply o)
 run (CmdResolve o) = withCfg (runResolve o)
-run (CmdImport go) = withCfg (runImport go)
+run (CmdImport go also) = withCfg (runImport go also)
+run (CmdAlbum (AlbumAdd go fs)) = withCfg (runAlbumAdd go fs)
+run (CmdAlbum AlbumCandidates) = withCfg runAlbumCandidates
 -- 两种形态：地点与日期区间**给齐**才生成计划，一个都不给是只读提议；
 -- 给一半是使用者写错了，直接报错——不替他猜另一半（I1）。
 run (CmdSort o) = withCfg $ \cfg ->
@@ -158,7 +166,8 @@ parserInfo =
       ( command "init" (info initP (progDesc "生成配置 + 主库 root 标识"))
           <> command "scan" (info scanP (progDesc "索引主库（增量；首次全量 hash）"))
           <> command "status" (info statusP (progDesc "总览仪表盘（默认命令）"))
-          <> command "import" (info importP (progDesc "暂存区 To-Be-Sync'd → Raw/成片 归档计划"))
+          <> command "import" (info importP (progDesc "暂存区 To-Be-Sync'd → Raw/成片 归档计划（--also-album 同时把成片 jpg 拷进相册）"))
+          <> command "album" (info albumP (progDesc "成片 → 相册（平铺收藏层，只收 jpg）：add 生成拷贝计划；candidates 列出还没进相册的成片 jpg 与非 jpg"))
           <> command "sort" (info sortP (progDesc "散落新照片按拍摄时间分段 → 暂存区事件夹（不带参数=只读提议）"))
           <> command "backup" (info backupP (progDesc "主库 → 备份盘单向增量（init 登记备份盘）"))
           <> command "clean" (info cleanP (progDesc "clean staging: 三副本确认后的暂存清理计划"))
@@ -234,7 +243,21 @@ parserInfo =
     GoOpts
       <$> switch (long "apply" <> help "展示计划后确认执行（缺省只生成计划）")
       <*> switch (long "yes" <> help "跳过交互确认（脚本用）")
-  importP = CmdImport <$> goOpts
+  importP =
+    CmdImport
+      <$> goOpts
+      <*> switch (long "also-album" <> help "成片里的 jpg 同时拷一份进相册（同源第二份拷贝，与成片项同组：成片没落位相册就不执行；非 jpg 只进成片）")
+  albumP =
+    fmap CmdAlbum $
+      hsubparser
+        ( command
+            "add"
+            ( info
+                (AlbumAdd <$> goOpts <*> many (strArgument (metavar "事件夹/文件名..." <> help "相对成片层的路径，如 26-06-R66/_DSC9621.jpg（只收 jpg；相册平铺，同名只能进一份）")))
+                (progDesc "成片里已归档的 jpg 挑进相册（拷贝计划；相册同名异容 → 待裁决，I5）")
+            )
+            <> command "candidates" (info (pure AlbumCandidates) (progDesc "只读：成片里还没进相册的 jpg（按事件夹）与成片/相册下的非 jpg（→ pm convert）"))
+        )
   sortP =
     fmap CmdSort $
       SortOpts

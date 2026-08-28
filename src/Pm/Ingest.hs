@@ -51,6 +51,7 @@ import Pm.Plan
 import Pm.Publish (inboxDoneCommand)
 import Pm.Types
 import Pm.Vault (ensureVaultRoot, fixedCategories, gitStepsLines)
+import Pm.VaultCore (pushableExt)
 import Pm.VaultHold (VaultHold (..), readHolds)
 import Pm.Win (probeName)
 
@@ -254,7 +255,9 @@ validateIngest cfg cat files vaultDir = do
         | (_, fs) <- Map.toList (Map.fromListWith (<>) [(map toLower (takeFileName f), [f]) | f <- files])
         , length fs > 1
         ]
-      badExt = [f <> " 不是 jpg/jpeg（相册与 vault 只收成品 JPG）" | f <- files, not (jpegExt f)]
+      -- P8-B：与 push 写路径、相册通道同一谓词（'Pm.VaultCore.pushableExt'）——
+      -- 此前这里是第二份 jpg 定义（DESIGN-P8 §19.1）。
+      badExt = [f <> " 不是 jpg/jpeg（相册与 vault 只收成品 JPG）" | f <- files, not (pushableExt f)]
   pure . concat $
     [ ["未给出任何源文件（pm vault ingest <文件…> --category <类目>）" | null files]
     , ["类目不存在: " <> cat <> "（可选: " <> unwords fixedCategories <> "）" | cat `notElem` fixedCategories]
@@ -265,11 +268,6 @@ validateIngest cfg cat files vaultDir = do
     , sort (nub dupNames)
     , badExt
     ]
- where
-  jpegExt f = case reverse (map toLower (takeFileName f)) of
-    ('g' : 'p' : 'j' : '.' : _) -> True
-    ('g' : 'e' : 'p' : 'j' : '.' : _) -> True
-    _ -> False
 
 -- | 纯预览收尾：两份计划都已存盘，把次序说清楚（I7：相册在前）。
 ingestOrderLines :: T.Text -> T.Text -> String -> [String]

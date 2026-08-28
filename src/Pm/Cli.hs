@@ -19,6 +19,7 @@ module Pm.Cli
   , savePlanAndMaybeRun
   , savePlanAndMaybeRun'
   , savePlanAndMaybeRunTo
+  , emitPlanTo
   , bindExecRoot
   , bindExecRootWith
   , runBarrier
@@ -244,6 +245,17 @@ savePlanAndMaybeRunTo sink cfg go plan = do
       if ok
         then uncurry PrRun <$> executePlanNowWith cfg sink plan
         else pure PrSaved
+
+-- | 「造计划 → 存盘 → 展示 → 确认 → 执行 → (退出码, 计划 id)」的公共收尾。
+-- P8-B 上提：sort 的 emit、import、album add 三处此前各抄一份同形的尾巴
+-- （新 id、取时、构造 Plan、savePlanAndMaybeRunTo、planRunCode/planIdOf）。
+-- id 只在计划真的落了盘时给（工作流 F052：'PrRefused' 在 savePlan 之前返回）。
+emitPlanTo :: (String -> IO ()) -> Config -> GoOpts -> T.Text -> FilePath -> RootInfo -> [PlanItem] -> IO (Int, Maybe T.Text)
+emitPlanTo sink cfg go kind root info items = do
+  pid <- newPlanId
+  now <- getCurrentTime
+  pr <- savePlanAndMaybeRunTo sink cfg go (Plan pid kind root (Just (riId info)) now items)
+  pure (planRunCode pr, planIdOf pr pid)
 
 -- | 执行后的 catalog 回写是一次「读 → 并 → 写」——execPlan 已释放锁，两次
 -- 先后完成的 apply 若都在锁外回写，后写者会基于旧快照整份覆盖先写者的更新

@@ -305,3 +305,25 @@ P7-T 树：393 测试、GHC 警告 0；pm-test.exe `7f53c05ffb80e4c21e12f06d9ca8
 P8-A 树：394 测试、GHC 警告 0（仅 clang `<built-in>` 的 `-Wnonportable-include-path` 既有噪声）；`node --check` 两脚本通过；
 pm-test.exe `0d76f4ef699f5b0d07b2595c9cf73443639a93dbf2f787bd453270ca67530913`、pm.exe（`.stack-work/install/…/bin` 副本）
 `0f7a01623b66b92bea7246137e0ffdfa51557672c2697081d8ecefaa915552a2`；`wc -l`：Serve.hs 544 / app.js 584 / DESIGN.md 607 / DESIGN-GUI.md 173。
+
+## P8-B 相册通道（第一方，2026-08-27；DESIGN-P8.md §19）
+
+用户裁定 R2（D′：不把 diff 落进 `_inbox`，只报告）与 R8（`pm album add`）之后的第一段功能代码。相册的两条入口
+（`pm import --also-album` / `pm album add`）共用 `Pm.Album.classifyAlbum` 一份判定；I7 次序靠 `piGroup` 与 Exec 既有组语义
+（成片项没落位 → 同组相册项 `NOT-EXECUTED`），返修项走 `coupleWithMain` 同款耦合而不分组（复合组成员不能单独 `--keep`）。
+`Ingest.jpegExt` 并入 `pushableExt`（核查缺口「第二份 jpg 谓词」闭合）；三处计划收尾上提 `Pm.Cli.emitPlanTo`。
+
+判别突变（`mutate_p8b.py`，源码级、逐条重建、`-p P8-B` / `-p jpegExt` 单点重跑、每条还原；末尾重建 + 复跑绿）：
+
+| id | 突变 | -p | 判定 | 突变输出 |
+|---|---|---|---|---|
+| m1 | withAlbumForImport: drop grouping of 成片 item (相册 item still grouped) -> I7 group e2e red | `P8-B` | RED OK | --also-album（纯）：成片项与相册项同组、返修 → 相册项待裁决不分组、Raw 无相册项、非 jpg 交代:            FAIL |
+| m2 | classifyAlbum: 同名异容 judged as already (I5 bucket lost) -> five-bucket case red | `P8-B` | RED OK | classifyAlbum 五桶：拷贝 / 已在（同 sha）/ 同名异容 / 同批撞名（case-fold）/ 非 jpg:        FAIL |
+| m3 | classifyAlbum: non-jpg sources enter the copy bucket -> tif accepted, five-bucket + e2e red | `P8-B` | RED OK | classifyAlbum 五桶：拷贝 / 已在（同 sha）/ 同名异容 / 同批撞名（case-fold）/ 非 jpg:        FAIL |
+| m4 | classifyAlbum: same-batch basename collision (case-fold) not detected -> five-bucket + e2e red | `P8-B` | RED OK | classifyAlbum 五桶：拷贝 / 已在（同 sha）/ 同名异容 / 同批撞名（case-fold）/ 非 jpg:        FAIL |
+| m5 | Ingest: a local jpegExt name comes back -> DocDrift dead-name sentinel red | `jpegExt` | RED OK | 死名清扫：opRelPaths / isPng / stemKey / jpegExt 不再出现在 src/app: FAIL (0.30s) |
+
+final build rc=0; P8-B rc=0 (All 6 tests passed (0.62s)); jpegExt sentinel rc=0 (All 1 tests passed (0.12s))
+
+P8-B 树：400 测试、GHC 警告 0（clang `<built-in>` 噪声同前）；pm-test.exe `94880e3881c347b7b2f16c41d080e3de4a38a36d222b74e5920f30308cbd1cfa`、pm.exe（`.stack-work/install/…/bin`）`a51af3fa80b7e5156cae175efdacb26ca0428b3ef40040259352eb30f72d86c6`。
+

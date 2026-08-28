@@ -19,11 +19,11 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
 > 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
 > 为准，不在这里手抄**），凡有可观测自动化落点的闸都配"删掉它就转红"的突变
-> 验证用例（394 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
+> 验证用例（400 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
 > 性观察点）在 REVIEW-LOG 登记为残余，不冒充覆盖。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
-命令细节：[docs/DESIGN-COMMANDS.md](docs/DESIGN-COMMANDS.md)。GUI 与 `pm serve` API：[docs/DESIGN-GUI.md](docs/DESIGN-GUI.md)。
+命令细节：[docs/DESIGN-COMMANDS.md](docs/DESIGN-COMMANDS.md)。GUI 与 `pm serve` API：[docs/DESIGN-GUI.md](docs/DESIGN-GUI.md)。P8（Photography 为相片 SoT：相册通道 / AI 建议 / jpg 转换 / 1.0.0 收官）的裁定与设计：[docs/DESIGN-P8.md](docs/DESIGN-P8.md)。
 开发史（P0–P8 全程）：[docs/HISTORY.md](docs/HISTORY.md)。
 对抗评审归档：[docs/reviews/](docs/reviews/)。
 
@@ -35,7 +35,9 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 - **功能二 · 整理新照片**：`pm sort` 把相机卡/下载目录按 EXIF 拍摄时间分段——
   不带参数只出**提议**（时间切不开事件，边界由人定），给齐地点与区间才生成
   拷贝计划；**拷贝不是移动**，源卡零改动。
-- **功能三 · 归档**：`pm import` 把暂存区事件夹归入 `Raw\年\事件-Raw` + `成片\事件`。
+- **功能三 · 归档**：`pm import` 把暂存区事件夹归入 `Raw\年\事件-Raw` + `成片\事件`；
+  `--also-album` 让成片里的 jpg 同源再拷一份进 `相册\`（与成片项同组：成片没落位相册就不执行）；
+  `pm album add <事件夹>/<文件名>…` 把已归档的成片 jpg 挑进相册（`pm album candidates` 列候选与非 jpg）。
 - **功能四 · 备份**：`pm backup` 主库 → 备份盘单向增量，按 root UUID 认盘不认
   盘符；备份盘上多出来的（EXTRA）只报告永不动。
 - **功能五 · 展示集分发**：`pm vault status`（相册 ↔ vault 九态差异，`--json`
@@ -108,7 +110,9 @@ portfolio 仓路径与两仓 push 目标可自定义；改完立刻生效，终�
 ```
 pm sort <源目录>                  # 整理新照片：按 EXIF 拍摄时间分段（不带参数=只读提议）
 pm sort <源> --place 亚特兰大 --from 2026-08-01 --to 2026-08-03   # 生成拷贝计划
-pm import                        # 暂存区 → Raw\年\事件-Raw + 成片\事件 归档计划
+pm import [--also-album]         # 暂存区 → Raw\年\事件-Raw + 成片\事件 归档计划（--also-album：成片 jpg 同时进相册）
+pm album add 26-06-R66/_DSC9621.jpg …   # 成片 → 相册（平铺、只收 jpg；相册同名异容 → 待裁决）
+pm album candidates              # 只读：还没进相册的成片 jpg（按事件夹）+ 成片/相册下的非 jpg（→ pm convert）
 pm backup init E:\Photography    # 一次性：登记备份盘（按 UUID 认盘，不认盘符）
 pm backup                        # 主库 → 备份盘单向增量（EXTRA 只报告永不动）
 pm clean staging                 # 仅清理「归档层+备份盘」都有同 sha 副本的暂存文件
@@ -234,7 +238,7 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 |---|---|---|
 | 增量扫描（4633 文件，其中 122 新 hash / 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（394 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
+| 测试套件（400 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
 | 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | 突变验证 | 凡有可观测自动化落点的承重闸各配一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过；无落点者登记为残余） | REVIEW-LOG 各轮收敛证据 |

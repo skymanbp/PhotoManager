@@ -401,7 +401,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **P7 / pm 0.6.1 / 394 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **P8-B / pm 0.6.1 / 400 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -495,3 +495,14 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm doctor --deep` | 结束多打一行 Info `[DEEP-DONE] N 条目待深验：已重读重 hash M、不符 a、读取失败/消失 b`（M = N − b：消失/读不出的没被重读；行标独立于逐条 `DEEP` Warn，与 `DEEP-SKIPPED` 配对）——此前干净库上 `--deep` 与不带 `--deep` 输出逐字相同，用户无法分辨「深验跑了没发现」与「没跑」 | e2e 观测缺口 |
 | GUI（pm-ui） | CSP `style-src` 收紧为 `'self'`（去掉 `'unsafe-inline'`，F090 实机 CDP 探针证实零违规）；`gui/ui` 新增「无内联样式/无内联脚本」常驻哨兵 | F090 |
 | `pm resolve` / `pm undo` / `pm vault ingest` / `pm trash` | 行为不变；README 提要改为与 `--help` 同形（`--unskip`、反向计划语义、ingest 入常用命令、屏障只覆盖 clean-staging/dedupe 两类记录） | 文档审计 |
+
+### P8-B 相册通道（2026-08-27，DESIGN-P8.md §19）
+
+| 命令/入口 | 变化 | 出处 |
+|---|---|---|
+| `pm import --also-album` | 新旗标：成片里的 jpg 同源再拷一份进 `相册\`——相册项与成片项**同组**（成片项 CONFLICT/FAILED 时相册项 `NOT-EXECUTED`，`--only` 拆不开）；成片项是返修待裁决时相册项一并待裁决且不分组；相册同名同 sha 不出项、同名异容待裁决、同批撞名两条都不入相册并逐条报告；非 jpg 只进成片并交代 `→ pm convert`；摘要行尾多 `· 相册 +N` | R2 D′ / §19.2 |
+| `pm album add <事件夹>/<文件名>…` | 新子命令：成片 → 相册的拷贝计划（`plKind = album-add`）。参数只收相对成片层的 `<事件夹>/<文件名>`（绝对/盘符/`..`/`成片\` 前缀/单级一律 exit 2）；不在索引、非照片、链接别名、非 jpg、同批撞名 → 全部错误一次列完、exit 2、零计划；全部已在 → exit 0 无计划 | §19.3 |
+| `pm album candidates` | 新子命令（只读）：成片里还没进相册的 jpg 按事件夹列出（相册同名异容标 ⚠）+ 成片/相册下的非 jpg（→ `pm convert`）；P8-D 再接 `GET /api/album/candidates`（DESIGN-P8.md §23） | §19.4 |
+| `pm vault ingest` | 行为不变；jpg 谓词改用 `pushableExt`（此前 Ingest 自带第二份 `jpegExt`），`caseNoDeadNames` 钉住 | §19.1 |
+| `pm sort` / `pm import` 计划收尾 | 行为不变；「造计划 → 存盘 → 确认 → 执行 → (退出码, 计划 id)」上提为 `Pm.Cli.emitPlanTo`，sort / import / album add 三处共用 | — |
+

@@ -26,6 +26,7 @@ module Pm.Commands
   , runResolve
   , resolveKeep
   , runImport
+  , runImportTo
   , runBackupInit
   , backupInitPreflight
   , runBackupRun
@@ -45,6 +46,7 @@ import System.Directory (doesDirectoryExist, doesFileExist, makeAbsolute)
 import System.FilePath ((</>))
 import Text.Printf (printf)
 
+import Pm.Album (AlbumReport (..), withAlbumForImport)
 import Pm.Apply
 import Pm.Backup
 import Pm.BackupCmd (BackupCmd (..), backupInitPreflight, runBackupInit, runBackupRun)
@@ -479,8 +481,14 @@ purgeBarriers cfg guarded
 
 -- ─── import ─────────────────────────────────────────────────────────────────
 
-runImport :: GoOpts -> Config -> IO Int
-runImport go cfg = do
+runImport :: GoOpts -> Bool -> Config -> IO Int
+runImport go alsoAlbum cfg = fst <$> runImportTo putStrLn go alsoAlbum cfg
+
+-- | 打印口由调用方给（工作流 F051 的 sink 纪律：P8-D 的 @POST \/api\/import\/plan@
+-- 把交代行收进 JSON）。@alsoAlbum@ = @--also-album@（P8-B，DESIGN-P8 §19.2）：
+-- 成片里的 jpg 同源再拷一份进相册，与成片项同组；非 jpg 只进成片并交代。
+runImportTo :: (String -> IO ()) -> GoOpts -> Bool -> Config -> IO (Int, Maybe T.Text)
+runImportTo sink go alsoAlbum cfg = do
   let root = cfgMainPath cfg
   -- P2.2 fail-closed（复审 cx-1 残留）：root 无身份就不出计划，而不是造一个
   -- rootId=Nothing 的计划再依赖下游拒绝；P3b-5 复审 B1：并校验 role 确为
@@ -488,42 +496,50 @@ runImport go cfg = do
   -- 次序）——配置路径指向别的 root 时，不该先按它的索引算出一份归档报告再拒绝。
   er <- requireRole RoleMain root
   case er of
-    Left msg -> putStrLn msg >> pure 2
-    Right info -> withFreshStagingCatalog root $ \cat -> do
-      let rep = planImport cat
-          items = importPlanItems root rep
-          copyBytes = sum [enSize e | (e, _) <- irCopy rep]
-      printf
-        "归档: 拷贝 %d 文件 (%.1f GiB) · 已归档冗余 %d · 返修待裁决 %d · 待修改不碰 %d\n"
-        (length (irCopy rep))
-        (fromIntegral copyBytes / (1024 * 1024 * 1024 :: Double))
-        (length (irAlready rep))
-        (length (irRework rep))
-        (length (irPendingEdit rep))
-      forM_ (irRework rep) $ \(e, dst) ->
-        putStrLn ("  ⚠ 返修: " <> enPath e <> " → " <> dst <> "（目标已存在且内容不同）")
-      forM_ (irUnrecognized rep) $ \p ->
-        putStrLn ("  ⚠ 无法识别的暂存布局（不猜，不入计划）: " <> p)
-      forM_ (irDupTarget rep) $ \(s, d) ->
-        putStrLn ("  ✗ 目标重复（连同侧车整组拒绝）: " <> s <> " → " <> d)
-      if null items
-        then do
-          putStrLn "✓ 暂存区无需归档"
-          pure (if null (irUnrecognized rep) && null (irDupTarget rep) then 0 else 1)
-        else do
-          pid <- newPlanId
-          now <- getCurrentTime
-          savePlanAndMaybeRun
-            cfg
-            go
-            Plan
-              { plId = pid
-              , plKind = "import"
-              , plRootPath = root
-              , plRootId = Just (riId info)
-              , plCreated = now
-              , plItems = items
-              }
+    Left msg -> sink msg >> pure (2, Nothing)
+    Right info -> do
+      ec <- freshStagingCatalog sink root
+      case ec of
+        Left m -> sink m >> pure (2, Nothing)
+        Right cat -> do
+          let rep = planImport cat
+              base = importPlanItems root rep
+              (items, arep)
+                | alsoAlbum = withAlbumForImport root cat rep base
+                | otherwise = (base, AlbumReport [] [] [] [] [])
+              copyBytes = sum [enSize e | (e, _) <- irCopy rep]
+              albumNote
+                | alsoAlbum = " · 相册 +" <> show (length (arCopy arep))
+                | otherwise = "" :: String
+          sink
+            ( printf
+                "归档: 拷贝 %d 文件 (%.1f GiB) · 已归档冗余 %d · 返修待裁决 %d · 待修改不碰 %d%s"
+                (length (irCopy rep))
+                (fromIntegral copyBytes / (1024 * 1024 * 1024 :: Double))
+                (length (irAlready rep))
+                (length (irRework rep))
+                (length (irPendingEdit rep))
+                albumNote
+            )
+          forM_ (irRework rep) $ \(e, dst) ->
+            sink ("  ⚠ 返修: " <> enPath e <> " → " <> dst <> "（目标已存在且内容不同）")
+          forM_ (irUnrecognized rep) $ \p ->
+            sink ("  ⚠ 无法识别的暂存布局（不猜，不入计划）: " <> p)
+          forM_ (irDupTarget rep) $ \(s, d) ->
+            sink ("  ✗ 目标重复（连同侧车整组拒绝）: " <> s <> " → " <> d)
+          forM_ (arNotJpg arep) $ \p ->
+            sink ("  · 非 jpg 只进成片，不入相册: " <> p <> "（要进相册 → pm convert）")
+          forM_ (arDupName arep) $ \(s, d) ->
+            sink ("  ✗ 相册目标重复（同名只能进一份，两条都不入相册）: " <> s <> " → " <> d)
+          forM_ (arAlready arep) $ \(s, d) ->
+            sink ("  = 已在相册（同内容）: " <> s <> " ≡ " <> d)
+          forM_ (arConflict arep) $ \(e, d) ->
+            sink ("  ⚠ 相册已有同名不同内容: " <> enPath e <> " → " <> d <> "（待裁决）")
+          if null items
+            then do
+              sink "✓ 暂存区无需归档"
+              pure (if null (irUnrecognized rep) && null (irDupTarget rep) then 0 else 1, Nothing)
+            else emitPlanTo sink cfg go "import" root info items
 
 -- | @pm dedupe@：归档层精确重复 → **逐份可裁决**的隔离计划。
 --

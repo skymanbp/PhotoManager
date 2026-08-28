@@ -68,20 +68,19 @@ import Data.Time
   , LocalTime (..)
   , NominalDiffTime
   , diffLocalTime
-  , getCurrentTime
   , toGregorian
   )
 import System.Directory (listDirectory)
 import System.FilePath (takeFileName, (</>))
 import Text.Printf (printf)
 
-import Pm.Cli (GoOpts (..), freshStagingCatalog, planIdOf, planRunCode, savePlanAndMaybeRunTo)
+import Pm.Cli (GoOpts (..), emitPlanTo, freshStagingCatalog)
 import Pm.Config (Config (..), requireRole)
 import Pm.Hash (ContentProbe (..), StatSnap (..), probeConfined)
 import Pm.Import (foldPath, stagingTop)
 import Pm.Names (canonProcessedEvent, canonRawEvent)
 import Pm.Op (Op (..), winNameOk)
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), newPlanId)
+import Pm.Plan (ItemStatus (..), PlanItem (..))
 import Pm.SortSource
 import Pm.Types
 import Pm.Win (whenPresent)
@@ -682,7 +681,6 @@ verifySkips root = mapM check
 
 emit :: (String -> IO ()) -> Config -> GoOpts -> RootInfo -> [Judged] -> IO (Int, Maybe T.Text)
 emit sink cfg go info judged = do
-  let root = cfgMainPath cfg
   sink
     ( printf
         "归位：待拷 %d · 已在目标位置 %d · 已归档 %d · 待裁决 %d"
@@ -697,25 +695,8 @@ emit sink cfg go info judged = do
     sink ("  · 已归档，不重复搬: " <> takeFileName (jSrc j))
   if null items
     then sink "✓ 没有需要归位的新照片" >> pure (0, Nothing)
-    else do
-      pid <- newPlanId
-      now <- getCurrentTime
-      -- 工作流 F052：id 只在计划真的落了盘时给（PrRefused 在 savePlan 之前就
-      -- 返回）；PrSaved（无 --apply）盘上有文件，退出码 1 仍带 id。
-      pr <-
-        savePlanAndMaybeRunTo
-          sink
-          cfg
-          go
-          Plan
-            { plId = pid
-            , plKind = "sort"
-            , plRootPath = root
-            , plRootId = Just (riId info)
-            , plCreated = now
-            , plItems = items
-            }
-      pure (planRunCode pr, planIdOf pr pid)
+    -- 公共收尾（P8-B 上提到 Pm.Cli.emitPlanTo；F052 的「id 只在真落盘时给」在那里）
+    else emitPlanTo sink cfg go "sort" (cfgMainPath cfg) info items
  where
   tally f = length [() | j <- judged, f (jVerdict j)]
   items =

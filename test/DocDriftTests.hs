@@ -31,7 +31,7 @@ docDriftTests =
     , testCase "CSP 逐字：DESIGN-GUI 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）" caseCspQuoted
     , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链" caseGuiNoInlineStyle
     , testCase "750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）" caseLineBudget
-    , testCase "死名清扫：opRelPaths / isPng / stemKey 不再出现在 src/app" caseNoDeadNames
+    , testCase "死名清扫：opRelPaths / isPng / stemKey / jpegExt 不再出现在 src/app" caseNoDeadNames
     , testCase "Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记" caseHaddockMarkerHygiene
     , testCase "讹传清扫：被否证的机制解释（F048 列表脊、46 轮 openBoundTo 共享模式）不再出现在 src/app/test" caseFolkloreNotInTests
     , testCase "命名同步：DESIGN-COMMANDS 讲的是 freshStagingCatalog（F025 收尾）" caseFreshGateName
@@ -187,8 +187,9 @@ caseGuiNoInlineStyle = do
   assertEqual "gui/ui 脚本 innerHTML 只允许赋空串" [] (innerBad js)
 
 -- | P7-J 删掉的三个名字不得回潮：opRelPaths（无调用者的导出）、isPng
--- （与 push 门分叉的第二份谓词）、stemKey（Import/Sort 双份局部配对键）。
--- 只查非注释行——历史注释里提旧名是合法的交代。
+-- （与 push 门分叉的第二份谓词）、stemKey（Import/Sort 双份局部配对键）；
+-- P8-B 再加 jpegExt（Ingest 里与 pushableExt 分叉的第二份 jpg 谓词，
+-- DESIGN-P8 §19.1）。只查非注释行——历史注释里提旧名是合法的交代。
 caseNoDeadNames :: IO ()
 caseNoDeadNames = do
   ms <- srcModules
@@ -197,7 +198,7 @@ caseNoDeadNames = do
  where
   check (m, fp) = do
     s <- readUtf8 fp
-    pure [(m, w) | w <- ["opRelPaths", "isPng", "stemKey"], refsIn w s]
+    pure [(m, w) | w <- ["opRelPaths", "isPng", "stemKey", "jpegExt"], refsIn w s]
 
 -- | 一段连续注释行里出现两个 @-- |@ / @-- ^@ 标记 = 两个块被粘成了一个
 -- （工作流 F013/F045/F055 的共同形态：挪代码时把上一个块的文档留在原地，

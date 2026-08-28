@@ -1,6 +1,6 @@
 # PhotoManager (`pm`) — 设计文档
 
-**版本**: v0.2 · **日期**: 2026-08-22 · **状态**: 已过对抗评审（§16）→ **用户已批准 v0.2 并开工**（裁定见 §15）；**实现现状以 [`DESIGN-COMMANDS.md`](DESIGN-COMMANDS.md) 的状态行为准**，本文件不复述版本号
+**版本**: v0.2 · **日期**: 2026-08-22 · **状态**: 已过对抗评审（§16）→ **用户已批准 v0.2 并开工**（裁定见 §15）；**实现现状以 [`DESIGN-COMMANDS.md`](DESIGN-COMMANDS.md) 的状态行为准**，本文件不复述版本号；P8 工作包（Photography 为相片 SoT）的裁定与设计在 [`DESIGN-P8.md`](DESIGN-P8.md)
 
 ---
 
@@ -232,7 +232,8 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm scan [root]` | 全量/增量索引（首扫全量 hash，之后 stat-比对；变更集才重 hash）。**进不去的子树按「查不出」承载**：ACL/IO 错误挡住的目录，其下的旧 catalog 条目原样保留（不当作"文件已消失"删掉），`pm scan` 末尾单列 `⚠ N 条…按「查不出」保留上次快照值（未核对）` | 仅 .pm/ |
 | `pm status` | **总览仪表盘**：头行永远打印「索引时间（几分钟前）· 文件数」；各层规模、staging 待归档、备份盘滞后（未挂载则显示上次同步时间）、vault 差异、命名/版本问题计数、最久未验证字节年龄；**每个问题行末尾给出可直接复制的下一步命令** | 否 |
 | `pm sort <源> [--place\|--event --from --to]` | **散落新照片 → 暂存区事件夹**（§7）。不带参数=只读提议：读 EXIF 拍摄时间、按间隔给候选分段、打印每段该敲的命令；给齐地点与区间才生成拷贝计划 | apply 时 |
-| `pm import [--apply]` | To-Be-Sync'd 事件 → `Raw\年\` + `成片\` 归档计划 | apply 时 |
+| `pm import [--apply] [--also-album]` | To-Be-Sync'd 事件 → `Raw\年\` + `成片\` 归档计划；`--also-album`（P8-B）让成片里的 jpg 同源再拷一份进 `相册\`，相册项与成片项**同组**（成片没落位相册不执行）、返修项耦合成待裁决、非 jpg 只进成片（DESIGN-P8.md §19.2） | apply 时 |
+| `pm album add <事件夹>/<文件名>… [--apply]` / `pm album candidates` | 成片 → 相册（P8-B，DESIGN-P8.md §19.3/19.4）：只收 jpg，相册同名同 sha 幂等跳过、同名异容 NEEDS-DECISION（I5）、同批撞名整批拒绝；`candidates` 只读列出还没进相册的成片 jpg 与成片/相册下的非 jpg | apply 时 / 否 |
 | `pm backup [--apply]` | 主库 → 备份盘单向增量；备份盘多出的只报 EXTRA 永不动。**`pm backup init <盘上镜像路径>`（P2 落锤）**：插盘后一次性登记——写 role=Backup 的 root-id.json（含 FS 探测）+ 配置记 UUID+盘内相对路径，此后按 UUID 认盘 | apply 时 |
 | `pm clean staging [--apply]` | **隔离区入口**：仅对「Raw/成片 已有同 sha 副本 **且** 备份 root catalog 也有同 sha 副本」（三副本确认）的 staging 文件生成 Quarantine 计划；不满足的标 `HELD(缺哪份)`；备份盘未挂载 → 不生成任何项，报「无法确认第三副本」。**`待修改\` 永不入清理计划（P2 落锤，与 §7 import 不碰同源）**；catalog 声称的两侧副本在计划期再过一次活体 stat 核对，变了降级 HELD | apply 时 |
 | `pm vault status` | 相册↔vault **九态**差异：与 `sync_photos.py` 兼容的六态核心（OK/NEW/MISSING/RENAME/DRIFT/DUPLICATE，§10.1 兼容 schema）+ pm 自加的 UNPUSHABLE / UNSTABLE / HELD | 否 |

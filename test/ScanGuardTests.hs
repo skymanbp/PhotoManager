@@ -376,7 +376,7 @@ caseImportStaleRefused = withSystemTempDirectory "pm-imp" $ \tmp -> do
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (Catalog "m" t0 (entryMap []))
   writeFile (root </> "To-Be-Sync'd" </> "Raw" </> "26-06-R66" </> "a.ARW") "raw"
-  (out, code) <- captureStdout (runImport (GoOpts False False) cfg)
+  (out, code) <- captureStdout (runImport (GoOpts False False) False cfg)
   code @?= 2
   assertBool ("拒绝时应指向 pm scan: " <> out) ("pm scan" `isInfixOf` out)
 
