@@ -22,7 +22,11 @@ nav button { display: flex; align-items: center; gap: .6rem; text-align: left; b
 nav button:hover { background: #8881; }
 nav button.active { background: var(--accent); color: var(--accent-ink); }
 nav .ic { width: 1.2em; text-align: center; opacity: .8; }
-.side-foot { margin-top: auto; padding: .4rem; }
+/* 侧栏是 200px 定宽 grid 列；脚注里「已连接 127.0.0.1:端口」与主库路径都是没有断行点的
+   长 token，字体回退 / 更长的路径会把它们顶出侧栏（用户复核 1.0.0 前实机看到）。
+   允许任意处断行并把侧栏本身钉住 min-width:0，脚注只会变高，不会横向溢出。 */
+.side { min-width: 0; overflow: hidden; }
+.side-foot { margin-top: auto; padding: .4rem; min-width: 0; overflow-wrap: anywhere; word-break: break-all; }
 .conn { font-size: .85rem; }
 .conn.ok::before { content: "● "; color: var(--ok); }
 .conn.bad::before { content: "● "; color: var(--bad); }
@@ -39,8 +43,12 @@ main { min-width: 0; overflow: auto; overflow-x: hidden; padding: 1.2rem 1.6rem 
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .8rem; }
 h1 { font-size: 1.35rem; margin: 0; } h2.sec { font-size: 1rem; margin: 1.4rem 0 .6rem; }
 .muted { color: var(--muted); } .small { font-size: .82rem; } .hidden { display: none !important; }
-.actions { display: flex; align-items: center; gap: .6rem; }
-.btn { font: inherit; padding: .45rem .9rem; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+/* 同一行里的按钮尺寸要对齐：页头文案长时 .actions 会被挤窄，按钮各自折行成不同高度
+   （分类推送页头「AI 建议分类/地点」与「保存决定并生成推送计划」实机一高一矮）。
+   按钮不折行、.actions 不被挤（宁可页头整体换行），同一行按钮自然等高。 */
+.actions { display: flex; align-items: center; gap: .6rem; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.page-head { flex-wrap: wrap; }
+.btn { font: inherit; padding: .45rem .9rem; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; white-space: nowrap; line-height: 1.3; }
 .btn:hover { border-color: var(--accent); }
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .btn.primary:disabled { opacity: .45; cursor: not-allowed; }
