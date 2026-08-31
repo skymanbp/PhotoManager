@@ -30,7 +30,7 @@ a whole (`pm undo`).
 > review gate (**recorded round by round in [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md);
 > the convergence verdict is whatever its last section says and is not copied
 > here**), and each gate with an observable automated anchor gets a "delete it and
-> exactly one test turns red" mutation case (418 tests, 0 GHC warnings); gates
+> exactly one test turns red" mutation case (427 tests, 0 GHC warnings); gates
 > without an anchor (the GUI has no harness; concurrent interleavings have no
 > deterministic observation point) are registered in REVIEW-LOG as residuals rather
 > than passed off as covered.
@@ -58,13 +58,17 @@ Adversarial review archive: [docs/reviews/](docs/reviews/).
   finished jpgs from the same source into `相册\` (album) as well (grouped with the
   finished item: if the finished copy did not land, the album copy is not executed);
   `pm album add <event folder>/<file>…` picks already-archived finished jpgs into the
-  album (`pm album candidates` lists candidates and non-jpg files); `pm convert
+  album (`pm album candidates` lists candidates and non-jpg files;
+  `pm album ignore|unignore` ignores/restores unwanted candidates by content sha — a
+  record in the main library's `.pm` only, zero photo changes); `pm convert
   <library-relative path>…` derives a jpg from tif/png etc. under finished/album (local
   python + Pillow; the original stays untouched in place) and lands it in the same
   finished event folder (`--also-album` also into the album) or in the album.
 - **Feature 4 · Backup**: `pm backup` — main library → backup drive, one-way
-  incremental; the drive is recognised by root UUID, not by drive letter; anything
-  extra on the backup drive (EXTRA) is only reported, never touched.
+  incremental; the drive is recognised by root UUID, not by drive letter; **backup
+  scope = main library minus the staging area** (`To-Be-Sync'd\` is transit only and
+  never enters the backup drive, ruled 2026-08-31); anything extra on the backup
+  drive (EXTRA) is only reported, never touched.
 - **Feature 5 · Showcase distribution**: `pm vault status` (album ↔ vault nine-state
   diff, `--json` compatible with the legacy script), `pm vault push` (copy into a
   category + DRIFT adjudication plan + print the explicit git steps — pm never runs
@@ -147,14 +151,19 @@ repos is generated from Settings, pm never runs git), **Sort new photos** (enter
 source directory → segment by capture time → per segment enter a place / pick an
 existing event → generate a copy plan; the source directory is read-only; "AI suggest
 place" only pre-fills), **Archive** (staging event folder → Raw/finished, optionally
-into the album at the same time; tick finished jpgs into the album; derive jpgs from
-tif/png etc. — all three only produce plans), **Categorise & push** (album photos the
+into the album at the same time; tick finished jpgs into the album — unwanted
+candidates can be **ignored** (remembered by content sha, undoable any time from the
+collapsed list); derive jpgs from tif/png etc. — all three only produce plans),
+**Categorise & push** (album photos the
 vault does not have yet: pick a category on the thumbnail, fill in place / coordinates /
 title record (optionally pre-filled by "AI suggest category/place"), or pick the fourth
 button "not syncing for now" → one button "save decisions and generate push plan" does
-all three), **Plans** (item-by-item detail; since 0.6.0 pending plans can be **executed
-directly** — the same button clicked twice to confirm, the execution chain is the same
-as `pm apply`, `pm undo` works afterwards), **Settings** (paths and concurrency: vault /
+all three), **Plans** (item-by-item detail + execution-state badges — executed /
+partial / not executed, folded from the journal, executed rows dimmed; plans can be
+deleted one by one or pruned in one click ("clear executed"), which only removes the
+regenerable plan files; since 0.6.0 pending plans can be **executed directly** — the
+same button clicked twice to confirm, the execution chain is the same as `pm apply`,
+`pm undo` works afterwards), **Settings** (paths and concurrency: vault /
 photos.json / worker count editable, backup drive registrable, the portfolio repo path
 and both repos' push targets for the publish commands customisable; changes take
 effect immediately, and so does `pm config set` run in a terminal; the main library
@@ -168,10 +177,12 @@ pm sort <source dir>              # sort new photos: segment by EXIF capture tim
 pm sort <source> --place Atlanta --from 2026-08-01 --to 2026-08-03   # generate a copy plan
 pm import [--also-album]         # staging → Raw\<year>\<event>-Raw + 成片\<event> archive plan (--also-album: finished jpgs also into the album)
 pm album add 26-06-R66/_DSC9621.jpg …   # finished → album (flat, jpg only; same name / different bytes in the album → awaits adjudication)
-pm album candidates              # read-only: finished jpgs not yet in the album (per event folder) + non-jpg under finished/album (→ pm convert)
+pm album candidates              # read-only: finished jpgs not yet in the album (per event folder) + non-jpg under finished/album (→ pm convert) + ignored list
+pm album ignore 26-06-R66/x.jpg …   # ignore a candidate: recorded by content sha in the main library's .pm/album-ignore.json (zero photo
+                                 # changes; survives renames/moves, a re-export with new bytes reappears); unignore takes a path or sha
 pm convert 成片/26-06-R66/x.tif --also-album   # non-jpg → derived jpg (Pillow, written to .pm/derived) → same finished event folder (+ album) plan; original untouched
 pm backup init E:\Photography    # once: register the backup drive (recognised by UUID, not by drive letter)
-pm backup                        # main library → backup drive, one-way incremental (EXTRA is only reported, never touched)
+pm backup                        # main library → backup drive, one-way incremental (staging To-Be-Sync'd excluded; EXTRA is only reported, never touched)
 pm clean staging                 # only cleans staging files that have same-sha copies in BOTH the archive tier and the backup drive
 pm vault status                  # album ↔ vault showcase nine-state diff (six states compatible with sync_photos.py,
                                  # --json copies those six field by field; the other three: UNPUSHABLE/UNSTABLE/HELD)
@@ -191,6 +202,8 @@ pm versions                      # version groups / exact duplicates outside the
 pm dedupe                        # exact duplicates → a quarantine plan adjudicated copy by copy (all await adjudication; which to keep
                                  # is not chosen for you — approve each with pm resolve --item N --unskip)
 
+pm plan [list]                   # list plans with execution state (executed / partial / not executed — folded from the journal; plan files are never written back)
+pm plan rm <id> … / pm plan prune   # delete plan files / one-click prune of executed plans (only regenerable files are removed; journal/undo unaffected)
 pm apply <planId>                # execute a plan (--dry full preview / --only 1,3-5 partial execution)
 pm resolve <id> --item N [--unskip]            # skip that item (default action) / --unskip restores it to pending;
                                                # dedupe plans all await adjudication — only items approved with --unskip execute on apply
@@ -278,11 +291,12 @@ path).
    spawn / hand over the token / kill; everything goes through `pm serve` (127.0.0.1 +
    random port + Bearer token with constant-time comparison + Host/Origin checks);
    serve has three authorisation levels: **read-only by default**; `--writable` opens
-   nine write endpoints — generate push / sort / archive / album / convert plans (writes
+   twelve write endpoints — generate push / sort / archive / album / convert plans (writes
    `.pm/plans`; convert additionally writes derived files into `.pm/derived`, the
-   originals untouched), record "not syncing for now" decisions and photo records, edit
-   configuration (main library path read-only), register the backup drive — **none of
-   them touch photo bytes**; the AI suggestion endpoint `POST /api/suggest` is
+   originals untouched), record "not syncing for now" decisions and photo records,
+   record "ignore this candidate" decisions, delete/prune plan files (only the
+   regenerable `.pm/plans` files), edit configuration (main library path read-only),
+   register the backup drive — **none of them touch photo bytes**; the AI suggestion endpoint `POST /api/suggest` is
    read-only level and only produces suggestions; only `--allow-apply` opens `POST
    /api/apply` (the sole endpoint that touches photo bytes; since 0.6.0 the GUI passes
    it at launch, the page confirms with two clicks; execution happens inside the serve
@@ -349,7 +363,7 @@ All measured on the real library (commands and sources reproducible, not estimat
 |---|---|---|
 | Incremental scan (4633 files, of which 122 newly hashed / 14.0 GiB, workers=16) | 19.4 s | `pm scan` 2026-08-26 |
 | First full hash (480 GiB class) | ~10–25 min | first library build, recorded |
-| Test suite (418 tests, whole suite serialised — required by process-level stdout redirection) | 10–40 s | `stack test` |
+| Test suite (427 tests, whole suite serialised — required by process-level stdout redirection) | 10–40 s | `stack test` |
 | GHC warnings | 0 | `stack build` |
 | Adversarial review gate | recorded per round (NO-GO findings verified first-hand → class-level fix → focused re-review; convergence = the last section's verdict) | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | Mutation verification | one mutation per load-bearing gate with an observable automated anchor, its paired test turns red (all discrimination tables of rounds 34–36 and the P7 rounds pass; gates without an anchor registered as residuals) | REVIEW-LOG convergence evidence per round |
@@ -463,6 +477,12 @@ binaries in a Release are not built on the author's machine.
   "Archive" + two AI entry points (`claude -p` read-only, pre-fill only); one shell for
   external processes, `Pm.Subprocess`; full first-party review + two Opus gate rounds +
   a single CI chain (this release's binaries are produced by GitHub Actions).
+- ~~Plans page completion / candidate ignore / backup scope~~ ✅ 1.1.0 (three user
+  rulings 2026-08-31): execution-state badges folded from the journal + `pm plan
+  list|rm|prune` (plan files are never written back); `pm album ignore|unignore` by
+  content sha (a local `.pm` decision, zero photo changes); backup scope = main
+  library minus the staging area (`To-Be-Sync'd\` is transit only; narrowed at the
+  single point `Pm.Diff.backupDiff`).
 
 **Known limitations**:
 

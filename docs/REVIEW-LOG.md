@@ -556,3 +556,13 @@ N1 无对应源突变（是用例自身的健壮性），以反向核验代替�
 | `pm-ui_1.0.0_x64-setup.exe` | `ca55d30e77b40c7b374f7668329015e0537d1fa7f486a4bf612c3446cfb7a60d` |
 
 项目收官：P8 七项（相册通道 / AI 入口 / jpg 转换 / 档案侧技能 / 用户复核 / 全量文档 / CI 发布）全部落地；vault 15 张「暂不同步」与首次真实 `claude -p` 留给用户日常使用（§25「job 等待整树」残余据此仍未核实，已登记）。
+
+## 1.1.0 增补批（2026-08-31，用户三批 AskUserQuestion 裁定；发布令：「pm收口。提交+推送并发布新release」）
+
+范围：计划页完善（`Pm.Plan` 执行态折叠 `planExecs`/`planExecuted` + `pm plan list|rm|prune` + GUI 计划页标注/删除/清理）、候选忽略（`Pm.Album` 按内容 sha 的 `.pm/album-ignore.json` + `pm album ignore|unignore` + GUI 归档页）、备份范围 = 主库 − 暂存区（`Pm.Diff.backupDiff` 单点收窄）；serve 写端点九 → 十二。938 插入 / 84 删除，20 文件。
+
+**第一方全量自审（发布前，按 2026-08-26 用户流程指令）**：产品代码 hunks 逐行读（app/Main、gui/ui 四件、Pm.Album/Diff/Plan/Serve/ServeAlbum），架构对照 DESIGN 声明（Plan.hs 持计划文件生命周期 + journal 折叠、Album.hs 持相册通道决定、Serve* 只做壳；行预算全部 ≤750，最大 app.js 688）。发现聚类：**0 critical / 0 major / 1 minor 登记不改码**——`POST /api/plan/delete` 把 `deletePlanAnyRoot` 的一切 Left（含「id 不符合生成格式」）都映射为 404，而 `GET /api/plan/<pid>` 对坏格式是 400；fail-closed 完好（坏 id 在 `deletePlan` 第一道守卫拒绝、零写入）、响应体带真实原因、GUI 只回传列表里的合法 id，状态码语义差异登记于此，留待下批与 `PlanIdReq` 解析层一并对齐。
+
+**判别突变（每条单点重跑取 FAIL 文案，随后还原全绿）**：m1 忽略分区谓词翻转 → caseIgnoreFilterPure 红；m2 「必须是候选」错误闸削除 → caseIgnoreRequestPure 红；m3 `~r` 复位剔除改无操作 → caseFold 红；m4 `planExecuted` 去待裁决检查 → caseExecuted 红；m5 `deletePlan` id 格式守卫削除 → caseDeleteAndPrune 红；m6 prune 不过滤已执行 → 同用例红（m5 已还原后单独判）；m7 备份范围过滤削除 → PlannerTests 备份范围用例红。427/427 全绿（--fast 与 stack clean 后优化链各一遍），GHC 警告 0。
+
+**真实库落地复核（只读 + 用户逐项裁定的写入）**：`pm plan list` 13 份计划执行态与 journal 诊断逐一一致（dedupe 正确标「已执行（余 8 项待裁决）」→ prune 保守跳过）；`pm album candidates` 104 张候选 · 已忽略 0；相册改名计划 `20260831-055559-c2107f`（手写 album-rename，dry → apply → DONE）后 `pm versions` 非设计内精确重复 1 → 0 组、doctor exit 0、`pm vault status` 零差异（15 HELD 除外）；vault 仓 7183f7e / portfolio 83260cb 连带推送。外部门禁轮未跑——用户直接下达发布令，第一方自审 + 突变 + 真实库复核为本批门禁。

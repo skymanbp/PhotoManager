@@ -52,12 +52,20 @@
   响应体**，不走 stdout——`pm ui` 只读一行 announce 就丢掉 BufReader，serve 的
   stdout 此后无人排空，照着打会填满管道缓冲。
 - **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
-  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。共**九个** `--writable`
+  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。共**十二个** `--writable`
   级写端点，都不执行、不碰照片——
   `POST /api/vault/push-plan`（P4-5，本条）、`POST /api/vault/hold`（P4-7）、`POST /api/vault/notes`（P8-C，照片记录：写主库 `.pm/vault-notes.json`，与 hold 共用 `recordPost` 壳与锁序）、
   `POST /api/config` 与 `POST /api/backup-init`（P4-8，均见下）、
   `POST /api/sort/plan`（P5-E，见下）、`POST /api/import/plan`、`POST /api/album/add-plan`、
-  `POST /api/convert/plan`（P8-D，见下「归档页与 AI 建议」条）；执行是第 ③ 级 `POST /api/apply`
+  `POST /api/convert/plan`（P8-D，见下「归档页与 AI 建议」条）、
+  `POST /api/album/ignore`（2026-08-31 用户裁定：忽略/取消候选，按内容 sha 写主库
+  `.pm/album-ignore.json`——校验与 CLI `pm album ignore|unignore` 共用
+  `runAlbumIgnoreTo`，requireMain 预检 + 主库 root lock 事务，照片零改动）、
+  `POST /api/plan/delete {planId}` 与 `POST /api/plans/prune`（同批裁定：删除/一键清理
+  计划文件——与 CLI `pm plan rm` / `pm plan prune` 共用 `deletePlanAnyRoot` /
+  `prunePlans`，只删可再生成的 `.pm/plans` 文件，journal/undo/doctor 不受影响；
+  prune 的「已执行」判据 `planExecuted` 保守：待执行项全部 Done 且无待裁决残余，
+  草稿与带裁决残余的计划不动）；执行是第 ③ 级 `POST /api/apply`
   （P5-C 实现，P7 起由 GUI 使用，见上文三级授权与下文 P7 条）。
   第一个是 `POST /api/vault/push-plan`，
   体 `{"assignments":[{"name","category"},…]}`，上限 64 KiB（413）；校验与计划
@@ -124,7 +132,9 @@
   **备份硬盘同步**卡（未登记 / 上次同步时间 + 滞后 add/update/extra / 缓存不可信）；
   「下一步」列表把 status 退出码的语义翻成可点的动作。②**整理新照片**——见上 P5-E 条（P8-D 加「AI 建议地点」：
   只预填空着的地点格，把握低的填 `<地点?>`，每段一行依据）。③**归档**——三张卡：暂存区归档
-  （勾「同时导入相册」）、成片 → 相册（按事件夹分组的缩略图网格勾选、「全选这个事件夹」）、
+  （勾「同时导入相册」）、成片 → 相册（按事件夹分组的缩略图网格勾选、「全选这个事件夹」；
+  每卡「忽略」按内容 sha 把候选压进折叠区——`GET /api/album/candidates` 的 `ignored` /
+  `ignoreStale` 字段，随时「取消忽略」，失效记录单独提示，2026-08-31）、
   非 jpg 转换（勾选 + 「同时进相册」→「转换并生成计划」）——三者都只出计划，见上 P8-D 条。
   ④**分类推送**——NEW 缩略图网格（原图 4–75 MB，GUI 侧 `createImageBitmap(resizeWidth
   640)` 缩放后再挂，修掉"滚动后缩略图消失"——全分辨率位图撑爆 WebView 的根因）+ 三
@@ -132,8 +142,11 @@
   经 POST notes 写主库）+「AI 建议分类/地点」（P8-D：类目只在按钮上描边 `.ai`、三格只填空着的；用户拥有的卡——本页亲手改过、或盘上记录本就是 `user` 来源且有内容——不进请求也不被改 `source`，门禁 F4 / 二轮 N2）
   + 进度「已选 x/N」+「保存决定并生成推送计划」→ hold → notes → push-plan（hold 先行：服务端拒收 held 文件的 push）→ 结果
   面板（计划 id、`pm apply` 命令、git 步骤）。⑤**计划**——表格（类型徽标、id、时间、
-  项/待执行/跳过/待裁决）+ 明细（逐项 拷贝/改名/隔离 + 源→目标 + 状态徽标，原始 JSON
-  可展开），打开即选中最新计划。⑥**设置**（P4-8，见下）。⑦**上手**——四步说明 + 安全
+  项/待执行/跳过/待裁决 + **执行态**列：已执行/部分/未执行（含失败注记）从 journal
+  折叠而来（`GET /api/plans` 的 done/failed/executed/lastRunAt 字段——计划文件本身
+  不回写执行状态），已执行的行淡化；行内「删除」（两次点击确认）与页头「清理已执行」
+  （2026-08-31，写授权级）——删的只是可再生成的计划文件）+ 明细（逐项 拷贝/改名/隔离 +
+  源→目标 + 状态徽标，原始 JSON 可展开），打开即选中最新计划。⑥**设置**（P4-8，见下）。⑦**上手**——四步说明 + 安全
   模型一句话。技术：`<img src>` 带不了 Authorization → fetch→blob；旧 blob URL 每轮
   revoke；Tauri CSP（`gui/src-tauri/tauri.conf.json` 逐字）：`default-src` 与
   `script-src` 只 `'self'`；`connect-src http://127.0.0.1:* ipc: http://ipc.localhost`；

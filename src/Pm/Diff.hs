@@ -3,6 +3,13 @@
 -- | Pure catalog-vs-catalog difference for backup sync (DESIGN.md §9).
 -- Identity is (relPath, sha256) — mtime is a per-root cache key and is never
 -- compared across roots (§3).
+--
+-- 备份范围 = 主库 − 暂存区（用户 2026-08-31 裁定：@To-Be-Sync'd\\@ 只是中转，
+-- 不进备份盘）。范围收窄在**这里**做一次，BackupCmd 的比对、apply 后的缓存
+-- 重算（Pm.Apply）与 status 卡片全部继承；暂存文件因此不再产生 add\/update，
+-- 备份盘上已有的暂存副本按「不在范围内」计入 EXTRA（只报告，删除由人做）。
+-- 清暂存的三副本屏障不受影响——'Pm.Clean.planClean' 按 sha 找备份见证，
+-- 归档层（Raw\/成片）的备份副本即可作证，不依赖暂存路径那份。
 module Pm.Diff
   ( BackupDiff (..)
   , backupDiff
@@ -10,8 +17,9 @@ module Pm.Diff
   ) where
 
 import qualified Data.Map.Strict as Map
-import System.FilePath ((</>))
+import System.FilePath (splitDirectories, (</>))
 
+import Pm.Import (stagingTop)
 import Pm.Op
 import Pm.Plan (ItemStatus (..), PlanItem (..))
 import Pm.Types
@@ -47,7 +55,9 @@ backupDiff mainCat bakCat =
           ]
     }
  where
-  mainE = catEntries mainCat
+  -- 主库侧先收窄到备份范围（模块头：暂存区不进备份盘）。谓词与
+  -- 'Pm.Import'/'Pm.Clean' 的暂存判定同形（首组件 == stagingTop）。
+  mainE = Map.filterWithKey (\rel _ -> take 1 (splitDirectories rel) /= [stagingTop]) (catEntries mainCat)
   bakE = catEntries bakCat
 
 -- | Plan items mutating the BACKUP root. Adds become plain copies; updates

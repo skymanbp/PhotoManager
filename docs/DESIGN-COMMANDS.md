@@ -278,6 +278,12 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - 单向 add/update：主库有而备份没有 → Copy；同名不同 hash → 计划标出方向
   （默认判主库新），**经确认后走 §6.5 supersede 复合**（备份盘旧字节进备份盘
   自己的 `.pm/trash/`，不丢）；备份盘多出的 → EXTRA 只读报告。
+- **备份范围 = 主库 − 暂存区**（用户 2026-08-31 裁定：`To-Be-Sync'd\` 只是
+  中转，不进备份盘）：暂存文件不再产生 add/update；备份盘上已有的暂存副本按
+  「不在范围内」计入 EXTRA（只报告，删除由人在盘上做）。范围收窄在
+  `Pm.Diff.backupDiff` 单点做一次，BackupCmd 比对、apply 后缓存重算（Pm.Apply）
+  与 status 卡片全部继承。清暂存的三副本屏障不受影响——`Pm.Clean.planClean`
+  按 sha 找备份见证，归档层（Raw/成片）的备份副本即可作证。
 - 备份 root 的 catalog 记录**备份盘自己 stat 的值**（§3）。备份计划的
   journal/trash/tmp 全在备份 root 自己的 `.pm` 下（P2 落锤，与效果同卷）；
   备份路径的 Done 仍一律即时 FlushFileBuffers（不组提交）——理由是可移动
@@ -404,7 +410,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.0.0 收官 / pm 1.0.0 / 418 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.1.0（计划页/忽略候选/备份范围增补）/ pm 1.1.0 / 427 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -538,4 +544,16 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm serve`（只读级） | 新增 `GET /api/album/candidates`（`Pm.Album.albumCandidates`：成片 jpg 未进相册按事件夹 + 非 jpg 单列）与 `POST /api/suggest`（拉起用户自己账号的 `claude -p --permission-mode plan`，只出建议：`kind` classify ≤ 20 名 / place ≤ 12 段每段 5 张；`PM_CLAUDE_EXE`、`PM_SUGGEST_TIMEOUT`（超时杀整棵进程树，`Pm.Subprocess`）；`seSuggestLock` 满 409；非 JSON 502 带 raw、退出非零 / `is_error` 502） | DESIGN-P8 §22 |
 | `pm ui` | 第七页「归档」（三张卡）+ 整理页「AI 建议地点」+ 分类推送页「AI 建议分类/地点」与每卡照片记录三格（保存次序 hold → notes → push-plan）；数字键 1–7 | DESIGN-P8 §23 |
 | `pm sort`（内部） | `SortSegment` 增 `sgFiles`（段内全部可定时文件，时间序）供 suggest place 抽样；CLI 输出不变 | — |
+
+### 计划页完善 + 候选忽略 + 备份范围（2026-08-31，用户裁定：标注+删除+一键清理 / 按内容 sha 忽略 / 暂存区不进备份盘）
+
+| 命令/入口 | 变化 | 出处 |
+|---|---|---|
+| `pm backup` | **备份范围 = 主库 − 暂存区**：`To-Be-Sync'd\` 不再产生 add/update，备份盘上已有的暂存副本按不在范围计入 EXTRA（只报告，删除由人做）；收窄在 `Pm.Diff.backupDiff` 单点，比对/缓存重算/status 全部继承；清暂存三副本屏障按 sha 认归档层的备份见证，不受影响 | §9 |
+| `pm plan [list]` | 新顶层子命令（缺省 = list）：列出主库/vault 的计划与**执行态**——已执行 / 部分执行 m/n / 未执行（+失败注记），从 journal 折叠（`Pm.Plan.planExecs`：普通 Done 计入、`~r` 组回滚复位剔除、`~d<N>` 位移不计、同序号重试成功抹失败）；计划文件本身**不回写**执行状态（§3：耐久层是 journal） | DESIGN-GUI §11 |
+| `pm plan rm <id>…` | 删除计划文件：id 格式闸 → 可信闸 → 完整路径受信解析 → 句柄式删除（与 `loadPlan`/`savePlan` 删旧同规格）；删的是可再生成的文件，journal/undo/doctor 零影响；主库 → vault 按序查找 | — |
+| `pm plan prune` | 一键清理**已执行**（`planExecuted` 保守判据：至少一个待执行项、待执行项全部 Done、无待裁决残余）；从未执行的草稿与带裁决残余的计划不动（prune 不替用户裁决，删它们走显式 `pm plan rm`）；journal 读不出的根一份不删（fail-closed） | — |
+| `pm album ignore <事件夹>/<文件名>…` / `pm album unignore <路径\|sha>…` | 新子命令：按**内容 sha** 忽略/恢复候选（改名/挪事件夹后忽略仍生效；重新导出=新字节会重新出现——正是要的语义）；写主库 `.pm/album-ignore.json`（`requireMain` 预检 + 主库 root lock 事务，照片零改动）；忽略对象必须是当前候选、错误一次列完 exit 2；unignore 收 64 位 sha、当前路径或记录存档路径（对象已删也能清） | — |
+| `pm album candidates` | 输出加「已忽略 N 张」清单与失效记录提示（对象已不在候选——只提示不自动清）；过滤在 `albumCandidates` 一个谓词上游完成，CLI 与 GUI 归档页同源 | — |
+| `pm serve` | `--writable` 写端点九个 → **十二个**（忽略/计划删除/一键清理）；`GET /api/plans` 加 done / failed / executed / lastRunAt；`GET /api/album/candidates` 加 ignored / ignoreStale；端点清单与形状见 DESIGN-GUI §11（路由哨兵 `caseRouteRoster` 盯守） | DESIGN-GUI §11 |
 

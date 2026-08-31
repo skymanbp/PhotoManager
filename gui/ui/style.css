@@ -125,6 +125,10 @@ h1 { font-size: 1.35rem; margin: 0; } h2.sec { font-size: 1rem; margin: 1.4rem 0
 .items td.op { white-space: nowrap; }
 .st { font-size: .75rem; padding: .05rem .4rem; border-radius: 5px; background: #8882; }
 .st.pending { color: var(--accent); } .st.skipped { color: var(--muted); } .st.needs-decision { color: var(--warn); }
+/* 计划页执行态（journal 折叠）：已执行的行整体淡化，执行态徽标按态着色 */
+.st.exec-done { color: var(--ok); } .st.exec-part { color: var(--accent); } .st.exec-fail { color: var(--warn); }
+#plan-table tr.plan-done td { opacity: .55; }
+.btn.mini { padding: .1rem .5rem; font-size: .75rem; }
 .howto li { margin: .5rem 0; }
 pre.raw { white-space: pre-wrap; font-size: .78rem; max-height: 28rem; overflow: auto; }
 

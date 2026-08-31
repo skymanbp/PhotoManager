@@ -8,6 +8,7 @@ photo-manager.cabal
 
 # cc-memory plugin data (session-local, not project source)
 memory/
+.ccm/
 
 # Local scratch
 *.local.*

@@ -201,6 +201,16 @@ diffTests =
             (src, dst, sha) @?= ("M:" </> enPath m, enPath m, "C-new")
             gq @?= gc -- cx-2: 配对共享组 id，不可拆
           other -> assertFailure ("unexpected items: " <> show other)
+    , testCase "备份范围（2026-08-31 裁定）：To-Be-Sync'd 不产生 add/update；备份盘上的暂存副本计入 EXTRA" $ do
+        let s = mkE ("To-Be-Sync'd" </> "Raw" </> "26-08-Atlanta" </> "n.ARW") "N"
+            sPend = mkE ("To-Be-Sync'd" </> "待修改" </> "p.tif") "P"
+            m = mkE ("成片" </> "a.jpg") "A"
+            -- 备份盘上：一份与主库暂存同路径同 sha（旧流程拷过去的）、一份主库已清
+            bS = mkE ("To-Be-Sync'd" </> "Raw" </> "26-08-Atlanta" </> "n.ARW") "N"
+            bStale = mkE ("To-Be-Sync'd" </> "Raw" </> "old-event" </> "o.ARW") "O"
+            d = backupDiff (mkCat [s, sPend, m]) (mkCat [bS, bStale])
+        (bdAdd d, bdUpdate d, bdSame d) @?= ([m], [], 0)
+        bdExtra d @?= [enPath bS, enPath bStale]
     ]
 
 backupE2eTests :: TestTree

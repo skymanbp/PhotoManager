@@ -39,7 +39,8 @@ window.pmArchive = function (u) {
       }
       if (stale("archive", gen)) return;
       const total = c.events.reduce((n, ev) => n + ev.photos.length, 0);
-      $("#album-cand-meta").textContent = total ? `${total} 张成片 jpg 还没进相册（${c.events.length} 个事件夹）` : "成片里的 jpg 都已在相册里";
+      const nIg = (c.ignored || []).length;
+      $("#album-cand-meta").textContent = (total ? `${total} 张成片 jpg 还没进相册（${c.events.length} 个事件夹）` : "成片里的 jpg 都已在相册里") + (nIg ? ` · 已忽略 ${nIg} 张` : "");
       const cards = [];
       for (const ev of c.events) {
         const h = el("div", "grid-head");
@@ -58,6 +59,10 @@ window.pmArchive = function (u) {
           const body = el("div", "body");
           body.appendChild(el("div", "name", p.name));
           body.appendChild(el("div", "meta", (p.size != null ? mib(p.size) : "") + (p.conflict ? " · ⚠ 相册已有同名不同内容（进计划会待裁决）" : "")));
+          // 忽略此候选（按内容 sha，主库 .pm 本地决定）：stopPropagation——别把卡勾上
+          const ig = el("button", "btn ghost mini", "忽略");
+          ig.onclick = (ev) => { ev.stopPropagation(); ignoreCall({ ignore: [p.rel] }, `已忽略 ${p.name}`).catch((e) => note("bad", "请求失败：" + e.message)); };
+          body.appendChild(ig);
           card.appendChild(body);
           card.onclick = () => {
             if (busyFlag) return;
@@ -68,6 +73,7 @@ window.pmArchive = function (u) {
         }
       }
       if (!total) grid.appendChild(el("div", "muted", "没有候选：成片里的 jpg 都已在相册（或主库还没有成片）。"));
+      renderIgnored(c.ignored || [], c.ignoreStale || []);
       renderConvert(c.nonJpg);
       // 索引里损坏跳过的快照行：与 CLI 一样说出来，不吞——写在专用行，不占结果横幅
       // （门禁 F3：占横幅会在 planCall 收尾的 loadArchive 里把刚出的计划 id 抹掉）
@@ -89,6 +95,40 @@ window.pmArchive = function (u) {
       if (stale("archive", gen)) return; // stale 失败不许改画面（41 轮 #2）
       throw e;
     }
+  }
+  // 已忽略的候选（折叠区）：逐条可取消（按 sha）；失效记录（对象已不在候选——
+  // 已进相册/已删/换了内容）只提示，一键清掉的决定权在用户。
+  function renderIgnored(list, staleList) {
+    const box = $("#album-ignored"), ul = $("#album-ignored-list");
+    ul.innerHTML = "";
+    box.classList.toggle("hidden", !list.length && !staleList.length);
+    $("#album-ignored-sum").textContent = `已忽略 ${list.length} 张` + (staleList.length ? `（另有 ${staleList.length} 条记录已失效）` : "") + " —— 点开取消";
+    for (const x of list) {
+      const li = el("li");
+      li.appendChild(el("span", "mono small", x.path + (x.size != null ? "（" + mib(x.size) + "）" : "")));
+      const un = el("button", "btn ghost mini", "取消忽略");
+      un.onclick = () => ignoreCall({ unignore: [x.sha] }, `已恢复候选 ${x.name}`).catch((e) => note("bad", "请求失败：" + e.message));
+      li.appendChild(un); ul.appendChild(li);
+    }
+    for (const x of staleList) {
+      const li = el("li");
+      li.appendChild(el("span", "muted small", "已失效：" + x.path + "（对象已不在候选）"));
+      const un = el("button", "btn ghost mini", "清掉这条");
+      un.onclick = () => ignoreCall({ unignore: [x.sha] }, "已清掉失效记录").catch((e) => note("bad", "请求失败：" + e.message));
+      li.appendChild(un); ul.appendChild(li);
+    }
+  }
+  // 忽略/取消的共用 POST（写主库 .pm/album-ignore.json，照片零改动）：成功后整页重载
+  async function ignoreCall(payload, okMsg) {
+    if (busyFlag) return;
+    busyFlag = true; updateButtons();
+    try {
+      const r = await post("/api/album/ignore", payload);
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) note("bad", "忽略清单没写入：" + (body.error || ("HTTP " + r.status)) + bodyLines(body));
+      else note("ok", okMsg + "——只是主库 .pm 里的本地决定，随时可改。");
+    } finally { busyFlag = false; updateButtons(); }
+    try { await loadArchive(); } catch (e) { $("#archive-result").textContent += "\n（页面刷新失败：" + e.message + "，按 3 重进本页）"; }
   }
   function renderConvert(list) {
     const ul = $("#convert-list"); ul.innerHTML = "";

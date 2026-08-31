@@ -99,9 +99,10 @@
       <div class="row check">
         <span id="album-progress" class="muted">已选 0</span>
         <button id="btn-album-add" class="btn primary" disabled>加入相册（生成计划）</button>
-        <span class="muted small">相册是平铺的收藏层、只收 jpg；相册已有同名不同内容的会进计划待裁决，不覆盖。</span>
+        <span class="muted small">相册是平铺的收藏层、只收 jpg；相册已有同名不同内容的会进计划待裁决，不覆盖。每张卡的「忽略」按内容 sha 把它压出候选（只是主库 .pm 里的本地决定，随时取消）。</span>
       </div>
       <div id="album-grid" class="grid"></div>
+      <details id="album-ignored" class="hidden"><summary id="album-ignored-sum" class="muted small"></summary><ul id="album-ignored-list" class="steps"></ul></details>
 
       <h2 class="sec">3 · 非 jpg 转换 <span id="convert-meta" class="muted small"></span></h2>
       <p class="muted small">tif / png / psd / heic 等已渲染位图 → 用本机 python + Pillow 派生一份 jpg（写进主库 <code>.pm\derived</code>，<strong>原文件原地不动</strong>），再由计划落到成片同事件夹（可勾选同时进相册）或相册。点按钮时转换就发生（第一段，pm 自建状态）；落位仍要到「计划」页执行（第二段，才动照片层）。</p>
@@ -131,11 +132,11 @@
 
     <!-- ── 计划 ── -->
     <section id="tab-plans" class="tab">
-      <header class="page-head"><h1>计划</h1><div class="actions"><button id="btn-plans-reload" class="btn ghost">刷新</button></div></header>
-      <p class="muted small">凡是<strong>动照片字节</strong>的写盘都是两段式：先生成计划，再执行；执行后可 <code>pm undo</code> 回滚。执行可以在这里点「执行这个计划」（要点两次确认），也可以在终端 <code>pm apply &lt;id&gt;</code>——两条路走的是同一套装载/复验/日志。（「暂不同步」是例外：它不碰照片，只在主库 <code>.pm</code> 里记一条决定，直接写、随时可撤。）</p>
+      <header class="page-head"><h1>计划</h1><div class="actions"><button id="btn-plans-prune" class="btn ghost">清理已执行</button><button id="btn-plans-reload" class="btn ghost">刷新</button></div></header>
+      <p class="muted small">凡是<strong>动照片字节</strong>的写盘都是两段式：先生成计划，再执行；执行后可 <code>pm undo</code> 回滚。执行可以在这里点「执行这个计划」（要点两次确认），也可以在终端 <code>pm apply &lt;id&gt;</code>——两条路走的是同一套装载/复验/日志。执行态从 journal 折叠而来（计划文件本身不回写）；计划文件可删（<code>pm plan rm</code> 同源）——删的只是可再生成的文件，journal/undo 不受影响。（「暂不同步」与「忽略候选」是例外：不碰照片，只在主库 <code>.pm</code> 里记一条决定，直接写、随时可撤。）</p>
       <div id="apply-result" class="banner hidden"></div>
       <div class="split">
-        <table id="plan-table" class="table"><thead><tr><th>类型</th><th>计划 id</th><th>生成时间</th><th>项</th><th>待执行</th><th>跳过</th><th>待裁决</th></tr></thead><tbody></tbody></table>
+        <table id="plan-table" class="table"><thead><tr><th>类型</th><th>计划 id</th><th>生成时间</th><th>项</th><th>待执行</th><th>跳过</th><th>待裁决</th><th>执行态</th><th></th></tr></thead><tbody></tbody></table>
         <div id="plan-detail" class="detail"><div class="muted">选一个计划查看明细</div></div>
       </div>
     </section>

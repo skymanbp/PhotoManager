@@ -1,9 +1,10 @@
 // pm-ui frontend: vanilla JS, no bundler. Everything comes from `pm serve`
 // over 127.0.0.1 with the session token handed over by the Rust shell.
-// Nine plan-free writes: POST /api/vault/push-plan、/api/sort/plan、/api/import/plan、
+// Twelve plan-free writes: POST /api/vault/push-plan、/api/sort/plan、/api/import/plan、
 // /api/album/add-plan、/api/convert/plan（只生成计划文件；convert 另写 .pm/derived
 // 派生件）、/api/vault/hold（记一条「暂不同步」决定）、/api/vault/notes（照片记录）、
-// /api/config、/api/backup-init。P7 起（用户裁定 2026-08-26）Rust 壳以 --allow-apply 拉起
+// /api/album/ignore（忽略候选）、/api/plan/delete、/api/plans/prune（只删可再生成的
+// 计划文件）、/api/config、/api/backup-init。P7 起（用户裁定 2026-08-26）Rust 壳以 --allow-apply 拉起
 // serve：计划页可以点「执行」（两次点击确认）走 POST /api/apply——那是唯一会
 // 动照片字节的端点，执行链与 CLI 的 pm apply 同源。git 仍只生成命令不执行（I9）。
 // 只读级的 POST /api/suggest（P8-D）拉起用户自己账号的 claude -p 看图，只出建议。
@@ -25,6 +26,8 @@
     const c = $("#conn"); c.textContent = "已连接 127.0.0.1:" + api.port; c.className = "conn ok";
     const p = await getJson("/api/ping");
     allowApply = !!p.allowApply;
+    // 没有写授权就藏掉「清理已执行」（行内删除按钮同一闸，在渲染处判）
+    $("#btn-plans-prune").classList.toggle("hidden", !allowApply);
     $("#root-path").textContent = p.main;
   }
   async function req(path, opts) {
@@ -232,6 +235,29 @@
         const td0 = el("td"); td0.appendChild(el("span", "badge " + p.kind, p.kind)); tr.appendChild(td0);
         tr.appendChild(el("td", null, p.id)); tr.appendChild(el("td", null, when(p.created)));
         tr.appendChild(el("td", null, String(p.items))); tr.appendChild(el("td", null, String(p.pending))); tr.appendChild(el("td", null, String(p.skipped))); tr.appendChild(el("td", null, String(p.needsDecision)));
+        // 执行态从 journal 折叠（服务端 done/failed/executed 字段；计划文件不回写）
+        const execCls = p.executed ? "exec-done" : p.done > 0 ? "exec-part" : "";
+        const execTxt = (p.executed ? "已执行" : p.done > 0 ? `部分 ${p.done}/${p.pending}` : "未执行") + (p.failed ? `（失败 ${p.failed}）` : "");
+        const tdE = el("td"); tdE.appendChild(el("span", "st " + (p.failed ? "exec-fail" : execCls), execTxt)); tr.appendChild(tdE);
+        if (p.executed) tr.classList.add("plan-done");
+        // 行内删除（--writable 级；pm plan rm 同源）：两次点击确认，删的只是可
+        // 再生成的计划文件，journal/undo 不受影响。stopPropagation——别把行点开。
+        const tdD = el("td");
+        if (allowApply) {
+          const del = el("button", "btn ghost mini", "删除");
+          del.onclick = (ev) => {
+            ev.stopPropagation();
+            if (del.dataset.armed !== "1") {
+              del.dataset.armed = "1"; del.textContent = "确认删除？";
+              setTimeout(() => { del.dataset.armed = ""; del.textContent = "删除"; }, 4000);
+              return;
+            }
+            del.dataset.armed = "";
+            deletePlanReq(p.id).catch(fail);
+          };
+          tdD.appendChild(del);
+        }
+        tr.appendChild(tdD);
         tr.onclick = () => {
           for (const x of tb.children) x.classList.remove("sel"); tr.classList.add("sel");
           // 先把明细区清成占位再去取：载失败时留在页上的会是**上一个**计划的
@@ -244,7 +270,7 @@
         };
         tb.appendChild(tr);
       }
-      if (d.errors.length) { const tr = el("tr"); const td = el("td", "muted", "⚠ 装不出来的计划：" + d.errors.map((e) => e[0] + "：" + e[1]).join("；")); td.colSpan = 7; tr.appendChild(td); tb.appendChild(tr); }
+      if (d.errors.length) { const tr = el("tr"); const td = el("td", "muted", "⚠ 装不出来的计划：" + d.errors.map((e) => e[0] + "：" + e[1]).join("；")); td.colSpan = 9; tr.appendChild(td); tb.appendChild(tr); }
       // 打开即显示最新计划的明细，不用先点；载不出明细不算列表失败（同行点击的处理）
       if (sorted.length) {
         tb.firstChild.classList.add("sel");
@@ -357,6 +383,36 @@
     // 重载失败只是附注——此前它在 try 里，会把「执行完成」整段换成「请求失败」，
     // 用户会再点一次执行。
     if (!done) return;
+    try { await loadPlans(); } catch (e) { out.textContent += "\n（计划列表刷新失败：" + e.message + "，按 5 重进本页）"; }
+  }
+
+  // 删除一份计划文件（行内按钮的第二次点击才到这里）：pm plan rm 同源端点。
+  async function deletePlanReq(id) {
+    const out = $("#apply-result");
+    const r = await post("/api/plan/delete", { planId: id });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { out.className = "banner bad"; out.textContent = "没有删除：" + (j.error || ("HTTP " + r.status)); return; }
+    out.className = "banner ok"; out.textContent = `✓ 已删除计划 ${id}（journal/undo 不受影响，需要可重新生成）`;
+    try { await loadPlans(); } catch (e) { out.textContent += "\n（计划列表刷新失败：" + e.message + "，按 5 重进本页）"; }
+  }
+
+  // 一键清理已执行（pm plan prune 同源）：两次点击确认；未执行的草稿不动。
+  async function prunePlansReq() {
+    const btn = $("#btn-plans-prune"), out = $("#apply-result");
+    if (btn.dataset.armed !== "1") {
+      btn.dataset.armed = "1"; btn.textContent = "⚠ 再点一次确认清理";
+      setTimeout(() => { btn.dataset.armed = ""; btn.textContent = "清理已执行"; }, 5000);
+      return;
+    }
+    btn.dataset.armed = ""; btn.textContent = "清理已执行";
+    const r = await post("/api/plans/prune", {});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { out.className = "banner bad"; out.textContent = "没有清理：" + (j.error || ("HTTP " + r.status)); return; }
+    const n = (j.deleted || []).length;
+    out.className = "banner " + (n ? "ok" : "warn");
+    out.textContent =
+      (n ? `✓ 已清理 ${n} 份已执行的计划（journal/undo 不受影响）` : "没有可清理的已执行计划——未执行的草稿用行内「删除」逐个删。") +
+      ((j.errors || []).length ? "\n⚠ " + j.errors.join("\n⚠ ") : "");
     try { await loadPlans(); } catch (e) { out.textContent += "\n（计划列表刷新失败：" + e.message + "，按 5 重进本页）"; }
   }
 
@@ -596,6 +652,7 @@
   $("#btn-fresh").onclick = () => loadStatus(true).catch(fail);
   $("#btn-reload").onclick = () => loadStatus(false).catch(fail);
   $("#btn-plans-reload").onclick = () => loadPlans().catch(fail);
+  $("#btn-plans-prune").onclick = () => prunePlansReq().catch(fail);
   $("#btn-plan").onclick = () => vault.makePlan();
   $("#btn-vault-ai").onclick = () => vault.suggest();
   // 设置页的按钮全部经 cfgClick：处理器是 async，没有 .catch 的异常只会

@@ -14,8 +14,9 @@ import Options.Applicative
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import Text.Read (readMaybe)
 
-import Pm.Album (runAlbumAdd, runAlbumCandidates)
+import Pm.Album (runAlbumAdd, runAlbumCandidates, runAlbumIgnore)
 import Pm.Cli (GoOpts (..), savePlanAndMaybeRun, savePlanAndMaybeRun')
+import Pm.Plan (runPlanList, runPlanPrune, runPlanRm)
 import Pm.Commands
 import Pm.ConfigEdit (ConfigSetOpts (..), mkPatch, runConfigSet, runConfigShow)
 import Pm.Convert (ConvertOpts (..), runConvert)
@@ -60,10 +61,15 @@ data Cmd
   | CmdDedupe GoOpts -- 精确重复 → 逐份可裁决的隔离计划（全部 NEEDS-DECISION）
   | CmdServe ServeOpts -- 127.0.0.1 JSON API（缺省只读；--writable 才开生成计划端点）
   | CmdUi -- 拉起 Tauri 桌面 GUI（P4-3；GUI 自己跑 serve）
+  | CmdPlanCmd PlanSub -- 计划文件管理（2026-08-31：list 带 journal 折叠执行态 / rm / prune）
 
--- | @pm album@ 的两个子命令（P8-B）：@add@ 生成成片→相册的拷贝计划；
--- @candidates@ 只读列出还没进相册的成片 jpg 与非 jpg。
-data AlbumCmd = AlbumAdd GoOpts [String] | AlbumCandidates
+-- | @pm album@ 的子命令（P8-B；ignore 系 2026-08-31）：@add@ 生成成片→相册的
+-- 拷贝计划；@candidates@ 只读列出候选；@ignore@\/@unignore@ 按内容 sha 把候选
+-- 压进\/移出主库 @.pm\/album-ignore.json@（照片零改动）。
+data AlbumCmd = AlbumAdd GoOpts [String] | AlbumCandidates | AlbumIgnoreC Bool [String]
+
+-- | @pm plan@ 的三个子命令：不带子命令 = @list@。
+data PlanSub = PlanList | PlanRm [String] | PlanPrune
 
 -- | @pm sort@ 的参数（两种形态见 'run'）。
 data SortOpts = SortOpts
@@ -114,6 +120,10 @@ run (CmdResolve o) = withCfg (runResolve o)
 run (CmdImport go also) = withCfg (runImport go also)
 run (CmdAlbum (AlbumAdd go fs)) = withCfg (runAlbumAdd go fs)
 run (CmdAlbum AlbumCandidates) = withCfg runAlbumCandidates
+run (CmdAlbum (AlbumIgnoreC doIg fs)) = withCfg (runAlbumIgnore doIg fs)
+run (CmdPlanCmd PlanList) = withCfg runPlanList
+run (CmdPlanCmd (PlanRm ids)) = withCfg (runPlanRm ids)
+run (CmdPlanCmd PlanPrune) = withCfg runPlanPrune
 run (CmdConvert o) = withCfg (runConvert o)
 -- 两种形态：地点与日期区间**给齐**才生成计划，一个都不给是只读提议；
 -- 给一半是使用者写错了，直接报错——不替他猜另一半（I1）。
@@ -176,7 +186,7 @@ parserInfo =
           <> command "scan" (info scanP (progDesc "索引主库（增量；首次全量 hash）"))
           <> command "status" (info statusP (progDesc "总览仪表盘（默认命令）"))
           <> command "import" (info importP (progDesc "暂存区 To-Be-Sync'd → Raw/成片 归档计划（--also-album 同时把成片 jpg 拷进相册）"))
-          <> command "album" (info albumP (progDesc "成片 → 相册（平铺收藏层，只收 jpg）：add 生成拷贝计划；candidates 列出还没进相册的成片 jpg 与非 jpg"))
+          <> command "album" (info albumP (progDesc "成片 → 相册（平铺收藏层，只收 jpg）：add 生成拷贝计划；candidates 列出候选；ignore/unignore 按内容忽略候选"))
           <> command "convert" (info convertP (progDesc "非 jpg 照片（tif/png/psd/heic…）→ 派生 jpg（Pillow，写 .pm/derived）→ 落成片同事件夹/相册的计划；原文件原地不动"))
           <> command "sort" (info sortP (progDesc "散落新照片按拍摄时间分段 → 暂存区事件夹（不带参数=只读提议）"))
           <> command "backup" (info backupP (progDesc "主库 → 备份盘单向增量（init 登记备份盘）"))
@@ -203,6 +213,18 @@ parserInfo =
                 (progDesc "查看/修改配置（GUI 设置页与此同源）")
             )
           <> command "ui" (info (pure CmdUi) (progDesc "拉起桌面 GUI（pm-ui.exe：PM_UI_EXE 或 pm.exe 同目录；GUI 自己启动并管理 pm serve）"))
+          <> command
+            "plan"
+            ( info
+                ( hsubparser
+                    ( command "list" (info (pure (CmdPlanCmd PlanList)) (progDesc "列出主库/vault 的计划与执行态（已执行/部分/未执行——从 journal 折叠，计划文件不回写）"))
+                        <> command "rm" (info (CmdPlanCmd . PlanRm <$> many (strArgument (metavar "PLAN-ID..." <> help "要删除的计划 id（pm plan list 查看）"))) (progDesc "删除计划文件（可再生成；journal/undo 不受影响）"))
+                        <> command "prune" (info (pure (CmdPlanCmd PlanPrune)) (progDesc "一键清理已执行的计划（待执行项全部 Done 且无待裁决残余；草稿不动）"))
+                    )
+                    <|> pure (CmdPlanCmd PlanList)
+                )
+                (progDesc "计划文件管理（GUI 计划页与此同源）：list / rm / prune")
+            )
       )
   -- 三态：不给 = 不动；--no-X = 清空；给值 = 设值。与 API 的 JSON 三态同构。
   -- 解析器只收集原始 (值, 清空) 对；矛盾（两个都给）由 'Pm.ConfigEdit.mkPatch'
@@ -230,7 +252,7 @@ parserInfo =
       ServeOpts
         <$> optional (option auto (long "port" <> metavar "N" <> help "固定端口（默认由内核随机分配）"))
         <*> switch (long "exit-on-stdin-eof" <> help "stdin 关闭即退出（GUI 拉起时用：父进程一死 serve 随之结束，不留孤儿）")
-        <*> switch (long "writable" <> help "允许九个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）、生成 sort / 归档 / 相册 / 转换计划（写主库的 .pm/plans；转换另写 .pm/derived 派生件）、记录「暂不同步」决定（写主库的 .pm/vault-holds.json）、照片记录（写主库的 .pm/vault-notes.json）、改配置（写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识）；都不执行、不碰照片；缺省只读。AI 建议 POST /api/suggest 是只读级（拉起 claude -p，只出建议）")
+        <*> switch (long "writable" <> help "允许十二个 POST 写端点：生成推送计划（写 vault 的 .pm/plans + 首次 root-id）、生成 sort / 归档 / 相册 / 转换计划（写主库的 .pm/plans；转换另写 .pm/derived 派生件）、记录「暂不同步」决定（写主库的 .pm/vault-holds.json）、照片记录（写主库的 .pm/vault-notes.json）、忽略候选（写主库的 .pm/album-ignore.json）、删除/清理计划文件（只删 .pm/plans，journal 不动）、改配置（写 config.toml，主库路径只读）、登记备份盘（在盘上建备份 root 标识）；都不执行、不碰照片；缺省只读。AI 建议 POST /api/suggest 是只读级（拉起 claude -p，只出建议）")
         <*> switch (long "allow-apply" <> help "另外允许 POST /api/apply 执行已存的计划——这是唯一会动照片字节的端点，因此单独一个开关，不并进 --writable（蕴含 --writable）。装载/绑 root/--only/执行期复验全部与 CLI 的 pm apply 同源")
   initP =
     fmap CmdInit $
@@ -266,7 +288,19 @@ parserInfo =
                 (AlbumAdd <$> goOpts <*> many (strArgument (metavar "事件夹/文件名..." <> help "相对成片层的路径，如 26-06-R66/_DSC9621.jpg（只收 jpg；相册平铺，同名只能进一份）")))
                 (progDesc "成片里已归档的 jpg 挑进相册（拷贝计划；相册同名异容 → 待裁决，I5）")
             )
-            <> command "candidates" (info (pure AlbumCandidates) (progDesc "只读：成片里还没进相册的 jpg（按事件夹）与成片/相册下的非 jpg（→ pm convert）"))
+            <> command "candidates" (info (pure AlbumCandidates) (progDesc "只读：成片里还没进相册的 jpg（按事件夹）与成片/相册下的非 jpg（→ pm convert）；已忽略的单列"))
+            <> command
+              "ignore"
+              ( info
+                  (AlbumIgnoreC True <$> many (strArgument (metavar "事件夹/文件名..." <> help "要忽略的候选（相对成片层）")))
+                  (progDesc "忽略候选：按内容 sha 记进主库 .pm/album-ignore.json，候选清单不再列出（照片零改动；重新导出=新内容会重新出现）")
+              )
+            <> command
+              "unignore"
+              ( info
+                  (AlbumIgnoreC False <$> many (strArgument (metavar "事件夹/文件名|sha..." <> help "要恢复的候选：当前路径、记录里的存档路径、或 64 位 sha")))
+                  (progDesc "取消忽略，候选回到清单")
+              )
         )
   -- P8-C2：两段式——第一段派生（生成期写 .pm/derived，python 由 PM_PYTHON / PATH 发现），
   -- 第二段照片层落位仍是计划（--apply / pm apply）。

@@ -48,6 +48,8 @@ serveP8Tests =
     "P8-D pm serve 归档页端点 + AI 建议"
     [ testCase "POST /api/import/plan：只读 403 且 .pm/plans 不出现；alsoAlbum → 相册项进计划、log 有「相册 +1」" caseImportPlan
     , testCase "GET /api/album/candidates + POST /api/album/add-plan：候选按事件夹（rel 可回传）、非 jpg 单列；坏路径 code 2 / planId null / log 交代；合法 → 计划可装回、相册未动" caseCandidatesAndAddPlan
+    , testCase "POST /api/album/ignore：只读 403；忽略 → candidates 压进 ignored、.pm/album-ignore.json 落盘；unignore 按 sha 恢复；坏对象 400 details" caseIgnoreEndpoint
+    , testCase "GET /api/plans 执行态字段（done/executed）+ POST /api/plan/delete（只读 403 / 404 / 真删）+ /api/plans/prune（无已执行 → deleted 空）" casePlanEndpoints
     , testCase "POST /api/convert/plan：只读 403 且 .pm/derived 不出现；真 Pillow 转换 → 派生件落 .pm/derived、计划两项同组；坏源 code 2 不出计划" caseConvertPlan
     , testCase "POST /api/suggest classify：只读级放行；预置回答规范化（未请求的名字丢弃、坐标规范）；400 五种；413；502 垃圾/退出非零/is_error；409 缺 claude/超时/并发；.pm 零写入" caseSuggestClassify
     , testCase "POST /api/suggest place：serve 自己重跑分段抽样；围栏 JSON 解析；只有 RAW 的段不交给模型答 null；>12 段 400" caseSuggestPlace
@@ -155,6 +157,91 @@ caseCandidatesAndAddPlan = withLib $ \root cfg -> do
       plKind plan @?= "album-add"
       map (opDstRel . piOp) (plItems plan) @?= ["相册" </> "a.jpg"]
   doesFileExist (root </> "相册" </> "a.jpg") >>= (@?= False)
+
+caseIgnoreEndpoint :: IO ()
+caseIgnoreEndpoint = withLib $ \root cfg -> do
+  writeF (root </> "成片" </> "E1" </> "a.jpg") "AAA"
+  writeF (root </> "成片" </> "E1" </> "b.jpg") "BBB"
+  index root
+  envR <- mkEnv cfg
+  flip runSession (serveApp envR) $ postReq "/api/album/ignore" "{\"ignore\":[\"E1/a.jpg\"]}" >>= assertStatus 403
+  doesFileExist (root </> ".pm" </> "album-ignore.json") >>= (@?= False)
+  envW <- mkEnvW cfg
+  sha <- flip runSession (serveApp envW) $ do
+    -- 坏对象整批拒：400 + details（fail-closed，一条不合法就一条不写）
+    rBad <- postReq "/api/album/ignore" "{\"ignore\":[\"E1/ghost.jpg\"]}"
+    assertStatus 400 rBad
+    liftIO' (assertBool "details 应交代不在索引" (fieldHas "不在索引" (field ["details"] (decodeBody rBad))))
+    postReq "/api/album/ignore" "{\"ignore\":[\"E1/a.jpg\"]}" >>= assertStatus 200
+    r <- getReq "/api/album/candidates" [] tok
+    assertStatus 200 r
+    let v = decodeBody r
+    liftIO' $ do
+      -- a 被压出 events、进 ignored（带 sha 供取消）；b 仍是候选
+      arrLen (field ["ignored"] v) @?= Just 1
+      case field ["ignored"] v of
+        Just (Aeson.Array xs) -> case toList xs of
+          [x] -> do
+            field ["path"] x @?= Just (Aeson.String (T.pack ("成片" </> "E1" </> "a.jpg")))
+            case field ["sha"] x of
+              Just (Aeson.String s) -> pure s
+              other -> assertFailure ("ignored 应带 sha: " <> show other) >> pure ""
+          other -> assertFailure ("ignored: " <> show (length other)) >> pure ""
+        other -> assertFailure ("ignored: " <> show other) >> pure ""
+  doesFileExist (root </> ".pm" </> "album-ignore.json") >>= (@?= True)
+  flip runSession (serveApp envW) $ do
+    postReq "/api/album/ignore" (BSL.fromStrict (TE.encodeUtf8 (T.pack ("{\"unignore\":[\"" <> T.unpack sha <> "\"]}")))) >>= assertStatus 200
+    r <- getReq "/api/album/candidates" [] tok
+    liftIO' $ do
+      arrLen (field ["ignored"] (decodeBody r)) @?= Just 0
+      case field ["events"] (decodeBody r) of
+        Just (Aeson.Array evs) -> case toList evs of
+          [e] -> arrLen (field ["photos"] e) @?= Just 2
+          other -> assertFailure ("events: " <> show (length other))
+        other -> assertFailure ("events: " <> show other)
+  -- 忽略是本地决定：照片零改动
+  BS.readFile (root </> "成片" </> "E1" </> "a.jpg") >>= (@?= "AAA")
+ where
+  fieldHas needle v = case v of
+    Just (Aeson.Array xs) -> any (\x -> case x of Aeson.String t -> needle `T.isInfixOf` t; _ -> False) (toList xs)
+    _ -> False
+
+casePlanEndpoints :: IO ()
+casePlanEndpoints = withLib $ \root cfg -> do
+  writeF (root </> "成片" </> "E1" </> "a.jpg") "AAA"
+  index root
+  envW <- mkEnvW cfg
+  pid <- flip runSession (serveApp envW) $ do
+    r <- postReq "/api/album/add-plan" "{\"paths\":[\"E1/a.jpg\"]}"
+    assertStatus 200 r
+    liftIO' $ maybe (assertFailure "应有 planId" >> pure "") pure (planIdOf (decodeBody r))
+  -- 列表带执行态字段：未执行的草稿 done 0 / executed false
+  flip runSession (serveApp envW) $ do
+    r <- getReq "/api/plans" [] tok
+    assertStatus 200 r
+    let v = decodeBody r
+    liftIO' $ case field ["plans"] v of
+      Just (Aeson.Array xs) -> case toList xs of
+        [p] -> do
+          field ["id"] p @?= Just (Aeson.String pid)
+          field ["done"] p @?= Just (Aeson.Number 0)
+          field ["executed"] p @?= Just (Aeson.Bool False)
+          field ["failed"] p @?= Just (Aeson.Number 0)
+        other -> assertFailure ("plans: " <> show (length other))
+      other -> assertFailure ("plans: " <> show other)
+    -- 没有已执行的 → prune 一份不删
+    rp <- postReq "/api/plans/prune" "{}"
+    assertStatus 200 rp
+    liftIO' (arrLen (field ["deleted"] (decodeBody rp)) @?= Just 0)
+  doesFileExist (root </> ".pm" </> "plans" </> (T.unpack pid <> ".json")) >>= (@?= True)
+  -- 只读 serve 拒删；writable 真删（404 兜底：不存在的 id）
+  envR <- mkEnv cfg
+  let delBody = BSL.fromStrict (TE.encodeUtf8 (T.pack ("{\"planId\":\"" <> T.unpack pid <> "\"}")))
+  flip runSession (serveApp envR) $ postReq "/api/plan/delete" delBody >>= assertStatus 403
+  flip runSession (serveApp envW) $ do
+    postReq "/api/plan/delete" "{\"planId\":\"20990101-000000-ffffff\"}" >>= assertStatus 404
+    postReq "/api/plan/delete" delBody >>= assertStatus 200
+  doesFileExist (root </> ".pm" </> "plans" </> (T.unpack pid <> ".json")) >>= (@?= False)
 
 caseConvertPlan :: IO ()
 caseConvertPlan = withLib $ \root cfg -> do

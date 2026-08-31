@@ -21,7 +21,7 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
 > 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
 > 为准，不在这里手抄**），凡有可观测自动化落点的闸都配"删掉它就转红"的突变
-> 验证用例（418 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
+> 验证用例（427 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
 > 性观察点）在 REVIEW-LOG 登记为残余，不冒充覆盖。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
@@ -39,11 +39,13 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
   拷贝计划；**拷贝不是移动**，源卡零改动。
 - **功能三 · 归档**：`pm import` 把暂存区事件夹归入 `Raw\年\事件-Raw` + `成片\事件`；
   `--also-album` 让成片里的 jpg 同源再拷一份进 `相册\`（与成片项同组：成片没落位相册就不执行）；
-  `pm album add <事件夹>/<文件名>…` 把已归档的成片 jpg 挑进相册（`pm album candidates` 列候选与非 jpg）；
+  `pm album add <事件夹>/<文件名>…` 把已归档的成片 jpg 挑进相册（`pm album candidates` 列候选与非 jpg；
+  `pm album ignore|unignore` 按内容 sha 忽略/恢复不想进相册的候选——只写主库 `.pm`，照片零改动）；
   `pm convert <库内相对路径>…` 把成片/相册里的 tif/png 等派生一份 jpg（本机 python + Pillow，原文件原地不动）
   落回成片同事件夹（`--also-album` 再进相册）或相册。
 - **功能四 · 备份**：`pm backup` 主库 → 备份盘单向增量，按 root UUID 认盘不认
-  盘符；备份盘上多出来的（EXTRA）只报告永不动。
+  盘符；**备份范围 = 主库 − 暂存区**（`To-Be-Sync'd\` 只是中转，不进备份盘，
+  2026-08-31 裁定）；备份盘上多出来的（EXTRA）只报告永不动。
 - **功能五 · 展示集分发**：`pm vault status`（相册 ↔ vault 九态差异，`--json`
   兼容旧脚本）、`pm vault push`（定类目拷入 + DRIFT 裁决计划 + 打印显式 git
   步骤——pm 不执行 git）、`pm vault hold`（"暂不同步"的本地决定，照片一变自动失效）、
@@ -104,10 +106,13 @@ GUI 七页（左侧导航次序）：**状态**（Raw·成片·相册·暂存四
 清单 + 备份盘滞后 + "下一步"；vault 卡可一键**复制上线命令**——两仓 git 序列按
 设置生成，pm 不执行 git）、**整理新照片**（填源目录 → 按拍摄时间分段 → 每段填
 地点/选已有事件 → 生成拷贝计划；源目录只读；「AI 建议地点」只预填）、**归档**（暂存区
-事件夹 → Raw/成片，可同时导入相册；成片 jpg 勾选进相册；tif/png 等派生 jpg——三者都只出
+事件夹 → Raw/成片，可同时导入相册；成片 jpg 勾选进相册，不想要的候选可「忽略」（按内容
+记住、折叠区随时取消）；tif/png 等派生 jpg——三者都只出
 计划）、**分类推送**（相册里 vault 还没有的照片，缩略图选类目、填地点/坐标/标题记录（可先
 「AI 建议分类/地点」预填），或选第四个按钮「暂不同步」→ 一个按钮「保存决定并生成推送
-计划」把三件事一起做）、**计划**（逐项明细；0.6.0 起可**直接执行**待执行计划——
+计划」把三件事一起做）、**计划**（逐项明细 + 执行态标注——已执行/部分/未执行从 journal
+折叠而来，已执行的行淡化；可逐个删除或「清理已执行」，删的只是可再生成的计划文件；
+0.6.0 起可**直接执行**待执行计划——
 同一按钮两次点击确认，执行链与 `pm apply` 同源，事后可 `pm undo`）、**设置**
 （路径与并发：vault / photos.json / 并发数可改、备份盘可登记、上线命令的
 portfolio 仓路径与两仓 push 目标可自定义；改完立刻生效，终端里跑 `pm config set`
@@ -121,10 +126,12 @@ pm sort <源目录>                  # 整理新照片：按 EXIF 拍摄时间�
 pm sort <源> --place 亚特兰大 --from 2026-08-01 --to 2026-08-03   # 生成拷贝计划
 pm import [--also-album]         # 暂存区 → Raw\年\事件-Raw + 成片\事件 归档计划（--also-album：成片 jpg 同时进相册）
 pm album add 26-06-R66/_DSC9621.jpg …   # 成片 → 相册（平铺、只收 jpg；相册同名异容 → 待裁决）
-pm album candidates              # 只读：还没进相册的成片 jpg（按事件夹）+ 成片/相册下的非 jpg（→ pm convert）
+pm album candidates              # 只读：还没进相册的成片 jpg（按事件夹）+ 成片/相册下的非 jpg（→ pm convert）+ 已忽略清单
+pm album ignore 26-06-R66/x.jpg …   # 忽略候选：按内容 sha 记进主库 .pm/album-ignore.json（照片零改动；
+                                 # 改名/挪夹后仍生效，重新导出的新字节会重新出现）；unignore 收路径或 sha 恢复
 pm convert 成片/26-06-R66/x.tif --also-album   # 非 jpg → 派生 jpg（Pillow，写 .pm/derived）→ 成片同事件夹（+相册）计划；原文件不动
 pm backup init E:\Photography    # 一次性：登记备份盘（按 UUID 认盘，不认盘符）
-pm backup                        # 主库 → 备份盘单向增量（EXTRA 只报告永不动）
+pm backup                        # 主库 → 备份盘单向增量（范围不含暂存区 To-Be-Sync'd；EXTRA 只报告永不动）
 pm clean staging                 # 仅清理「归档层+备份盘」都有同 sha 副本的暂存文件
 pm vault status                  # 相册 ↔ vault 展示集九态差异（其中六态兼容 sync_photos.py，
                                  # --json 逐字段照抄那六个；另三态 UNPUSHABLE/UNSTABLE/HELD）
@@ -144,6 +151,8 @@ pm versions                      # 版本组 / 非设计内精确重复报告（
 pm dedupe                        # 精确重复 → 逐份可裁决的隔离计划（全部待裁决；留哪份不替你选，
                                  # 用 pm resolve --item N --unskip 逐份批准）
 
+pm plan [list]                   # 列出计划与执行态（已执行/部分/未执行——从 journal 折叠，计划文件不回写）
+pm plan rm <id> … / pm plan prune   # 删除计划文件 / 一键清理已执行（只删可再生成的文件，journal/undo 不受影响）
 pm apply <planId>                # 执行计划（--dry 全量预览 / --only 1,3-5 部分执行）
 pm resolve <id> --item N [--unskip]            # 跳过该项（默认动作）/ --unskip 恢复为待执行；
                                                # dedupe 计划全部待裁决，逐份 --unskip 批准后 apply 才会执行
@@ -200,9 +209,10 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
    的标签、统一边界检查、读不到即交人判断（fail-closed），不猜文件修改时间。
 8. **GUI 永不直接碰照片**。Rust 壳层只做 spawn / 交 token / kill 三件事，一切经
    `pm serve`（127.0.0.1 + 随机端口 + Bearer token 常量时间比对 + Host/Origin
-   校验）；serve 三级授权：**缺省只读**；`--writable` 开九个写端点——生成
+   校验）；serve 三级授权：**缺省只读**；`--writable` 开十二个写端点——生成
    推送 / sort / 归档 / 相册 / 转换计划（写 `.pm/plans`；转换另写 `.pm/derived` 派生件，原文件
-   不动）、记「暂不同步」决定与照片记录、改配置（主库路径只读）、登记备份盘——**没有一个碰
+   不动）、记「暂不同步」决定与照片记录、记「忽略候选」决定、删除/清理计划文件（只删
+   可再生成的 `.pm/plans` 文件）、改配置（主库路径只读）、登记备份盘——**没有一个碰
    照片字节**；AI 建议 `POST /api/suggest` 是只读级，只出建议；`--allow-apply` 才开
    `POST /api/apply`（唯一动照片字节的端点，0.6.0 起 GUI 拉起时传它，页面
    两次点击确认；执行发生在 serve 进程里，走与 CLI 同一条装载/复验/journal 链）。
@@ -253,7 +263,7 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 |---|---|---|
 | 增量扫描（4633 文件，其中 122 新 hash / 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（418 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
+| 测试套件（427 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
 | 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | 突变验证 | 凡有可观测自动化落点的承重闸各配一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过；无落点者登记为残余） | REVIEW-LOG 各轮收敛证据 |
@@ -339,6 +349,10 @@ CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同�
   Photography 为相片 SoT——`pm import --also-album` / `pm album add`、`pm convert`（Pillow 派生 jpg）、
   `pm vault note`、GUI 第七页「归档」+ 两个 AI 入口（`claude -p` 只读、只预填）；外部进程一把壳
   `Pm.Subprocess`；第一方全量审 + Opus 两轮门禁 + CI 单链（本 release 二进制由 GitHub Actions 出）。
+- ~~计划页完善 / 候选忽略 / 备份范围~~ ✅ 1.1.0（用户三批裁定 2026-08-31）：执行态
+  从 journal 折叠 + `pm plan list|rm|prune`（计划文件不回写）；`pm album
+  ignore|unignore` 按内容 sha（主库 `.pm` 本地决定，照片零改动）；备份范围 =
+  主库 − 暂存区（`To-Be-Sync'd\` 只是中转，收窄在 `Pm.Diff.backupDiff` 单点）。
 
 **已知限制**：
 

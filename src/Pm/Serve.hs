@@ -8,8 +8,9 @@
 -- 三级授权，逐级更强，缺省最弱：
 --
 --   1. 无开关 —— 只读端点。
---   2. @--writable@（P4-5）—— POST 端点可**生成计划**：只写 @.pm\/plans@ 与
---      少数 pm 自身状态（vault holds、config、备份 root 标识），**不执行、
+--   2. @--writable@（P4-5）—— POST 端点可**生成计划**：只写 @.pm\/plans@（含
+--      删除\/清理计划文件——可再生成，journal 不动）与少数 pm 自身状态
+--      （vault holds、照片记录、忽略清单、config、备份 root 标识），**不执行、
 --      不碰照片**。这句契约同时写在帮助文本、DESIGN §11、README 与 GUI 里。
 --   3. @--allow-apply@（P5-C）—— 才允许 @POST \/api\/apply@ **执行**已存的计划。
 --
@@ -65,6 +66,7 @@ import qualified Data.ByteString.Lazy as BSL
 import Data.Char (isHexDigit)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (Day, UTCTime)
@@ -87,7 +89,8 @@ import Pm.ConfigEdit (checkPatch, configTxn)
 import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
 import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), isValidPlanId, listPlans)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), PlanExec (..), deletePlanAnyRoot, isValidPlanId, listPlans, planExecuted, planExecs, prunePlans)
+import Pm.Journal (readJournal)
 import Pm.Publish (publishCommands)
 import Pm.ServeAi (routeAi)
 import Pm.ServeAlbum (planPost, routeAlbum)
@@ -384,12 +387,48 @@ routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
   ("GET", ["api", "plans"]) -> do
     (ps, errs) <- listPlans (cfgMainPath cfg)
     (vps, verrs) <- maybe (pure ([], [])) listPlans (cfgVaultPath cfg)
-    jsonR status200 [] (object ["plans" .= map planSummary (ps <> vps), "errors" .= (errs <> verrs)])
+    -- 执行态从两根的 journal 折叠（'Pm.Plan.planExecs'——CLI `pm plan list` 同源）：
+    -- 计划文件从不回写执行状态，页面此前把执行完的计划照样标「待执行」。
+    -- journal 读不出（untrusted 等）→ 折叠为空、计划显示未执行（fail-closed），
+    -- 原因进 errors。
+    (mes, mwarns) <- readJournal (cfgMainPath cfg)
+    (ves, vwarns) <- maybe (pure ([], [])) readJournal (cfgVaultPath cfg)
+    let runs = planExecs (mes <> ves)
+    jsonR
+      status200
+      []
+      ( object
+          [ "plans" .= map (\p -> planSummary p (Map.lookup (plId p) runs)) (ps <> vps)
+          , "errors" .= (errs <> verrs <> [("journal", w) | w <- mwarns <> vwarns])
+          ]
+      )
   ("GET", ["api", "plan", pid])
     | not (isValidPlanId pid) -> err status400 "计划 id 不符合生成格式"
     | otherwise -> do
         ep <- loadPlanAnyRoot cfg pid
         either (err status404) (jsonR status200 [] . toJSON) ep
+  -- 计划文件的删除与一键清理（用户 2026-08-31 裁定）。--writable 级：写域仅
+  -- @.pm/plans@（计划可再生成，journal/undo/doctor 不受影响）；守卫与 CLI
+  -- `pm plan rm` / `pm plan prune` 共用 'deletePlanAnyRoot' / 'prunePlans'。
+  ("POST", ["api", "plan", "delete"])
+    | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝删除计划"
+    | otherwise -> withJsonBody req err $ \(PlanIdReq pid) -> do
+        r <- deletePlanAnyRoot cfg pid
+        case r of
+          Left m -> err status404 m
+          Right label -> jsonR status200 [] (object ["ok" .= True, "root" .= label])
+  ("POST", ["api", "plans", "prune"])
+    | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝清理计划"
+    | otherwise -> withJsonBody req err $ \PruneReq -> do
+        (deleted, perrs) <- prunePlans cfg
+        jsonR
+          status200
+          []
+          ( object
+              [ "deleted" .= [object ["id" .= plId p, "kind" .= plKind p, "root" .= label] | (label, p) <- deleted]
+              , "errors" .= perrs
+              ]
+          )
   ("GET", ["api", "thumb", sha])
     | not (validSha sha) -> err status400 "sha 须为 64 位 hex"
     | otherwise -> do
@@ -502,20 +541,38 @@ findJpeg sha cat =
   isJpeg p = map toLowerAscii (takeExtension p) `elem` [".jpg", ".jpeg"]
   toLowerAscii c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
 
-planSummary :: Plan -> Value
-planSummary p =
+planSummary :: Plan -> Maybe PlanExec -> Value
+planSummary p mr =
   object
     [ "id" .= plId p
     , "kind" .= plKind p
     , "root" .= plRootPath p
     , "created" .= (plCreated p :: UTCTime)
     , "items" .= length (plItems p)
-    , "pending" .= count StPending
+    , "pending" .= length pend
     , "skipped" .= count StSkippedByUser
     , "needsDecision" .= length [() | PlanItem {piStatus = StNeedsDecision _} <- plItems p]
+    , -- 计划文件里只有 pending / skipped / needs-decision 三态；"已执行"是 journal
+      -- 层的事实（Done），不在计划文件上（DESIGN §3）——以下四个字段来自
+      -- 'Pm.Plan.planExecs' 的折叠。
+      "done" .= length [ix | ix <- pend, ix `Set.member` maybe Set.empty peDone mr]
+    , "failed" .= maybe (0 :: Int) (Set.size . peFailed) mr
+    , "executed" .= planExecuted p mr
+    , "lastRunAt" .= (mr >>= peLastAt)
     ]
  where
-  -- 计划文件里只有 pending / skipped / needs-decision 三态；"已执行"是 journal
-  -- 层的事实（Done），不在计划文件上（DESIGN §3）。
+  pend = [piIx it | it <- plItems p, piStatus it == StPending]
   count s = length [() | it <- plItems p, piStatus it == s]
+
+-- | @{"planId": "…"}@
+newtype PlanIdReq = PlanIdReq Text
+
+instance Aeson.FromJSON PlanIdReq where
+  parseJSON = Aeson.withObject "plan-delete" $ \o -> PlanIdReq <$> o Aeson..: "planId"
+
+-- | @{}@——prune 无参数；体仍走 'withJsonBody'（上限与 JSON 闸不因无参而豁免）。
+data PruneReq = PruneReq
+
+instance Aeson.FromJSON PruneReq where
+  parseJSON = Aeson.withObject "plans-prune" (\_ -> pure PruneReq)
 
