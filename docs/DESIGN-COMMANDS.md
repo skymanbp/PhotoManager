@@ -154,8 +154,10 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 ## 8. 命名治理（`pm names`）
 
 - 事件夹统一到 canonical scheme = **Scheme A `YY-MM-地点-Raw`（用户裁定
-  2026-08-22）**：29/38 已是，与成片对齐；Scheme B 的月份从成片对应事件还原，
-  还原不出的——如 RAW-2025-Summer-Providence 无成片对应——标 NEEDS-DECISION 交用户。
+  2026-08-22）**：设计时 29/38 已是，与成片对齐；Scheme B 的月份从成片对应事件还原，
+  还原不出的标 NEEDS-DECISION 交用户（2026-08-22 设计时的实例：`RAW-2025-Summer-Providence`
+  无成片对应；该夹已于 2026-09-02 按用户裁定改名为 `25-08-Providence-Raw`，当前
+  `pm names` → 已合规 44 · 待裁决 0）。
 - 跨层地点别名表（Hunan↔湖南 等）入配置，事件关联用别名闭包。
 - 文件级版本后缀**不强制统一**（信息即历史）——只做清单报告，改名需用户勾选。
 - rename 计划 + 同批目标唯一性校验 + journal 双向映射 + `pm undo` 可回滚。

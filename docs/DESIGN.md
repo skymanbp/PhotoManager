@@ -27,14 +27,15 @@
 
 **全库合计：4635 文件 / ≈459.3 GiB**（2026-08-22 P0 基线实测，本节四行之和；§12/§13 的规模输入统一用这组基线数。库在长大——现库数字见 README「效果」节的注日实测，两组各自为真，三十六轮 F3 注明采样日）。
 
-**Raw 事件夹命名两套并存**（38 个事件夹）：
-
-- Scheme A `YY-MM-地点-Raw` × **29**（如 `23-01-Cotswold-Raw`）
-- Scheme B `RAW-YYYY-季节-地点` × **7**（全在 2025，如 `RAW-2025-Winter-Alaska`）
-- 无后缀 × **2**（`23-12-Turkey`、`25-06-USA`）
+**Raw 事件夹命名已统一为 Scheme A**（`YY-MM-地点-Raw` × **44**；2026-09-02 实测，
+`pm names` → 已合规 44 · 待改名 0 · 待裁决 0 · 无法识别 0）。2026-08-22 基线时为 38 夹、
+两套并存——Scheme A × **29**（如 `23-01-Cotswold-Raw`）/ Scheme B `RAW-YYYY-季节-地点`
+× **7**（全在 2025，如 `RAW-2025-Winter-Alaska`）/ 无后缀 × **2**（`23-12-Turkey`、
+`25-06-USA`）——由 `pm names` 计划（P3b 起）与用户裁定的人工改名分批收口，最后三个
+`RAW-2025-*` 与两个 `&` 双月夹（拆夹）于 2026-09-02 结清（HISTORY 同日两行）。
 
 **跨层同事件地点名不一致**：Raw 用英文（`23-07-Hunan-Raw`、`23-10-Zhenjiang-Raw`、
-`23-11-Anhui-Raw`），成片用中文（`23-07-湖南`、`23-10-镇江`、`23-11-安徽`）。
+`23-10-Anhui-Raw`），成片用中文（`23-07-湖南`、`23-10-镇江`、`23-10-安徽`）。
 事件关联必须支持地点别名。
 
 **版本后缀实测清单**（同 stem 多版本，样本来自 相册/ 与 成片/）：
@@ -361,7 +362,25 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 
 **源文件在所有 Copy 路径上未被触碰**；掉电模型（journal 尾部丢失）由 C3/R2
 接住。`pm doctor` 默认对「上次 CleanShutdown 之后的全部 Done」重 hash（有界：
-只有被中断那场会话）。「已归档，冗余」标签**不由 Done 驱动**——它是当前 catalog
+只有被中断那场会话）。
+
+**会瞬断的可移动介质（2026-09-02 真实盘实录，运维路径而非内核改动）**：
+外置 USB 盘在持续 I/O 下约每 10 min 掉线一次时，裸跑 `pm apply` 的续跑代价是
+「每个已 Done 的 Copy 目标重 hash 判同」（§6.1 步 2，每次掉线白读几十 GB），
+且掉线若落在「rename 落位 → 写 Done」之间会留下 C2 格——重跑本身**不自愈**
+（Quarantine 看见原位是新字节，报「victim 内容与计划时不符」，组闭包连带
+Copy 不执行），只有 `--repair` 能补记。仓内 `scripts/backup_watchdog.py`
+是这类介质的标准跑法：按备份 root journal 算断点 → `pm apply <id> --only
+组首-组尾` 分块 → 非零退出后等 root-id.json 可读再续 → 对「有 Intent 无 Done」
+的 op 核盘认洞（C2 / Q-DONE-LOST 同判据）并跳过 → 收尾 `pm doctor --backup
+--repair` + `pm backup`。**默认复验窗口的一个后果**：分块跑完的每一块都是
+CleanShutdown，收尾 doctor 的 C4 集合为空、对字节零重读——它不是介质核验；
+写入后的字节核验走 `scripts/verify_backup_dst.py`（按计划 sha 全文重读）或
+`scripts/verify_backup_entries.py`（按备份 catalog 条目挑，如 `--verified-on <日期>`
+只读「那天只在写入端算过 sha、从未回读」的那批）或 `--deep`；两支核验与看门狗共用
+`scripts/backup_verify.py` 的 `Drive`（root-id.json 可读 = 盘在；掉线就等它回来、冷却、
+从被打断的那条接着读，`--max-drops` 兜底、`--retry` 续上次），不用人盯。
+pm 不改：分块/自愈若要内建，属 §15 待决。「已归档，冗余」标签**不由 Done 驱动**——它是当前 catalog
 的 sha 集合判据（快照级提示，不是删除授权），据实更正见 DESIGN-COMMANDS §7。
 **撕裂尾（掉电写了半行）不是损坏**：追加前先查末字节，不是换行就先补 `\n`
 ——新记录绝不与残行黏成一条（那会吞掉一条真实记录，并把残行从「末行半截」Warn
@@ -566,7 +585,7 @@ REVIEW-LOG 第 28 轮。
 |---|---|
 | **Windows 输出编码（ACP=936）**：GHC 默认 CP936，emoji/勾号直接崩进程、重定向输出 GBK 字节（本机已实测复现） | main 首行 `hSetEncoding stdout/stderr utf8`；`--json` 走 ByteString 直写绕开编码器与 CRLF；console 场景 `SetConsoleOutputCP(65001)`；§13 编码回归测试（**尚未实现**，见 §13） |
 | `directory` rename/copy 的替换语义（静默覆盖） | Exec 禁用清单 + 一律 `Pm.Win.moveBoundNoReplace`（句柄形态 no-replace，§6.1/§6.2）；P1 测试覆盖目标已存在分支 |
-| 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C3/C4 + doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`） |
+| 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C3/C4 + doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`）；会反复瞬断的盘走 `scripts/backup_watchdog.py` 分块续跑 + `scripts/verify_backup_dst.py` 写后全文重读（§6.4 末段，2026-09-02 实录：当日掉线 8 次、527 组更新落位并核过） |
 | 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤）；CJK 路径入 golden |
 | 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode + 只探 REMOVABLE/FIXED（§9） |
 | exFAT 备份盘（无元数据日志、rename 原子性弱） | 矩阵不依赖原子性；FS 类型/粒度入 root-id.json；mtime 只做同 root 缓存键（§3） |

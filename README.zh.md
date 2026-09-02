@@ -132,6 +132,12 @@ pm album ignore 26-06-R66/x.jpg …   # 忽略候选：按内容 sha 记进主�
 pm convert 成片/26-06-R66/x.tif --also-album   # 非 jpg → 派生 jpg（Pillow，写 .pm/derived）→ 成片同事件夹（+相册）计划；原文件不动
 pm backup init E:\Photography    # 一次性：登记备份盘（按 UUID 认盘，不认盘符）
 pm backup                        # 主库 → 备份盘单向增量（范围不含暂存区 To-Be-Sync'd；EXTRA 只报告永不动）
+python scripts/backup_watchdog.py --plan <id> --root E:\Photography --main D:\Photography --log wd.log --final-doctor
+                                 # 会瞬断的 USB 备份盘：把 `pm apply --only` 分块跑，掉线后等盘回来按 journal 断点续，
+                                 # 认出「已落盘但 Done 丢失」的洞，收尾 `pm doctor --backup --repair` + `pm backup`（pm 本身不改）
+python scripts/verify_backup_dst.py --plan <id> --root E:\Photography          # 大批量写入后的介质核验：把该计划每个拷贝目标从盘上全文重读、按 sha 比对
+python scripts/verify_backup_entries.py --root E:\Photography --verified-on 2026-08-26   # 同上但按索引条目挑（例如只在写入端算过 sha、从没回读过的那批）
+                                 # 两支都会自己等掉线的盘回来接着读（共用内核 scripts/backup_verify.py，看门狗也用它）
 pm clean staging                 # 仅清理「归档层+备份盘」都有同 sha 副本的暂存文件
 pm vault status                  # 相册 ↔ vault 展示集九态差异（其中六态兼容 sync_photos.py，
                                  # --json 逐字段照抄那六个；另三态 UNPUSHABLE/UNSTABLE/HELD）
@@ -249,7 +255,9 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 - 从备份盘找回 2 张 ARW（源与落位双侧 sha 核对）；
 - 增量备份 1016 项 / 98.5 GiB（含 2 对 supersede 复合组；重生成对比归零：新增 0 · 更新 0）；
 - 暂存清理 220 项 / 21.4 GiB——即上一条"首次归档"那批的暂存冗余副本，生成期三副本
-  真实重 hash + 执行期屏障再验后隔离（HELD 4 项 pm 拒收，留待 `pm import`）。
+  真实重 hash + 执行期屏障再验后隔离（HELD 4 项 pm 当时拒收——`26-06-R66` 事件的 4 个文件
+  那时归档层尚无副本；同日 `pm import` 归档后第二份清理计划清掉其暂存副本，暂存区此后
+  只剩用户在制的 `待修改\`）。
 
 一个说明"不猜"的例子：`pm sort` 在真实卡上发现纽约与亚特兰大两个事件首尾相接
 ——时间**切不开**事件，7 张连号 ARW 因此落进两个事件夹。所以分段只是提议、边界
@@ -261,7 +269,8 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 
 | 指标 | 实测值 | 出处 |
 |---|---|---|
-| 增量扫描（4633 文件，其中 122 新 hash / 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26 |
+| 增量扫描（4633 文件，复用 4633 / 待 hash 0，workers=16） | 1.58 s | `pm scan` 2026-09-02，1.1.1 上实测，[release-notes/v1.1.1](docs/release-notes/v1.1.1.md) |
+| hash 吞吐（122 个 ARW 共 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26——1.1.1 之前「未来 mtime 每次重 hash」的那批，修后不再发生 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
 | 测试套件（428 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |

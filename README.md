@@ -183,6 +183,12 @@ pm album ignore 26-06-R66/x.jpg …   # ignore a candidate: recorded by content 
 pm convert 成片/26-06-R66/x.tif --also-album   # non-jpg → derived jpg (Pillow, written to .pm/derived) → same finished event folder (+ album) plan; original untouched
 pm backup init E:\Photography    # once: register the backup drive (recognised by UUID, not by drive letter)
 pm backup                        # main library → backup drive, one-way incremental (staging To-Be-Sync'd excluded; EXTRA is only reported, never touched)
+python scripts/backup_watchdog.py --plan <id> --root E:\Photography --main D:\Photography --log wd.log --final-doctor
+                                 # flaky USB drive: runs `pm apply --only` in chunks, waits for the drive to come back and resumes from the journal,
+                                 # recognises "landed on disk but Done lost" holes, ends with `pm doctor --backup --repair` + `pm backup` (pm itself unchanged)
+python scripts/verify_backup_dst.py --plan <id> --root E:\Photography          # media check after a big write: re-read every copy target of that plan in full, compare sha
+python scripts/verify_backup_entries.py --root E:\Photography --verified-on 2026-08-26   # same, by catalog entries (e.g. only those hashed at write time, never re-read)
+                                 # both wait for a dropped drive to come back and resume by themselves (shared kernel scripts/backup_verify.py, also used by the watchdog)
 pm clean staging                 # only cleans staging files that have same-sha copies in BOTH the archive tier and the backup drive
 pm vault status                  # album ↔ vault showcase nine-state diff (six states compatible with sync_photos.py,
                                  # --json copies those six field by field; the other three: UNPUSHABLE/UNSTABLE/HELD)
@@ -361,7 +367,8 @@ All measured on the real library (commands and sources reproducible, not estimat
 
 | Metric | Measured | Source |
 |---|---|---|
-| Incremental scan (4633 files, of which 122 newly hashed / 14.0 GiB, workers=16) | 19.4 s | `pm scan` 2026-08-26 |
+| Incremental scan (4633 files, 4633 reused / 0 to hash, workers=16) | 1.58 s | `pm scan` 2026-09-02 on 1.1.1, [release-notes/v1.1.1](docs/release-notes/v1.1.1.md) |
+| Hash throughput (14.0 GiB across 122 ARW, workers=16) | 19.4 s | `pm scan` 2026-08-26 — the pre-1.1.1 future-mtime re-hash, which no longer happens |
 | First full hash (480 GiB class) | ~10–25 min | first library build, recorded |
 | Test suite (428 tests, whole suite serialised — required by process-level stdout redirection) | 10–40 s | `stack test` |
 | GHC warnings | 0 | `stack build` |

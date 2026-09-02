@@ -23,3 +23,6 @@ gui/src-tauri/binaries/
 
 # 仓根的操作手册 PDF 等本机产物（2026-09-02 用户指令：手册放仓根、不入库）
 /*.pdf
+
+# scripts/ 里的 Python 字节码（backup_watchdog / verify_* 共用 backup_verify 内核时由解释器生成）
+__pycache__/
