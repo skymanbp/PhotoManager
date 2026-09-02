@@ -20,3 +20,6 @@ gui/src-tauri/target/
 gui/src-tauri/gen/
 gui/src-tauri/binaries/
 
+
+# 仓根的操作手册 PDF 等本机产物（2026-09-02 用户指令：手册放仓根、不入库）
+/*.pdf

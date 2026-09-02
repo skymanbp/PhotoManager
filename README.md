@@ -30,7 +30,7 @@ a whole (`pm undo`).
 > review gate (**recorded round by round in [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md);
 > the convergence verdict is whatever its last section says and is not copied
 > here**), and each gate with an observable automated anchor gets a "delete it and
-> exactly one test turns red" mutation case (427 tests, 0 GHC warnings); gates
+> exactly one test turns red" mutation case (428 tests, 0 GHC warnings); gates
 > without an anchor (the GUI has no harness; concurrent interleavings have no
 > deterministic observation point) are registered in REVIEW-LOG as residuals rather
 > than passed off as covered.
@@ -363,7 +363,7 @@ All measured on the real library (commands and sources reproducible, not estimat
 |---|---|---|
 | Incremental scan (4633 files, of which 122 newly hashed / 14.0 GiB, workers=16) | 19.4 s | `pm scan` 2026-08-26 |
 | First full hash (480 GiB class) | ~10–25 min | first library build, recorded |
-| Test suite (427 tests, whole suite serialised — required by process-level stdout redirection) | 10–40 s | `stack test` |
+| Test suite (428 tests, whole suite serialised — required by process-level stdout redirection) | 10–40 s | `stack test` |
 | GHC warnings | 0 | `stack build` |
 | Adversarial review gate | recorded per round (NO-GO findings verified first-hand → class-level fix → focused re-review; convergence = the last section's verdict) | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | Mutation verification | one mutation per load-bearing gate with an observable automated anchor, its paired test turns red (all discrimination tables of rounds 34–36 and the P7 rounds pass; gates without an anchor registered as residuals) | REVIEW-LOG convergence evidence per round |
@@ -483,6 +483,10 @@ binaries in a Release are not built on the author's machine.
   content sha (a local `.pm` decision, zero photo changes); backup scope = main
   library minus the staging area (`To-Be-Sync'd\` is transit only; narrowed at the
   single point `Pm.Diff.backupDiff`).
+- ~~Future-mtime index reuse~~ ✅ 1.1.1 (real-drive review 2026-09-02): files whose
+  mtime lies in the future (camera clock + preserved timestamps) were re-hashed on every
+  scan (14 GiB per run on this library); `statHitStable` now also trusts a write window
+  that has not opened yet — one re-hash when it does, then stable for good.
 
 **Known limitations**:
 

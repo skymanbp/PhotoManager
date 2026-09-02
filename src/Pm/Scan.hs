@@ -261,6 +261,7 @@ scanRoot :: ScanOpts -> Maybe Catalog -> Text -> FilePath -> IO ScanResult
 scanRoot opts oldCat rootId root = do
   (files, walkErrs, uncovered) <- listTreeCov SkipDotDirs root
   -- Stat pass
+  statNow <- getCurrentTime
   statted <- forM files $ \rel -> do
     r <- try (statSnap (root </> rel)) :: IO (Either IOException StatSnap)
     pure (rel, r)
@@ -269,12 +270,12 @@ scanRoot opts oldCat rootId root = do
       oldEntries = maybe Map.empty catEntries oldCat
       (reused, toHash) = foldl' split ([], []) stats
       -- P3b-4 评审 #4（统一修）：复用判据走 statHitStable——(size,mtime)
-      -- 相等之外还排除 racy 条目（hash 时刻与 mtime 同刻度窗口内），与
-      -- Pm.Vault.shaViaCache 共用同一谓词。
+      -- 相等之外还排除 racy 条目（hash 时刻与 mtime 同刻度窗口内；未来
+      -- mtime 的窗口尚未到来，同样可信），与 Pm.Vault.shaViaCache 共用同一谓词。
       split (rs, hs) se@(StatEntry rel snap) =
         case Map.lookup rel oldEntries of
           Just e
-            | statHitStable (enSize e) (enMtimeNs e) (enLastVerified e) snap ->
+            | statHitStable statNow (enSize e) (enMtimeNs e) (enLastVerified e) snap ->
                 (e : rs, hs)
           _ -> (rs, se : hs)
       totalHashBytes = sum [ssSize (seSnap se) | se <- toHash]

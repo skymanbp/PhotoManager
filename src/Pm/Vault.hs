@@ -142,10 +142,11 @@ listFlatPhotos dir = do
 -- quiet 决定。
 shaViaCache :: Map FilePath Entry -> FilePath -> FilePath -> IO (Text, Maybe Entry)
 shaViaCache cache rel abs' = do
+  atStat <- getCurrentTime
   pre <- statSnap abs'
   case Map.lookup rel cache of
     Just e
-      | statHitStable (enSize e) (enMtimeNs e) (enLastVerified e) pre ->
+      | statHitStable atStat (enSize e) (enMtimeNs e) (enLastVerified e) pre ->
           pure (enSha e, Just e)
     _ -> go (3 :: Int) pre
  where

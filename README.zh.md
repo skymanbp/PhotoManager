@@ -21,7 +21,7 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
 > 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
 > 为准，不在这里手抄**），凡有可观测自动化落点的闸都配"删掉它就转红"的突变
-> 验证用例（427 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
+> 验证用例（428 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
 > 性观察点）在 REVIEW-LOG 登记为残余，不冒充覆盖。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
@@ -263,7 +263,7 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 |---|---|---|
 | 增量扫描（4633 文件，其中 122 新 hash / 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（427 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
+| 测试套件（428 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
 | 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | 突变验证 | 凡有可观测自动化落点的承重闸各配一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过；无落点者登记为残余） | REVIEW-LOG 各轮收敛证据 |
@@ -353,6 +353,9 @@ CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同�
   从 journal 折叠 + `pm plan list|rm|prune`（计划文件不回写）；`pm album
   ignore|unignore` 按内容 sha（主库 `.pm` 本地决定，照片零改动）；备份范围 =
   主库 − 暂存区（`To-Be-Sync'd\` 只是中转，收窄在 `Pm.Diff.backupDiff` 单点）。
+- ~~未来 mtime 的索引复用~~ ✅ 1.1.1（真实盘复核 2026-09-02）：mtime 在未来的文件
+  （相机时钟错 + 拷贝保留时间戳）每次 scan 都被重 hash（本库每跑一次 14 GiB）；
+  `statHitStable` 现在同样信任「写入窗口尚未到来」的文件——到期重 hash 一次，此后永久回稳。
 
 **已知限制**：
 

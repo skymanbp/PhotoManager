@@ -58,6 +58,7 @@ vaultTests =
     , testCase "P3b-4 #6 bindExecRoot：UUID 多重命中/role 不符 拒绝绑定" caseBindAmbiguity
     , testCase "P3b-4 #4 缓存身份绑定：vault 换路径后 (size,mtime) 巧合不复用 sha" caseCacheIdentitySwap
     , testCase "P3b-4 #4 racy 判据 statHitStable：同刻度窗口不信任缓存" caseRacyGuard
+    , testCase "真实库复核 2026-09-02：未来 mtime（相机时钟错）写入窗口未到 → 可信，不再每次重 hash" caseFutureMtimeReuse
     , testCase "三十四轮 F1：相册文件被独占占住 → 入 UNSTABLE 单列报告，status 不崩、exit 1" caseUnstableOnLocked
     , testCase "三十四轮 F1 同族：photos.json 被独占占住 → Left（fail-closed，不得答「未被引用」）" casePhotosJsonRefLocked
     , testCase "三十五轮 F1：只有 UNSTABLE 的 push 无项分支 → exit 1（与 status 同谓词，不报 0）" caseUnstablePushExit
@@ -561,14 +562,37 @@ caseCacheIdentitySwap = withSystemTempDirectory "pm-vault" $ \tmp -> do
 caseRacyGuard :: IO ()
 caseRacyGuard = do
   let snap = StatSnap 4 1000000000
+      now = nsToUtc 10000000000 -- 判定时刻晚于一切：只考「hash 时刻 vs mtime」这一支
   -- hash 时刻仅晚于 mtime 0.5 s（< 2 s 粒度余量）→ racy，不信任
-  statHitStable 4 1000000000 (Just (nsToUtc 1500000000)) snap @?= False
+  statHitStable now 4 1000000000 (Just (nsToUtc 1500000000)) snap @?= False
   -- hash 时刻晚于 mtime 8 s → 可信
-  statHitStable 4 1000000000 (Just (nsToUtc 9000000000)) snap @?= True
+  statHitStable now 4 1000000000 (Just (nsToUtc 9000000000)) snap @?= True
   -- 无验证时间戳 → fail-closed
-  statHitStable 4 1000000000 Nothing snap @?= False
+  statHitStable now 4 1000000000 Nothing snap @?= False
   -- size 不符 → 直接不命中
-  statHitStable 5 1000000000 (Just (nsToUtc 9000000000)) snap @?= False
+  statHitStable now 5 1000000000 (Just (nsToUtc 9000000000)) snap @?= False
+
+-- | 2026-09-02 真实库复核：122 个相机时钟在 2027 年的 ARW，mtime 永远晚于任何
+-- 一次 hash 时刻，只看「hash 晚于 mtime」的旧判据让它们每次 scan 都重 hash
+-- （主库与备份盘各 14 GiB）。危险的只是 mtime 起 2 s 的写入窗口——窗口尚未
+-- 到来同样可信；窗口内 / 窗口过后但 hash 早于 mtime 仍不信任，重 hash 一次
+-- 即永久回稳。
+caseFutureMtimeReuse :: IO ()
+caseFutureMtimeReuse = do
+  let m = 20000000000 -- mtime（ns）：在「现在」之后
+      snap = StatSnap 4 m
+      hashedAt = Just (nsToUtc 10000000000) -- hash 早于 mtime 10 s
+  -- 现在离未来 mtime 还有 5 s（> 2 s 余量）：写入窗口尚未到来 → 可信（旧判据：False）
+  statHitStable (nsToUtc 15000000000) 4 m hashedAt snap @?= True
+  -- 现在已进入 mtime 前 2 s 的余量：不信任，重 hash 一次
+  statHitStable (nsToUtc 19000000000) 4 m hashedAt snap @?= False
+  -- 现在已过了 mtime，但 hash 时刻仍早于 mtime：不信任
+  statHitStable (nsToUtc 30000000000) 4 m hashedAt snap @?= False
+  -- 过窗口后重 hash 过一次（hash 晚于 mtime > 2 s）→ 此后永久可信
+  statHitStable (nsToUtc 30000000000) 4 m (Just (nsToUtc 25000000000)) snap @?= True
+  -- 未来 mtime 不豁免 fail-closed：无验证时间戳 / size 不符仍不命中
+  statHitStable (nsToUtc 15000000000) 4 m Nothing snap @?= False
+  statHitStable (nsToUtc 15000000000) 5 m hashedAt snap @?= False
 
 -- | 三十四轮 F1（本轮 minset）：computeVault' 枚举-hash 主循环的读口
 -- fail-closed——相册里一个被独占占住的文件（AV/索引器/未关闭的写句柄；

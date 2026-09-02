@@ -183,13 +183,20 @@ utcToNs t = truncate (utcTimeToPOSIXSeconds t * 1_000_000_000)
 -- 改写的文件 (size,mtime) 不变而内容已变，无此余量会永久信任陈旧 sha
 -- （git racily-clean 同型问题）。lastVerified 缺失 → 不信任（fail-closed，
 -- 重 hash 一次即回填）。
-statHitStable :: Integer -> Integer -> Maybe UTCTime -> StatSnap -> Bool
-statHitStable size mtimeNs mVerified snap =
+--
+-- 危险的只是从 mtime 那一刻起 2 s 的**写入窗口**：hash 落在窗口之后（上一段）
+-- 或窗口尚未到来（mtime 比当前时刻还晚 2 s 以上——相机时钟错、拷贝保留了
+-- 未来时间戳）都可信，只有两者之间不信任。没有第二个分支时，未来 mtime 的
+-- 文件在系统时钟真正走到那一天之前**每次扫描都重 hash**（2026-09-02 真实库
+-- 复核：122 个 2027 年时钟的 ARW，主库与备份盘每次 scan 各白 hash 14 GiB）。
+-- 系统时钟回拨在两个分支下同样打穿本判据，不在其威胁模型内。
+statHitStable :: UTCTime -> Integer -> Integer -> Maybe UTCTime -> StatSnap -> Bool
+statHitStable now size mtimeNs mVerified snap =
   size == ssSize snap
     && mtimeNs == ssMtimeNs snap
     && case mVerified of
       Nothing -> False
-      Just v -> utcToNs v - mtimeNs > racySlackNs
+      Just v -> utcToNs v - mtimeNs > racySlackNs || mtimeNs - utcToNs now > racySlackNs
 
 -- | 最粗常见文件系统（FAT 系）的时间戳粒度。
 racySlackNs :: Integer

@@ -342,7 +342,8 @@ plantStaleCatalog root jpg between = do
     Cat.CatLoaded _ _ -> pure ()
     other -> assertFailure ("陈旧 catalog 未能载入，缓存命中前提不成立: " <> Cat.loadNote other)
   snap2 <- statSnap jpg
-  assertBool "陈旧 catalog 条目必须 statHitStable 命中" (statHitStable (ssSize snap) (ssMtimeNs snap) (Just verified) snap2)
+  now <- getCurrentTime
+  assertBool "陈旧 catalog 条目必须 statHitStable 命中" (statHitStable now (ssSize snap) (ssMtimeNs snap) (Just verified) snap2)
   pure (staleSha, realSha)
 
 -- | 另一个「pm 进程」正持有主库 root lock 时跑动作（I10 事务用例共用）：
