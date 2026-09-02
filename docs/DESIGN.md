@@ -416,7 +416,9 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
   = CacheLockBusy，降级为"本轮不刷新"，与 junction 拒绝的硬停是不同构造子。
   作用域（三十二轮登记）：锁只串行化**写者**；掉电停在 catalog 与 meta 两次
   replace 之间会留跨代对——换 vault 再换回的场景下旧 meta 会放行新 catalog，
-  兜底是 sha 复用前逐条 (size,mtime)+racy 余量复验，缓存本身可重建）；
+  兜底是 sha 复用前逐条 (size,mtime)+racy 余量复验——`statHitStable`：上次 hash
+  晚于 mtime 2 s 以上，**或** mtime 比当前时刻晚 2 s 以上（写入窗口尚未到来；
+  1.1.1 补，此前未来 mtime 的文件每次扫描都重 hash）——缓存本身可重建）；
   配置的全部四条读改写路径
   （config set / API config / backup init / **pm init --force**）都在
   `withConfigLock` 内。进程内互斥（serve 的 MVar）不算——它挡不住第二个 pm。
