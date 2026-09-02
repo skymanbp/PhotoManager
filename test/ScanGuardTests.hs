@@ -83,7 +83,7 @@ caseInitForcePreservesOrSays = withSystemTempDirectory "pm-init" $ \tmp -> do
   mold <- lookupEnv "PM_CONFIG"
   let cfgFp = tmp </> "config.toml"
       mainP = tmp </> "main"
-      old = Config mainP Nothing Nothing Nothing (Just "B") (Just "mirror") Nothing (Just "origin main") Nothing
+      old = Config mainP Nothing Nothing Nothing (Just "B") (Just "mirror") (Just 0) Nothing (Just "origin main") Nothing
       force = InitOpts mainP Nothing Nothing Nothing True
   createDirectoryIfMissing True mainP
   setEnv "PM_CONFIG" cfgFp
@@ -106,7 +106,7 @@ caseInitForcePreservesOrSays = withSystemTempDirectory "pm-init" $ \tmp -> do
 caseStatusCatalogFallbackExit :: IO ()
 caseStatusCatalogFallbackExit = withSystemTempDirectory "pm-sfb" $ \dir -> do
   let root = dir </> "root"
-      cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+      cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
   createDirectoryIfMissing True root
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
@@ -329,7 +329,7 @@ caseStatusFreshnessErrExit :: IO ()
 caseStatusFreshnessErrExit =
   withSystemTempDirectory "pm-status-err" $ \dir -> do
     let root = dir </> "root"
-        cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+        cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
     createDirectoryIfMissing True root
     now <- getCurrentTime
     writeRootInfo root (RootInfo "m" RoleMain now Nothing)
@@ -370,7 +370,7 @@ caseFreshnessJunctionRoot = withSystemTempDirectory "pm-jroot" $ \tmp -> do
 caseImportStaleRefused :: IO ()
 caseImportStaleRefused = withSystemTempDirectory "pm-imp" $ \tmp -> do
   let root = tmp </> "main"
-      cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+      cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
   createDirectoryIfMissing True (root </> "To-Be-Sync'd" </> "Raw" </> "26-06-R66")
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)

@@ -238,6 +238,7 @@ execItems env root j pid = go [] [] []
           pure (ONotExecuted : outs, r')
     mg -> do
       out <- execItem env root j pid it
+      eeProgress env it out -- 1.1.2：逐项进度上报（瞬断续跑的依据，见 ExecTypes）
       case mg of
         Nothing -> do
           (outs, r') <- go abortedGs quars restored rest

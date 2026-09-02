@@ -32,7 +32,8 @@ import Pm.ConfigEdit (checkConfig, rootsNested)
 import Pm.Diff (BackupDiff (..), backupDiff, backupPlanItems)
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Plan
-import Pm.Scan (ScanOpts (..), ScanResult (..), scanRoot)
+import Pm.Removable (driveWaitFor, scanRootRetry, withDriveRetry)
+import Pm.Scan (ScanOpts (..), ScanResult (..))
 import Pm.Types
 import Pm.Win (volumeFsType)
 
@@ -216,11 +217,14 @@ runBackupRun' go mworkers cfg = do
 
 runBackupDiff :: GoOpts -> Maybe Int -> Config -> FilePath -> RootInfo -> Catalog -> [String] -> IO Int
 runBackupDiff go mworkers cfg broot info mainCat mwarns = do
-  (oldBak, bwarns) <- catalogMaybe <$> loadCatalog broot
+  -- 1.1.2 瞬断保护：备份盘上的读索引 / 扫描 / 写索引都按 'Pm.Removable' 的策略
+  -- 等盘、续跑（扫描按 pass 复用已 hash 的条目；执行侧在 executePlanNow' 里）。
+  let dw = driveWaitFor cfg putStrLn
+  (oldBak, bwarns) <- catalogMaybe <$> withDriveRetry dw broot "读备份索引" (loadCatalog broot)
   mapM_ (\w -> putStrLn ("⚠ 备份快照损坏已跳过: " <> w)) bwarns
   let workers = fromMaybe 1 mworkers
-  result <- scanRoot ScanOpts {soWorkers = workers, soProgress = True} oldBak (riId info) broot
-  saveCatalog broot (srCatalog result)
+  result <- scanRootRetry dw ScanOpts {soWorkers = workers, soProgress = True} oldBak (riId info) broot
+  withDriveRetry dw broot "写备份索引" (saveCatalog broot (srCatalog result))
   reportScanIssues result
   let bakCat = srCatalog result
       d = backupDiff mainCat bakCat
@@ -260,7 +264,7 @@ runBackupDiff go mworkers cfg broot info mainCat mwarns = do
             }
       -- apply 之后备份 catalog 已被 executePlanNow 回写，缓存重算
       when (goApply go) $ do
-        lb2 <- loadCatalog broot
+        lb2 <- withDriveRetry (driveWaitFor cfg putStrLn) broot "读备份索引" (loadCatalog broot)
         case lb2 of
           CatLoaded bak2 _ -> refreshBackupCache putStrLn cfg broot bak2 (backupDiff mainCat bak2)
           other -> putStrLn ("⚠ 备份缓存未刷新（备份盘" <> loadNote other <> "）")

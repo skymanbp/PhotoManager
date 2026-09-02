@@ -298,6 +298,20 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   `root-id.json` 只记 `id/role/created/fsType`。主库扫描是另一条口径（`[main] workers`，
   DESIGN-GUI.md §11「设置页与配置端点」）。
 - 拔盘期间 `pm status` 用备份 root 的本地缓存快照报「上次同步时间 + 当时滞后量」。
+- **瞬断保护（1.1.2，`Pm.Removable`，DESIGN §6.4 末段）**：外置盘在扫描/执行/深验
+  途中掉线又自己回来是常态而非异常（2026-09-02 一天 11 次）。判据：盘在 =
+  `.pm/root-id.json` 读得出；一个 `IOException` 三分——确定性一族（userError /
+  权限 / 已存在 / 非法操作…）原样抛出，盘不在 → 等它回来（`[backup] drive-wait`
+  秒，缺省 1800，`pm config set --drive-wait N`，0 = 关闭 = 1.1.1 行为）再冷却 30 s，
+  盘在而 EINVAL 一类 → 5 s 短停；同一步骤最多 5 次。续跑单位：`pm backup` 的扫描
+  按 pass（一遍有读错/未枚举就等盘、拿这一遍的 catalog 当旧快照重扫，只补漏）；
+  执行按**组**（`Pm.Cli.executePlanNowWith` → `execPlanRetry`：内核经 `eeProgress`
+  逐项报进度；异常后等盘、跑 `doctor --repair` 把「已落位、Done 丢失」补上，再按
+  「组内每项都成功 / 组内每项 journal 末事件都是 Done」结算，只把没结算的组交给
+  下一场 `execPlan`——已落的字节不重拷、不重 hash）；`pm doctor --backup [--deep]`
+  整场可重跑（幂等），`--deep` 逐条先等盘再 `doesFileExist`（盘不在时它答 False，
+  会把掉线报成「消失」），场末盘不在则整场作废等盘重跑，不交假结论。备份盘上的
+  读/写索引也包在同一策略里。对所有 root 生效，但只有会掉线的介质会真正触发。
 
 ---
 
@@ -412,7 +426,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.1.1（未来 mtime 复用根修）/ pm 1.1.1 / 428 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.1.2（瞬断保护内建）/ pm 1.1.2 / 436 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。

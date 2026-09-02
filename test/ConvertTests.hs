@@ -49,7 +49,7 @@ type Runner = Bool -> Bool -> [String] -> IO (Int, Maybe T.Text, String)
 withLib :: (FilePath -> Runner -> IO ()) -> IO ()
 withLib k = withSystemTempDirectory "pm-convert" $ \tmp -> do
   let root = tmp </> "lib"
-      cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+      cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
       runner also redo files = do
         scanQuiet "main-rid" root >>= saveCatalog root
         ref <- newIORef []

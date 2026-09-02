@@ -188,6 +188,8 @@
           <div id="cfg-backup" class="v"></div>
           <div class="row"><input id="cfg-backup-path" type="text" spellcheck="false" placeholder="盘上的镜像路径，如 E:\\Photography"><button id="btn-cfg-backup" class="btn">登记这块盘</button></div>
           <div class="s">登记会在<strong>那块盘上</strong>建立备份 root 标识（已经是备份 root 就沿用），并按 UUID + 盘内相对路径记住它——以后换盘符也认得出。照片不动。</div>
+          <div class="row"><input id="cfg-drive-wait" type="number" min="0" max="86400" placeholder="默认 1800 秒"><button id="btn-cfg-drive-wait" class="btn">保存</button><button id="btn-cfg-drive-wait-clear" class="btn ghost">恢复默认</button></div>
+          <div class="s"><strong>掉线等待</strong>：备份 / 检查途中 USB 盘瞬断时，最多等它回来多少秒，然后从中断处接着跑（已落好的文件不重做）。0 = 关闭，出错就停。</div>
         </div>
       </div>
     </section>

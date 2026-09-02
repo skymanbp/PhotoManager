@@ -35,6 +35,7 @@ import qualified Data.Text as T
 import Pm.Backup (discoverBackupRoots)
 import Pm.Config (Config (..), checkAbsolute, configFilePath, loadConfig, withConfigLock, writeConfig)
 import Pm.Publish (cmdPath, pushTarget)
+import Pm.Removable (defaultDriveWaitSecs)
 
 -- | 两个 root 是否嵌套（任一方向）：canonicalize 两侧（解析已存在前缀的
 -- junction/symlink 与真实大小写），再按 case-fold 分量做祖先判断——文本级
@@ -90,6 +91,8 @@ data ConfigPatch = ConfigPatch
   { cpVault :: Maybe (Maybe FilePath)
   , cpPhotosJson :: Maybe (Maybe FilePath)
   , cpWorkers :: Maybe (Maybe Int)
+  , cpDriveWait :: Maybe (Maybe Int)
+    -- ^ 1.1.2：备份盘掉线等待秒数（@[backup] drive-wait@；0 = 关闭瞬断保护）
   , cpPortfolioDir :: Maybe (Maybe FilePath)
     -- ^ P7：portfolio 仓本地路径（上线命令生成用）
   , cpVaultPush :: Maybe (Maybe String)
@@ -107,7 +110,7 @@ data ConfigPatch = ConfigPatch
   deriving (Show, Eq)
 
 emptyPatch :: ConfigPatch
-emptyPatch = ConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+emptyPatch = ConfigPatch Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- | 线格式：**键缺省** = 不动，**键为 null** = 清空，否则设值。三态必须分得
 -- 开——否则"清空 vault 路径"和"不改 vault 路径"会撞成同一个请求。实例写在
@@ -122,6 +125,7 @@ instance Aeson.FromJSON ConfigPatch where
       <$> fld "vault"
       <*> fld "photosJson"
       <*> fld "workers"
+      <*> fld "driveWait"
       <*> fld "portfolioDir"
       <*> fld "vaultPush"
       <*> fld "portfolioPush"
@@ -155,6 +159,9 @@ checkPatch c p = do
   let ew = case cpWorkers p of
         Just (Just w) | w < 1 || w > 64 -> ["并发数 " <> show w <> " 越界（1..64）"]
         _ -> []
+      ed = case cpDriveWait p of
+        Just (Just d) | d < 0 || d > 86400 -> ["掉线等待 " <> show d <> " 秒越界（0..86400；0 = 关闭瞬断保护）"]
+        _ -> []
       -- push 目标进的是「整块复制到终端」的命令文本：语法闸见 'Pm.Publish.pushTarget'。
       es =
         [ "push 目标 " <> show t <> " 不合法（" <> why <> "；须为 <remote> [<refspec>]，每段以字母数字开头，只含字母数字与 -._/:@~^，≤200 字符）"
@@ -166,7 +173,7 @@ checkPatch c p = do
       em = ["主库路径只读：改它等于换一个库，请在终端 pm init --main <路径>" | Just _ <- [cpMain p]]
       en = ["没有要改的项" | p == emptyPatch]
   whole <- checkConfig (applyPatch c p)
-  pure (em <> en <> ev <> ej <> ep <> ew <> es <> whole)
+  pure (em <> en <> ev <> ej <> ep <> ew <> ed <> es <> whole)
 
 -- | 施加（纯函数）。调用方须先过 'checkPatch'。
 applyPatch :: Config -> ConfigPatch -> Config
@@ -175,6 +182,7 @@ applyPatch c p =
     { cfgVaultPath = maybe (cfgVaultPath c) id (cpVault p)
     , cfgPhotosJson = maybe (cfgPhotosJson c) id (cpPhotosJson p)
     , cfgWorkers = maybe (cfgWorkers c) id (cpWorkers p)
+    , cfgDriveWait = maybe (cfgDriveWait c) id (cpDriveWait p)
     , cfgPortfolioDir = maybe (cfgPortfolioDir c) id (cpPortfolioDir p)
     , cfgVaultPush = maybe (cfgVaultPush c) id (cpVaultPush p)
     , cfgPortfolioPush = maybe (cfgPortfolioPush c) id (cpPortfolioPush p)
@@ -233,6 +241,7 @@ runConfigShow c = do
       putStrLn ("  portfolio " <> d <> mark ex)
   putStrLn ("  push 目标  展示集 " <> maybe "（默认 git push）" id (cfgVaultPush c) <> " · portfolio " <> maybe "（默认 git push）" id (cfgPortfolioPush c))
   putStrLn ("  并发数    " <> maybe "（默认=核数）" show (cfgWorkers c))
+  putStrLn ("  掉线等待  " <> maybe ("（默认 " <> show defaultDriveWaitSecs <> " s）") (\d -> if d == 0 then "0（瞬断保护关闭）" else show d <> " s") (cfgDriveWait c) <> "——备份盘瞬断后等它回来再从中断处续跑")
   case (cfgBackupId c, cfgBackupSubpath c) of
     (Just i, Just s) -> putStrLn ("  备份盘    UUID " <> T.unpack i <> " · 盘内路径 " <> s <> "（按 UUID 认盘，与盘符无关）")
     (Nothing, Nothing) -> putStrLn "  备份盘    （未登记）→ pm backup init <盘上镜像路径>"
@@ -272,6 +281,7 @@ data ConfigSetOpts = ConfigSetOpts
   { csVault :: (Maybe FilePath, Bool)
   , csPhotosJson :: (Maybe FilePath, Bool)
   , csWorkers :: (Maybe Int, Bool)
+  , csDriveWait :: (Maybe Int, Bool)
   , csPortfolioDir :: (Maybe FilePath, Bool)
   , csVaultPush :: (Maybe String, Bool)
   , csPortfolioPush :: (Maybe String, Bool)
@@ -290,6 +300,7 @@ mkPatch o =
     <$> tri "vault" (csVault o)
     <*> tri "photos-json" (csPhotosJson o)
     <*> tri "workers" (csWorkers o)
+    <*> tri "drive-wait" (csDriveWait o)
     <*> tri "portfolio-dir" (csPortfolioDir o)
     <*> tri "vault-push" (csVaultPush o)
     <*> tri "portfolio-push" (csPortfolioPush o)

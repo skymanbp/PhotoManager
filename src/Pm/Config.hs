@@ -104,6 +104,8 @@ data Config = Config
     -- ^ 备份 root 的 UUID（`pm backup init` 登记；发现流程按 UUID 认盘，§9）
   , cfgBackupSubpath :: Maybe FilePath
     -- ^ 备份镜像相对盘根的位置（如 "Photography"）；盘符不入配置
+  , cfgDriveWait :: Maybe Int
+    -- ^ 备份盘掉线后最多等多少秒（1.1.2 瞬断保护，'Pm.Removable'）；缺省 1800，0 = 关闭
   , cfgPortfolioDir :: Maybe FilePath
     -- ^ portfolio 仓的本地路径（P7 上线命令生成用；photos-json 是只读引用
     -- 检查，这个是仓本身，两者独立可设）
@@ -124,6 +126,7 @@ instance TOML.DecodeTOML Config where
       <*> TOML.getFieldsOpt ["main", "workers"]
       <*> TOML.getFieldsOpt ["backup", "id"]
       <*> TOML.getFieldsOpt ["backup", "subpath"]
+      <*> TOML.getFieldsOpt ["backup", "drive-wait"]
       <*> TOML.getFieldsOpt ["portfolio", "dir"]
       <*> TOML.getFieldsOpt ["vault", "push"]
       <*> TOML.getFieldsOpt ["portfolio", "push"]
@@ -253,18 +256,19 @@ renderConfig c =
       -- 工作流 F011：与其它表同一 helper——此前唯独这张表全有才渲染，半对
       -- 登记被**静默归零**；「登记成对」的判定归 'Pm.ConfigEdit.checkConfig'
       -- （写入口当场拒），渲染器只忠实保全已设字段
-      <> section "backup" [("id", T.unpack <$> cfgBackupId c), ("subpath", cfgBackupSubpath c)]
+      <> section "backup" [("id", T.unpack <$> cfgBackupId c), ("subpath", cfgBackupSubpath c)] [("drive-wait", T.pack . show <$> cfgDriveWait c)]
       -- 每张表渲染**所有**已设字段：渲染器漏一个字段，下一次任何写回就把
       -- 用户设过的那项静默抹掉（round-trip 由 configTxn 的写后重读顺带验证）。
-      <> section "vault" [("path", cfgVaultPath c), ("push", cfgVaultPush c)]
+      <> section "vault" [("path", cfgVaultPath c), ("push", cfgVaultPush c)] []
       <> section
         "portfolio"
         [ ("photos-json", cfgPhotosJson c)
         , ("dir", cfgPortfolioDir c)
         , ("push", cfgPortfolioPush c)
         ]
+        []
  where
-  section name kvs = case [k <> " = " <> tomlStr (T.pack v) | (k, Just v) <- kvs] of
+  section name kvs raws = case [k <> " = " <> tomlStr (T.pack v) | (k, Just v) <- kvs] <> [k <> " = " <> v | (k, Just v) <- raws] of -- raws = 裸值（整数），不加引号
     [] -> []
     ls -> ["", "[" <> name <> "]"] <> ls
 

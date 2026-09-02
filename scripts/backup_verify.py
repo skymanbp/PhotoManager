@@ -1,5 +1,6 @@
-"""backup_verify.py — 三支备份盘脚本共用的内核（不单独运行）：
-  Drive        盘在不在（root-id.json 可读）、等它回来并冷却——backup_watchdog.py 也用它；
+"""backup_verify.py — 两支备份盘核验脚本共用的内核（不单独运行；写入侧的等盘续跑自 pm 1.1.2 起内建于 Pm.Removable，
+看门狗脚本已退役）：
+  Drive        盘在不在（root-id.json 可读）、等它回来并冷却（与 pm 的判据相同）；
   sha_of       全文 sha256（可限速）；
   run/finish   把一组目标从备份盘全文重读核 sha，盘瞬断就等它回来、从被打断的那条接着读
                （verify_backup_dst.py 按计划目标、verify_backup_entries.py 按 catalog 条目）。

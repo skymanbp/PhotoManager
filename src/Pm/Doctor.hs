@@ -11,6 +11,7 @@ module Pm.Doctor
   , Severity (..)
   , Finding (..)
   , runDoctor
+  , runDoctorWith
   , renderFinding
   ) where
 
@@ -28,13 +29,14 @@ import System.FilePath (joinPath, makeRelative, splitDirectories, (</>))
 
 import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog)
 import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
-import Pm.Convert (DerivedState (..), scanDerived)
+import Pm.Derived (DerivedState (..), scanDerived)
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
 import Pm.Hash (sha256File, sha256Handle)
 import Pm.Journal
 import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
+import Pm.Removable (DriveWait, ensureDrive, noDriveWait, requireDrive, withDriveRetry)
 import Pm.Trash
 import Pm.Types
 import Pm.Win (NameKind (..), deleteBoundAt, openStateRead, probeName, resolveUnder)
@@ -76,27 +78,41 @@ renderFinding f =
 -- 锁内 runDoctor' 里的 requireWritable 复检保留（预检与取锁之间被改仍拒绝）。
 -- 取不到锁 → 退回只读诊断 + 一条 I10 Bad，不做任何修复。
 runDoctor :: FilePath -> DoctorOpts -> IO ([Finding], Int)
-runDoctor root opts
+runDoctor = runDoctorWith noDriveWait
+
+-- | 1.1.2 瞬断保护版（CLI 与执行续跑走这里；'runDoctor' = 关闭）。整场包
+-- 'withDriveRetry'——doctor 幂等：判定只读，@--repair@ 的补记 Done \/ 删自建 tmp
+-- 重跑无害。场末 'requireDrive'：诊断期间盘掉了且没回来，盘面探针（doesFileExist
+-- 答 False）已把「掉线」写成「消失\/无痕迹」，整场作废等盘重跑，不交假结论。
+-- @--deep@ 的逐条重读另在 'deepVerify' 里按条等盘（一条掉线不作废前面几千条）。
+runDoctorWith :: DriveWait -> FilePath -> DoctorOpts -> IO ([Finding], Int)
+runDoctorWith dw root opts = withDriveRetry dw root "doctor" $ do
+  r <- runDoctorGate dw root opts
+  requireDrive dw root "doctor"
+  pure r
+
+runDoctorGate :: DriveWait -> FilePath -> DoctorOpts -> IO ([Finding], Int)
+runDoctorGate dw root opts
   | doRepair opts = do
       w <- requireWritable root
       case w of
         Left m -> diagnoseOnly (Finding "I11" Bad ("--repair 拒绝执行（root 不可写）: " <> m) "")
         Right _ -> do
-          r <- withRootLock root (runDoctor' root opts)
+          r <- withRootLock root (runDoctor' dw root opts)
           case r of
             Just x -> pure x
             Nothing ->
               diagnoseOnly
                 (Finding "I10" Bad "--repair 需要 root 独占锁，另一个 pm 实例正持有——本轮只诊断，未做任何修复" "")
-  | otherwise = runDoctor' root opts
+  | otherwise = runDoctor' dw root opts
  where
   diagnoseOnly f = do
-    (fs, _) <- runDoctor' root opts {doRepair = False}
+    (fs, _) <- runDoctor' dw root opts {doRepair = False}
     let all' = fs <> [f]
     pure (all', if maximum (Info : map fSeverity all') >= Warn then 1 else 0)
 
-runDoctor' :: FilePath -> DoctorOpts -> IO ([Finding], Int)
-runDoctor' root opts = do
+runDoctor' :: DriveWait -> FilePath -> DoctorOpts -> IO ([Finding], Int)
+runDoctor' dw root opts = do
   (entries, jwarns) <- readJournal root
   let journalFindings =
         [ Finding
@@ -187,7 +203,7 @@ runDoctor' root opts = do
     CatRefused ws ->
       pure ([Finding "CATALOG" Bad w "排除原因后重试，或 pm scan 重建；快照被拒说明有人手编过或介质出错" | w <- ws] <> deepSkipped "快照载入失败")
     CatLoaded cat ws -> do
-      deepFindings <- if doDeep opts then deepVerify root cat else pure []
+      deepFindings <- if doDeep opts then deepVerify dw root cat else pure []
       let nUnverified = length [() | e <- Map.elems (catEntries cat), enLastVerified e == Nothing]
       pure
         ( [Finding "CATALOG" Warn ("快照坏代已跳过（本轮按较旧一代核对）: " <> w) "pm scan 重建" | w <- ws]
@@ -558,18 +574,21 @@ staleTmpFiles root expected = do
         Left e -> Left (show e)
         Right fs -> Right fs
 
-deepVerify :: FilePath -> Catalog -> IO [Finding]
-deepVerify root cat = do
+deepVerify :: DriveWait -> FilePath -> Catalog -> IO [Finding]
+deepVerify dw root cat = do
   results <- forM (Map.elems (catEntries cat)) $ \e -> do
     let abs' = root </> enPath e
+    -- 1.1.2：盘不在时 doesFileExist 答 False——先等盘，否则掉线被报成「消失」
+    ensureDrive dw root "深验"
     ex <- doesFileExist abs'
     if not ex
       then pure [Finding "DEEP" Warn ("条目在盘上消失: " <> enPath e) "跑 pm scan 刷新索引"]
       else do
         -- 三十四轮（同型扫尽）：--deep 扫全库、窗口以分钟计，一个被占的
         -- 文件不该让整轮诊断崩掉；读失败也不得折叠成 CORRUPT（下一步不同：
-        -- 稍后重跑 vs 核查介质）。
-        actualE <- try (sha256File abs') :: IO (Either IOException Text)
+        -- 稍后重跑 vs 核查介质）。1.1.2：读错先按瞬断判（盘不在等它回来、
+        -- 再读这一条），确定性的读错与等不到盘才落成 Warn。
+        actualE <- try (withDriveRetry dw root ("深验 " <> enPath e) (sha256File abs')) :: IO (Either IOException Text)
         pure $ case actualE of
           Left ioe ->
             [Finding "DEEP" Warn ("条目读取失败（被占/介质？）: " <> enPath e <> "（" <> show ioe <> "）") "稍后重跑 pm doctor --deep"]

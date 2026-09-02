@@ -161,6 +161,8 @@ src/Pm/Hash.hs              -- crypton SHA-256 流式 + 目录指纹（FilePath 
 src/Pm/Diff.hs              -- 两个 Catalog → 六态差异（纯函数；只认 filename+sha，不看 mtime）
 src/Pm/Plan.hs              -- Diff/规则 → Plan（规则/校验为纯函数；计划文件的存/取/枚举 IO 同在此——listPlans 三十五轮自 Serve 迁入）
 src/Pm/Exec.hs              -- ★安全内核：唯一**写入/落位/改名**照片字节的模块（另两处只读的字节出口见下「关键结构性质 2」；pm 状态文件写口在 Config/Journal/Catalog/Plan/Trash，三十六轮收窄措辞；类型面在 Pm.ExecTypes，三十四轮拆出）
+src/Pm/Removable.hs         -- 可移动介质瞬断保护（1.1.2，§6.4 末段）：盘在判据、IOException 三分、等盘/短停重试、扫描按 pass 续、执行按组续跑（内核之外的会话层；不写照片字节）
+src/Pm/Derived.hs           -- .pm/derived 派生件对账口（1.1.2 从 Convert 字节级拆出，解 Doctor→Convert→Cli 依赖环；Convert 再导出）
 src/Pm/Sort.hs              -- 卡/收件目录 → 分段提议与归位计划（源扫描层在 Pm.SortSource，三十五轮拆出）
 src/Pm/Names.hs             -- 事件夹/文件名解析、规范化、rename 计划（目标唯一性校验）
 src/Pm/Versions.hs          -- 版本组聚合报告
@@ -364,23 +366,32 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 接住。`pm doctor` 默认对「上次 CleanShutdown 之后的全部 Done」重 hash（有界：
 只有被中断那场会话）。
 
-**会瞬断的可移动介质（2026-09-02 真实盘实录，运维路径而非内核改动）**：
-外置 USB 盘在持续 I/O 下约每 10 min 掉线一次时，裸跑 `pm apply` 的续跑代价是
-「每个已 Done 的 Copy 目标重 hash 判同」（§6.1 步 2，每次掉线白读几十 GB），
-且掉线若落在「rename 落位 → 写 Done」之间会留下 C2 格——重跑本身**不自愈**
-（Quarantine 看见原位是新字节，报「victim 内容与计划时不符」，组闭包连带
-Copy 不执行），只有 `--repair` 能补记。仓内 `scripts/backup_watchdog.py`
-是这类介质的标准跑法：按备份 root journal 算断点 → `pm apply <id> --only
-组首-组尾` 分块 → 非零退出后等 root-id.json 可读再续 → 对「有 Intent 无 Done」
-的 op 核盘认洞（C2 / Q-DONE-LOST 同判据）并跳过 → 收尾 `pm doctor --backup
---repair` + `pm backup`。**默认复验窗口的一个后果**：分块跑完的每一块都是
-CleanShutdown，收尾 doctor 的 C4 集合为空、对字节零重读——它不是介质核验；
-写入后的字节核验走 `scripts/verify_backup_dst.py`（按计划 sha 全文重读）或
-`scripts/verify_backup_entries.py`（按备份 catalog 条目挑，如 `--verified-on <日期>`
-只读「那天只在写入端算过 sha、从未回读」的那批）或 `--deep`；两支核验与看门狗共用
-`scripts/backup_verify.py` 的 `Drive`（root-id.json 可读 = 盘在；掉线就等它回来、冷却、
-从被打断的那条接着读，`--max-drops` 兜底、`--retry` 续上次），不用人盯。
-pm 不改：分块/自愈若要内建，属 §15 待决。「已归档，冗余」标签**不由 Done 驱动**——它是当前 catalog
+**会瞬断的可移动介质（2026-09-02 真实盘实录；1.1.2 起内建，`Pm.Removable`）**：
+外置 USB 盘在持续 I/O 下约每 10 min 掉线一次（当日 11 次，最短 2 s 内重挂）。掉线
+在内核里是**进程死亡语义**（本节矩阵接住），但裸重跑的代价是「每个已 Done 的
+Copy 目标重 hash 判同」（§6.1 步 2，每次掉线白读几十 GB），且掉线落在「rename 落位
+→ 写 Done」之间会留下 C2 格——重跑本身**不自愈**（Quarantine 看见原位是新字节，
+报「victim 内容与计划时不符」，组闭包连带 Copy 不执行），只有 `--repair` 能补记。
+1.1.1 时这些由仓内脚本在外面兜（分块 `--only` 续跑的看门狗，已退役）；1.1.2 把同一
+套判据收进 pm：盘在 = `.pm/root-id.json` 读得出；一个 `IOException` 三分——确定性
+一族（userError / 权限 / 已存在 / 非法操作…）原样抛出（测试注入与 pm 自己的
+fail-closed 拒绝都在这一族，行为与 1.1.1 逐字相同），盘不在 → 等它回来（缺省
+1800 s，`[backup] drive-wait`，0 = 关闭）再冷却 30 s，盘在而 EINVAL 一类 → 短停，
+同一步骤最多 5 次。续跑单位：扫描按 pass（拿这一遍的 catalog 当旧快照重扫，只补
+漏）；执行按**组**（`Pm.Cli.executePlanNowWith` → `execPlanRetry`：内核经
+`ExecEnv.eeProgress` 逐项报进度；异常后等盘、先 `doctor --repair` 把 C2 / R2 /
+Q-DONE-LOST 补上，再按「组内每项都 DONE/同内容 SKIP」或「组内每项 journal 末事件
+都是 Done」结算——后者的结局从 JDone 记录（sha / trashRel）+ 一次 dst stat 重建，
+形态与内核落位时相同——只把没结算的组交给下一场 `execPlan`，内核既有的崩溃恢复
+分支接手：victim 已入 trash 且 sha 相符视同完成、dst 已同内容 SKIP，字节不重拷）；
+`doctor --backup [--deep]` 整场幂等可重跑，`--deep` 逐条先等盘再探存在性（盘不在
+时 `doesFileExist` 答 False，会把掉线报成「消失」），场末盘不在则整场作废重跑。
+锁与 journal 句柄随会话死、随会话重开；两场之间无锁窗口只对同 root 的另一个 pm
+可见（它拿到锁就是常规 I10 竞争）。写入后的**字节核验**仍是另一件事：走
+`scripts/verify_backup_dst.py`（按计划 sha 全文重读）/ `verify_backup_entries.py`
+（按备份 catalog 条目挑，如 `--verified-on <日期>`）或 `--deep`；两支脚本共用
+`scripts/backup_verify.py` 的 `Drive`（同一「root-id.json 可读 = 盘在」判据）。
+「已归档，冗余」标签**不由 Done 驱动**——它是当前 catalog
 的 sha 集合判据（快照级提示，不是删除授权），据实更正见 DESIGN-COMMANDS §7。
 **撕裂尾（掉电写了半行）不是损坏**：追加前先查末字节，不是换行就先补 `\n`
 ——新记录绝不与残行黏成一条（那会吞掉一条真实记录，并把残行从「末行半截」Warn
@@ -585,7 +596,7 @@ REVIEW-LOG 第 28 轮。
 |---|---|
 | **Windows 输出编码（ACP=936）**：GHC 默认 CP936，emoji/勾号直接崩进程、重定向输出 GBK 字节（本机已实测复现） | main 首行 `hSetEncoding stdout/stderr utf8`；`--json` 走 ByteString 直写绕开编码器与 CRLF；console 场景 `SetConsoleOutputCP(65001)`；§13 编码回归测试（**尚未实现**，见 §13） |
 | `directory` rename/copy 的替换语义（静默覆盖） | Exec 禁用清单 + 一律 `Pm.Win.moveBoundNoReplace`（句柄形态 no-replace，§6.1/§6.2）；P1 测试覆盖目标已存在分支 |
-| 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C3/C4 + doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`）；会反复瞬断的盘走 `scripts/backup_watchdog.py` 分块续跑 + `scripts/verify_backup_dst.py` 写后全文重读（§6.4 末段，2026-09-02 实录：当日掉线 8 次、527 组更新落位并核过） |
+| 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C3/C4 + doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`）；会反复瞬断的盘由 `Pm.Removable` 内建等盘续跑（1.1.2；§6.4 末段，2026-09-02 实录：当日掉线 11 次、527 组更新落位并核过）+ `scripts/verify_backup_dst.py` 写后全文重读 |
 | 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤）；CJK 路径入 golden |
 | 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode + 只探 REMOVABLE/FIXED（§9） |
 | exFAT 备份盘（无元数据日志、rename 原子性弱） | 矩阵不依赖原子性；FS 类型/粒度入 root-id.json；mtime 只做同 root 缓存键（§3） |

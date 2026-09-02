@@ -93,7 +93,7 @@ caseFirstPartySweep = withSystemTempDirectory "pm-guard" $ \dir -> do
   assertBool "正常缺失形态仍放行（pm 自己会创建）" (r /= Nothing)
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
-mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
 
 -- ─── P3b-9（六轮） ──────────────────────────────────────────────────────────
 

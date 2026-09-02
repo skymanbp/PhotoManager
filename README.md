@@ -30,7 +30,7 @@ a whole (`pm undo`).
 > review gate (**recorded round by round in [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md);
 > the convergence verdict is whatever its last section says and is not copied
 > here**), and each gate with an observable automated anchor gets a "delete it and
-> exactly one test turns red" mutation case (428 tests, 0 GHC warnings); gates
+> exactly one test turns red" mutation case (436 tests, 0 GHC warnings); gates
 > without an anchor (the GUI has no harness; concurrent interleavings have no
 > deterministic observation point) are registered in REVIEW-LOG as residuals rather
 > than passed off as covered.
@@ -68,7 +68,9 @@ Adversarial review archive: [docs/reviews/](docs/reviews/).
   incremental; the drive is recognised by root UUID, not by drive letter; **backup
   scope = main library minus the staging area** (`To-Be-Sync'd\` is transit only and
   never enters the backup drive, ruled 2026-08-31); anything extra on the backup
-  drive (EXTRA) is only reported, never touched.
+  drive (EXTRA) is only reported, never touched. A USB drive that drops mid-scan or
+  mid-apply is waited for and the run resumes where it stopped (1.1.2, `[backup]
+  drive-wait`, default 1800 s) — finished files are never re-copied or re-hashed.
 - **Feature 5 · Showcase distribution**: `pm vault status` (album ↔ vault nine-state
   diff, `--json` compatible with the legacy script), `pm vault push` (copy into a
   category + DRIFT adjudication plan + print the explicit git steps — pm never runs
@@ -183,12 +185,12 @@ pm album ignore 26-06-R66/x.jpg …   # ignore a candidate: recorded by content 
 pm convert 成片/26-06-R66/x.tif --also-album   # non-jpg → derived jpg (Pillow, written to .pm/derived) → same finished event folder (+ album) plan; original untouched
 pm backup init E:\Photography    # once: register the backup drive (recognised by UUID, not by drive letter)
 pm backup                        # main library → backup drive, one-way incremental (staging To-Be-Sync'd excluded; EXTRA is only reported, never touched)
-python scripts/backup_watchdog.py --plan <id> --root E:\Photography --main D:\Photography --log wd.log --final-doctor
-                                 # flaky USB drive: runs `pm apply --only` in chunks, waits for the drive to come back and resumes from the journal,
-                                 # recognises "landed on disk but Done lost" holes, ends with `pm doctor --backup --repair` + `pm backup` (pm itself unchanged)
+                                 # flaky USB drive (built in since 1.1.2): if the drive drops mid-scan or mid-apply, pm waits for it to come back
+                                 # (up to `[backup] drive-wait`, default 1800 s), runs `doctor --repair` for the interrupted item and resumes from where it
+                                 # stopped — finished files are never re-copied or re-hashed; `pm apply` and `pm doctor --backup [--deep]` behave the same
 python scripts/verify_backup_dst.py --plan <id> --root E:\Photography          # media check after a big write: re-read every copy target of that plan in full, compare sha
 python scripts/verify_backup_entries.py --root E:\Photography --verified-on 2026-08-26   # same, by catalog entries (e.g. only those hashed at write time, never re-read)
-                                 # both wait for a dropped drive to come back and resume by themselves (shared kernel scripts/backup_verify.py, also used by the watchdog)
+                                 # both wait for a dropped drive to come back and resume by themselves (shared kernel scripts/backup_verify.py)
 pm clean staging                 # only cleans staging files that have same-sha copies in BOTH the archive tier and the backup drive
 pm vault status                  # album ↔ vault showcase nine-state diff (six states compatible with sync_photos.py,
                                  # --json copies those six field by field; the other three: UNPUSHABLE/UNSTABLE/HELD)
@@ -217,8 +219,8 @@ pm resolve <id> --item N --keep src|dst|both   # conflict adjudication (src = th
 pm doctor                        # crash-recovery reconciliation + integrity check (read-only by default)
 pm undo --last [N]               # generate a reverse plan from the journal: undo the last N completed operations (default 1; --backup/--vault select the side), then pm apply
 pm config                        # print configuration and the health of every path (read-only)
-pm config set --vault <dir>      # change vault / --photos-json / --workers /
-                                 # --portfolio-dir / --vault-push / --portfolio-push
+pm config set --vault <dir>      # change vault / --photos-json / --workers / --drive-wait (seconds to wait for a dropped backup
+                                 # drive, 0 = off) / --portfolio-dir / --vault-push / --portfolio-push
                                  # (the three publish-command settings; the main library path is read-only, use pm init)
 pm serve                         # 127.0.0.1 JSON API (for the GUI; read-only by default, see --writable / --allow-apply)
 ```
@@ -370,7 +372,7 @@ All measured on the real library (commands and sources reproducible, not estimat
 | Incremental scan (4633 files, 4633 reused / 0 to hash, workers=16) | 1.58 s | `pm scan` 2026-09-02 on 1.1.1, [release-notes/v1.1.1](docs/release-notes/v1.1.1.md) |
 | Hash throughput (14.0 GiB across 122 ARW, workers=16) | 19.4 s | `pm scan` 2026-08-26 — the pre-1.1.1 future-mtime re-hash, which no longer happens |
 | First full hash (480 GiB class) | ~10–25 min | first library build, recorded |
-| Test suite (428 tests, whole suite serialised — required by process-level stdout redirection) | 10–40 s | `stack test` |
+| Test suite (436 tests, whole suite serialised — required by process-level stdout redirection) | 10–90 s | `stack test` |
 | GHC warnings | 0 | `stack build` |
 | Adversarial review gate | recorded per round (NO-GO findings verified first-hand → class-level fix → focused re-review; convergence = the last section's verdict) | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | Mutation verification | one mutation per load-bearing gate with an observable automated anchor, its paired test turns red (all discrimination tables of rounds 34–36 and the P7 rounds pass; gates without an anchor registered as residuals) | REVIEW-LOG convergence evidence per round |
@@ -494,6 +496,16 @@ binaries in a Release are not built on the author's machine.
   mtime lies in the future (camera clock + preserved timestamps) were re-hashed on every
   scan (14 GiB per run on this library); `statHitStable` now also trusts a write window
   that has not opened yet — one re-hash when it does, then stable for good.
+- ~~Built-in protection against a backup drive that drops mid-run~~ ✅ 1.1.2 (user ruling
+  2026-09-02, after a day with 11 USB drops): `Pm.Removable` — an I/O error is judged by
+  error type and by whether `.pm/root-id.json` is still readable (deterministic errors are
+  rethrown unchanged; drive gone → wait up to `[backup] drive-wait`, default 1800 s;
+  drive present but EINVAL-style → short pause, bounded retries). `pm backup` re-scans
+  reusing everything already hashed; `pm apply` records per-item progress, runs
+  `doctor --repair` between sessions so a copy interrupted between rename and Done counts
+  as done, and re-runs only the unfinished groups; `pm doctor --deep` waits per entry
+  instead of reporting thousands of bogus "unreadable" rows. The former
+  `scripts/backup_watchdog.py` is retired; the two verify scripts stay.
 
 **Known limitations**:
 

@@ -63,6 +63,11 @@ data ExecEnv = ExecEnv
     -- 清单必须指向存在且 StPending 的条目——否则屏障的世界观与计划不符，
     -- 整批拒绝。「要不要屏障」仍是内核的知识（'Pm.Plan.kindBarrier'）：
     -- 该有而这里是 Nothing → 整批拒绝，缺席不会退化成静默跳过（P3b-5/A3）。
+  , eeProgress :: PlanItem -> ItemOutcome -> IO ()
+    -- ^ 1.1.2 瞬断保护：内核每执行完一项就报一次（组回滚改写之前的原始结局）。
+    -- 会话被介质事件打断时异常逃顶、'Pm.Exec.execPlan' 交不回任何结果，
+    -- 'Pm.Removable.execPlanRetry' 靠它知道哪些项已经落了、下一场从哪继续。
+    -- 只读、不改变内核行为；默认空操作。
   }
 
 defaultExecEnv :: ExecEnv
@@ -72,6 +77,7 @@ defaultExecEnv =
     , eeDoneSync = Buffered
     , eeExpectRootId = Nothing
     , eeBarrier = Nothing
+    , eeProgress = \_ _ -> pure ()
     }
 
 data ItemOutcome

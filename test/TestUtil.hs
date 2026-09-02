@@ -296,6 +296,7 @@ mkVaultCfg root vdir =
     , cfgWorkers = Nothing
     , cfgBackupId = Nothing
     , cfgBackupSubpath = Nothing
+    , cfgDriveWait = Just 0 -- 夹具关闭瞬断等待：临时 root 被删/拒读时不得等 30 min
     , cfgPortfolioDir = Nothing
     , cfgVaultPush = Nothing
     , cfgPortfolioPush = Nothing

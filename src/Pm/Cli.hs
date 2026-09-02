@@ -58,12 +58,14 @@ import Pm.Hash (ContentProbe (..), probeConfined)
 import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), readRootState, requireMain, requireWritable)
 import Pm.Dedupe (recheckDedupeItems)
 import Pm.Diff (BackupDiff (..))
-import Pm.Exec (ExecEnv (..), ItemOutcome (..), defaultExecEnv, execPlan, outcomeLabel, updateCatalog)
+import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctorWith)
+import Pm.Exec (ExecEnv (..), ItemOutcome (..), defaultExecEnv, outcomeLabel, updateCatalog)
 import Pm.Import (stagingTop)
 import Pm.Journal (Sync (..))
 import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
+import Pm.Removable (driveWaitFor, execPlanRetry, withDriveRetry)
 import Pm.Scan (ScanResult (..), freshPending, freshnessSweep)
 import Pm.Types
 import Pm.Win (volumeFsType)
@@ -129,6 +131,7 @@ executePlanNowWith cfg sink plan = case plRootId plan of
 executePlanNow' :: Config -> (String -> IO ()) -> Plan -> IO (Int, [(PlanItem, ItemOutcome)])
 executePlanNow' cfg sink plan = do
   let root = plRootPath plan
+      dw = driveWaitFor cfg sink
       env =
         defaultExecEnv
           { eeDoneSync = if plKind plan == "backup" then Barrier else Buffered
@@ -140,13 +143,19 @@ executePlanNow' cfg sink plan = do
             -- defaultExecEnv）仍整批拒绝。
             eeBarrier = Just (runBarrier cfg sink)
           }
-  r <- execPlan env plan
+      -- 1.1.2 瞬断保护（'Pm.Removable.execPlanRetry'）：两场会话之间先
+      -- @doctor --repair@ 补记「已落位、Done 丢失」的洞（C2 / R2 / Q-DONE-LOST），
+      -- 被打断的那一项按 journal 认作完成，不重 hash、不留 C2。
+      heal = do
+        (fs, _) <- runDoctorWith dw root (DoctorOpts False True)
+        sink (printf "· 自愈：pm doctor --repair 补记 Done %d 条" (length [() | f <- fs, fRow f `elem` ["C2", "R2", "Q-DONE-LOST"], fSeverity f == Warn]))
+  r <- execPlanRetry dw heal env plan
   case r of
     Left e -> sink e >> pure (2, [])
     Right results -> do
       forM_ results $ \(it, out) ->
         sink (printf "  %3d → %s" (piIx it) (outcomeLabel out))
-      writeBackCatalog sink root results
+      withDriveRetry dw root "索引回写" (writeBackCatalog sink root results)
       let bad = [() | (_, out) <- results, isBad out]
       unless (null bad) $
         sink (printf "⚠ %d 项 CONFLICT/FAILED（其余不受影响；详见逐项结果）" (length bad))

@@ -247,7 +247,7 @@ caseTrashEmptyUnlinkFailure = withSystemTempDirectory "pm-sweep" $ \tmp -> do
   writeFile (trashDir root </> rel2) "B"
   appendManifest root (TrashRecord "a.jpg" rel1 "aa" "supersede:test" "p" t0)
   appendManifest root (TrashRecord "b.jpg" rel2 "bb" "supersede:test" "p" t0)
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
   (out, r) <- captureStdout (withDenyAll (trashDir root </> rel1) (try (runTrash cfg (TrashEmpty True) root)))
   case r :: Either IOException Int of
     Left e -> assertFailure ("unlink 异常不得逃出 runTrash: " <> show e)
@@ -293,7 +293,7 @@ caseBindRootReportsUnreadable = withSystemTempDirectory "pm-sweep" $ \tmp -> do
   createDirectoryIfMissing True root
   plan <- mkPlanIO root []
   writeFile (pmDir root </> "root-id.json") "{"
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
   r <- bindExecRoot cfg plan "rid-x"
   case r of
     Left m -> assertBool ("零候选时须说明主库身份损坏，而非宣称比对不符: " <> m) ("身份损坏" `isInfixOf` m)

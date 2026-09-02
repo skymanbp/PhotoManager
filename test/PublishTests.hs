@@ -319,12 +319,21 @@ caseRootDisjoint = withSystemTempDirectory "pm-nest" $ \dir -> do
   -- 备份登记半对（跨字段不变量的第二例）
   e5 <- checkPatch cfg {cfgBackupId = Just "B"} emptyPatch {cpWorkers = Just (Just 4)}
   assertBool ("半对登记应拒: " <> show e5) (any ("登记不完整" `isInfixOf`) e5)
+  -- 1.1.2 掉线等待：0..86400 之外拒；0 与 null（清空回默认）都合法
+  e6 <- checkPatch cfg emptyPatch {cpDriveWait = Just (Just (-1))}
+  assertBool ("负的掉线等待应拒: " <> show e6) (any ("掉线等待" `isInfixOf`) e6)
+  checkPatch cfg emptyPatch {cpDriveWait = Just (Just 0)} >>= (@?= [])
+  checkPatch cfg emptyPatch {cpDriveWait = Just Nothing} >>= (@?= [])
 
 caseConfigBackupRoundTrip :: IO ()
 caseConfigBackupRoundTrip = do
-  let c = (mkCfg "D:\\Photography") {cfgBackupId = Just "abc123", cfgBackupSubpath = Just "Photography"}
+  let c = (mkCfg "D:\\Photography") {cfgBackupId = Just "abc123", cfgBackupSubpath = Just "Photography", cfgDriveWait = Just 60}
   _ <- writeConfig c
   loadConfig >>= either assertFailure (@?= c)
+  -- 1.1.2：只设 drive-wait（未登记备份盘）也要写出 [backup] 表头并读回；裸整数不加引号
+  let onlyWait = (mkCfg "D:\\Photography") {cfgDriveWait = Just 0}
+  _ <- writeConfig onlyWait
+  loadConfig >>= either assertFailure (@?= onlyWait)
   -- 半对状态只能来自手编；渲染器忠实保全（此前整张表被静默归零——
   -- 下一次任何写回把完整登记丢掉）
   let half = c {cfgBackupSubpath = Nothing}
@@ -341,7 +350,7 @@ caseTriState = do
   tri "vault" (Just "D:\\v", False) @?= Right (Just (Just ("D:\\v" :: String)))
   tri "vault" (Nothing, False) @?= Right (Nothing :: Maybe (Maybe String))
   -- 整份：一处矛盾整体拒（exit 2 在 Main 的接线上）；全空 = 空补丁
-  let o = ConfigSetOpts (Nothing, False) (Nothing, False) (Just 8, True) (Nothing, False) (Nothing, False) (Nothing, False) Nothing
+  let o = ConfigSetOpts (Nothing, False) (Nothing, False) (Just 8, True) (Nothing, False) (Nothing, False) (Nothing, False) (Nothing, False) Nothing
   either (\m -> assertBool m ("--workers 与 --no-workers" `isInfixOf` m)) (const (assertFailure "矛盾应整体拒")) (mkPatch o)
   case mkPatch o {csWorkers = (Nothing, False)} of
     Right p -> p @?= emptyPatch

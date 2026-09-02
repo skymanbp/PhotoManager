@@ -191,7 +191,7 @@ casePreExecRow = withDup $ \root sha a b -> do
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
   saveCatalog root (dupCat sha a b)
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
   kindBarrier "dedupe" @?= Just BarrierDedupe
   kindBarrier "clean-staging" @?= Just BarrierClean
   forM_ ["sort", "backup", "import", "names", "undo", "vault-push", "restore-from-backup"] $ \k ->
@@ -217,7 +217,7 @@ caseTrashEmptyBarrier :: IO ()
 caseTrashEmptyBarrier = withDup $ \root sha a b -> do
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
       rel = "p" </> "dup.arw"
   createDirectoryIfMissing True (trashDir root </> "p")
   writeFile (trashDir root </> rel) dupBody
@@ -304,7 +304,7 @@ caseTrashEmptyTakesLock :: IO ()
 caseTrashEmptyTakesLock = withDup $ \root sha a b -> do
   now <- getCurrentTime
   writeRootInfo root (RootInfo "m" RoleMain now Nothing)
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
       rel = "p" </> "dup.arw"
   createDirectoryIfMissing True (trashDir root </> "p")
   writeFile (trashDir root </> rel) dupBody

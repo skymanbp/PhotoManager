@@ -253,7 +253,7 @@ routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
           , "vault" .= vaultJ
           , "photosJson" .= photosJ
           , "workers" .= cfgWorkers cfg
-          , "backup" .= object ["id" .= cfgBackupId cfg, "subpath" .= cfgBackupSubpath cfg]
+          , "backup" .= object ["id" .= cfgBackupId cfg, "subpath" .= cfgBackupSubpath cfg, "driveWait" .= cfgDriveWait cfg]
           , -- P7：上线命令的三项自定义（portfolio 仓路径 + 两个 push 目标）。
             "publish"
               .= object

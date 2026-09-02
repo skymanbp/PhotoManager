@@ -434,13 +434,14 @@ caseServeConfigExternalEdit = withSystemTempDirectory "pm-serve" $ \dir -> do
   _ <- writeConfig cfg
   env <- mkEnv cfg
   -- 带外改动（终端 pm config set 的效果）：不经 POST
-  _ <- writeConfig cfg {cfgVaultPath = Just vdir2, cfgWorkers = Just 7}
+  _ <- writeConfig cfg {cfgVaultPath = Just vdir2, cfgWorkers = Just 7, cfgDriveWait = Just 90}
   flip runSession (serveApp env) $ do
     r <- getReq "/api/config" [] tok
     assertStatus 200 r
     liftIO' $ do
       field ["vault", "path"] (decodeBody r) @?= Just (Aeson.String (T.pack vdir2))
       field ["workers"] (decodeBody r) @?= Just (Aeson.Number 7)
+      field ["backup", "driveWait"] (decodeBody r) @?= Just (Aeson.Number 90) -- 1.1.2 掉线等待随备份表下发
   createDirectoryIfMissing True (dir </> "other")
   _ <- writeConfig cfg {cfgMainPath = dir </> "other"}
   flip runSession (serveApp env) $ do

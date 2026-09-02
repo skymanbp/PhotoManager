@@ -422,7 +422,7 @@ caseCollisionReportsAll = withSystemTempDirectory "pm-coll" $ \tmp -> do
   createDirectoryIfMissing True root
   _ <- ensureTestRoot RoleMain root
   scanQuiet "test-root" root >>= saveCatalog root
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
   (out, rc) <-
     captureStdout
       (fst <$> runSortPlan (GoOpts False False) src (Left "Atlanta") (d 2026 8 25) (d 2026 8 26) cfg)
@@ -496,7 +496,7 @@ caseNotesArePrinted = withSystemTempDirectory "pm-notes" $ \tmp -> do
   createDirectoryIfMissing True root
   _ <- ensureTestRoot RoleMain root
   scanQuiet "test-root" root >>= saveCatalog root
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
   (out, _) <- captureStdout (runSortSurvey link 72 cfg)
   elemSub "源根本身是 symlink/junction" out @?= True
 
@@ -552,7 +552,7 @@ caseChosenNotTruncated = withSystemTempDirectory "pm-trunc" $ \tmp -> do
   createDirectoryIfMissing True root
   _ <- ensureTestRoot RoleMain root
   scanQuiet "test-root" root >>= saveCatalog root
-  let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+  let cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
   (out, rc) <- captureStdout (sortPlan src cfg)
   rc @?= 2
   -- 第 45 个（远在 40 之后）必须出现。用带本次临时目录的完整路径，既独有、

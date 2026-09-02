@@ -83,7 +83,7 @@ withIngestEnvRole role k = withSystemTempDirectory "pm-ingest" $ \tmp -> do
   now <- getCurrentTime
   writeRootInfo main' (RootInfo "im" role now Nothing)
   -- vault 的 root-id 由 ensureVaultRoot 在首次 ingest 时建（非 git 树，I11 平凡通过）
-  k (Config main' (Just vault) Nothing Nothing Nothing Nothing Nothing Nothing Nothing) inbox
+  k (Config main' (Just vault) Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing) inbox
 
 -- | 记录计划、按给定 'PlanRun' 应答的桩。
 capturePlans :: PlanRun -> IO (Plan -> IO PlanRun, IO [Plan])

@@ -221,7 +221,7 @@ withAlbumRoot k = withSystemTempDirectory "pm-album" $ \tmp -> do
   let root = tmp </> "lib"
   writeF (root </> "相册" </> ".keep") ""
   writeRootInfo root (RootInfo "m" RoleMain t0 Nothing)
-  k root (Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing)
+  k root (Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing)
 
 index :: FilePath -> IO ()
 index root = scanQuiet "m" root >>= saveCatalog root

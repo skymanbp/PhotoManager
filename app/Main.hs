@@ -20,9 +20,10 @@ import Pm.Plan (runPlanList, runPlanPrune, runPlanRm)
 import Pm.Commands
 import Pm.ConfigEdit (ConfigSetOpts (..), mkPatch, runConfigSet, runConfigShow)
 import Pm.Convert (ConvertOpts (..), runConvert)
-import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctor)
+import Pm.Doctor (DoctorOpts (..), renderFinding, runDoctorWith)
 import Pm.Ingest (runVaultIngest)
 import Pm.Names (runNames)
+import Pm.Removable (driveWaitFor)
 import Pm.Serve (ServeOpts (..), runServe)
 import Pm.Sort (runSortPlan, runSortSurvey)
 import Pm.Status (StatusOpts (..), runStatus)
@@ -104,7 +105,8 @@ run (CmdDoctor o bku vlt) = withCfg $ \cfg -> withSel bku vlt $ \sel -> do
   case eroot of
     Left (msg, code) -> putStrLn msg >> pure code
     Right root -> do
-      (findings, code) <- runDoctor root o
+      -- 1.1.2：瞬断保护版（备份盘 --deep 途中掉线：等盘、按条续；非备份 root 无感）
+      (findings, code) <- runDoctorWith (driveWaitFor cfg putStrLn) root o
       if null findings
         then putStrLn "✓ doctor: 无发现"
         else mapM_ (putStrLn . renderFinding) findings
@@ -236,6 +238,10 @@ parserInfo =
       <*> ( (,)
               <$> optional (option auto (long "workers" <> metavar "N" <> help "扫描并发数（1..64）；备份盘不读它，默认单线程防 HDD 寻道抖动，另用 pm backup --workers"))
               <*> switch (long "no-workers" <> help "清空并发数（回到默认=核数）")
+          )
+      <*> ( (,)
+              <$> optional (option auto (long "drive-wait" <> metavar "秒" <> help "备份盘瞬断保护：盘掉线后最多等多少秒再从中断处续跑（0..86400；0 = 关闭，出错照旧中止；缺省 1800）"))
+              <*> switch (long "no-drive-wait" <> help "清空掉线等待（回到缺省 1800 s）")
           )
       <*> pair "portfolio-dir" "portfolio 仓的本地路径（上线命令生成用）"
       <*> pair "vault-push" "展示集仓的 push 目标（如 origin main；不设 = 裸 git push）"

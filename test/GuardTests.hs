@@ -82,7 +82,7 @@ guardTests =
     ]
 
 mkCfg :: FilePath -> Maybe FilePath -> Config
-mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+mkCfg mainP vdir = Config mainP vdir Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
 
 caseWildcardNegations :: IO ()
 caseWildcardNegations = withSystemTempDirectory "pm-guard" $ \tmp -> do
@@ -728,8 +728,8 @@ caseBackupRegisterRevalidates = withSystemTempDirectory "pm-breg" $ \dir -> do
   flip finally (maybe (pure ()) (setEnv "PM_CONFIG") mold) $ do
     let mainP = dir </> "main"
         vaultP = dir </> "vault"
-        onDisk = Config mainP (Just vaultP) Nothing Nothing Nothing Nothing Nothing Nothing Nothing
-        staleArg = Config mainP Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+        onDisk = Config mainP (Just vaultP) Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+        staleArg = Config mainP Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
     createDirectoryIfMissing True mainP
     createDirectoryIfMissing True vaultP
     _ <- writeConfig onDisk

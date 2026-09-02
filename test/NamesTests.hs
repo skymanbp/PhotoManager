@@ -245,6 +245,7 @@ mkMainCfg root =
     , cfgWorkers = Nothing
     , cfgBackupId = Nothing
     , cfgBackupSubpath = Nothing
+    , cfgDriveWait = Just 0
     , cfgPortfolioDir = Nothing
     , cfgVaultPush = Nothing
     , cfgPortfolioPush = Nothing

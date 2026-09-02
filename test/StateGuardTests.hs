@@ -555,7 +555,7 @@ caseCopyDstUsesResolvedPath = withSystemTempDirectory "pm-sguard" $ \dir -> do
   removeDirectoryLink rootLink
 
 mkSCfg :: FilePath -> Config
-mkSCfg root = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+mkSCfg root = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
 
 -- ─── P6-C（路线图③）：提交型操作的句柄形态 ────────────────────────────────
 

@@ -621,7 +621,7 @@ p22Tests =
           let rec1 = TrashRecord "v.jpg" rel "aa" "supersede:test" "p" now
           appendManifest root rec1
           appendManifest root rec1
-          let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+          let cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
           code <- runTrash cfg (TrashEmpty True) root
           code @?= 0
           ex <- doesFileExist (trashDir root </> rel)
@@ -651,7 +651,7 @@ p22Tests =
           createDirectoryIfMissing True root
           now <- getCurrentTime
           writeRootInfo root (RootInfo "rid-A" RoleMain now Nothing)
-          let cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+          let cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
           plan0 <- mkPlanIO (dir </> "stale-path") []
           let plan = plan0 {plKind = "import"}
           r <- bindExecRoot cfg plan "rid-A"
@@ -665,7 +665,7 @@ p22Tests =
     , testCase "工作流 F031/F099: pm undo 生成计划 → 与其它生成器同码：退出 1（计划已存、未执行）+ 计划落盘" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"
-              cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+              cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
           createDirectoryIfMissing True (root </> "成片")
           op <- mkCopyOp (dir </> "s.jpg") "UNDO-ME" ("成片" </> "u.jpg")
           plan <- mkPlanIO root [op]

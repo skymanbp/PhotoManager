@@ -88,7 +88,7 @@ caseExecuted = do
 caseDeleteAndPrune :: IO ()
 caseDeleteAndPrune = withSystemTempDirectory "pm-planexec" $ \tmp -> do
   let root = tmp </> "lib"
-      cfg = Config root Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+      cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
   mkMain root
   let pA = mkPlan pidA root [(0, StPending)]
       pB = mkPlan pidB root [(0, StPending)]

@@ -437,11 +437,12 @@
       cfgTxt("#cfg-portfolio-dir", pub.portfolioDir);
       cfgTxt("#cfg-vault-push", pub.vaultPush);
       cfgTxt("#cfg-portfolio-push", pub.portfolioPush);
-      // /api/config 的 backup 恒是对象，两个字段各自可为 null（Serve.hs:425
-      // `object ["id" .= cfgBackupId cfg, "subpath" .= cfgBackupSubpath cfg]`）。
+      // /api/config 的 backup 恒是对象，字段各自可为 null（Serve.hs
+      // `object ["id" .= …, "subpath" .= …, "driveWait" .= …]`）。
       // 认盘要 UUID + 盘内相对路径**两样**：只看 id 会把手改 config.toml 落下的
       // 半登记态说成"已登记"，然后在 subpath 位置印一个 undefined。
       const bk = c.backup || {};
+      cfgTxt("#cfg-drive-wait", bk.driveWait); // 1.1.2 掉线等待（null = 默认 1800）
       const bkId = bk.id != null && bk.id !== "" ? bk.id : null;
       const bkSub = bk.subpath != null && bk.subpath !== "" ? bk.subpath : null;
       $("#cfg-backup").textContent = bkId && bkSub
@@ -682,6 +683,8 @@
   cfgClick("#btn-cfg-portfolio-push", () => saveConfig({ portfolioPush: valOrNull("#cfg-portfolio-push") }));
   cfgClick("#btn-cfg-portfolio-push-clear", () => saveConfig({ portfolioPush: null }));
   cfgClick("#btn-cfg-backup", () => registerBackup());
+  cfgClick("#btn-cfg-drive-wait", () => saveConfig({ driveWait: Number(val("#cfg-drive-wait")) }));
+  cfgClick("#btn-cfg-drive-wait-clear", () => saveConfig({ driveWait: null }));
   $("#btn-publish-copy").onclick = () => copyPublishCommands();
 
   try { await connect(); await loadStatus(false); } catch (e) { fail(e); $("#status-banner").className = "banner bad"; $("#status-banner").textContent = "无法连接 pm serve：" + e.message; }

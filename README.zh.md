@@ -21,7 +21,7 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
 > 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
 > 为准，不在这里手抄**），凡有可观测自动化落点的闸都配"删掉它就转红"的突变
-> 验证用例（428 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
+> 验证用例（436 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
 > 性观察点）在 REVIEW-LOG 登记为残余，不冒充覆盖。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
@@ -45,7 +45,9 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
   落回成片同事件夹（`--also-album` 再进相册）或相册。
 - **功能四 · 备份**：`pm backup` 主库 → 备份盘单向增量，按 root UUID 认盘不认
   盘符；**备份范围 = 主库 − 暂存区**（`To-Be-Sync'd\` 只是中转，不进备份盘，
-  2026-08-31 裁定）；备份盘上多出来的（EXTRA）只报告永不动。
+  2026-08-31 裁定）；备份盘上多出来的（EXTRA）只报告永不动。扫描或执行途中 USB 盘
+  掉线，pm 等它回来再从中断处接着跑（1.1.2，`[backup] drive-wait`，缺省 1800 s）
+  ——已落好的文件不重拷、不重 hash。
 - **功能五 · 展示集分发**：`pm vault status`（相册 ↔ vault 九态差异，`--json`
   兼容旧脚本）、`pm vault push`（定类目拷入 + DRIFT 裁决计划 + 打印显式 git
   步骤——pm 不执行 git）、`pm vault hold`（"暂不同步"的本地决定，照片一变自动失效）、
@@ -132,12 +134,12 @@ pm album ignore 26-06-R66/x.jpg …   # 忽略候选：按内容 sha 记进主�
 pm convert 成片/26-06-R66/x.tif --also-album   # 非 jpg → 派生 jpg（Pillow，写 .pm/derived）→ 成片同事件夹（+相册）计划；原文件不动
 pm backup init E:\Photography    # 一次性：登记备份盘（按 UUID 认盘，不认盘符）
 pm backup                        # 主库 → 备份盘单向增量（范围不含暂存区 To-Be-Sync'd；EXTRA 只报告永不动）
-python scripts/backup_watchdog.py --plan <id> --root E:\Photography --main D:\Photography --log wd.log --final-doctor
-                                 # 会瞬断的 USB 备份盘：把 `pm apply --only` 分块跑，掉线后等盘回来按 journal 断点续，
-                                 # 认出「已落盘但 Done 丢失」的洞，收尾 `pm doctor --backup --repair` + `pm backup`（pm 本身不改）
+                                 # 会瞬断的 USB 备份盘（1.1.2 起内建）：扫描或执行途中盘掉线，pm 等它回来（最多 `[backup] drive-wait`，
+                                 # 缺省 1800 s），对被打断的那一项跑 `doctor --repair`，再从中断处接着跑——已落好的文件不重拷、不重 hash；
+                                 # `pm apply` 与 `pm doctor --backup [--deep]` 同样如此
 python scripts/verify_backup_dst.py --plan <id> --root E:\Photography          # 大批量写入后的介质核验：把该计划每个拷贝目标从盘上全文重读、按 sha 比对
 python scripts/verify_backup_entries.py --root E:\Photography --verified-on 2026-08-26   # 同上但按索引条目挑（例如只在写入端算过 sha、从没回读过的那批）
-                                 # 两支都会自己等掉线的盘回来接着读（共用内核 scripts/backup_verify.py，看门狗也用它）
+                                 # 两支都会自己等掉线的盘回来接着读（共用内核 scripts/backup_verify.py）
 pm clean staging                 # 仅清理「归档层+备份盘」都有同 sha 副本的暂存文件
 pm vault status                  # 相册 ↔ vault 展示集九态差异（其中六态兼容 sync_photos.py，
                                  # --json 逐字段照抄那六个；另三态 UNPUSHABLE/UNSTABLE/HELD）
@@ -166,7 +168,7 @@ pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先
 pm doctor                        # 崩溃恢复对账 + 完整性体检（默认只读）
 pm undo --last [N]               # 由 journal 生成反向计划：撤销最近 N 个已完成操作（默认 1；--backup/--vault 选侧），再 pm apply 执行
 pm config                        # 打印配置与每条路径的健康状态（只读）
-pm config set --vault <目录>     # 改 vault / --photos-json / --workers /
+pm config set --vault <目录>     # 改 vault / --photos-json / --workers / --drive-wait（备份盘掉线后最多等多少秒，0 = 关）/
                                  # --portfolio-dir / --vault-push / --portfolio-push
                                  # （上线命令三项；主库路径只读，用 pm init）
 pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读，见 --writable / --allow-apply）
@@ -272,7 +274,7 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 | 增量扫描（4633 文件，复用 4633 / 待 hash 0，workers=16） | 1.58 s | `pm scan` 2026-09-02，1.1.1 上实测，[release-notes/v1.1.1](docs/release-notes/v1.1.1.md) |
 | hash 吞吐（122 个 ARW 共 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26——1.1.1 之前「未来 mtime 每次重 hash」的那批，修后不再发生 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（428 例，整套序列化跑——进程级 stdout 重定向所需） | 10–40 s | `stack test` |
+| 测试套件（436 例，整套序列化跑——进程级 stdout 重定向所需） | 10–90 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
 | 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | 突变验证 | 凡有可观测自动化落点的承重闸各配一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过；无落点者登记为残余） | REVIEW-LOG 各轮收敛证据 |
@@ -365,6 +367,13 @@ CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同�
 - ~~未来 mtime 的索引复用~~ ✅ 1.1.1（真实盘复核 2026-09-02）：mtime 在未来的文件
   （相机时钟错 + 拷贝保留时间戳）每次 scan 都被重 hash（本库每跑一次 14 GiB）；
   `statHitStable` 现在同样信任「写入窗口尚未到来」的文件——到期重 hash 一次，此后永久回稳。
+- ~~备份盘瞬断保护内建~~ ✅ 1.1.2（用户裁定 2026-09-02，当天 USB 盘掉线 11 次之后）：
+  `Pm.Removable`——一个 I/O 异常按错误类型 + `.pm/root-id.json` 还读不读得到三分：
+  确定性错误原样抛出；盘不在 → 等它回来（最多 `[backup] drive-wait`，缺省 1800 s）；
+  盘在而 EINVAL 一类 → 短停、有界重试。`pm backup` 重扫时复用已 hash 的一切；
+  `pm apply` 逐项记进度、两场之间跑 `doctor --repair`（rename 落位后瞬断的那一项按
+  journal 认作完成）、只重跑没跑完的组；`pm doctor --deep` 按条等盘，不再吐几千行假
+  「读取失败」。原 `scripts/backup_watchdog.py` 退役，两支核验脚本保留。
 
 **已知限制**：
 

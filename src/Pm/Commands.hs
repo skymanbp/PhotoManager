@@ -177,6 +177,7 @@ runInit o = do
                               , cfgWorkers = ioWorkers o
                               , cfgBackupId = maybe Nothing cfgBackupId mold
                               , cfgBackupSubpath = maybe Nothing cfgBackupSubpath mold
+                              , cfgDriveWait = maybe Nothing cfgDriveWait mold
                               , -- P7：发布路径/push 目标与备份盘登记同类——它们是
                                 -- config set / GUI 设置页的产物，init 没有对应旗标，
                                 -- --force 重建时不保留就是静默丢设置。
