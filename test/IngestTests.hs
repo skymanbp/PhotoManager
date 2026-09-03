@@ -4,8 +4,8 @@
 -- 两份计划的形状与**预览两段式**（两份都存盘）、fail-closed 校验（含
 -- case-fold 重名 \/ 跨类目占名 \/「暂不同步」名单）、I5 分流与 I7 耦合、
 -- 「主库真的全部落完才轮到 vault」「两份都落完才给收尾步骤」两道执行闸、
--- 主库 role 闸（requireMain），以及 I7 来源登记（journal Intent 带库外
--- srcAbs）。
+-- 主库 role 闸（requireMain），I7 来源登记（journal Intent 带库外 srcAbs）
+-- 与它的**消费侧**（'Pm.Doctor' 的 I7 行：相册 ⊆ 成片 ∪ inbox-origin）。
 --
 -- 双 stat（R9，源在读取期间变化 → 拒绝）没有直接用例：无法在不引入竞态
 -- 的前提下让文件恰好在 sha256File 与 statSnap 之间变化；协议与
@@ -18,23 +18,26 @@ import Data.IORef (modifyIORef, newIORef, readIORef)
 import Data.List (isInfixOf)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist)
-import System.FilePath (isAbsolute, takeFileName, (</>))
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
+import System.FilePath (isAbsolute, takeDirectory, takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Pm.Catalog (saveCatalog)
 import Pm.Cli (GoOpts (..), PlanRun (..), savePlanAndMaybeRun')
 import Pm.Config (Config (..), writeRootInfo)
+import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
+import Pm.Hash (sha256File)
 import Pm.Ingest (ingestSteps, runVaultIngest)
-import Pm.Journal (JEntry (..))
+import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, withJournal)
 import Pm.Op
 import Pm.Plan
 import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.VaultHold (VaultHold (..))
 import Pm.Win (openExclusiveBinary)
 import System.IO (hClose)
-import TestUtil (captureStdout, isIntent, journalEntries, mkVaultCfg, t0, tpid)
+import TestUtil (captureStdout, elemSubstr, isIntent, journalEntries, mkVaultCfg, scanQuiet, t0, tpid, writeF)
 
 ingestTests :: TestTree
 ingestTests =
@@ -50,6 +53,9 @@ ingestTests =
     , testCase "三十三轮 F1：源/目标存在但读不出（独占占住）→ 错误清单 + 退出 2 + 零计划，不是 CLI 崩溃" caseIngestUnreadable
     , testCase "工作流 F072：ingestSteps 搬移行经 inboxDoneCommand——展开字符文件名给手动指引而非裸拼；命令行无反斜杠" caseIngestStepsSink
     , testCase "第一方自审 R1 的 ProbeUnknown 臂：占名查不出（非法字符名）→ 本批拒绝 exit 2 + 零计划（无需 ACL 夹具）" caseIngestProbeUnknown
+    , testCase "I7 消费侧端到端：ingest 落下的相册照片（成片没有）→ doctor 判「已解释」，源随后被移进 _done 也不改判" caseI7Inbox
+    , testCase "I7 消费侧：成片有同 sha 副本 = 已解释；两条都不成立 → I7 Warn 逐条列出、exit 1，--repair 不碰它" caseI7Twin
+    , testCase "I7 判据三处判别：src 在库内 / sha 与盘面不符 → 不算来源；journal 有告警 → 整条不判（fail-closed）" caseI7Discriminate
     ]
 
 -- | REVIEW-LOG 曾登记「crossCat 的 ProbeUnknown 分支需 ACL 夹具」——不需要：
@@ -292,3 +298,96 @@ caseIngestUnreadable = withIngestEnv $ \cfg inbox -> do
   c2 @?= 2
   ps <- gotP
   length ps @?= 0
+-- ─── I7 消费侧（doctor：相册 ⊆ 成片 ∪ inbox-origin，§10.3 第 2 项） ──────────
+
+-- | 判定侧要的两个输入：索引（相册\/成片两层）与 journal。夹具建索引再跑
+-- doctor，只取 I7 行 + 退出码。
+i7Rows :: FilePath -> IO ([Finding], Int)
+i7Rows root = do
+  cat <- scanQuiet "im" root
+  saveCatalog root cat
+  (fs, code) <- runDoctor root (DoctorOpts False False)
+  pure ([f | f <- fs, fRow f == "I7"], code)
+
+-- | 一句人读的 I7 汇总（Info 行）+ Warn 行点名的路径。
+i7Summary :: [Finding] -> (String, [String])
+i7Summary fs = (concat [fDetail f | f <- fs, fSeverity f == Info], [fDetail f | f <- fs, fSeverity f == Warn])
+
+-- | 端到端：@pm vault ingest --apply@ 把 @_inbox@ 的照片拷进相册（成片里没有
+-- 这一份），doctor 必须按 journal 的库外 srcAbs 判「已解释」而不是违例。
+-- **源随后被移走**（skill 的 @_inbox→_done@ 那一步）后仍然算数——来源证据是
+-- journal 记录，不是源文件还在不在。
+-- 突变配对：删掉 'Pm.Doctor.i7Findings' 的 inbox 那条（或把 @Just False@ 判据
+-- 收成「src 存在且在库外」）→ 本用例转红。
+caseI7Inbox :: IO ()
+caseI7Inbox = withIngestEnv $ \cfg inbox -> do
+  writeFile (inbox </> "a.jpg") "PHOTO-A"
+  c <- runVaultIngest (realRun cfg) True "landscape" [inbox </> "a.jpg"] cfg
+  c @?= 0
+  removeFile (inbox </> "a.jpg") -- 收尾步骤把源移进 _done
+  (fs, code) <- i7Rows (cfgMainPath cfg)
+  let (info, warns) = i7Summary fs
+  warns @?= []
+  assertBool ("汇总应记 1 张 inbox 来源、0 未解释: " <> info) ("inbox 来源 1" `elemSubstr` info && "未解释 0" `elemSubstr` info)
+  code @?= 0
+
+-- | 成片里有同 sha 的那份 = 已解释（设计内冗余）；既无成片副本又无来源记录的
+-- 相册文件逐条报 Warn 并把退出码抬到 1。@--repair@ 与它无关：I7 不在
+-- 'Pm.Doctor.applyRepairs' 的白名单里，跑完盘上一个字节不变。
+-- 突变配对：删掉成片同 sha 那条 → @a.jpg@ 也被报违例，本用例转红。
+caseI7Twin :: IO ()
+caseI7Twin = withI7Root $ \root -> do
+  writeF (root </> "成片" </> "26-06-R66" </> "a.jpg") "SAME-BYTES"
+  writeF (root </> "相册" </> "a.jpg") "SAME-BYTES"
+  writeF (root </> "相册" </> "orphan.jpg") "NO-TWIN"
+  (fs, code) <- i7Rows root
+  let (info, warns) = i7Summary fs
+  map (takeFileName . last . words) warns @?= ["orphan.jpg"]
+  assertBool ("汇总: " <> info) ("2 张 = 成片副本 1" `elemSubstr` info && "未解释 1" `elemSubstr` info)
+  code @?= 1
+  _ <- runDoctor root (DoctorOpts False True)
+  readFile (root </> "相册" </> "orphan.jpg") >>= (@?= "NO-TWIN")
+
+-- | 判据的三处判别，逐条都有独立的错误后果：
+--
+--   * src 在**库内**（这里：成片自己那份，即 @pm album add@ 的形态）不是
+--     inbox 来源——把它算进来，相册 ⊆ 成片 就成了同义反复；
+--   * journal 记的 sha 与盘上现字节不符 → 那条记录说的不是这份字节；
+--   * journal 有告警（中段损坏）→ 整条判据不判：「journal 里没有别的来源记录」
+--     是否定式，折叠不全时会把正常照片报成违例（fail-closed）。
+caseI7Discriminate :: IO ()
+caseI7Discriminate = do
+  -- ① src 在库内
+  withI7Root $ \root -> do
+    writeF (root </> "相册" </> "x.jpg") "BYTES-X"
+    sha <- sha256File (root </> "相册" </> "x.jpg")
+    plantCopyIntent root (root </> "成片" </> "26-06-R66" </> "x.jpg") ("相册" </> "x.jpg") sha
+    (fs, _) <- i7Rows root
+    assertBool "库内来源不算 inbox-origin" (not (null (snd (i7Summary fs))))
+  -- ② sha 与盘面不符
+  withI7Root $ \root -> do
+    writeF (root </> "相册" </> "x.jpg") "BYTES-X"
+    plantCopyIntent root (takeDirectory root </> "_inbox" </> "x.jpg") ("相册" </> "x.jpg") "deadbeef"
+    (fs, _) <- i7Rows root
+    assertBool "记录的 sha 与盘面不符 → 不算来源" (not (null (snd (i7Summary fs))))
+  -- ③ journal 中段损坏 → 不判
+  withI7Root $ \root -> do
+    writeF (root </> "相册" </> "x.jpg") "BYTES-X"
+    withJournal root $ \j -> jAppend j Buffered (JCleanShutdown t0)
+    appendFile (journalPath root) "not-json\n"
+    withJournal root $ \j -> jAppend j Buffered (JCleanShutdown t0)
+    (fs, _) <- i7Rows root
+    let (info, warns) = i7Summary fs
+    warns @?= []
+    assertBool ("journal 有告警时须明说不判: " <> info) ("不判" `elemSubstr` info)
+
+-- | 只有主库身份的空 root（I7 用例不需要 vault\/config）。
+withI7Root :: (FilePath -> IO ()) -> IO ()
+withI7Root k = withSystemTempDirectory "pm-i7" $ \root -> do
+  writeRootInfo root (RootInfo "im" RoleMain t0 Nothing)
+  k root
+
+-- | 往 journal 里种一条 Copy 的 Intent（= ingest 的来源记录形态）。
+plantCopyIntent :: FilePath -> FilePath -> FilePath -> T.Text -> IO ()
+plantCopyIntent root srcAbs dstRel sha =
+  withJournal root $ \j -> jAppend j Buffered (JIntent (opId tpid 0) (OpCopy srcAbs dstRel sha 1 0) t0)

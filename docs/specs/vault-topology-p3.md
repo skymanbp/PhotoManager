@@ -25,7 +25,7 @@
 
 ```
 摄影作品/
-├── .gitignore          # _inbox/  .ce/  _site/   ← 无 .pm/（I11 待办）
+├── .gitignore          # _inbox/  .ce/  _site/   ← 勘察当时无 .pm/（I11 待办）
 ├── .github/workflows/deploy-pages.yml
 ├── README.md · scripts/build_site.py
 ├── _inbox/ (gitignored, 含 _done/)
@@ -33,6 +33,11 @@
 ├── portrait/    6 文件
 └── urban/      24 文件     合计 79，全 .jpg/.JPG，零 png/RAW/侧车，零子目录
 ```
+
+> **截至 2026-09-03 的更正（本文是 2026-08-23 的勘察快照，正文保持当时口径）**：
+> 上面 `.gitignore` 那行的「无 `.pm/`」已不成立——展示集仓 2026-08-23 的
+> commit `2d81d36` 追加了 `.pm/` 行（用户批准，DESIGN-COMMANDS §10.3 第 3 项），
+> I11 待办随之关闭；此后又追加了 `.ccm/`。文件数与其余勘察数字仍是快照当时的值。
 
 - 追踪文件 83 = 79 照片 + 4 基建文件；照片为普通 blob（**无 LFS**）。
 - 无 manifest；元数据索引在下游 portfolio `data/photos.json`（按 Pages URL 键）。

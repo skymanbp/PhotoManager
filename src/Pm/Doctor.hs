@@ -18,6 +18,7 @@ module Pm.Doctor
 import Control.Monad (filterM, forM, forM_, unless)
 import Control.Exception (IOException, bracket, try)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Maybe (isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -32,6 +33,7 @@ import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
 import Pm.Derived (DerivedState (..), scanDerived)
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
 import Pm.Hash (sha256File, sha256Handle)
+import Pm.Import (foldPath)
 import Pm.Journal
 import Pm.Lock (withRootLock)
 import Pm.Op
@@ -39,7 +41,7 @@ import Pm.Plan
 import Pm.Removable (DriveWait, ensureDrive, noDriveWait, requireDrive, withDriveRetry)
 import Pm.Trash
 import Pm.Types
-import Pm.Win (NameKind (..), deleteBoundAt, openStateRead, probeName, resolveUnder)
+import Pm.Win (NameKind (..), deleteBoundAt, openStateRead, pathAtOrUnder, probeName, resolveUnder)
 
 data DoctorOpts = DoctorOpts
   { doDeep :: Bool
@@ -211,6 +213,14 @@ runDoctor' dw root opts = do
             <> deepFindings
         )
 
+  -- I7 判定侧（§10.3 第 2 项）：相册 ⊆ 成片 ∪ inbox-origin。判据的两个输入
+  -- （journal 与快照）任一有告警就**不判**——判据里有一条否定式（「journal 里
+  -- 没有别的来源记录」），折叠不全时会把正常照片报成违例；核不了 ≠ 已覆盖。
+  i7 <- case lc of
+    CatLoaded cat [] | null jwarns -> i7Findings root entries cat
+    CatLoaded _ _ -> pure [Finding "I7" Info "相册来源本轮不判（journal 或快照有告警，见上面的行）" ""]
+    _ -> pure []
+
   -- P8-C2：派生件（.pm/derived，DESIGN-P8 §20.2）对账——已落位 / 源已不在库 /
   -- 半成品是 pm 自建状态，与孤儿 tmp 同一条删除线；派生了还没 apply 的只报 Info。
   -- 枚举失败 → DERIVED-ENUM Bad（不在任何修复推导里），删除清单按空处理。
@@ -220,7 +230,7 @@ runDoctor' dw root opts = do
         Right xs -> ([f | (f, s) <- xs, s `elem` [DerivedStale, DerivedOrphan, DerivedTmp]], map derivedFinding xs)
 
   let findings0 =
-        journalFindings <> pendingFindings <> c4Findings <> q1 <> manifestWarns <> staleFindings <> ageFinding <> derivedFindings
+        journalFindings <> pendingFindings <> c4Findings <> q1 <> manifestWarns <> staleFindings <> ageFinding <> i7 <> derivedFindings
 
   -- P3b-7 复审新 major：--repair 会写 journal / 删自建 tmp / 生成计划，属
   -- .pm 写入口——root 必须有可解析身份且过 I11（requireWritable），否则
@@ -238,6 +248,60 @@ runDoctor' dw root opts = do
       worst = maximum (Info : map fSeverity allFindings)
       code = if worst >= Warn then 1 else 0
   pure (allFindings, code)
+
+-- | I7 的判定侧（DESIGN §2 I7 / DESIGN-COMMANDS §10.3 第 2 项）：
+-- 相册 ⊆ 成片 ∪ inbox-origin。记录侧 P6-D 就位（@pm vault ingest@ 落在主库
+-- journal 的 'JIntent' 里，'OpCopy' 自带**库外**的 @srcAbs@），这里是消费侧。
+--
+-- 「已解释」两条，都以**内容**为准——设计内冗余的定义就是「同一份字节的副本」：
+-- ① 盘上还有同 sha 的成片；② journal 里有一条 Copy 记录，dst 恰是这条相册路径、
+-- sha 与盘上现字节相同、src 在**库外**（即从 @_inbox@ 拷进来的那份）。两条都不
+-- 成立 → Warn 列给人（同 Q1：只报告、不处置；I1 不猜来源）。新行进不了任何修复
+-- 推导：'applyRepairs' 只认 C2\/R2\/Q-DONE-LOST\/C5 且要求 detail 以 oid 开头。
+--
+-- 「库外」由 'pathAtOrUnder' 三态回答（'canonicalizePath' 消解 junction 与 @..@，
+-- 同 'Pm.Exec.confinedUserPath' 的口径）：只有明确的 @Just False@ 才算库外。答不
+-- 上来（卷已拔走、ACL 拒）不算——把查不出的记录当成来源证明正是布尔探针塌态那
+-- 类错误，反方向只是多一条待人工核查的 Warn。相册层只判照片（'KindPhoto'，同
+-- 'Pm.ServeAi' 的取图判据）：侧车与 meta 不是 I7 说的那个「相册 ⊆ 成片」。
+i7Findings :: FilePath -> [JEntry] -> Catalog -> IO [Finding]
+i7Findings root entries cat
+  | null album = pure []
+  | otherwise = do
+      judged <- forM noTwin $ \e -> (,) e <$> fromInbox e
+      let unexplained = [e | (e, False) <- judged]
+          tally =
+            "相册 ⊆ 成片 ∪ inbox-origin: " <> show (length album) <> " 张 = 成片副本 "
+              <> show (length album - length noTwin)
+              <> " · inbox 来源 "
+              <> show (length judged - length unexplained)
+              <> " · 未解释 "
+              <> show (length unexplained)
+      pure
+        ( [ Finding "I7" Warn ("相册文件在成片里无同 sha 副本、journal 里也无库外来源记录: " <> enPath e) repairless
+          | e <- unexplained
+          ]
+            <> [Finding "I7" Info tally ""]
+        )
+ where
+  repairless = "只报告不处置：把成片那份补齐（pm import / pm convert），或确认它另有来源"
+  ents = Map.elems (catEntries cat)
+  layerOf e = take 1 (splitDirectories (enPath e))
+  album = [e | e <- ents, layerOf e == [albumTop], enKind e == KindPhoto]
+  processedShas = Set.fromList [enSha e | e <- ents, layerOf e == [processedTop]]
+  noTwin = [e | e <- album, not (enSha e `Set.member` processedShas)]
+  -- 落在这条相册路径上、内容与盘面相符的 Copy 记录的源。journal 是可手编的外部
+  -- 输入：路径字段先过 'opPathsOk'（同 'classifyPending' 的 fail-closed）。认
+  -- Intent 而不等 Done——Intent 就是来源记录本体（P6-D），「这份字节确实是那次
+  -- 拷贝落下的」由 sha 相等作证。
+  srcsFor e =
+    [ opSrcAbs op
+    | JIntent _ op@OpCopy {} _ <- entries
+    , opPathsOk op
+    , foldPath (opDstRel op) == foldPath (enPath e)
+    , opSha op == enSha e
+    ]
+  fromInbox e = elem (Just False) <$> mapM (pathAtOrUnder root) (srcsFor e)
 
 -- | 派生件状态 → 发现行（'Pm.Convert.scanDerived' 的判定，文案在这里）。
 derivedFinding :: (FilePath, DerivedState) -> Finding

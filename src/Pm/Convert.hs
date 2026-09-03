@@ -41,7 +41,7 @@ module Pm.Convert
   , runConvertTo
   ) where
 
-import Pm.Album (AlbumReport (..), albumPlanItems, albumTop, attachAlbumItems, classifyAlbum, classifyInto, processedTop)
+import Pm.Album (AlbumReport (..), albumPlanItems, attachAlbumItems, classifyAlbum, classifyInto)
 import Pm.Catalog (catalogOr, loadCatalog)
 import Pm.Cli (GoOpts, emitPlanTo)
 import Pm.Config (Config (..), ensurePmSubdir, requireRole, withRootLock)

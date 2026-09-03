@@ -38,7 +38,6 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (splitDirectories, takeFileName)
 
-import Pm.Album (albumTop)
 import Pm.Catalog (catalogOr, loadCatalog)
 import Pm.Config (Config (..), requireRole)
 import Pm.ServeEnv

@@ -10,11 +10,11 @@
 -- 的动作不执行、只交代。收尾步骤**只在两份计划都真的全部落完时**打印
 -- （三十二轮 R5：源文件被移走后，未完成那半的计划 @opSrcAbs@ 全部失效）。
 --
--- **I7 的来源登记**（记录侧）不新造记录类型：主库计划执行时，journal 的
--- @JIntent@ 里的 'Pm.Op.OpCopy' 本来就带**库外**的 @srcAbs@——「相册 ⊆ 成片 ∪
--- inbox-origin」的 inbox-origin 集合 = journal 中 dst 在 @相册\/@ 且 src 在
--- root 外的 Copy 记录。**消费侧（doctor 据此把 inbox 来的照片归为「已解释」）
--- 尚未实现**（三十二轮核对：§10.3 第 2 项只有记录侧就位）。
+-- **I7 的来源登记**不新造记录类型：主库计划执行时，journal 的 @JIntent@ 里的
+-- 'Pm.Op.OpCopy' 本来就带**库外**的 @srcAbs@——「相册 ⊆ 成片 ∪ inbox-origin」的
+-- inbox-origin 集合 = journal 中 dst 在 @相册\/@ 且 src 在 root 外的 Copy 记录。
+-- 消费侧是 'Pm.Doctor' 的 I7 行（§10.3 第 2 项）：它按这个集合把 inbox 来的照片
+-- 归为「已解释」，成片副本与库外来源两条都不成立的相册文件才报 Warn。
 --
 -- 执行协议（三十二轮 R4，退出码一码三义的根因修法）：runPlan 回 'PlanRun'
 -- 三态。预览（无 --apply）两份计划**都**存盘并渲染（两段式协议对两份同样

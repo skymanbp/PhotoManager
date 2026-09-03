@@ -18,8 +18,6 @@
 -- 平铺，同名只能进一份，pm 不替用户挑（I1）。
 module Pm.Album
   ( AlbumReport (..)
-  , albumTop
-  , processedTop
   , classifyAlbum
   , classifyInto
   , albumPlanItems
@@ -65,10 +63,6 @@ import Pm.Types
 import Pm.VaultCore (convertibleExt, pushableExt)
 import Pm.VaultHold (applyRecordOps, isSha256Hex, readPmRecords, writePmRecords)
 import Pm.Win (resolveUnder)
-
-albumTop, processedTop :: FilePath
-albumTop = "相册"
-processedTop = "成片"
 
 -- | 相册是平铺层：目标 = @相册\\\<源文件名\>@。
 albumDst :: Entry -> FilePath

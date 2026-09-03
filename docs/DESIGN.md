@@ -96,7 +96,7 @@ R4 Haskell）落成以下**硬不变量**，每条都有机制背书，不靠自
 | I4 | 所有 mutation 先写 intent、成功后写 done（append-only NDJSON），**带真实持久化屏障**：intent 在其效果落盘前 `hFlush + FlushFileBuffers`；Copy 的 done 可组提交，Rename 的屏障强制且不可组提交（旧名仅存于日志）。**追加前先封尾**：`.pm/journal.ndjson` 与隔离区 manifest 的每次追加都先查末字节，不是换行（掉电写了半行）就先补 `\n`，新记录绝不与残行黏成一条——journal 另落一条 `torn-gap` 标记把残行**封**成可识别的撕裂尾（§6.4） | Journal 模块（Win32 boot 库 `flushFileBuffers`，本机已验证存在）；`pm doctor` 对账 §6.4 |
 | I5 | 目的地已存在且内容不同 → **conflict，停该项，不覆盖，无例外**。vault DRIFT 的 supersede 与备份盘更新**不是覆盖**：先 Quarantine 移出旧文件、再 Copy 落新字节（§6.5），旧字节始终在隔离区可还原 | Plan 生成期检查 + Exec 执行期二次检查 + 落位 rename 的 no-replace（ReplaceIfExists=FALSE）语义三重防线 |
 | I6 | 断电 / 拔盘 / 进程被杀后，`pm doctor` 能检出半成品并安全恢复；恢复矩阵覆盖三种 Op 的全部协议步骤与掉电（journal 尾部丢失）模型 | §6.4 矩阵 + §13 两类故障注入 |
-| I7 | 拓扑不变量持续可校验：vault ⊆ 相册；相册 ⊆ 成片 ∪ inbox-origin（journal 中有 ingest 来源记录的集合）；侧车与主文件同批移动 | vault⊆相册 由 `pm vault status` 的 MISSING 态校验；相册⊆成片∪inbox-origin **记录侧**就位（ingest 的 journal Intent 带库外 srcAbs），doctor 的判定侧未实现（§10.3 第 2 项）；侧车同批由 import/sort 的整组悬置保证 |
+| I7 | 拓扑不变量持续可校验：vault ⊆ 相册；相册 ⊆ 成片 ∪ inbox-origin（journal 中有 ingest 来源记录的集合）；侧车与主文件同批移动 | vault⊆相册 由 `pm vault status` 的 MISSING 态校验；相册⊆成片∪inbox-origin 记录侧是 ingest 的 journal Intent（带库外 srcAbs）、判定侧是 `pm doctor` 的 **I7 行**（同 sha 的成片副本 / 库外来源记录两条都不成立 → Warn 交人裁决，1.2.0；§10.3 第 2 项）；侧车同批由 import/sort 的整组悬置保证 |
 | I8 | 相册↔vault 差异与 `sync_photos.py` **逐字段值形状兼容**（六态 + 位置元组 + 16 字符截断 hash + 同一文件过滤集合含 .png，case-fold）；退出码仍是 0/1/2，但**语义自 P4-7 起收窄**：NEW 里已决定「暂不同步」的不再算差异（`new` 键本身不变，见 §10.2 第九态） | §10.1 + §10.2 |
 | I9 | pm 绝不执行 git 命令（vault/portfolio 的 add/commit/push 都由用户手动）；对 portfolio `photos.json` 仅只读引用检查 | Vault 模块无 git 调用 |
 | I10 | pm 单实例：mutation 前对 `.pm/lock` 打开句柄并 `hTryLock`（内核级锁，进程死亡自动释放，锁文件残留无害且无需删除）。三十一轮 F1 起**侧缓存成对写**也在此锁内——只读的 `pm vault status` / GET /api/vault/status 因此也会短暂独占它（锁被占则缓存本轮不刷新，报告不受影响） | base `GHC.IO.Handle.Lock`（Windows 走 LockFileEx） |
@@ -249,7 +249,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、别名登记、同批目标唯一性校验） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
 | `pm dedupe [--apply]` | **精确重复的逐份裁决计划**（§8.1）：来源就是 `pm versions` 的非设计内精确重复组，每一份出一个 Quarantine 条目、**全部** `NEEDS-DECISION`——留哪一份 pm 判不出就不猜（I1），用 `pm resolve --item N --unskip` 逐份批准。**不**绑复合组（复合组语义是不可拆，而这里要求逐份裁决）；组的完整性由执行期屏障保证：某个 sha 在归档层的最后一份**活**副本不会被隔离掉 | apply 时 |
-| `pm doctor [--deep]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留与撕裂尾）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash（工作量只有被中断那场会话，有界）；**`--deep` 另外把 catalog 的全部条目重读重 hash 一遍**（`DEEP` / `DEEP-CORRUPT` 行）。没有轮转/抽样档位：要么默认那个有界窗口，要么 `--deep` 全库。P8-C2 起另对账 `.pm/derived` 派生件（`DERIVED-STALE` 已落位 / `DERIVED-ORPHAN` 源已不在库 / `DERIVED-TMP` 半成品 → Warn，`--repair` 删；`DERIVED-PENDING` Info；枚举失败 `DERIVED-ENUM` Bad 不修） | 否 |
+| `pm doctor [--deep]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留与撕裂尾）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash（工作量只有被中断那场会话，有界）；**`--deep` 另外把 catalog 的全部条目重读重 hash 一遍**（`DEEP` / `DEEP-CORRUPT` 行）。没有轮转/抽样档位：要么默认那个有界窗口，要么 `--deep` 全库。P8-C2 起另对账 `.pm/derived` 派生件（`DERIVED-STALE` 已落位 / `DERIVED-ORPHAN` 源已不在库 / `DERIVED-TMP` 半成品 → Warn，`--repair` 删；`DERIVED-PENDING` Info；枚举失败 `DERIVED-ENUM` Bad 不修）；1.2.0 起另校验 I7 拓扑（`I7` 行：相册 ⊆ 成片 ∪ inbox-origin，未解释的逐条 Warn 交人裁决，`--repair` 不碰；journal/快照有告警即整条不判） | 否 |
 | `pm apply <planId> [--only 3,7-9]` | 执行（或部分执行）已存的计划；conflict 项只停该项、批次继续、末尾汇总。**P2.1/P2.2**：执行 root 按计划 `rootId` 重新发现绑定（Exec 拿锁后再验一次；无 rootId 的计划 CLI 层 fail-closed 拒绝，含 --apply 即时路径）；`--only` 自动扩到复合组闭包，**语法错误或序号超出 `0-N` 一律拒绝**（`--only 语法错误或序号超出计划范围（0-N）`，exit 2——不静默夹取，也不"照能认出的那几个跑"）；绑不上 root 时报文**逐槽位列出读不出身份的那些**（`缺席（尚未 init）` / `损坏: …` / `读不出: …`），而不是一句"均不符"宣称一次从未发生的 UUID 比对；clean 计划**每次执行前**逐项重验三副本（真实重 hash），不过的降级暂停——`pm apply` 与 `clean --apply` 即时路径无差别，无豁免 | 是 |
 | `pm resolve <planId> --item N --keep src\|dst\|both` | 裁决计划中标 `NEEDS-DECISION` 的冲突项（both = 新名并存）。**P2.1**：`--keep` 只接受独立的 NEEDS-DECISION Copy（复合组成员不可单独裁决）；skip/unskip 扩到全组；`--keep src` 追加的 supersede 对共享组 id | 改计划 |
 | `pm trash list / empty` | 隔离区查看（manifest ∪ journal ∪ 实际目录并集，孤儿标 UNREGISTERED）/ **唯一的最终清除入口**：逐项列出、二次确认，只 unlink 确认清单里逐项可见的条目，禁止整删目录树。**P2.1（评审 cx-3 终极屏障）**：reason 为 `clean-staging` 的条目在永久删除前按当前 catalog + 真实重 hash 再确认「Raw/成片 + 备份盘」各存一份同 sha 副本，确认不了 HELD 不删。**P5-B 起这道屏障一般化成一张表**（`barrierOf`）：`dedupe` 记录另走「归档三层还留着一份活副本吗」，与备份盘无关——一块没插的盘不该拖住与它无关的记录；无前缀的记录不受屏障管，仍需逐项确认。**清除过程中 unlink 失败即停**（占用/只读/句柄绑定不符）：打印 `✗ <路径>: <错误> —— 已清除 k/N 项，其余未动；解除占用/只读后重跑 pm trash empty`、exit 2——保守方向是少删不多删；manifest 不为失败的那批改写（清除成功的记录也照样保留为历史），重跑幂等 | empty 时 |
@@ -611,7 +611,7 @@ REVIEW-LOG 第 28 轮。
 | 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：**下一次比对**（`pm vault status` / GUI 刷新）复核到字节已变即失效并回到 NEW——不是实时监视；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |
-| 相册↔成片 1 个例外文件 | 暂人工裁决——doctor 的 inbox-origin 判定侧未实现（§10.3 第 2 项，记录侧已在 journal） |
+| 相册里出现成片没有的照片 | `pm doctor` 的 I7 行每次对账（1.2.0）：有同 sha 的成片副本、或 journal 里有库外来源记录（ingest）即已解释，否则逐条 Warn 交人裁决，pm 不猜来源也不自动处置（2026-09-03 真实库：94 张 = 成片副本 94 · inbox 来源 0 · 未解释 0） |
 
 ---
 

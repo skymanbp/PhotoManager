@@ -58,10 +58,14 @@ sweepTests =
 caseDoctorDeepSummary :: IO ()
 caseDoctorDeepSummary = withSystemTempDirectory "pm-sweep" $ \tmp -> do
   let root = tmp </> "root"
+      ev = "成片" </> "26-06-R66"
   createDirectoryIfMissing True root
   mkMain root
-  writeF (root </> "相册" </> "a.jpg") "AAA"
-  writeF (root </> "相册" </> "b.jpg") "BBB"
+  -- 两张放成片层：本用例问的是 --deep 的覆盖面汇报，与在哪一层无关；而相册层上
+  -- 无源的照片会被 doctor 的 I7 行按「既无成片同 sha 副本、也无库外来源记录」
+  -- 报 Warn（§10.3 第 2 项落地后），把这里的 exit 0 断言变成对另一件事的断言。
+  writeF (root </> ev </> "a.jpg") "AAA"
+  writeF (root </> ev </> "b.jpg") "BBB"
   scanQuiet "main-rid" root >>= saveCatalog root
   let deepInfo fs = [fDetail f | f <- fs, fRow f == "DEEP-DONE", fSeverity f == Info]
   (fs, c) <- runDoctor root (DoctorOpts True False)
@@ -71,13 +75,13 @@ caseDoctorDeepSummary = withSystemTempDirectory "pm-sweep" $ \tmp -> do
   (fs0, _) <- runDoctor root (DoctorOpts False False)
   deepInfo fs0 @?= []
   -- 同长度换字节：默认那次看不出，--deep 报 DEEP-CORRUPT Bad，汇总里不符 1，退出码 1
-  writeFile (root </> "相册" </> "a.jpg") "AAB"
+  writeFile (root </> ev </> "a.jpg") "AAB"
   (fs2, c2) <- runDoctor root (DoctorOpts True False)
   c2 @?= 1
   assertBool ("应报 DEEP-CORRUPT: " <> show [(fRow f, fSeverity f) | f <- fs2]) (("DEEP-CORRUPT", Bad) `elem` [(fRow f, fSeverity f) | f <- fs2])
   assertBool ("汇总应记不符 1: " <> show (deepInfo fs2)) (any ("不符 1" `isInfixOf`) (deepInfo fs2))
   -- 48 轮：消失/读不出的条目没被重读——「已重读」须是实读数，不是索引总数
-  removeFile (root </> "相册" </> "b.jpg")
+  removeFile (root </> ev </> "b.jpg")
   (fs3, _) <- runDoctor root (DoctorOpts True False)
   assertBool ("已重读数须扣除消失条目: " <> show (deepInfo fs3)) (any ("2 条目待深验：已重读重 hash 1、不符 1、读取失败/消失 1" `isInfixOf`) (deepInfo fs3))
 

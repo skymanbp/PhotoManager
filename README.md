@@ -30,7 +30,7 @@ a whole (`pm undo`).
 > review gate (**recorded round by round in [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md);
 > the convergence verdict is whatever its last section says and is not copied
 > here**), and each gate with an observable automated anchor gets a "delete it and
-> exactly one test turns red" mutation case (437 tests, 0 GHC warnings); gates
+> exactly one test turns red" mutation case (440 tests, 0 GHC warnings); gates
 > without an anchor (the GUI has no harness; concurrent interleavings have no
 > deterministic observation point) are registered in REVIEW-LOG as residuals rather
 > than passed off as covered.
@@ -97,7 +97,10 @@ Adversarial review archive: [docs/reviews/](docs/reviews/).
   journal; after `pm apply` it rolls back the last N completed operations), `pm doctor`
   (crash-recovery reconciliation + integrity check: by default re-verifies "the batch
   written since the last clean exit", `--deep` re-reads and re-hashes **every** index
-  entry and reports entry count and mismatch count).
+  entry and reports entry count and mismatch count; the `I7` row also checks the
+  topology invariant album ⊆ finished ∪ inbox-origin — an album photo with no
+  same-sha finished copy and no out-of-library origin recorded in the journal is
+  reported one by one for a person to adjudicate, never repaired).
 - **Feature 10 · GUI**: a seven-page Tauri desktop front-end (Status / Sort new photos
   / Archive / Categorise & push / Plans / Settings / Getting started) — generates
   plans, records decisions, edits configuration, AI suggestions (launches `claude -p`
@@ -374,7 +377,7 @@ All measured on the real library (commands and sources reproducible, not estimat
 | Incremental scan (4633 files, 4633 reused / 0 to hash, workers=16) | 1.58 s | `pm scan` 2026-09-02 on 1.1.1, [release-notes/v1.1.1](docs/release-notes/v1.1.1.md) |
 | Hash throughput (14.0 GiB across 122 ARW, workers=16) | 19.4 s | `pm scan` 2026-08-26 — the pre-1.1.1 future-mtime re-hash, which no longer happens |
 | First full hash (480 GiB class) | ~10–25 min | first library build, recorded |
-| Test suite (437 tests, whole suite serialised — required by process-level stdout redirection) | 10–90 s | `stack test` |
+| Test suite (440 tests, whole suite serialised — required by process-level stdout redirection) | 10–90 s | `stack test` |
 | GHC warnings | 0 | `stack build` |
 | Adversarial review gate | recorded per round (NO-GO findings verified first-hand → class-level fix → focused re-review; convergence = the last section's verdict) | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | Mutation verification | one mutation per load-bearing gate with an observable automated anchor, its paired test turns red (all discrimination tables of rounds 34–36 and the P7 rounds pass; gates without an anchor registered as residuals) | REVIEW-LOG convergence evidence per round |
@@ -519,6 +522,17 @@ binaries in a Release are not built on the author's machine.
   used to render「已执行（余 8 项待裁决）」as「部分 8/8」), and the plans page is stacked
   full-width: the two half-width grid tracks let the 9-column nowrap list overflow under
   the detail panel and squeezed paths into one-character lines.
+- ~~I7's consumption side (album ⊆ finished ∪ inbox-origin)~~ ✅ 1.2.0 (owner ruling
+  2026-09-03): the recording side had been in place since P6-D (`pm vault ingest` writes
+  a journal Copy intent carrying the out-of-library `srcAbs`), while nothing read it back.
+  `pm doctor` now has an `I7` row: an album photo is explained by a same-sha copy in the
+  finished tier, or by a journal Copy record whose dst is that album path, whose sha
+  matches the bytes on disk and whose src resolves outside the library root (so moving the
+  `_inbox` source into `_done` afterwards changes nothing — the evidence is the record);
+  anything else is a Warn listed one by one for a person. `--repair` never touches it, and
+  a journal or snapshot that reads with warnings suspends the whole judgement (the
+  criterion contains a negative — "no other origin record in the journal" — and cannot be
+  trusted on an incomplete fold).
 
 **Known limitations**:
 

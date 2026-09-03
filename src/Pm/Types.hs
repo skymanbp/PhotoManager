@@ -10,6 +10,8 @@ module Pm.Types
   , classifyExt
   , rawExts
   , renderExts
+  , albumTop
+  , processedTop
   , entryMap
   ) where
 
@@ -95,6 +97,16 @@ rawExts =
 -- 家族），此前只认 @.psd@ 是同一处遗漏。
 renderExts :: [String]
 renderExts = [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".psd", ".psb", ".heic"]
+
+-- | 三层库里两个层的目录名（DESIGN.md §1.1 的拓扑）。**全项目唯一一份定义**，
+-- 与 'rawExts' 同一理由：相册通道（'Pm.Album'）、转换落位（'Pm.Convert'）、
+-- 归档页取图（'Pm.ServeAi'）与 I7 判定（'Pm.Doctor'）问的是同一个「哪一层」。
+-- 住在 'Pm.Types' 而不是 'Pm.Album'，是因为 'Pm.Doctor' 也要它而 'Pm.Album'
+-- 经 'Pm.Cli' 反过来依赖 Doctor（同 'Pm.Derived' 拆出的那个环）；'Pm.Album'
+-- 按原名再导出，既有调用点一字不改。
+albumTop, processedTop :: FilePath
+albumTop = "相册"
+processedTop = "成片"
 
 -- | 调色参数等随主文件走的附属文件。
 sidecarExts :: [String]

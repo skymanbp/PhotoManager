@@ -18,7 +18,6 @@ import qualified Data.Text as T
 import Network.HTTP.Types
 import Network.Wai
 
-import Pm.Album (albumTop)
 import Pm.Config (Config (..), requireWritable)
 import Pm.Plan (Plan (..), savePlan)
 import Pm.ServeEnv

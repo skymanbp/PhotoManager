@@ -426,7 +426,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.1.3（计划页失效草稿 + 版式）/ pm 1.1.3 / 437 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 440 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -457,7 +457,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 | 项 | 状态 |
 |---|---|
 | 1 `/photo-inbox` 改走 `pm vault ingest` | ✅ pm 侧 P6-D 实现（两份计划 + 显式收尾步骤，三十二轮收紧执行次序闸）；skill 侧指针改写随第 32 轮门禁 GO 后落地 |
-| 2 ingest 的 journal 来源登记喂 I7 | **记录侧 ✅**（P6-D：主库 journal 的 Intent 带库外 srcAbs 即 inbox-origin 记录本体，不新造记录类型）；**判定侧 ⏸ 未做**——本项正文承诺的「doctor 把 inbox 来的照片归为已解释」尚无任何代码（三十二轮核对），登记为待办 |
+| 2 ingest 的 journal 来源登记喂 I7 | ✅ **两侧齐全**（判定侧 1.2.0，2026-09-03）：记录侧 P6-D（主库 journal 的 Intent 带库外 srcAbs 即 inbox-origin 记录本体，不新造记录类型）；判定侧 = `pm doctor` 的 **I7 行**（`Pm.Doctor.i7Findings`），inbox 来的照片归「已解释」，见下面「doctor 的 I7 判定侧」节 |
 | 3 vault `.gitignore` 追加 `.pm/` | ✅ 已在展示集仓（P3b 时经用户批准，commit `2d81d36`） |
 | 4 `KB-维护速查.md` §📸 / 档案 `CLAUDE.md` / `record-structure-version.md` | ✅ 指针改写 + Change Log 补记 |
 | 5 `sync_photos.py` 去留 | ✅ **退役但保留**：加横幅 + 运行时 stderr 指针，代码冻结 |
@@ -582,3 +582,11 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm plan prune` | 清理范围 = **已执行**（`planExecuted`，判据不变）∪ **失效草稿**（`planStale`）；journal 有告警的根一份不删（此前告警只是附注、仍按折叠结果清已执行；失效判据依赖「无 Done」，告警下不可信，整根跳过）。还能执行的草稿与带裁决残余的计划照旧不动 | — |
 | `pm serve` | `GET /api/plans` 每项加 `stale`（布尔）与 `state`（`runTag` 原句，GUI 原样显示——此前 GUI 自己拼「部分 m/n」，把「已执行（余 8 项待裁决）」显示成了「部分 8/8」）；路由集合不变 | DESIGN-GUI §11 |
 | `pm ui` 计划页 | 列表与明细改**上下整宽堆叠**（`.split` 单栏；列表在 `.tbl-scroll` 里 ≤ 42 vh 自滚、表头钉住）：此前两栏各半，9 列 nowrap 的列表比半栏宽而 `.table` 的 `overflow:hidden` 让它对栏宽的最小贡献算 0，多出的尾列被后画的明细盖住，明细里路径逐字折行、待裁决徽标（整句 why）碎成多行。明细：路径列 `td.path` 任意断行、状态列 `td.stc` 只放三词徽标、待裁决原因另起一行灰字 `.why`；失效草稿明细顶上一条黄横幅说明并**不渲染「执行」**（终端 `pm apply` 仍可强跑）；页头按钮改名「清理已执行/失效」 | DESIGN-GUI §11 |
+
+### doctor 的 I7 判定侧（1.2.0，2026-09-03，用户裁定「实现 §10.3 第 2 项的消费侧」）
+
+| 命令/入口 | 变化 | 出处 |
+|---|---|---|
+| `pm doctor` | 多一类 **I7 行**（`Pm.Doctor.i7Findings`）：按 I7 校验 **相册 ⊆ 成片 ∪ inbox-origin**。已解释两条，都以**内容**为准——① 索引里有同 sha 的成片；② journal 里有一条 Copy 记录，dst 恰是这条相册路径、sha 与盘上现字节相同、src 在**库外**（`pathAtOrUnder` 三态，只有明确的 `Just False` 算库外；`_inbox` 的源后来被移进 `_done` 不影响判定——证据是记录不是源文件）。两条都不成立 → 逐条 **Warn** 列给人（同 Q1：只报告、不处置，I1 不猜来源），退出码随之为 1。收尾一条 Info 汇总「N 张 = 成片副本 x · inbox 来源 y · 未解释 z」。相册层只判照片（`KindPhoto`）；相册为空的 root（备份盘之外的 vault root、空库）一行不打 | DESIGN §2 I7 |
+| `pm doctor --repair` | **与 I7 无关**：`applyRepairs` 只认 C2 / R2 / Q-DONE-LOST / C5 四种 fRow 且要求 detail 以 oid 开头，I7 行进不了任何修复推导。相册文件永远由人处置 | — |
+| `pm doctor`（fail-closed） | journal 有告警（撕裂尾 / 中段损坏）或快照是坏代回退时**整条判据不判**，只打一行 Info 说明。判据里有一条否定式（「journal 里没有别的来源记录」），折叠不全时会把正常照片报成违例——核不了 ≠ 已覆盖 | 同 1.1.3 `planStale` 的纪律 |
