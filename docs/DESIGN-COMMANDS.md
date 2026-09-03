@@ -587,6 +587,6 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 
 | 命令/入口 | 变化 | 出处 |
 |---|---|---|
-| `pm doctor` | 多一类 **I7 行**（`Pm.Doctor.i7Findings`）：按 I7 校验 **相册 ⊆ 成片 ∪ inbox-origin**。已解释两条，都以**内容**为准——① 索引里有同 sha 的成片；② journal 里有一条 Copy 记录，dst 恰是这条相册路径、sha 与盘上现字节相同、src 在**库外**（`pathAtOrUnder` 三态，只有明确的 `Just False` 算库外；`_inbox` 的源后来被移进 `_done` 不影响判定——证据是记录不是源文件）。两条都不成立 → 逐条 **Warn** 列给人（同 Q1：只报告、不处置，I1 不猜来源），退出码随之为 1。收尾一条 Info 汇总「N 张 = 成片副本 x · inbox 来源 y · 未解释 z」。相册层只判照片（`KindPhoto`）；相册为空的 root（备份盘之外的 vault root、空库）一行不打 | DESIGN §2 I7 |
+| `pm doctor` | 多一类 **I7 行**（`Pm.Doctor.i7Findings`）：按 I7 校验 **相册 ⊆ 成片 ∪ inbox-origin**。已解释两条，都以**内容**为准——① 索引里有同 sha 的成片；② journal 里有一条 Copy 记录，dst 恰是这条相册路径、sha 与盘上现字节相同、src 在**库外**（`pathAtOrUnder` 三态，只有明确的 `Just False` 算库外；`_inbox` 的源后来被移进 `_done` 不影响判定——证据是记录不是源文件）。两条都不成立 → 逐条 **Warn** 列给人（同 Q1：只报告、不处置，I1 不猜来源），退出码随之为 1。收尾一条 Info 汇总「N 张 = 成片副本 x · inbox 来源 y · 未解释 z」。相册层只判照片（`KindPhoto`）；相册层为空的 root（vault root、空库）一行不打（备份盘是主库的镜像，同样按本判据对账它自己那份） | DESIGN §2 I7 |
 | `pm doctor --repair` | **与 I7 无关**：`applyRepairs` 只认 C2 / R2 / Q-DONE-LOST / C5 四种 fRow 且要求 detail 以 oid 开头，I7 行进不了任何修复推导。相册文件永远由人处置 | — |
 | `pm doctor`（fail-closed） | journal 有告警（撕裂尾 / 中段损坏）或快照是坏代回退时**整条判据不判**，只打一行 Info 说明。判据里有一条否定式（「journal 里没有别的来源记录」），折叠不全时会把正常照片报成违例——核不了 ≠ 已覆盖 | 同 1.1.3 `planStale` 的纪律 |
