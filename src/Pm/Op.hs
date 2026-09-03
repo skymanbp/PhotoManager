@@ -20,6 +20,7 @@ module Pm.Op
   , trashSrcRel
   , opPathsOk
   , describeOp
+  , opSource
   ) where
 
 import Control.Monad (guard)
@@ -238,3 +239,14 @@ describeOp :: Op -> String
 describeOp (OpCopy s d _ sz _) = "copy " <> s <> " -> " <> d <> " (" <> show sz <> " B)"
 describeOp (OpRename o n _) = "rename " <> o <> " -> " <> n
 describeOp (OpQuarantine v _ r) = "quarantine " <> v <> " (" <> T.unpack r <> ")"
+
+-- | 条目要动的那一份源：拷贝的绝对源、改名的旧路径、隔离的 victim（后两者相对于
+-- 计划所属 root，故要 root 拼全）。它不在了，这一项就永远执行不成——Exec 会以
+-- 「重命名源不存在」/「victim 不存在」/ 拷贝源读不出一类的 CONFLICT 收场。
+-- 'Pm.Plan.planStale'（1.1.3 失效草稿判据）用它探盘；住在这里而不是 Pm.Plan，
+-- 是让 Op 的路径语义与 'opPathsOk' / 'describeOp' 同一处（DocDrift 隔离产地清点
+-- 也不必为一个纯读者扩名单）。
+opSource :: FilePath -> Op -> FilePath
+opSource _ (OpCopy s _ _ _ _) = s
+opSource root (OpRename o _ _) = root </> o
+opSource root (OpQuarantine v _ _) = root </> v

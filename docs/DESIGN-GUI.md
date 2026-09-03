@@ -65,7 +65,8 @@
   计划文件——与 CLI `pm plan rm` / `pm plan prune` 共用 `deletePlanAnyRoot` /
   `prunePlans`，只删可再生成的 `.pm/plans` 文件，journal/undo/doctor 不受影响；
   prune 的「已执行」判据 `planExecuted` 保守：待执行项全部 Done 且无待裁决残余，
-  草稿与带裁决残余的计划不动）；执行是第 ③ 级 `POST /api/apply`
+  草稿与带裁决残余的计划不动；1.1.3 起**失效草稿**（`planStale`：从未执行且每条待办的源
+  都已不在盘上而卷还在）也一并清，journal 有告警的根整根不删）；执行是第 ③ 级 `POST /api/apply`
   （P5-C 实现，P7 起由 GUI 使用，见上文三级授权与下文 P7 条）。
   第一个是 `POST /api/vault/push-plan`，
   体 `{"assignments":[{"name","category"},…]}`，上限 64 KiB（413）；校验与计划
@@ -142,11 +143,14 @@
   经 POST notes 写主库）+「AI 建议分类/地点」（P8-D：类目只在按钮上描边 `.ai`、三格只填空着的；用户拥有的卡——本页亲手改过、或盘上记录本就是 `user` 来源且有内容——不进请求也不被改 `source`，门禁 F4 / 二轮 N2）
   + 进度「已选 x/N」+「保存决定并生成推送计划」→ hold → notes → push-plan（hold 先行：服务端拒收 held 文件的 push）→ 结果
   面板（计划 id、`pm apply` 命令、git 步骤）。⑤**计划**——表格（类型徽标、id、时间、
-  项/待执行/跳过/待裁决 + **执行态**列：已执行/部分/未执行（含失败注记）从 journal
-  折叠而来（`GET /api/plans` 的 done/failed/executed/lastRunAt 字段——计划文件本身
-  不回写执行状态），已执行的行淡化；行内「删除」（两次点击确认）与页头「清理已执行」
-  （2026-08-31，写授权级）——删的只是可再生成的计划文件）+ 明细（逐项 拷贝/改名/隔离 +
-  源→目标 + 状态徽标，原始 JSON 可展开），打开即选中最新计划。⑥**设置**（P4-8，见下）。⑦**上手**——四步说明 + 安全
+  项/待执行/跳过/待裁决 + **执行态**列：已执行/部分/未执行/已失效（含失败注记）从 journal
+  折叠 + 探源而来（`GET /api/plans` 的 done/failed/executed/stale/lastRunAt 字段与 `state`
+  原句——1.1.3 起 GUI 原样显示服务端 `runTag` 的措辞，与 `pm plan list` 同一句；计划文件本身
+  不回写执行状态），已执行与已失效的行淡化；行内「删除」（两次点击确认）与页头「清理已执行/失效」
+  （2026-08-31，写授权级；1.1.3 起失效草稿一并清）——删的只是可再生成的计划文件）+ 明细（逐项
+  拷贝/改名/隔离 + 源→目标 + 状态徽标，待裁决原因另起一行，失效草稿顶上黄横幅且不渲染「执行」，
+  原始 JSON 可展开），打开即选中最新计划；列表与明细自 1.1.3 起上下整宽堆叠（列表 ≤ 42 vh 自滚、
+  表头钉住——两栏各半时 9 列 nowrap 的列表被明细盖掉尾列、路径逐字折行）。⑥**设置**（P4-8，见下）。⑦**上手**——四步说明 + 安全
   模型一句话。技术：`<img src>` 带不了 Authorization → fetch→blob；旧 blob URL 每轮
   revoke；Tauri CSP（`gui/src-tauri/tauri.conf.json` 逐字）：`default-src` 与
   `script-src` 只 `'self'`；`connect-src http://127.0.0.1:* ipc: http://ipc.localhost`；

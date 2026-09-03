@@ -26,7 +26,7 @@
     const c = $("#conn"); c.textContent = "已连接 127.0.0.1:" + api.port; c.className = "conn ok";
     const p = await getJson("/api/ping");
     allowApply = !!p.allowApply;
-    // 没有写授权就藏掉「清理已执行」（行内删除按钮同一闸，在渲染处判）
+    // 没有写授权就藏掉「清理已执行/失效」（行内删除按钮同一闸，在渲染处判）
     $("#btn-plans-prune").classList.toggle("hidden", !allowApply);
     $("#root-path").textContent = p.main;
   }
@@ -235,11 +235,13 @@
         const td0 = el("td"); td0.appendChild(el("span", "badge " + p.kind, p.kind)); tr.appendChild(td0);
         tr.appendChild(el("td", null, p.id)); tr.appendChild(el("td", null, when(p.created)));
         tr.appendChild(el("td", null, String(p.items))); tr.appendChild(el("td", null, String(p.pending))); tr.appendChild(el("td", null, String(p.skipped))); tr.appendChild(el("td", null, String(p.needsDecision)));
-        // 执行态从 journal 折叠（服务端 done/failed/executed 字段；计划文件不回写）
-        const execCls = p.executed ? "exec-done" : p.done > 0 ? "exec-part" : "";
-        const execTxt = (p.executed ? "已执行" : p.done > 0 ? `部分 ${p.done}/${p.pending}` : "未执行") + (p.failed ? `（失败 ${p.failed}）` : "");
-        const tdE = el("td"); tdE.appendChild(el("span", "st " + (p.failed ? "exec-fail" : execCls), execTxt)); tr.appendChild(tdE);
+        // 执行态从 journal 折叠 + 探源（服务端 done/failed/executed/stale 字段；计划文件不回写）。
+        // 措辞原样用服务端的 state（Pm.Plan.runTag，与 pm plan list 同一句）：此前这里自己拼，
+        // 把「已执行（余 8 项待裁决）」显示成了「部分 8/8」（用户 2026-09-02 实机）。
+        const execCls = p.executed ? "exec-done" : p.stale ? "exec-stale" : p.done > 0 ? "exec-part" : "";
+        const tdE = el("td"); tdE.appendChild(el("span", "st " + (p.failed ? "exec-fail" : execCls), p.state || "（旧版 pm serve 无执行态措辞）")); tr.appendChild(tdE);
         if (p.executed) tr.classList.add("plan-done");
+        if (p.stale) tr.classList.add("plan-stale");
         // 行内删除（--writable 级；pm plan rm 同源）：两次点击确认，删的只是可
         // 再生成的计划文件，journal/undo 不受影响。stopPropagation——别把行点开。
         const tdD = el("td");
@@ -263,18 +265,18 @@
           // 先把明细区清成占位再去取：载失败时留在页上的会是**上一个**计划的
           // 明细，而高亮行已经换成了刚点的这一行——看着就像点开了它。
           const box = $("#plan-detail"); box.innerHTML = ""; box.appendChild(el("div", "muted", "载入中…"));
-          showPlan(p.id).catch((e) => {
+          showPlan(p.id, p).catch((e) => {
             box.innerHTML = ""; box.appendChild(el("div", "muted", "载不出这个计划"));
             const b = $("#apply-result"); b.className = "banner bad"; b.textContent = "载不出计划 " + p.id + "：" + e.message;
           });
         };
         tb.appendChild(tr);
       }
-      if (d.errors.length) { const tr = el("tr"); const td = el("td", "muted", "⚠ 装不出来的计划：" + d.errors.map((e) => e[0] + "：" + e[1]).join("；")); td.colSpan = 9; tr.appendChild(td); tb.appendChild(tr); }
+      if (d.errors.length) { const tr = el("tr"); const td = el("td", "muted wrap", "⚠ 装不出来的计划：" + d.errors.map((e) => e[0] + "：" + e[1]).join("；")); td.colSpan = 9; tr.appendChild(td); tb.appendChild(tr); }
       // 打开即显示最新计划的明细，不用先点；载不出明细不算列表失败（同行点击的处理）
       if (sorted.length) {
         tb.firstChild.classList.add("sel");
-        try { await showPlan(sorted[0].id); } catch (e) {
+        try { await showPlan(sorted[0].id, sorted[0]); } catch (e) {
           const box = $("#plan-detail"); box.innerHTML = ""; box.appendChild(el("div", "muted", "载不出这个计划：" + e.message));
         }
       }
@@ -286,15 +288,20 @@
   function opRow(it) {
     const op = it.op, st = it.status.s;
     const tr = el("tr");
-    tr.appendChild(el("td", null, String(it.ix != null ? it.ix : "")));
+    tr.appendChild(el("td", "ix", String(it.ix != null ? it.ix : "")));
     const kind = op.t === "copy" ? "拷贝" : op.t === "rename" ? "改名" : op.t === "quarantine" ? "隔离" : op.t;
     tr.appendChild(el("td", "op", kind));
     const path = op.t === "copy" ? `${op.src} → ${op.dst}` : op.t === "rename" ? `${op.old} → ${op.new}` : op.t === "quarantine" ? `${op.victim}（${op.reason}）` : JSON.stringify(op);
-    tr.appendChild(el("td", null, path));
-    const tds = el("td"); tds.appendChild(el("span", "st " + st, st === "pending" ? "待执行" : st === "skipped" ? "跳过" : "待裁决" + (it.status.why ? "：" + it.status.why : ""))); tr.appendChild(tds);
+    tr.appendChild(el("td", "path", path));
+    // 状态徽标只放三个词；待裁决的「为什么」是整句话，另起一行灰字（此前塞进徽标里，
+    // 徽标碎成四五行——用户 2026-09-02 实机）
+    const tds = el("td", "stc"); tds.appendChild(el("span", "st " + st, st === "pending" ? "待执行" : st === "skipped" ? "跳过" : "待裁决"));
+    if (st === "needs-decision" && it.status.why) tds.appendChild(el("div", "why", it.status.why));
+    tr.appendChild(tds);
     return tr;
   }
-  async function showPlan(id) {
+  // summary = 列表行的摘要（GET /api/plans 那一项；stale 只在那里判——明细端点是计划原文）
+  async function showPlan(id, summary) {
     // 明细与「执行」按钮绑定的是**这份响应**的计划：旧响应晚到必须丢弃，否则
     // 用户按 B 的选择意图点两下、执行的却是 A（40 轮 #5）。
     const gen = stamp("plan");
@@ -304,12 +311,16 @@
       const box = $("#plan-detail"); box.innerHTML = "";
       box.appendChild(el("h3", null, `${plan.kind} · ${plan.id}`));
       box.appendChild(el("div", "muted small", `root ${plan.rootPath || plan.root || ""} · 生成于 ${when(plan.created)} · 终端执行：`)).appendChild(el("code", null, "pm apply " + plan.id));
+      // 失效草稿（1.1.3）：明细顶上说清为什么、怎么办，并且不渲染「执行」——每一条待办的
+      // 源都不在了，执行只会逐项 CONFLICT；坚持要跑走终端 pm apply。
+      const isStale = !!(summary && summary.stale); // 别叫 stale：外层的 stale(key, gen) 是响应代际判定，同名会把上面那次调用推进 TDZ
+      if (isStale) box.appendChild(el("div", "banner warn", "这份计划已失效：每一条待办的源都已不在盘上（被后来的计划搬走 / 改名 / 隔离了），执行只会逐项 CONFLICT。页头「清理已执行/失效」会连它一起删（journal/undo 不受影响）；坚持要跑，终端 pm apply " + plan.id + "。"));
       const t = el("table", "items"); for (const it of plan.items) t.appendChild(opRow(it)); box.appendChild(t);
       // 执行入口（P7）：只有 serve 带第三级授权（--allow-apply，pm ui 拉起即是）
       // 且计划里有待执行项才渲染。两次点击确认——没有弹窗原语，同一个按钮先
       // arm 再确认，5 秒不点第二下自动解除。
       const pending = plan.items.filter((it) => it.status && it.status.s === "pending").length;
-      if (allowApply && pending > 0) {
+      if (allowApply && pending > 0 && !isStale) {
         const row = el("div", "exec-row");
         const label = `执行这个计划（${pending} 项待执行）`;
         const btn = el("button", "btn danger", label);
@@ -396,22 +407,22 @@
     try { await loadPlans(); } catch (e) { out.textContent += "\n（计划列表刷新失败：" + e.message + "，按 5 重进本页）"; }
   }
 
-  // 一键清理已执行（pm plan prune 同源）：两次点击确认；未执行的草稿不动。
+  // 一键清理已执行与失效草稿（pm plan prune 同源）：两次点击确认；还能执行的草稿不动。
   async function prunePlansReq() {
     const btn = $("#btn-plans-prune"), out = $("#apply-result");
     if (btn.dataset.armed !== "1") {
       btn.dataset.armed = "1"; btn.textContent = "⚠ 再点一次确认清理";
-      setTimeout(() => { btn.dataset.armed = ""; btn.textContent = "清理已执行"; }, 5000);
+      setTimeout(() => { btn.dataset.armed = ""; btn.textContent = "清理已执行/失效"; }, 5000);
       return;
     }
-    btn.dataset.armed = ""; btn.textContent = "清理已执行";
+    btn.dataset.armed = ""; btn.textContent = "清理已执行/失效";
     const r = await post("/api/plans/prune", {});
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { out.className = "banner bad"; out.textContent = "没有清理：" + (j.error || ("HTTP " + r.status)); return; }
     const n = (j.deleted || []).length;
     out.className = "banner " + (n ? "ok" : "warn");
     out.textContent =
-      (n ? `✓ 已清理 ${n} 份已执行的计划（journal/undo 不受影响）` : "没有可清理的已执行计划——未执行的草稿用行内「删除」逐个删。") +
+      (n ? `✓ 已清理 ${n} 份计划（已执行的与已失效的；journal/undo 不受影响）` : "没有可清理的计划——已执行的、失效的都没有；还能执行的草稿用行内「删除」逐个删。") +
       ((j.errors || []).length ? "\n⚠ " + j.errors.join("\n⚠ ") : "");
     try { await loadPlans(); } catch (e) { out.textContent += "\n（计划列表刷新失败：" + e.message + "，按 5 重进本页）"; }
   }

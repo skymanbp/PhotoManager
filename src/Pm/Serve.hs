@@ -89,7 +89,7 @@ import Pm.ConfigEdit (checkPatch, configTxn)
 import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
 import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), PlanExec (..), deletePlanAnyRoot, isValidPlanId, listPlans, planExecuted, planExecs, prunePlans)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), PlanExec (..), deletePlanAnyRoot, isValidPlanId, listPlans, planExecuted, planExecs, planStale, prunePlans, runTag)
 import Pm.Journal (readJournal)
 import Pm.Publish (publishCommands)
 import Pm.ServeAi (routeAi)
@@ -394,11 +394,15 @@ routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
     (mes, mwarns) <- readJournal (cfgMainPath cfg)
     (ves, vwarns) <- maybe (pure ([], [])) readJournal (cfgVaultPath cfg)
     let runs = planExecs (mes <> ves)
+        -- 失效草稿要探盘（'Pm.Plan.planStale'，1.1.3），逐份在这里判；journal 有告警就不判
+        -- （折叠不全时「从未执行」不可信，与 prune 同一 fail-closed）；措辞 'runTag' 与 CLI 同一句
+        staleOf p mr = if null mwarns && null vwarns then planStale p mr else pure False
+    sums <- mapM (\p -> let mr = Map.lookup (plId p) runs in fmap (planSummary p mr) (staleOf p mr)) (ps <> vps)
     jsonR
       status200
       []
       ( object
-          [ "plans" .= map (\p -> planSummary p (Map.lookup (plId p) runs)) (ps <> vps)
+          [ "plans" .= sums
           , "errors" .= (errs <> verrs <> [("journal", w) | w <- mwarns <> vwarns])
           ]
       )
@@ -541,8 +545,8 @@ findJpeg sha cat =
   isJpeg p = map toLowerAscii (takeExtension p) `elem` [".jpg", ".jpeg"]
   toLowerAscii c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
 
-planSummary :: Plan -> Maybe PlanExec -> Value
-planSummary p mr =
+planSummary :: Plan -> Maybe PlanExec -> Bool -> Value
+planSummary p mr stale =
   object
     [ "id" .= plId p
     , "kind" .= plKind p
@@ -558,6 +562,9 @@ planSummary p mr =
       "done" .= length [ix | ix <- pend, ix `Set.member` maybe Set.empty peDone mr]
     , "failed" .= maybe (0 :: Int) (Set.size . peFailed) mr
     , "executed" .= planExecuted p mr
+    , -- 1.1.3：失效草稿（'Pm.Plan.planStale'）与人读措辞（'Pm.Plan.runTag'，GUI 原样显示）
+      "stale" .= stale
+    , "state" .= runTag stale p mr
     , "lastRunAt" .= (mr >>= peLastAt)
     ]
  where

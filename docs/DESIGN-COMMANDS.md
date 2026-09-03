@@ -426,7 +426,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.1.2（瞬断保护内建）/ pm 1.1.2 / 436 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.1.3（计划页失效草稿 + 版式）/ pm 1.1.3 / 437 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -568,8 +568,17 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm backup` | **备份范围 = 主库 − 暂存区**：`To-Be-Sync'd\` 不再产生 add/update，备份盘上已有的暂存副本按不在范围计入 EXTRA（只报告，删除由人做）；收窄在 `Pm.Diff.backupDiff` 单点，比对/缓存重算/status 全部继承；清暂存三副本屏障按 sha 认归档层的备份见证，不受影响 | §9 |
 | `pm plan [list]` | 新顶层子命令（缺省 = list）：列出主库/vault 的计划与**执行态**——已执行 / 部分执行 m/n / 未执行（+失败注记），从 journal 折叠（`Pm.Plan.planExecs`：普通 Done 计入、`~r` 组回滚复位剔除、`~d<N>` 位移不计、同序号重试成功抹失败）；计划文件本身**不回写**执行状态（§3：耐久层是 journal） | DESIGN-GUI §11 |
 | `pm plan rm <id>…` | 删除计划文件：id 格式闸 → 可信闸 → 完整路径受信解析 → 句柄式删除（与 `loadPlan`/`savePlan` 删旧同规格）；删的是可再生成的文件，journal/undo/doctor 零影响；主库 → vault 按序查找 | — |
-| `pm plan prune` | 一键清理**已执行**（`planExecuted` 保守判据：至少一个待执行项、待执行项全部 Done、无待裁决残余）；从未执行的草稿与带裁决残余的计划不动（prune 不替用户裁决，删它们走显式 `pm plan rm`）；journal 读不出的根一份不删（fail-closed） | — |
+| `pm plan prune` | 一键清理**已执行**（`planExecuted` 保守判据：至少一个待执行项、待执行项全部 Done、无待裁决残余）；从未执行的草稿与带裁决残余的计划不动（prune 不替用户裁决，删它们走显式 `pm plan rm`）；journal 读不出的根一份不删（fail-closed）。1.1.3 起失效草稿也清、journal 有告警的根整根不删（见下节） | — |
 | `pm album ignore <事件夹>/<文件名>…` / `pm album unignore <路径\|sha>…` | 新子命令：按**内容 sha** 忽略/恢复候选（改名/挪事件夹后忽略仍生效；重新导出=新字节会重新出现——正是要的语义）；写主库 `.pm/album-ignore.json`（`requireMain` 预检 + 主库 root lock 事务，照片零改动）；忽略对象必须是当前候选、错误一次列完 exit 2；unignore 收 64 位 sha、当前路径或记录存档路径（对象已删也能清） | — |
 | `pm album candidates` | 输出加「已忽略 N 张」清单与失效记录提示（对象已不在候选——只提示不自动清）；过滤在 `albumCandidates` 一个谓词上游完成，CLI 与 GUI 归档页同源 | — |
 | `pm serve` | `--writable` 写端点九个 → **十二个**（忽略/计划删除/一键清理）；`GET /api/plans` 加 done / failed / executed / lastRunAt；`GET /api/album/candidates` 加 ignored / ignoreStale；端点清单与形状见 DESIGN-GUI §11（路由哨兵 `caseRouteRoster` 盯守） | DESIGN-GUI §11 |
 
+
+### 计划页失效草稿 + 版式（1.1.3，2026-09-02，用户反馈「为什么还有那么多未执行计划」「已执行计划在 GUI 上溢出重叠」）
+
+| 命令/入口 | 变化 | 出处 |
+|---|---|---|
+| `pm plan [list]` | 执行态多一种 **已失效（源已不在）**：`Pm.Plan.planStale`——从未执行（journal 无一条 Done）、有待办（待执行或待裁决；跳过项不看）、且每一条待办的源（拷贝的绝对源 / 改名旧路径 / 隔离 victim，`opSource`）都已不在盘上而源所在的卷还在。卷不在（相机卡拔了）不算；探测抛出按「源在」计；journal 有告警的根不判（折叠不全时「从未执行」不可信）。措辞 `runTag` 多一个首参（stale），CLI 与 GUI 同一句 | DESIGN-GUI §11 |
+| `pm plan prune` | 清理范围 = **已执行**（`planExecuted`，判据不变）∪ **失效草稿**（`planStale`）；journal 有告警的根一份不删（此前告警只是附注、仍按折叠结果清已执行；失效判据依赖「无 Done」，告警下不可信，整根跳过）。还能执行的草稿与带裁决残余的计划照旧不动 | — |
+| `pm serve` | `GET /api/plans` 每项加 `stale`（布尔）与 `state`（`runTag` 原句，GUI 原样显示——此前 GUI 自己拼「部分 m/n」，把「已执行（余 8 项待裁决）」显示成了「部分 8/8」）；路由集合不变 | DESIGN-GUI §11 |
+| `pm ui` 计划页 | 列表与明细改**上下整宽堆叠**（`.split` 单栏；列表在 `.tbl-scroll` 里 ≤ 42 vh 自滚、表头钉住）：此前两栏各半，9 列 nowrap 的列表比半栏宽而 `.table` 的 `overflow:hidden` 让它对栏宽的最小贡献算 0，多出的尾列被后画的明细盖住，明细里路径逐字折行、待裁决徽标（整句 why）碎成多行。明细：路径列 `td.path` 任意断行、状态列 `td.stc` 只放三词徽标、待裁决原因另起一行灰字 `.why`；失效草稿明细顶上一条黄横幅说明并**不渲染「执行」**（终端 `pm apply` 仍可强跑）；页头按钮改名「清理已执行/失效」 | DESIGN-GUI §11 |

@@ -30,7 +30,7 @@ a whole (`pm undo`).
 > review gate (**recorded round by round in [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md);
 > the convergence verdict is whatever its last section says and is not copied
 > here**), and each gate with an observable automated anchor gets a "delete it and
-> exactly one test turns red" mutation case (436 tests, 0 GHC warnings); gates
+> exactly one test turns red" mutation case (437 tests, 0 GHC warnings); gates
 > without an anchor (the GUI has no harness; concurrent interleavings have no
 > deterministic observation point) are registered in REVIEW-LOG as residuals rather
 > than passed off as covered.
@@ -161,9 +161,11 @@ vault does not have yet: pick a category on the thumbnail, fill in place / coord
 title record (optionally pre-filled by "AI suggest category/place"), or pick the fourth
 button "not syncing for now" → one button "save decisions and generate push plan" does
 all three), **Plans** (item-by-item detail + execution-state badges — executed /
-partial / not executed, folded from the journal, executed rows dimmed; plans can be
-deleted one by one or pruned in one click ("clear executed"), which only removes the
-regenerable plan files; since 0.6.0 pending plans can be **executed directly** — the
+partial / not executed / stale, folded from the journal; the wording is the server's, the
+same line `pm plan list` prints; executed and stale rows dimmed — a stale draft is one
+never executed whose every pending source is gone from disk, superseded by a later plan;
+list and detail stacked full-width since 1.1.3; plans can be deleted one by one or pruned
+in one click ("clear executed/stale"), which only removes the regenerable plan files; since 0.6.0 pending plans can be **executed directly** — the
 same button clicked twice to confirm, the execution chain is the same as `pm apply`,
 `pm undo` works afterwards), **Settings** (paths and concurrency: vault /
 photos.json / worker count editable, backup drive registrable, the portfolio repo path
@@ -211,7 +213,7 @@ pm dedupe                        # exact duplicates → a quarantine plan adjudi
                                  # is not chosen for you — approve each with pm resolve --item N --unskip)
 
 pm plan [list]                   # list plans with execution state (executed / partial / not executed — folded from the journal; plan files are never written back)
-pm plan rm <id> … / pm plan prune   # delete plan files / one-click prune of executed plans (only regenerable files are removed; journal/undo unaffected)
+pm plan rm <id> … / pm plan prune   # delete plan files / one-click prune of executed plans and stale drafts (never executed, every pending source gone; only regenerable files are removed; journal/undo unaffected)
 pm apply <planId>                # execute a plan (--dry full preview / --only 1,3-5 partial execution)
 pm resolve <id> --item N [--unskip]            # skip that item (default action) / --unskip restores it to pending;
                                                # dedupe plans all await adjudication — only items approved with --unskip execute on apply
@@ -372,7 +374,7 @@ All measured on the real library (commands and sources reproducible, not estimat
 | Incremental scan (4633 files, 4633 reused / 0 to hash, workers=16) | 1.58 s | `pm scan` 2026-09-02 on 1.1.1, [release-notes/v1.1.1](docs/release-notes/v1.1.1.md) |
 | Hash throughput (14.0 GiB across 122 ARW, workers=16) | 19.4 s | `pm scan` 2026-08-26 — the pre-1.1.1 future-mtime re-hash, which no longer happens |
 | First full hash (480 GiB class) | ~10–25 min | first library build, recorded |
-| Test suite (436 tests, whole suite serialised — required by process-level stdout redirection) | 10–90 s | `stack test` |
+| Test suite (437 tests, whole suite serialised — required by process-level stdout redirection) | 10–90 s | `stack test` |
 | GHC warnings | 0 | `stack build` |
 | Adversarial review gate | recorded per round (NO-GO findings verified first-hand → class-level fix → focused re-review; convergence = the last section's verdict) | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | Mutation verification | one mutation per load-bearing gate with an observable automated anchor, its paired test turns red (all discrimination tables of rounds 34–36 and the P7 rounds pass; gates without an anchor registered as residuals) | REVIEW-LOG convergence evidence per round |
@@ -506,6 +508,17 @@ binaries in a Release are not built on the author's machine.
   as done, and re-runs only the unfinished groups; `pm doctor --deep` waits per entry
   instead of reporting thousands of bogus "unreadable" rows. The former
   `scripts/backup_watchdog.py` is retired; the two verify scripts stay.
+- ~~Plans page: stale drafts and layout~~ ✅ 1.1.3 (user feedback 2026-09-02: "why are
+  there so many unexecuted plans" + the executed plan's detail rendering as overflowing,
+  overlapping text): `Pm.Plan.planStale` — a draft never executed whose every pending
+  source (copy source / rename old path / quarantine victim) is gone while its volume is
+  present is **stale**; `pm plan list`, `GET /api/plans` (new `stale` + `state` fields) and
+  the GUI show「已失效（源已不在）」, and `pm plan prune` / "clear executed/stale" remove it
+  (a missing volume — an unplugged card — never counts; a root whose journal read warns is
+  neither judged nor pruned, fail-closed). The GUI now displays the server's wording (it
+  used to render「已执行（余 8 项待裁决）」as「部分 8/8」), and the plans page is stacked
+  full-width: the two half-width grid tracks let the 9-column nowrap list overflow under
+  the detail panel and squeezed paths into one-character lines.
 
 **Known limitations**:
 

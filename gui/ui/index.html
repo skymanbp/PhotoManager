@@ -132,11 +132,11 @@
 
     <!-- ── 计划 ── -->
     <section id="tab-plans" class="tab">
-      <header class="page-head"><h1>计划</h1><div class="actions"><button id="btn-plans-prune" class="btn ghost">清理已执行</button><button id="btn-plans-reload" class="btn ghost">刷新</button></div></header>
-      <p class="muted small">凡是<strong>动照片字节</strong>的写盘都是两段式：先生成计划，再执行；执行后可 <code>pm undo</code> 回滚。执行可以在这里点「执行这个计划」（要点两次确认），也可以在终端 <code>pm apply &lt;id&gt;</code>——两条路走的是同一套装载/复验/日志。执行态从 journal 折叠而来（计划文件本身不回写）；计划文件可删（<code>pm plan rm</code> 同源）——删的只是可再生成的文件，journal/undo 不受影响。（「暂不同步」与「忽略候选」是例外：不碰照片，只在主库 <code>.pm</code> 里记一条决定，直接写、随时可撤。）</p>
+      <header class="page-head"><h1>计划</h1><div class="actions"><button id="btn-plans-prune" class="btn ghost">清理已执行/失效</button><button id="btn-plans-reload" class="btn ghost">刷新</button></div></header>
+      <p class="muted small">凡是<strong>动照片字节</strong>的写盘都是两段式：先生成计划，再执行；执行后可 <code>pm undo</code> 回滚。执行可以在这里点「执行这个计划」（要点两次确认），也可以在终端 <code>pm apply &lt;id&gt;</code>——两条路走的是同一套装载/复验/日志。执行态从 journal 折叠而来（计划文件本身不回写）；从未执行、而每条待办的源都已不在盘上的草稿标「已失效」（被后来的计划搬走/改名了，再执行只会逐项 CONFLICT）。计划文件可删（<code>pm plan rm</code> 同源）——「清理已执行/失效」一键清已执行的与已失效的，删的只是可再生成的文件，journal/undo 不受影响。（「暂不同步」与「忽略候选」是例外：不碰照片，只在主库 <code>.pm</code> 里记一条决定，直接写、随时可撤。）</p>
       <div id="apply-result" class="banner hidden"></div>
       <div class="split">
-        <table id="plan-table" class="table"><thead><tr><th>类型</th><th>计划 id</th><th>生成时间</th><th>项</th><th>待执行</th><th>跳过</th><th>待裁决</th><th>执行态</th><th></th></tr></thead><tbody></tbody></table>
+        <div class="tbl-scroll"><table id="plan-table" class="table"><thead><tr><th>类型</th><th>计划 id</th><th>生成时间</th><th>项</th><th>待执行</th><th>跳过</th><th>待裁决</th><th>执行态</th><th></th></tr></thead><tbody></tbody></table></div>
         <div id="plan-detail" class="detail"><div class="muted">选一个计划查看明细</div></div>
       </div>
     </section>

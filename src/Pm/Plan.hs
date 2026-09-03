@@ -23,6 +23,7 @@ module Pm.Plan
   , PlanExec (..)
   , planExecs
   , planExecuted
+  , planStale
   , runTag
   , deletePlan
   , deletePlanAnyRoot
@@ -44,10 +45,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime)
 import Control.Exception (IOException, bracket, try)
-import Control.Monad (forM, forM_, when)
+import Control.Monad (filterM, forM, forM_, when)
 import Data.Maybe (fromMaybe)
-import System.Directory (doesFileExist, listDirectory)
-import System.FilePath (dropExtension, takeExtension, (</>))
+import System.Directory (doesDirectoryExist, doesFileExist, doesPathExist, listDirectory)
+import System.FilePath (dropExtension, takeDrive, takeExtension, (</>))
 import System.IO (hClose)
 import Text.Printf (printf)
 
@@ -354,9 +355,12 @@ planExecuted p mr = not (null pend) && null nds && all (`Set.member` done) pend
   nds = [() | it <- plItems p, StNeedsDecision _ <- [piStatus it]]
   done = maybe Set.empty peDone mr
 
--- | 人读执行态（CLI 与 GUI 同一折叠，措辞各自渲染）。
-runTag :: Plan -> Maybe PlanExec -> String
-runTag p mr
+-- | 人读执行态（CLI 与 GUI 同一折叠、**同一句**措辞——1.1.3 起 GUI 直接显示服务端
+-- 给的这一句；此前它自己拼，把「已执行（余 8 项待裁决）」显示成了「部分 8/8」，
+-- 用户 2026-09-02 实机）。首参是 'planStale' 的判定：失效草稿一律「已失效（源已不在）」。
+runTag :: Bool -> Plan -> Maybe PlanExec -> String
+runTag stale p mr
+  | stale = "已失效（源已不在）" <> failNote
   | not (null pend) && doneN == length pend =
       (if null nds then "已执行" else "已执行（余 " <> show (length nds) <> " 项待裁决）") <> failNote
   | doneN > 0 = "部分执行 " <> show doneN <> "/" <> show (length pend) <> failNote
@@ -367,6 +371,26 @@ runTag p mr
   doneN = length [ix | ix <- pend, ix `Set.member` maybe Set.empty peDone mr]
   failN = maybe 0 (Set.size . peFailed) mr
   failNote = if failN > 0 then "（失败 " <> show failN <> "）" else ""
+
+-- | 「失效草稿」判据（1.1.3，用户 2026-09-02「为什么还有那么多未执行计划」——真实库
+-- 里躺着 4 份 import 草稿与 2 份 names 草稿，都是后来用新计划执行过的同一批事：相机
+-- 卡已清、旧夹名已改，它们再也执行不成，却按「草稿不动」的保守判据永远留在列表里）：
+-- 从未执行（journal 无一条 Done）、有待办条目（待执行或待裁决；跳过项是用户裁决，
+-- 不看），且**每一条**待办的源都已不在盘上而源所在的卷还在。卷不在（相机卡拔了）
+-- 不算失效：插回去照样能跑。判定要探盘，故在 IO；探测抛出一律按「源还在」计
+-- （fail-closed：判不出就不判失效，prune 不会因此多删）。
+planStale :: Plan -> Maybe PlanExec -> IO Bool
+planStale p mr
+  | maybe False (not . Set.null . peDone) mr = pure False
+  | null todo = pure False
+  | otherwise = allM sourceGone todo
+ where
+  todo = [piOp it | it <- plItems p, piStatus it /= StSkippedByUser]
+  sourceGone op = do
+    let src = opSource (plRootPath p) op
+    r <- try (do ex <- doesPathExist src; vol <- doesDirectoryExist (takeDrive src); pure (not ex && vol)) :: IO (Either IOException Bool)
+    pure (either (const False) id r)
+  allM f = foldr (\x k -> f x >>= \b -> if b then k else pure False) (pure True)
 
 -- | 删除一份计划文件。计划可再生成、耐久层是 journal（'savePlan' 的注释）——
 -- 删除不触碰 journal\/undo\/doctor 的任何输入。守卫与 'loadPlan' 同规格：
@@ -408,16 +432,17 @@ deletePlanAnyRoot cfg pid = go (planRoots cfg)
       Right () -> pure (Right label)
       Left m -> if null rest then pure (Left m) else go rest
 
--- | 清理两根下全部「已执行」的计划（'planExecuted' 的保守判据）。返回
--- （删掉的 (根, 计划), 失败原因）；journal 读不出时该根一份都不删（fail-closed：
--- 折叠不出执行事实就没有「已执行」）。
+-- | 清理两根下全部「已执行」（'planExecuted' 的保守判据）与「失效草稿」（1.1.3，
+-- 'planStale'）的计划。返回（删掉的 (根, 计划), 失败原因）；journal 读不出时该根一份
+-- 都不删（fail-closed：折叠不出执行事实就没有「已执行」，也判不出「从未执行」）。
 prunePlans :: Config -> IO ([(String, Plan)], [String])
 prunePlans cfg = do
   rs <- forM (planRoots cfg) $ \(label, root) -> do
     (ps, errs) <- listPlans root
     (es, warns) <- readJournal root
     let runs = planExecs es
-        victims = [p | p <- ps, planExecuted p (Map.lookup (plId p) runs)]
+        cleanable p = let mr = Map.lookup (plId p) runs in if planExecuted p mr then pure True else planStale p mr
+    victims <- if null warns then filterM cleanable ps else pure []
     dels <- forM victims $ \p -> do
       r <- deletePlan root (plId p)
       pure (either (\m -> Left (T.unpack (plId p) <> ": " <> m)) (const (Right (label, p))) r)
@@ -433,11 +458,14 @@ runPlanList cfg = do
     mapM_ (\w -> putStrLn ("⚠ journal: " <> w)) warns
     mapM_ (\(n, e) -> putStrLn ("⚠ 装不出来的计划: " <> n <> "：" <> e)) errs
     let runs = planExecs es
-    pure [(label, p, Map.lookup (plId p) runs) | p <- ps]
+    forM ps $ \p -> do
+      let mr = Map.lookup (plId p) runs
+      st <- if null warns then planStale p mr else pure False -- journal 有告警不判失效（同 prune）
+      pure (label, p, mr, st)
   if null rows
     then putStrLn "还没有计划。" >> pure 0
     else do
-      forM_ (sortOn (\(_, p, _) -> plCreated p) rows) $ \(label, p, mr) ->
+      forM_ (sortOn (\(_, p, _, _) -> plCreated p) rows) $ \(label, p, mr, st) ->
         putStrLn
           ( printf
               "%-5s %s  %-14s %4d 项  %s"
@@ -445,9 +473,9 @@ runPlanList cfg = do
               (T.unpack (plId p))
               (T.unpack (plKind p))
               (length (plItems p))
-              (runTag p mr)
+              (runTag st p mr)
           )
-      putStrLn "（执行态从 journal 折叠而来，计划文件不回写；pm plan rm <id> 删除、pm plan prune 清理已执行）"
+      putStrLn "（执行态从 journal 折叠而来，计划文件不回写；pm plan rm <id> 删除、pm plan prune 清理已执行与失效草稿）"
       pure 0
 
 -- | @pm plan rm <id>…@：删除计划文件（journal\/undo 不受影响，需要可重新生成）。
@@ -462,7 +490,7 @@ runPlanRm ids cfg
           Right label -> putStrLn ("  ✓ 已删除计划 " <> i <> "（" <> label <> "；journal/undo 不受影响，需要可重新生成）") >> pure 0
       pure (maximum (0 : codes))
 
--- | @pm plan prune@：一键清理已执行（'prunePlans'）。
+-- | @pm plan prune@：一键清理已执行与失效草稿（'prunePlans'）。
 runPlanPrune :: Config -> IO Int
 runPlanPrune cfg = do
   (deleted, errs) <- prunePlans cfg
@@ -471,7 +499,7 @@ runPlanPrune cfg = do
   forM_ errs $ \e -> putStrLn ("  ⚠ " <> e)
   putStrLn
     ( if null deleted
-        then "没有可清理的已执行计划（未执行的草稿用 pm plan rm <id> 删）"
+        then "没有可清理的计划（已执行的、失效的都没有；还能执行的草稿用 pm plan rm <id> 删）"
         else "共清理 " <> show (length deleted) <> " 份；journal/undo 不受影响。"
     )
   pure (if null errs then 0 else 1)

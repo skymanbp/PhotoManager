@@ -219,9 +219,9 @@ parserInfo =
             "plan"
             ( info
                 ( hsubparser
-                    ( command "list" (info (pure (CmdPlanCmd PlanList)) (progDesc "列出主库/vault 的计划与执行态（已执行/部分/未执行——从 journal 折叠，计划文件不回写）"))
+                    ( command "list" (info (pure (CmdPlanCmd PlanList)) (progDesc "列出主库/vault 的计划与执行态（已执行/部分/未执行/已失效——从 journal 折叠 + 探源，计划文件不回写）"))
                         <> command "rm" (info (CmdPlanCmd . PlanRm <$> many (strArgument (metavar "PLAN-ID..." <> help "要删除的计划 id（pm plan list 查看）"))) (progDesc "删除计划文件（可再生成；journal/undo 不受影响）"))
-                        <> command "prune" (info (pure (CmdPlanCmd PlanPrune)) (progDesc "一键清理已执行的计划（待执行项全部 Done 且无待裁决残余；草稿不动）"))
+                        <> command "prune" (info (pure (CmdPlanCmd PlanPrune)) (progDesc "一键清理已执行的计划与失效草稿（已执行 = 待执行项全部 Done 且无待裁决残余；失效 = 从未执行且每条待办的源都已不在盘上；其余草稿不动）"))
                     )
                     <|> pure (CmdPlanCmd PlanList)
                 )
