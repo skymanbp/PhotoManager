@@ -366,7 +366,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | I3 | 转换第一段在 Plan 之外写 `.pm\derived`（pm 状态区） | 登记为**偏离**：照片层仍只经 Plan（第二段）；派生件 sha 在生成期测得并进 OpCopy 前提 |
 | I4 | 三条新计划种类 `import`(+相册项)/`album-add`/`convert` 全走 journal | — |
 | I5 | 相册同名异容 → NEEDS-DECISION；同批重名 → 拒绝 | 19.2/19.3 |
-| I7 | 相册 ⊆ 成片：import 的相册项与成片项同组、成片在前；album add / convert 源就在成片 | doctor 判定侧仍未实现（§10.3 第 2 项，登记不变） |
+| I7 | 相册 ⊆ 成片：import 的相册项与成片项同组、成片在前；album add / convert 源就在成片 | doctor 判定侧已于 1.2.0 落地（`Pm.Doctor.i7Findings`，DESIGN-COMMANDS §10.3 第 2 项；HISTORY.md「1.2.0 ✅ I7 判定侧」） |
 | I8 | `vault status --json` 的六键与 held/held_stale **零改动**；不加第十态 | D′ 的直接收益 |
 | I9 | pm 仍不执行 git；`pm vault notes` 只读反查 photos.json | — |
 | I10/I11 | notes 事务同 holds；derived 目录经 `ensurePmSubdir`，派生件 tmp/终名再各过完整路径 `resolveUnder` + CREATE_NEW 独占创建 + 根锁（§20.1 写纪律；整批派生期间其它写路径报忙）；三条新写路径都过 `requireWritable` | — |
