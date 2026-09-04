@@ -2,6 +2,8 @@
 
 [中文版 (Chinese)](README.zh.md) · This English README is the primary entry point; the Chinese version mirrors it section by section.
 
+****ZERO MAINTENANCE. ALTHOUGH PUBLIC, SELF-USE ONLY. CLONE AND TUNE IT YOURSELF.****
+
 ## Overview
 
 A **zero-loss** photo library manager written in Haskell, plus a Rust/Tauri desktop
