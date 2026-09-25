@@ -26,3 +26,6 @@ gui/src-tauri/binaries/
 
 # scripts/ 里的 Python 字节码（backup_watchdog / verify_* 共用 backup_verify 内核时由解释器生成）
 __pycache__/
+
+# Linux typecheck harness work dir (generated; see tools/linux-typecheck/README.md)
+tools/linux-typecheck/work/

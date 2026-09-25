@@ -1,0 +1,132 @@
+--also-album（纯）：成片项与相册项同组、返修 → 相册项待裁决不分组、Raw 无相册项、非 jpg 交代
+--json 清点：全 CLI 只有 vault status 与 vault notes 两处 long "json"（P8-C）
+.JPG is photo
+.Xmp is sidecar
+.acr is sidecar
+.arw is photo
+.txt is meta
+0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、每个 exe stanza 显式 other-modules
+41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托 REVIEW-LOG
+41 轮 GO-note #9 运行契约：cwd = 仓库根（本套件按根相对路径读仓库文件）
+750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）
+A1 opIdParts 严格解析 + quarTrashRel 推导
+CSP 逐字：DESIGN-GUI 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）
+DUPLICATE 与 ok/drift 重叠，不构成划分，也不算差异
+EXIF fail-closed：截断/坏魔数/伪 APP1/偏移越界/全零时间 一律 Nothing，不猜
+EXIF：Exif 段前有别的段/填充字节/独立标记时，JPEG 段链仍走得到它
+EXIF：IFD 偏移必须 ≥ 8；声明「没有 IFD」的文件不得返回时间
+EXIF：IFD 声明的条目数必须自洽，谎报 count 整个 IFD 作废
+EXIF：TIFF 与 JPEG 两种容器 × 大端小端 两种端序都读到 DateTimeOriginal
+EXIF：count 未超上限但声明的 IFD 装不下 → 仍整体作废
+EXIF：只认拍摄时间；IFD0 的 DateTime（文件修改时间）不再回退
+EXIF：子 IFD 指针接受 LONG 与 IFD 类型，但个数必须恰为 1
+EXIF：子 IFD 缺 4 字节 next-IFD offset → 结构不完整，读不到时间
+EXIF：字面量解析只认 YYYY:MM:DD HH:MM:SS，非法值不放行
+F004 目录 rename 的 catalog 重键：改写后的条目胜过目标前缀下的过期条目（左偏），不由字节序决定
+F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链
+GUI 页序：DESIGN-GUI ①—⑦ 的顺序与 index.html 的 nav 次序一致（P8-D 第七页归档）
+Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记
+JSON 值形状 = legacy 六键 + unpushable（hash 截 16）
+JSON 键序与 legacy 一致（unpushable 殿后）
+P2 旧格式（无 rootId/group）仍可解析为 Nothing
+P2.2: --keep 拒绝复合组成员与非待裁决条目
+P2.3(mj-3v3): 跨源布局同目标 stem 组——返修主文件悬置另一布局的侧车
+P3b gitStepsLines/planCategories：显式类目、无 -A、隔离项不入 add；与上线命令同一生成点（R2）
+P3b-12 pathAtOrUnder 三态：解析不出时不得被当成「不在 .pm 里」放行
+P3b-4 #4 racy 判据 statHitStable：同刻度窗口不信任缓存
+P3b-5 B2 dirFingerprint 递归：子目录内文件变化改变指纹；目录自身改名不变
+P3b-7 A1 opIdParts 拒绝非规范十进制（前导零）；quarTrashRel 畸形 → Nothing
+P4-2 --port 范围 0..65535（越界不得静默折回）
+P8-C 纯校验：坐标格式/越界、source、控制符/超长、类目、无字段 → 拒；同名两条/带路径名/坏 sha → 拒；合法通过并按名排序
+Processed 事件 → 成片\事件
+RENAME 短路：任一侧候选为空则不做配对
+RENAME 贪心首配：一个 NEW 只消费一个 MISSING（类目序优先）
+Scheme B 不猜（P3 的 pm names 处理）
+add / update / extra / same 分类
+albumCandidates：成片 jpg 未进相册的按事件夹分组、同名异容标记、非 jpg 单列、RAW 不列
+canonProcessedEvent 剥离误带的 -Raw
+canonProcessedEvent 恒等
+canonProcessedEvent 空地点拒绝
+canonProcessedEvent 非事件名拒绝
+canonRawEvent 幂等（已带 -Raw）
+canonRawEvent 补 -Raw + 推导年份
+classifyAlbum 五桶：拷贝 / 已在（同 sha）/ 同名异容 / 同批撞名（case-fold）/ 非 jpg
+classifyDst：按目标位置定性；暂存目标异容待裁决，归档异容交给 import
+classifyExt：相机原生 raw 与 classifyExt 必须同一份清单
+classifyRawEvent：A 类/可规范化/B 类/不可识别
+cmdPath：盘符绝对路径 + 白名单分量 → '/' 重渲染；UNC/相对/../空分量/尾随点/引号终结符拒
+designedGroup：Raw 原片就是 JPG / 相册撞名避让 算设计内；有 RAW 兄弟、没撞名、同层两份 仍上报
+eventNameFor：YY-MM-地点；空地点与非法字符拒绝
+groupClosure: 选组内任一项 → 全组
+holdKin：同目录同 stem 组内一荣俱荣，侧车不先于主文件落位
+ignoreRequest（纯）：非候选/不在索引/重复内容/同时忽略又取消/未知取消 全部拒绝；按 sha/当前路径/存档路径三种取消
+importPlanItems: src 绝对化 + 前置条件来自 catalog
+mj-1: 小写 -raw 后缀接受并规范化
+mj-1: 空地点 26-04--Raw 拒绝
+mj-1: 裸后缀 26-04-Raw 拒绝（歧义）
+mj-2/3: 大小写不同目标 → dup，且同 stem 侧车整组拒绝
+mj-2: 已归档判定 case-fold（成片\26-06-r66\C.JPG 命中）
+mj-3v2: 返修主文件 → 同 stem 侧车悬置（不入 irCopy）
+mj-5: 只有相册副本 → HELD（归档层限 Raw/成片）
+namesPlan：年份夹不符与同批撞名全降裁决
+normalizeStem：§1.1 后缀清单 + 迭代不动点
+parse/canon roundtrip + 幂等（QuickCheck）
+parseSchemeB：RAW-YYYY-季节-地点（地点可含 '-'）
+parseYYMM 正常
+pickFiles：侧车跟随主文件、去重、并参与撞名检查
+pickFiles：区间含首含尾；同名（含大小写差异）来自多源 → 整批拒绝
+planExecs：普通 Done 计入、~r 复位剔除、~d 不计、Failed 后再 Done 抹失败、lastAt 取最大、坏 oid 跳过
+planExecuted/runTag：草稿≠已执行、部分执行、待裁决残余不算已执行、全 Done 才算、失败注记
+publishCommands：显式类目 add --、photos.json 仓内相对路径 add --、缺配/仓外拒绝生成、push -- 目标
+pushTarget：<remote> [<refspec>] 语法；选项/强推/删除形态与能长出第二条命令的字符一律拒
+resolveEvent：--place 自动补年月；--event 也过字符闸与 canonRawEvent
+restoreMonth：唯一/缺失/歧义 + case-fold 地点
+segmentBy：按间隔切段；输入乱序自己排；恰好等于阈值算同一段
+sha256 of "abc" (NIST vector)
+sha256 of empty file (NIST vector)
+staging Raw 事件 → Raw\20YY\…-Raw（侧车同批）
+staging Raw 带显式年份层（一致 → 接受）
+stagingArchivedSummary 排除 待修改
+sweepCounts 穷举：出错路径不隐身、不算消失、必入错误数（含子树覆盖）
+update → supersede 同组：隔离在前、Copy 在后、同一相对路径
+vault-only 跨类目重复：两条 MISSING，不标 DUPLICATE
+vaultCommands（第一方自审 R2）：push 收尾与上线命令同一生成点——push 目标取自设置、类目白名单、坏值拒
+versionsReport：设计内成片↔相册对排除；同目录版本组；真重复上报
+三副本齐 → eligible（带两侧见证）
+三十六轮 F1 classifyGitProbe 三态穷举：查不出 ≠ 不存在（ProbeUnknown 必须 Left）
+六态基本分类（ok/new/missing/rename/drift）
+命名同步：DESIGN-COMMANDS 讲的是 freshStagingCatalog（F025 收尾）
+备份范围（2026-08-31 裁定）：To-Be-Sync'd 不产生 add/update；备份盘上的暂存副本计入 EXTRA
+字节出口清点：deleteBoundAt 引用模块集合固定；Exec 头注不再写 no delete call anywhere
+工作流 C101 checkConfig：vault 与主库嵌套（两个方向、既有配置改无关字段）拒；旁边的 vault 放行；备份半对登记拒
+工作流 F052：planIdOf——PrRefused 无 id（盘上没有计划）；PrSaved/PrRun 带 id
+工作流 F056/F057 backupVerdict 判定表：零降级零差异才 ✓/0；主库回退告警、备份盘读错/被改/未枚举 → 1
+工作流 F058 stagingArchivedSummary：相册镜像不算「已归档」（口径 = inArchiveLayer）
+工作流 F082 tri/mkPatch：--X 与 --no-X 同给 → Left「只能给一个」；三态其余三格照旧
+工作流 F096 threeCopiesStillExist：主库见证只认 Raw/成片——相册镜像不算归档副本
+工作流 F097 holdKin：主文件待裁决 → 同目录同 stem 侧车（case-fold）一并悬置；别组不受牵连
+待修改 不碰；顶层散文件 unrecognized
+待修改 从不清理
+忽略过滤（纯）：按 sha 压出候选进 acIgnored（含冲突位）；splitIgnores 分生效/失效
+新字段 roundtrip（rootId/group 编解码保真）
+无地点拒绝
+无连字符拒绝
+易变守卫：次序须为 stat→hash→stat；两次 stat 不同则不出 sha
+显式年份层与事件名年份不一致 → 不猜，unrecognized
+月份 13 拒绝
+死名清扫：opRelPaths / isPng / stemKey / jpegExt 不再出现在 src/app
+每一份都是独立可裁决条目：全 NEEDS-DECISION、不绑复合组
+汇点复验（39/40 轮）：手编配置绕过 checkPatch 的路径/push 目标/选项注入在生成处再拒，整体不出
+目标已存在不同 sha → 返修 NEEDS-DECISION
+目标已存在同 sha → 已归档冗余，不入计划
+真实库复核 2026-09-02：未来 mtime（相机时钟错）写入窗口未到 → 可信，不再每次重 hash
+纯函数：evenSample 首/中/尾均匀；extractJson 裸/围栏/带前后文/垃圾
+缺备份副本 → HELD
+缺归档副本 → HELD
+讹传清扫：被否证的机制解释（F048 列表脊、46 轮 openBoundTo 共享模式）不再出现在 src/app/test
+设计内冗余不进 dedupe，同层两份进
+路由清点（P8-D）：src/Pm/Serve*.hs 的 (METHOD, [api,…]) 元组集合 = DESIGN-GUI 反引号里的 `METHOD /api/…` 集合
+遍历：目录列举失败变成一条带路径的错误，异常不得逃逸
+配置锁清点：withConfigLock 调用模块集合 = DESIGN-GUI 声明的四条读改写路径
+隔离 reason 带 dedupe 前缀（trash empty 据此分流到本类屏障）
+隔离产地清点（步 9 C10）：引用 OpQuarantine 的模块集合固定；DESIGN §2 I2 逐一点名每个产地
