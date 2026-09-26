@@ -56,6 +56,7 @@ import Text.Printf (printf)
 
 import Pm.Config (Config (..), ensurePmSubdir, pmDir, pmSubPlans, readPmState, requirePmTrusted, untrustedMsg)
 import Pm.Journal (JEntry (..), readJournal)
+import Pm.Types (showHuman)
 import Pm.Win (NameKind (..), deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary, probeName, resolveUnder, whenPresent)
 import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
 
@@ -77,7 +78,7 @@ instance FromJSON ItemStatus where
       "pending" -> pure StPending
       "skipped" -> pure StSkippedByUser
       "needs-decision" -> StNeedsDecision <$> o .: "why"
-      _ -> fail ("unknown item status: " <> show s)
+      _ -> fail ("unknown item status: " <> showHuman (T.unpack s))
 
 data PlanItem = PlanItem
   { piIx :: Int

@@ -18,10 +18,11 @@ module Pm.Types
   , blankPathArg
   , workersOk
   , driveWaitOk
+  , showHuman
   ) where
 
 import Data.Aeson
-import Data.Char (isSpace, toLower)
+import Data.Char (isControl, isSpace, toLower)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -41,7 +42,7 @@ instance FromJSON RootRole where
     "main" -> pure RoleMain
     "backup" -> pure RoleBackup
     "vault" -> pure RoleVault
-    _ -> fail ("unknown root role: " <> show t)
+    _ -> fail ("unknown root role: " <> showHuman (T.unpack t))
 
 -- | Contents of @\<root\>\/.pm\/root-id.json@ — identifies a root by UUID,
 -- never by drive letter (DESIGN.md §9).
@@ -77,7 +78,7 @@ instance FromJSON FileKind where
     "photo" -> pure KindPhoto
     "sidecar" -> pure KindSidecar
     "meta" -> pure KindMeta
-    _ -> fail ("unknown file kind: " <> show t)
+    _ -> fail ("unknown file kind: " <> showHuman (T.unpack t))
 
 -- | 相机原生 raw 的扩展名。**全项目唯一一份定义**。
 --
@@ -229,3 +230,13 @@ subpathOk s =
   splitSeps x = case break (`elem` ("\\/" :: String)) x of
     (a, []) -> [a]
     (a, _ : rest) -> a : splitSeps rest
+
+-- | 给人看的带引号文本（横切审计 #69 的类）：像 'show' 一样加引号、把控制符写成转义，但**不**转义
+-- 可打印的非 ASCII（'show' 把「杭州」打成 @\\26477\\24030@，用户认不出、也复制不了），也不转义反斜杠
+-- （Windows 路径照原样读）。报错与状态行里引用用户的名字 \/ 路径 \/ 手编值一律用它，不用 'show'。
+showHuman :: String -> String
+showHuman s = "\"" <> concatMap esc s <> "\""
+ where
+  esc c
+    | isControl c = init (drop 1 (show [c]))
+    | otherwise = [c]

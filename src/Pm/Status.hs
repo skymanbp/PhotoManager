@@ -21,7 +21,7 @@ module Pm.Status
   ) where
 
 import Data.Aeson (ToJSON (..), object, (.=))
-import Data.List (sortOn)
+import Data.List (intercalate, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
@@ -222,7 +222,8 @@ renderStatus opts r = do
               printf "  暂存区    %d 个事件 %d 文件内容已全部归档（冗余）\n" (length stagingEvents) nStaging
               putStrLn "      → pm clean staging（三副本确认，需插备份盘）"
             else do
-              printf "  ⚠ 暂存区 %d 个事件未归档: %s\n" (length stagingEvents) (show stagingEvents)
+              -- 横切审计 #69：不用 show（中文事件名会被打成数字转义）；ASCII 名字的输出与此前逐字相同
+              printf "  ⚠ 暂存区 %d 个事件未归档: %s\n" (length stagingEvents) ("[" <> intercalate "," (map showHuman stagingEvents) <> "]")
               putStrLn "      → pm import"
       case isBackup i of
         CacheBad m -> putStrLn ("  ⚠ 备份盘   缓存不可信: " <> m)

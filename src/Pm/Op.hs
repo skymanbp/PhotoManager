@@ -32,6 +32,7 @@ import qualified Data.Text as T
 import System.FilePath (isAbsolute, isPathSeparator, splitDirectories, (</>))
 
 import Pm.Config (pmSubTrash)
+import Pm.Types (showHuman)
 
 data Fingerprint
   = FpFileSha Text
@@ -93,7 +94,7 @@ instance FromJSON Op where
         OpCopy <$> o .: "src" <*> o .: "dst" <*> o .: "sha256" <*> o .: "size" <*> o .: "mtimeNs"
       "rename" -> OpRename <$> o .: "old" <*> o .: "new" <*> o .: "fp"
       "quarantine" -> OpQuarantine <$> o .: "victim" <*> o .: "sha256" <*> o .: "reason"
-      _ -> fail ("unknown op type: " <> show t)
+      _ -> fail ("unknown op type: " <> showHuman (T.unpack t))
 
 -- | Stable id of item @ix@ inside plan @pid@.
 opId :: Text -> Int -> Text

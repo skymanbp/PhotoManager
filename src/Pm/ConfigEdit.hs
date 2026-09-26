@@ -36,7 +36,7 @@ import Pm.Backup (discoverBackupRoots)
 import Pm.Config (Config (..), checkAbsolute, configFilePath, loadConfig, withConfigLock, writeConfig)
 import Pm.Publish (cmdPath, pushTarget)
 import Pm.Removable (defaultDriveWaitSecs)
-import Pm.Types (driveWaitOk, subpathOk, workersOk)
+import Pm.Types (driveWaitOk, showHuman, subpathOk, workersOk)
 
 -- | 两个 root 是否嵌套（任一方向）：canonicalize 两侧（解析已存在前缀的
 -- junction/symlink 与真实大小写），再按 case-fold 分量做祖先判断——文本级
@@ -177,7 +177,7 @@ checkPatch c p = do
   -- 并发数 / 掉线等待的边界在 checkConfig（末尾那次调用覆盖施加后的值；审计 #14 挪过去的）
   let -- push 目标进的是「整块复制到终端」的命令文本：语法闸见 'Pm.Publish.pushTarget'。
       es =
-        [ "push 目标 " <> show t <> " 不合法（" <> why <> "；须为 <remote> [<refspec>]，每段以字母数字开头，只含字母数字与 -._/:@~^，≤200 字符）"
+        [ "push 目标 " <> showHuman t <> " 不合法（" <> why <> "；须为 <remote> [<refspec>]，每段以字母数字开头，只含字母数字与 -._/:@~^，≤200 字符）"
         | Just (Just t) <- [cpVaultPush p, cpPortfolioPush p]
         , Left why <- [pushTarget t]
         ]

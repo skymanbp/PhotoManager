@@ -26,8 +26,9 @@ import Pm.ConfigEdit (checkConfig, runConfigShow)
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Catalog (saveCatalog)
 import Pm.SortSource (withSourceQ)
-import Pm.Status (IndexSummary (..), StatusOpts (..), StatusReport (..), statusReport)
-import Pm.Types (RootRole (..), blankPathArg, subpathOk)
+import Pm.Status (IndexSummary (..), StatusOpts (..), StatusReport (..), renderStatus, statusReport)
+import Pm.VaultHold (validateKeyed)
+import Pm.Types (RootRole (..), blankPathArg, showHuman, subpathOk)
 import TestUtil (captureStdout, mkMain, readUtf8, scanQuiet, withEnv, writeF)
 
 cleanupTests :: TestTree
@@ -39,6 +40,7 @@ cleanupTests =
     , testCase "#41 #66 开头的 UTF-8 BOM：config.toml 照常载入（此前每条命令起不来）；.gitignore 首行 .pm/ 照常算覆盖；中间的 BOM 不认" caseLeadingBom
     , testCase "#14 #27 配置写口：并发数 / 掉线等待越界与非盘内相对的备份 subpath 由 checkConfig 统一拒（pm init --workers 0 不再写进配置）；发现侧对手编 subpath 说清原因" caseConfigSink
     , testCase "#54 pm status 的暂存事件按 import 的同一套布局：Raw\\<年>\\<事件> 报事件不报年份；import 认不出的形状记「(无法识别)」、待修改不计" caseStagingEventLayout
+    , testCase "#69 给人看的名字不经 show：pm status 的暂存事件、记录校验的坏名字照原样显示中文（此前是 \\26477 这类转义）" caseHumanText
     , testCase "#65 #84 命令行参数：日期只收十位 YYYY-MM-DD（26-09-01 不再是公元 26 年）；空路径参数不再落到当前目录（init / backup init / sort）" caseCliArgs
     ]
 
@@ -160,3 +162,21 @@ caseStagingEventLayout = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   r <- statusReport cfg (StatusOpts True)
   fmap isStagingEvents (srIndex r) @?= Just ["(无法识别)", "26-07-Wien", "26-08-Hangzhou"]
   srExit r @?= 1
+
+-- | #69：show 把非 ASCII 打成十进制转义——pm status 的「事件未归档」清单与记录校验的报错里，中文名字认不出、复制不了。
+caseHumanText :: Assertion
+caseHumanText = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  showHuman "26-08-杭州" @?= "\"26-08-杭州\""
+  showHuman "a\nb" @?= "\"a\\nb\""
+  showHuman "old\\a.jpg" @?= "\"old\\a.jpg\""
+  let root = dir </> "main"
+      cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+  mkMain root
+  writeF (root </> "To-Be-Sync'd" </> "Raw" </> "26-08-杭州" </> "a.ARW") "A"
+  scanQuiet "main-rid" root >>= saveCatalog root
+  r <- statusReport cfg (StatusOpts True)
+  (out, _) <- captureStdout (renderStatus (StatusOpts True) r >> pure ())
+  assertBool out ("事件未归档: [\"26-08-杭州\"]" `isInfixOf` out)
+  case validateKeyed "暂不同步名单" fst snd [("旧/杭州.jpg", "x")] of
+    Left m -> assertBool m ("\"旧/杭州.jpg\"" `isInfixOf` m)
+    Right () -> assertFailure "非平铺名应拒"

@@ -32,6 +32,7 @@ module Pm.VaultHold
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.:?), (.=))
 import qualified Data.Aeson as Aeson
 import Data.Char (isHexDigit)
+import Pm.Types (showHuman)
 import Data.List (nub, sort, sortOn)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -97,8 +98,8 @@ isSha256Hex s = T.length s == 64 && T.all isHexDigit s
 -- 进错误文本（「暂不同步名单」/「照片记录」）。
 validateKeyed :: String -> (a -> FilePath) -> (a -> Text) -> [a] -> Either String ()
 validateKeyed label key sha xs
-  | (b : _) <- [n | n <- names, not (isFlatName n)] = Left (label <> "里的 name 不是平铺文件名: " <> show b)
-  | (b : _) <- [sha x | x <- xs, not (isSha256Hex (sha x))] = Left (label <> "里的 sha 不是 64 位 hex: " <> show b)
+  | (b : _) <- [n | n <- names, not (isFlatName n)] = Left (label <> "里的 name 不是平铺文件名: " <> showHuman b)
+  | (b : _) <- [sha x | x <- xs, not (isSha256Hex (sha x))] = Left (label <> "里的 sha 不是 64 位 hex: " <> showHuman (T.unpack b))
   | (d : _) <- dups = Left (label <> "里同一名字出现多次: " <> d)
   | otherwise = Right ()
  where

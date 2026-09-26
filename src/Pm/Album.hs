@@ -327,7 +327,7 @@ ignoreFileName = "album-ignore.json"
 -- 库内相对形态。任一条不合法整体拒绝——宽容跳过等于悄悄改写用户的决定。
 validateIgnores :: [AlbumIgnore] -> Either String [AlbumIgnore]
 validateIgnores xs
-  | (b : _) <- [aiSha x | x <- xs, not (isSha256Hex (aiSha x))] = Left ("忽略清单里的 sha 不是 64 位 hex: " <> show b)
+  | (b : _) <- [aiSha x | x <- xs, not (isSha256Hex (aiSha x))] = Left ("忽略清单里的 sha 不是 64 位 hex: " <> showHuman (T.unpack b))
   | (d : _) <- dups = Left ("忽略清单里同一 sha 出现多次: " <> T.unpack d)
   | (p : _) <- [aiPath x | x <- xs, not (relPathOk (aiPath x))] = Left ("忽略清单里的 path 不是库内相对路径: " <> p)
   | otherwise = Right (sortOn aiPath xs)
