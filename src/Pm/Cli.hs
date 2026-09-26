@@ -35,9 +35,10 @@ module Pm.Cli
   , freshStagingCatalog
   , reportScanIssues
   , refreshBackupCache
+  , exitBoundary
   ) where
 
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, displayException, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.Char (toLower)
 import Data.Function (on)
@@ -46,7 +47,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (canonicalizePath, listDirectory)
-import System.IO (hFlush, stdout)
+import System.IO (hFlush, hPutStrLn, stderr, stdout)
 import Text.Printf (printf)
 import Text.Read (readMaybe)
 
@@ -68,6 +69,21 @@ import Pm.Removable (driveWaitFor, execPlanRetry, withDriveRetry)
 import Pm.Scan (ScanResult (..), cloudOnlyNote, freshPending, freshnessSweep)
 import Pm.Types
 import Pm.Win (volumeFsType)
+
+-- | 进程出口的最后一道边界（2026-09-26 横切审计 #61）：命令体里逃出的同步 IO 异常（写口逃逸是
+-- §6.4 进程死亡语义，设计内）此前落到 GHC 默认顶层处理器——打一行 @pm: <异常>@、以 1 退出，与
+-- §5.1 的「1 = 有差异 / 降级 / 计划待处理」同码，脚本与 GUI 分不清「失败」和「有待办」。现在同一
+-- 行报到 stderr、以 2（IO 失败）退出。只接 IOException：Ctrl-C（UserInterrupt）等异步异常与
+-- ExitCode 照原样传出，命令体自己返回的码不动。
+exitBoundary :: IO Int -> IO Int
+exitBoundary act = do
+  r <- try act
+  case r of
+    Right c -> pure c
+    Left e -> do
+      hFlush stdout
+      hPutStrLn stderr ("pm: " <> displayException (e :: IOException))
+      pure 2
 
 -- | 写盘命令共有的两段式开关（DESIGN.md §5）。
 data GoOpts = GoOpts

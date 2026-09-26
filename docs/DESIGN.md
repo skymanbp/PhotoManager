@@ -267,7 +267,8 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 ### 5.1 报告规格（R2 的硬形态）
 
 **退出码**（与 `sync_photos.py` 对齐）：`0` = 无差异/全部成功；`1` = 有差异/
-降级告警（如快照坏代回退）/计划待处理/部分 conflict；`2` = 错误（路径不存在、root 未 init、IO 失败）。
+降级告警（如快照坏代回退）/计划待处理/部分 conflict；`2` = 错误（路径不存在、root 未 init、IO 失败）。命令体里逃出的 IO 异常（§6.4 写口逃逸）由进程出口边界
+`Pm.Cli.exitBoundary` 同样按 2 退出、错误行进 stderr（横切审计 #61；此前落到 GHC 默认的 1）。
 
 `pm status` 终端 mock（**既没有 `--no-color` 也没有 `--json`**：输出全程是无 ANSI
 转义的纯文本，去色开关无对象；结构化等价物是 `GET /api/status` 的 `StatusReport`）：

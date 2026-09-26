@@ -6,7 +6,7 @@
 -- 仍就地扩展。每条钉一个屏障：拆掉对应修复，用例必须转红。
 module AuditFixTests (auditFixTests) where
 
-import Control.Exception (IOException, finally, try)
+import Control.Exception (AsyncException (..), IOException, finally, throwIO, try)
 import Control.Monad (filterM, forM_, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
@@ -30,7 +30,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Clean (CleanReport (..), planClean)
-import Pm.Cli (reportScanIssues, stagingFresh)
+import Pm.Cli (exitBoundary, reportScanIssues, stagingFresh)
 import Pm.Commands (TrashCmd (..), runTrash)
 import Pm.Config (Config (..), configFilePath, createRootInfo, loadConfig, readRootInfo, withConfigLock, writeConfig, writeRootInfo)
 import Pm.Dedupe (archiveLayerRel)
@@ -66,6 +66,7 @@ auditFixTests =
     , testCase "#58 测试里临时改环境变量须原样还原（有值写回、没有才删、异常同样还原）；test/ 里删环境变量只许在 TestUtil.withEnv" caseWithEnvRestores
     , testCase "#37 批次崩在隔离 Done 之后再 pm trash empty：清除后补写 CleanShutdown，下一次 doctor 不再把已清除的载荷误报成 C4「目标不存在」" caseTrashEmptyClosesWindow
     , testCase "#37 回归：补写收尾标记失败（journal 只读）不逃顶——照常报「已清除 1 项」、另报一行、exit 2；标记没写上，doctor 如报文所说报 C4" caseTrashEmptyMarkFails
+    , testCase "#61 进程出口边界：逃出命令体的 IO 异常以 2 退出（不是 GHC 默认的 1），Ctrl-C 照原样传出，main 经它调命令体" caseExitBoundary
     , testCase "#8 遍历按 name-surrogate 位判链接：第三方非 surrogate 的 reparse 文件照常枚举（此前落进「链接跳过」不进索引），置上 surrogate 位的仍不跟随；源码里 pathIsSymbolicLink 只剩 Exec 的占用判定" caseWalkForeignReparse
     , testCase "#8 云端未下载（OFFLINE 位）：scan / sort 不读、单列「云端未下载」；已索引没改过的按 stat 复用，改过的保留旧条目，新鲜度照常核对；属性位按 SDK 取值" caseCloudOnlyNotRead
     , testCase "#3 暂存区 / 布局层名折大小写认：手建的 to-be-sync'd、raw 照样过新鲜度守卫、照样路由与归档判定；规范拼写与盘面拼写不算新增 + 消失；两种拼写并存拒绝；src 不再拿层名做 == / elem 比较" caseStagingCaseFold
@@ -481,3 +482,14 @@ caseStagingCaseFold = withSystemTempDirectory "pm-audit" $ \dir -> do
       cmpLayer l = any (`isInfixOf` l) pats
   bad <- codeLinesWhere cmpLayer =<< srcHsFiles
   bad @?= []
+
+-- | #61（横切审计「异常处理」）：main 没有进程级边界——逃出命令体的同步 IO 异常（§6.4 写口逃逸 = 进程
+-- 死亡语义，设计内）落到 GHC 默认顶层处理器，以 1 退出，与 §5.1「1 = 有差异 / 待办」同码。
+caseExitBoundary :: Assertion
+caseExitBoundary = do
+  exitBoundary (pure 1) >>= (@?= 1)
+  exitBoundary (ioError (userError "横切审计 #61 注入的 IO 失败（预期输出）")) >>= (@?= 2)
+  r <- try (exitBoundary (throwIO UserInterrupt)) :: IO (Either AsyncException Int)
+  r @?= Left UserInterrupt
+  m <- T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile ("app" </> "Main.hs")
+  assertBool "main 须经 exitBoundary 调命令体" ("exitBoundary (run cmd)" `isInfixOf` m)

@@ -15,7 +15,7 @@ import System.Exit (ExitCode (..), exitSuccess, exitWith)
 import Text.Read (readMaybe)
 
 import Pm.Album (runAlbumAdd, runAlbumCandidates, runAlbumIgnore)
-import Pm.Cli (GoOpts (..), savePlanAndMaybeRun, savePlanAndMaybeRun')
+import Pm.Cli (GoOpts (..), exitBoundary, savePlanAndMaybeRun, savePlanAndMaybeRun')
 import Pm.Plan (runPlanList, runPlanPrune, runPlanRm)
 import Pm.Commands
 import Pm.ConfigEdit (ConfigSetOpts (..), mkPatch, runConfigSet, runConfigShow)
@@ -97,7 +97,8 @@ main = do
   -- 判定（planStale）探计划源所在的卷时会弹框并阻塞。pm ui 拉起的 pm serve 也走这里。
   suppressCriticalErrorDialogs
   cmd <- execParser parserInfo
-  code <- run cmd
+  -- 横切审计 #61：逃出命令体的 IO 异常按 §5.1 的 2（IO 失败）退出，不落到 GHC 默认的 1
+  code <- exitBoundary (run cmd)
   if code == 0 then exitSuccess else exitWith (ExitFailure code)
 
 run :: Cmd -> IO Int
