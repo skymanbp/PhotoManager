@@ -28,13 +28,13 @@ module Pm.Names
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad (forM, forM_)
+import Control.Monad (filterM, forM, forM_)
 import Data.Char (isDigit, toLower)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
+import System.Directory (listDirectory)
 import System.FilePath ((</>))
 import Text.Printf (printf)
 
@@ -43,6 +43,7 @@ import Pm.Exec (dirFingerprint)
 import Pm.Op
 import Pm.Plan
 import Pm.Types (RootInfo (..), RootRole (..))
+import Pm.Win (NameKind (..), probeIsDir, probeName)
 
 -- ─── 解析（纯） ─────────────────────────────────────────────────────────────
 
@@ -231,9 +232,10 @@ runNames runPlan cfg = do
 runNamesOn :: (Plan -> IO Int) -> FilePath -> RootInfo -> IO Int
 runNamesOn runPlan root info = do
   let rawTop = root </> "Raw"
-  ex <- doesDirectoryExist rawTop
-  if not ex
-    then putStrLn ("Raw 层不存在: " <> rawTop) >> pure 2
+  -- 2026-09-25 审计 #6：本函数的存在性与逐项分类一律三态（见下方 filterDirs），查不出不说「不存在」。
+  rawE <- probeIsDir rawTop
+  if rawE /= Right (Just True)
+    then putStrLn (either ("Raw 层读不出: " <>) (const ("Raw 层不存在: " <> rawTop)) rawE) >> pure 2
     else do
       -- 三十五轮 F2（与本函数下方的生成期指纹同纪律）：年份夹/事件夹/成片的
       -- 三层枚举此前裸奔——目录被良性进程占住/挪走时 listDirectory 抛出直接
@@ -248,7 +250,7 @@ runNamesOn runPlan root info = do
           evs <- filterDirs (rawTop </> yd) (sort evs0)
           pure (yd, evs)
         processed <- do
-          pex <- doesDirectoryExist (root </> "成片")
+          pex <- isDirOrThrow (root </> "成片")
           if pex then listDirectory (root </> "成片") >>= filterDirs (root </> "成片") else pure []
         pure (oddTop, rawYears, processed)
       case (enumE :: Either IOException ([String], [(String, [String])], [String])) of
@@ -269,8 +271,14 @@ runNamesOn runPlan root info = do
           checked <- forM (nrRenames rep) $ \(yd, old, new) -> do
             let target = rawTop </> yd </> new
                 selfOnly = map toLower old == map toLower new
-            tex <- (||) <$> doesFileExist target <*> doesDirectoryExist target
-            pure (if tex && not selfOnly then Left (yd </> old, "目标路径已在盘上存在（文件或目录）: " <> new) else Right (yd, old, new))
+            -- 审计 #6 同形：占位判定三态（probeName 不受对象自身 ACL 影响，链接占名也算占）；
+            -- 此前 doesFileExist || doesDirectoryExist 把 ACL 拒绝的占位者当成空位放进计划。
+            tk <- probeName target
+            pure $ case tk of
+              ProbeUnknown -> Left (yd </> old, "目标路径存在性查不出（ACL/介质错误？）: " <> new)
+              NameMissing -> Right (yd, old, new)
+              _ | selfOnly -> Right (yd, old, new)
+                | otherwise -> Left (yd </> old, "目标路径已在盘上存在（文件或目录）: " <> new)
           let finalRenames = [r | Right r <- checked]
               downgraded = [d | Left d <- checked]
           -- 表头计数取盘面校验**之后**的结果（此前降为裁决的项仍计在「待改名」列）。
@@ -317,9 +325,12 @@ runNamesOn runPlan root info = do
  where
   isYearName n = length n == 4 && all isDigit n && take 2 n == "20"
   span' p xs = (filter p xs, filter (not . p) xs)
-  filterDirs base ns = do
-    flags <- mapM (\n -> doesDirectoryExist (base </> n)) ns
-    pure [n | (n, True) <- zip ns flags]
+  -- 2026-09-25 审计 #6：逐项分类此前是 doesDirectoryExist 二态——对象自身 ACL 拒绝（deny F）
+  -- 塌成「不是目录」，该年份夹 / 事件夹从报告里静默消失（表头不计、无 ⚠ 行，可 exit 0），
+  -- 成片层少一个候选还会把月份歧义变成唯一改名。'probeIsDir' 读属性位（对象自身 ACL 不影响）：
+  -- 读不出的目录仍是目录，随后枚举抛进外层 try → 整批拒绝 exit 2；查不出同一出口。
+  filterDirs base = filterM (isDirOrThrow . (base </>))
+  isDirOrThrow p = probeIsDir p >>= either (ioError . userError) (pure . (== Just True))
 
 yearFolder :: Int -> String
 yearFolder yy = "20" <> pad2 yy

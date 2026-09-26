@@ -28,7 +28,7 @@ import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.Vault
 import Pm.Win (openExclusiveBinary)
 import System.IO (hClose)
-import TestUtil (captureStdout, execNow, mkMain, mkVaultCfg, t0, writeF)
+import TestUtil (captureStdout, execNow, mkMain, mkVaultCfg, t0, withDenyAll, writeF)
 
 vaultTests :: TestTree
 vaultTests =
@@ -456,6 +456,11 @@ caseProbeUnknownFailClosed = withSystemTempDirectory "pm-vault" $ \tmp -> do
   either (const (pure ())) (\v -> assertFailure ("photos.json 查不出应 Left，得到 " <> show v)) pj
   listFlatPhotos (tmp </> "absent") >>= (@?= Right ([], []))
   photosJsonRef (Just (tmp </> "absent.json")) "x.jpg" >>= (@?= Right Nothing)
+  -- 审计 #6 同形：逐项「是不是目录」也三态——ACL 拒绝（deny F）的子目录仍报成子目录，
+  -- 不再被当成文件、再被照片扩展名过滤静默吞掉
+  writeF (tmp </> "cat" </> "a.jpg") "A"
+  createDirectoryIfMissing True (tmp </> "cat" </> "sub")
+  withDenyAll (tmp </> "cat" </> "sub") (listFlatPhotos (tmp </> "cat")) >>= (@?= Right (["a.jpg"], ["sub"]))
 
 -- ─── P3b-4（codex 评审修复） ────────────────────────────────────────────────
 

@@ -64,7 +64,7 @@ import Pm.Sort
   , surveySort
   )
 import Pm.Types (FileKind (..), RootRole (..), classifyExt, rawExts)
-import TestUtil (ensureTestRoot, scanQuiet)
+import TestUtil (ensureTestRoot, scanQuiet, withDenyAll)
 
 sortTests :: TestTree
 sortTests =
@@ -482,6 +482,9 @@ caseSurveyRawStrayFile = withLib $ \src root cfg -> do
     Right sv -> do
       length (ssSegments sv) @?= 1
       concatMap sgSameMonthEvents (ssSegments sv) @?= ["26-08-Atlanta"]
+  -- 审计 #6 同形：ACL 拒绝（deny F）的普通文件仍是文件（属性位），不被当年份夹去枚举
+  r2 <- withDenyAll (root </> "Raw" </> "desktop.ini") (surveySort src 72 cfg)
+  either (\e -> assertFailure ("被拒的普通文件不该让概览失败: " <> e)) (const (pure ())) r2
 
 caseSortE2EGates :: IO ()
 caseSortE2EGates = withLib $ \src root cfg -> do

@@ -32,6 +32,7 @@ module Pm.Win
   , pathAtOrUnder
   , NameKind (..)
   , probeName
+  , probeIsDir
   , resolveUnder
   , whenPresent
   , openExclusiveBinary
@@ -187,25 +188,35 @@ data NameKind = NameMissing | NamePlain | NameSurrogate | ProbeUnknown
 -- 线程内取得，线程亲和性假设不复存在。
 probeName :: FilePath -> IO NameKind
 probeName p = do
-  (attrs, ec) <-
-    withTString p $ \wp ->
-      alloca $ \errp -> do
-        a <- c_pmGetFileAttributesErr wp errp
-        e <- peek errp
-        pure (a, e)
-  if attrs == invalidFileAttributes
-    then pure (if ec == 2 || ec == 3 then NameMissing else ProbeUnknown)
-    else
-      if attrs .&. Win32File.fILE_ATTRIBUTE_REPARSE_POINT == 0
-        then pure NamePlain
-        else do
+  r <- fileAttrs p
+  case r of
+    Right Nothing -> pure NameMissing
+    Left _ -> pure ProbeUnknown
+    Right (Just attrs)
+      | attrs .&. Win32File.fILE_ATTRIBUTE_REPARSE_POINT == 0 -> pure NamePlain
+      | otherwise -> do
           mt <- reparseTag p
           pure $ case mt of
             Nothing -> NameSurrogate -- 是 reparse 但读不出 tag → 保守拒绝
             Just tag ->
               if tag .&. ioReparseTagNameSurrogate /= 0 then NameSurrogate else NamePlain
+
+-- | 上面错误码纪律的唯一实现（'probeName' / 'probeIsDir' 共用）：Right Nothing = 名字
+-- 不在（只认 2 / 3）；Right (Just 属性)；Left 错误码 = 查不出。
+fileAttrs :: FilePath -> IO (Either Word32 (Maybe Word32))
+fileAttrs p = withTString p $ \wp -> alloca $ \errp -> do
+  a <- c_pmGetFileAttributesErr wp errp
+  ec <- peek errp
+  pure (if a /= 0xFFFFFFFF then Right (Just a) else if ec == 2 || ec == 3 then Right Nothing else Left ec)
+
+-- | 读路径的三态「是不是目录」（2026-09-25 审计 #6）：@doesDirectoryExist@ 走 CreateFile，
+-- 对象自身的 ACL 拒绝（deny F）把它塌成 False，枚举里读不出的子目录就被当成「不是目录」
+-- 静默剔掉。这里读属性的 DIRECTORY 位——同 'probeName' 一个探针，对象自身 ACL 不影响它；
+-- junction / 目录 symlink 带该位，算目录（悬空时随后的枚举响亮失败）。Left = 查不出。
+probeIsDir :: FilePath -> IO (Either String (Maybe Bool))
+probeIsDir p = either unknown (Right . fmap (\a -> a .&. Win32File.fILE_ATTRIBUTE_DIRECTORY /= 0)) <$> fileAttrs p
  where
-  invalidFileAttributes = 0xFFFFFFFF :: Word32
+  unknown ec = Left (p <> " 存在性查不出（ACL/介质错误？错误码 " <> show ec <> "）")
 
 -- | 「名字在就做、不在就当没有、**查不出就说查不出**」（第一方自审 R1）。
 --

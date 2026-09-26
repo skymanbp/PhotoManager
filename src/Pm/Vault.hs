@@ -68,7 +68,7 @@ import Pm.Publish (vaultCommands)
 import Pm.Types
 import Pm.VaultCore (VaultDiff (..), fixedCategories, photoExtFold, pushableExt, renderVaultJson, vaultDiff)
 import Pm.VaultHold (VaultHold (..), readHolds, splitHeld)
-import Pm.Win (volumeFsType, whenPresent)
+import Pm.Win (probeIsDir, volumeFsType, whenPresent)
 
 -- ─── vault 侧缓存（主库 .pm\/vault-cache\/，display + sha 复用） ─────────────
 
@@ -125,15 +125,21 @@ writeVaultCache mainRoot = writeSideCache mainRoot pmSubVaultCache
 -- 第一方自审 R1：存在性此前是 @doesDirectoryExist@ 二态——类目目录被 ACL 拒时
 -- 塌成「不存在 = 空」，整个类目的照片伪报 NEW、一张都不 MISSING。改走
 -- 'whenPresent' 三态：缺席才是空，查不出 = Left（本轮报告整体拒绝）。
+--
+-- 2026-09-25 审计 #6 同形：逐项「是不是目录」也三态——此前 doesDirectoryExist 把 ACL 拒绝的
+-- 子目录塌成「文件」，再被照片扩展名过滤静默吞掉（「子目录显式报出来」落空）。改读属性位
+-- （'probeIsDir'）；查不出抛出，由 whenPresent 收成 Left（本轮报告整体拒绝）。
 listFlatPhotos :: FilePath -> IO (Either String ([FilePath], [FilePath]))
 listFlatPhotos dir = do
-  r <- whenPresent dir (listDirectory dir >>= mapM (\n -> (,) n <$> doesDirectoryExist (dir </> n)))
+  r <- whenPresent dir (listDirectory dir >>= mapM (\n -> (,) n <$> isDirOrThrow (dir </> n)))
   pure $ case r of
     Left e -> Left (dir <> " 枚举失败（" <> e <> "）")
     Right Nothing -> Right ([], [])
     Right (Just flagged) ->
       let (dirs, files) = partition snd flagged
        in Right (sort (filter photoExtFold (map fst files)), sort (map fst dirs))
+ where
+  isDirOrThrow p = probeIsDir p >>= either (ioError . userError) (pure . (== Just True))
 
 -- | 取一个文件的 sha：stat 与缓存条目一致（statHitStable：含 racy 余量
 -- 判据，评审 #4）→ 复用；否则真实重读，双 stat 防撕裂。三轮不稳 →

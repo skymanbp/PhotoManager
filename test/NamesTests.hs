@@ -18,7 +18,8 @@ import Pm.Plan
 import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.Undo (buildUndoPlan)
 import Pm.Versions
-import TestUtil (mkCat, mkE, t0)
+import Pm.Win (probeIsDir)
+import TestUtil (captureStdout, mkCat, mkE, t0, withDenyAll)
 
 namesTests :: TestTree
 namesTests =
@@ -31,6 +32,7 @@ namesTests =
     , testCase "runNames E2E：Scheme B 目录改名落盘 + undo 完整回滚" caseNamesE2E
     , testCase "P3b-5 B1/B3：主库路径是 backup root → 拒绝出计划；目标被文件占位 → 降裁决" caseNamesGuards
     , testCase "第一方自审工作流 F074：纯大小写改名（-raw → -Raw）计划闸与执行闸都豁免自身，落盘拼写改变，undo 反向同样可执行" caseNamesCaseOnlySuffix
+    , testCase "审计 #6：ACL 拒绝的年份夹 / 成片候选 / 改名目标不再被当成「不是目录 / 空位」静默剔掉——整批拒绝或降裁决，零计划" caseNamesDeniedDirs
     , testCase "normalizeStem：§1.1 后缀清单 + 迭代不动点" caseStem
     , testCase "versionsReport：设计内成片↔相册对排除；同目录版本组；真重复上报" caseVersions
     , testCase "designedGroup：Raw 原片就是 JPG / 相册撞名避让 算设计内；有 RAW 兄弟、没撞名、同层两份 仍上报" caseDesignedGroups
@@ -236,6 +238,37 @@ caseDesignedGroups = do
           ]
       rep' = versionsReport cat
   sort (map fst (vgExactDups rep')) @?= ["s11", "s14", "s15", "s16", "s17"]
+
+-- | 审计 #6（medium）：逐项分类此前是 doesDirectoryExist 二态，对象自身 ACL 拒绝（deny F）
+-- 塌成「不是目录」。① Raw\2024 被拒：旧码静默剔掉、报「无可机械执行的改名」exit 0——
+-- 现整批拒绝 exit 2 并点名路径。② 成片两个候选月份之一被拒：旧码只剩一个候选，歧义
+-- 变成唯一改名——现仍是歧义。③ 改名目标被拒：旧码当空位入计划——现算占位、降裁决。
+caseNamesDeniedDirs :: IO ()
+caseNamesDeniedDirs = withSystemTempDirectory "pm-names" $ \tmp -> do
+  -- 探针本身：目录 / 文件 / 缺席 / 查不出（非法名 → GetFileAttributes 报 123，确定性）
+  probeIsDir tmp >>= (@?= Right (Just True))
+  writeF (tmp </> "f.txt") "x"
+  probeIsDir (tmp </> "f.txt") >>= (@?= Right (Just False))
+  probeIsDir (tmp </> "absent") >>= (@?= Right Nothing)
+  probeIsDir (tmp </> "ca<t") >>= either (const (pure ())) (\v -> assertFailure ("非法名应查不出，得到 " <> show v))
+  let run root = do
+        ran <- newIORef False
+        (out, code) <- captureStdout (runNames (\_ -> writeIORef ran True >> pure 0) (mkMainCfg root))
+        (,,) out code <$> readIORef ran
+      mkRoot r dirs = mapM_ (createDirectoryIfMissing True . (r </>)) dirs >> writeRootInfo r (RootInfo "m" RoleMain t0 Nothing)
+      (r1, r2, r3) = (tmp </> "r1", tmp </> "r2", tmp </> "r3")
+  mkRoot r1 ["Raw" </> "2023" </> "23-12-Turkey-Raw", "Raw" </> "2024" </> "RAW-2024-Summer-Oslo"]
+  (out1, code1, ran1) <- withDenyAll (r1 </> "Raw" </> "2024") (run r1)
+  (code1, ran1) @?= (2, False)
+  assertBool ("输出须点名读不出的年份夹: " <> out1) (("Raw" </> "2024") `isInfixOf` out1)
+  mkRoot r2 ["Raw" </> "2025" </> "RAW-2025-Winter-Alaska", "成片" </> "25-01-Alaska", "成片" </> "25-02-Alaska"]
+  (out2, code2, ran2) <- withDenyAll (r2 </> "成片" </> "25-02-Alaska") (run r2)
+  (code2, ran2) @?= (1, False)
+  assertBool ("两个候选月份须仍是歧义: " <> out2) ("歧义" `isInfixOf` out2)
+  mkRoot r3 ["Raw" </> "2023" </> "23-12-Turkey", "Raw" </> "2023" </> "23-12-Turkey-Raw"]
+  (out3, code3, ran3) <- withDenyAll (r3 </> "Raw" </> "2023" </> "23-12-Turkey-Raw") (run r3)
+  (code3, ran3) @?= (1, False)
+  assertBool ("被拒的目标须算占位: " <> out3) ("已在盘上存在" `isInfixOf` out3)
 
 -- ─── helpers ────────────────────────────────────────────────────────────────
 
