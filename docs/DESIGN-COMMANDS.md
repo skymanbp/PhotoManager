@@ -291,7 +291,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   journal/trash/tmp 全在备份 root 自己的 `.pm` 下（P2 落锤，与效果同卷）；
   备份路径的 Done 仍一律即时 FlushFileBuffers（不组提交）——理由是可移动
   介质：结果打印后用户随时可能拔盘，Done 必须在汇报前已落盘；
-  doctor（`--backup`）的 C3/C4 行专门接这个残余。
+  doctor（`--backup`）的 C4 行（复核 Done）专门接这个残余（连 Intent 都没落盘的 C3 情形 doctor 不归属，见 DESIGN §6.4）。
 - 备份盘 hash 并行度**恒定默认 1**（HDD 防寻道抖动，`Pm.BackupCmd` `fromMaybe 1 mworkers`；
   **不读** `[main] workers`），只能用 `pm backup --workers N` 逐次覆盖。**pm 不探介质**
   ——seek-penalty/MediaType 探测从未实现；`Pm.Win.listCandidateDrives` 的 `DriveKind` 仅按

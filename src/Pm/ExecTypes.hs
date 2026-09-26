@@ -44,8 +44,8 @@ data Checkpoint
 data ExecEnv = ExecEnv
   { eeCheckpoint :: Checkpoint -> IO ()
   , eeDoneSync :: Sync
-    -- ^ Copy 的 Done 持久化模式。主库默认 Buffered（可组提交，C2/C3 从盘面
-    -- 重建）；备份路径必须 Barrier（DESIGN.md §9）—— 备份盘是可移动介质，
+    -- ^ Copy 的 Done 持久化模式。主库默认 Buffered（可组提交：Intent 过屏障，
+    -- Done 丢了由 C2 从盘面重建）；备份路径必须 Barrier（DESIGN.md §9）—— 备份盘是可移动介质，
     -- 打印结果后用户随时可能拔盘，Done 必须在汇报前已落盘。
     -- Rename/Quarantine 的 Done 永远 Barrier，不受此字段影响。
   , eeExpectRootId :: Maybe Text

@@ -413,7 +413,7 @@ injectionTests =
           truncateJournalTo root intentOnly
           rows <- doctorRows root
           assertBool ("expected C2 in " <> show rows) (("C2", Warn) `elem` rows)
-    , testCase "掉电模型: 整个 journal 尾丢失（无任何记录）→ 盘面完好无发现(C3 语义)" $
+    , testCase "掉电模型: 整个 journal 丢失（无任何记录，§6.4 C3）→ doctor 不归属、--repair 不补记，重跑原计划 SKIP 对账；Done 无 Intent 报 DONE-ORPHAN 而非 C3（审计 #36）" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"
           createDirectoryIfMissing True root
@@ -423,8 +423,15 @@ injectionTests =
           truncateJournalTo root []
           rows <- doctorRows root
           [r | r@(tag, sev) <- rows, sev >= Warn, tag /= "TORN"] @?= []
+          _ <- runDoctor root (DoctorOpts False True)
+          journalEntries root >>= \es -> filter isDone es @?= []
+          map snd <$> execOk plan >>= (@?= [OSkippedIdentical])
           c <- readFile (root </> "相册" </> "a.jpg")
           c @?= "PWR2"
+          now <- getCurrentTime
+          truncateJournalTo root [JDone (opId (plId plan) 0) (Just (opSha op)) Nothing now]
+          orphan <- doctorRows root
+          assertBool ("Done 无 Intent 须报 DONE-ORPHAN、不得冒用矩阵的 C3: " <> show orphan) (("DONE-ORPHAN", Info) `elem` orphan && "C3" `notElem` map fst orphan)
     , testCase "C4: Done 声称的内容与盘面不符 → CORRUPT，不删任何东西" $
         withSystemTempDirectory "pm-test" $ \dir -> do
           let root = dir </> "root"

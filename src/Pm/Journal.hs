@@ -3,8 +3,8 @@
 -- | Append-only NDJSON journal — the durable layer (DESIGN.md §3, I4).
 -- Intent entries are written through a real persistence barrier
 -- (FlushFileBuffers) BEFORE their effect touches the disk; Done entries for
--- Copy may be group-committed because doctor row C2/C3 can rebuild them from
--- disk content, while Rename/Quarantine Done entries always use the barrier
+-- Copy may be group-committed because doctor row C2 can rebuild them from the
+-- (barriered) Intent plus disk content, while Rename/Quarantine Done entries always use the barrier
 -- (the old name exists nowhere else).
 module Pm.Journal
   ( JEntry (..)

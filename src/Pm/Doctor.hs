@@ -544,7 +544,8 @@ verifyFp p (FpDir s) = do
 verifyDone :: FilePath -> Map.Map Text Op -> (Text -> Bool) -> (Text, Maybe Text, Maybe FilePath) -> IO [Finding]
 verifyDone root intents restoredAfter (oid, msha, mtrash) =
   case Map.lookup oid intents of
-    Nothing -> pure [Finding "C3" Info (T.unpack oid <> ": Done 无对应 Intent（journal 头部轮转或跨批），跳过") ""]
+    -- 审计 #36：此前标 "C3"，与 §6.4 矩阵的 C3（journal 无任何记录）同名异义，用户按表查会读反。
+    Nothing -> pure [Finding "DONE-ORPHAN" Info (T.unpack oid <> ": Done 无对应 Intent（journal 头部轮转或跨批），跳过") ""]
     -- P3b-8 六轮复审 major：Intent 的 Op 路径与 Done 的 trash 路径都是手编
     -- 输入，拼上 root 前先验（同 classifyPending 的 OP-PATH fail-closed）。
     Just op

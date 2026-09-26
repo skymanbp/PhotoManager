@@ -353,9 +353,10 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 |---|---|---|
 | C1 | 孤儿 `.pm/tmp/*` + Intent 无 Done（中断于写 tmp 阶段） | 报告；**`--repair` 不清除该 tmp**——它是在途 Intent 的证据。文案即 `--repair 不清除该 tmp（在途 Intent 的证据）；重跑原计划即可（重写从零开始，落位前覆盖它）`（"续传"同样不实：重跑走独占创建）。`--repair` 真正清的只有**不属于任何 pending Intent** 的孤儿 tmp（`TMP-STALE` 行）；清不掉时打印 `✗ 孤儿 tmp 未清除（…）` 并继续跑完其余修复，不中止 |
 | C2 | dst 完好 sha==expected + Intent 无 Done | 补记 Done |
-| C3 | dst 存在 sha==expected + journal **无任何记录**（掉电丢 journal 尾） | 按内容归属为已完成拷贝并补记 Done；backup 场景退化为 EXTRA 只读报告 |
+| C3 | dst 存在 sha==expected + journal **无任何记录** | **doctor 不归属、不补记**。Intent 在动盘前过持久化屏障（I4），这一格只有硬件谎报 flush 才到得了；此时连「pm 做过这一步」的证据都没有——凭内容补一条 Intent+Done 等于伪造历史（盘上那份也可能是人手放进去的，undo 会据此把它隔离掉）。对账走**重跑原计划**：目标已在且内容相同 → SKIP（I5）；该项没有 journal 记录，undo 不覆盖它；字节核查交 `pm scan` / `--deep`（2026-09-25 审计 #36：本行此前写「按内容归属并补记 Done」，代码从未实现） |
 | C4 | **Intent+Done 齐全但 dst sha ≠ expected**（硬件谎报 flush、劣质 USB 桥） | 报 **CORRUPT**，不删任何东西；staging/源那份标回「未确认归档」 |
 | C5 | 步 7 撕裂：dst 存在但 sha≠expected 且有 Intent **无任何终态**（进程死在步 7 与步 8 之间） | Failed 半成品；`--repair` 生成 dst 的隔离计划（已不在 tmp，超出 unlink 授权，须经 `pm apply` 确认），源未动，重跑。**pm 没崩、只是步 7.5 复核不符的那种失败不在这一格**——它当场写了 Failed 终态，doctor 结构上看不见，走 `pm resolve` |
+| DONE-ORPHAN | Done 无对应 Intent（journal 头部轮转、跨批） | 只报 Info、跳过复核（此前误标为 C3，审计 #36） |
 | R1 | Rename：{old 在 / new 无} | 未执行，重跑 |
 | R2 | Rename：{old 无 / new 在} | 已执行；按指纹复核后补记 Done |
 | R3 | Rename：{两者都在} | 未执行且目标被占 → conflict 报告，不动 |
@@ -363,8 +364,8 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 | Q1 | trash 有文件 / manifest 无条目 | 标 UNREGISTERED，列给用户，不自动处置 |
 | Q2 | manifest 有条目 / trash 无文件 + Intent 无 Done | 未执行，victim 应仍在原位，复核后清除该 manifest 条目 |
 
-**源文件在所有 Copy 路径上未被触碰**；掉电模型（journal 尾部丢失）由 C3/R2
-接住。`pm doctor` 默认对「上次 CleanShutdown 之后的全部 Done」重 hash（有界：
+**源文件在所有 Copy 路径上未被触碰**；掉电模型（journal 尾部丢失：组提交的 Done
+未落盘）由 C2/R2/Q-DONE-LOST 接住——Intent 过屏障，尾部丢失丢不到它；连 Intent 都没有的是 C3（见上表）。`pm doctor` 默认对「上次 CleanShutdown 之后的全部 Done」重 hash（有界：
 只有被中断那场会话）。
 
 **会瞬断的可移动介质（2026-09-02 真实盘实录；1.1.2 起内建，`Pm.Removable`）**：
@@ -597,7 +598,7 @@ REVIEW-LOG 第 28 轮。
 |---|---|
 | **Windows 输出编码（ACP=936）**：GHC 默认 CP936，emoji/勾号直接崩进程、重定向输出 GBK 字节（本机已实测复现） | main 首行 `hSetEncoding stdout/stderr utf8`；`--json` 走 ByteString 直写绕开编码器与 CRLF；console 场景 `SetConsoleOutputCP(65001)`；§13 编码回归测试（**尚未实现**，见 §13） |
 | `directory` rename/copy 的替换语义（静默覆盖） | Exec 禁用清单 + 一律 `Pm.Win.moveBoundNoReplace`（句柄形态 no-replace，§6.1/§6.2）；P1 测试覆盖目标已存在分支 |
-| 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C3/C4 + doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`）；会反复瞬断的盘由 `Pm.Removable` 内建等盘续跑（1.1.2；§6.4 末段，2026-09-02 实录：当日掉线 11 次、527 组更新落位并核过）+ `scripts/verify_backup_dst.py` 写后全文重读 |
+| 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C4（C3 行写明 doctor 不归属的边界）+ doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`）；会反复瞬断的盘由 `Pm.Removable` 内建等盘续跑（1.1.2；§6.4 末段，2026-09-02 实录：当日掉线 11 次、527 组更新落位并核过）+ `scripts/verify_backup_dst.py` 写后全文重读 |
 | 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤）；CJK 路径入 golden |
 | 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode（main 起手按进程设，审计 #7）+ 只探 REMOVABLE/FIXED（§9） |
 | exFAT 备份盘（无元数据日志、rename 原子性弱） | 矩阵不依赖原子性；FS 类型/粒度入 root-id.json；mtime 只做同 root 缓存键（§3） |
