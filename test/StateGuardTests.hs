@@ -452,7 +452,7 @@ caseDoctorDeepSkipped = withSystemTempDirectory "pm-sguard" $ \dir -> do
 --   ① FpDir：目录 old + 目录 new —— codex 报的那条形态；
 --   ② FpFileSha：目录 old + 文件 new —— 触发**不需要** FpDir，现有 undo 构造器
 --      （'Pm.Undo' 只生成 FpFileSha 复位）配上一个占了载荷名的目录就够。
--- 把 'Pm.Doctor.probePmExists' 的 @PmEntryAny@ 改回 @PmEntryFile@，两条都转红。
+-- 把 'Pm.DoctorProbe.probePmExists' 的 @PmEntryAny@ 改回 @PmEntryFile@，两条都转红。
 
 -- | ① old 与 new 都是真实目录，Intent 记的是 new 的 FpDir 指纹。
 caseRestoreSrcFpDir :: IO ()

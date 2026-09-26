@@ -169,6 +169,7 @@ src/Pm/Exec.hs              -- ★安全内核：唯一**写入/落位/改名**�
 src/Pm/Removable.hs         -- 可移动介质瞬断保护（1.1.2，§6.4 末段）：盘在判据、IOException 三分、等盘/短停重试、扫描按 pass 续、执行按组续跑（内核之外的会话层；不写照片字节）
 src/Pm/Derived.hs           -- .pm/derived 派生件对账口（1.1.2 从 Convert 字节级拆出，解 Doctor→Convert→Cli 依赖环；Convert 再导出）；derivedRefs = 未完成计划项引用的派生件（审计 #31）
 src/Pm/Finding.hs           -- doctor 的发现行类型与渲染（Severity/Finding/renderFinding/repairRow；2026-09-26 从 Doctor 字节级拆出，Doctor 再导出；750 行预算）
+src/Pm/DoctorProbe.hs       -- doctor 的受信探针（.pm 内定点路径的受信 sha / 存在性、用户侧三态存在性；2026-09-26 审计 #35 时从 Doctor 字节级拆出；750 行预算）
 src/Pm/Sort.hs              -- 卡/收件目录 → 分段提议与归位计划（源扫描层在 Pm.SortSource，三十五轮拆出）
 src/Pm/Names.hs             -- 事件夹/文件名解析、规范化、rename 计划（目标唯一性校验）
 src/Pm/Versions.hs          -- 版本组聚合报告
@@ -363,7 +364,7 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 | C2 | dst 完好 sha==expected + Intent 无 Done | 补记 Done |
 | C3 | dst 存在 sha==expected + journal **无任何记录** | **doctor 不归属、不补记**。Intent 在动盘前过持久化屏障（I4），这一格只有硬件谎报 flush 才到得了；此时连「pm 做过这一步」的证据都没有——凭内容补一条 Intent+Done 等于伪造历史（盘上那份也可能是人手放进去的，undo 会据此把它隔离掉）。对账走**重跑原计划**：目标已在且内容相同 → SKIP（I5）；该项没有 journal 记录，undo 不覆盖它；字节核查交 `pm scan` / `--deep`（2026-09-25 审计 #36：本行此前写「按内容归属并补记 Done」，代码从未实现） |
 | C4 | **Intent+Done 齐全但 dst sha ≠ expected**（硬件谎报 flush、劣质 USB 桥） | 报 **CORRUPT**，不删任何东西；staging/源那份标回「未确认归档」 |
-| C5 | 步 7 撕裂：dst 存在但 sha≠expected 且有 Intent **无任何终态**（进程死在步 7 与步 8 之间） | Failed 半成品；`--repair` 生成 dst 的隔离计划（已不在 tmp，超出 unlink 授权，须经 `pm apply` 确认），源未动，重跑。**pm 没崩、只是步 7.5 复核不符的那种失败不在这一格**——它当场写了 Failed 终态，doctor 结构上看不见，走 `pm resolve` |
+| C5 | 步 7 撕裂：dst 存在但 sha≠expected 且有 Intent **无任何终态**（进程死在步 7 与步 8 之间） | Failed 半成品；`--repair` 生成 dst 的隔离计划（已不在 tmp，超出 unlink 授权，须经 `pm apply` 确认），源未动，重跑。**pm 没崩、只是步 7.5 复核不符的那种失败不在这一格**——它当场写了 Failed 终态，doctor 结构上看不见，走 `pm resolve` 。**dst 的现内容是 pm 经另一条 Copy 落下的**（journal 里有那条的 Done，dst 按 case-fold 比、sha 相等）——另一份计划把同一路径正当地落成了新内容——不是这一格：报 `C5-SUPERSEDED` Info「旧 Intent 作废」，不进 `--repair` 白名单、不出隔离计划（审计 #35） |
 | DONE-ORPHAN | Done 无对应 Intent（journal 头部轮转、跨批） | 只报 Info、跳过复核（此前误标为 C3，审计 #36） |
 | R1 | Rename：{old 在 / new 无} | 未执行，重跑 |
 | R2 | Rename：{old 无 / new 在} | 已执行；按指纹复核后补记 Done |

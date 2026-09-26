@@ -17,8 +17,8 @@ module Pm.Doctor
   , repairDegraded
   ) where
 
-import Control.Monad (filterM, forM)
-import Control.Exception (IOException, bracket, try)
+import Control.Monad (filterM, forM, mfilter)
+import Control.Exception (IOException, try)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Maybe (isJust, listToMaybe, mapMaybe)
@@ -26,16 +26,15 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
-import System.IO (hClose)
-import System.IO.Error (isDoesNotExistError)
 import System.FilePath (joinPath, makeRelative, splitDirectories, (</>))
 
 import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog)
 import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
 import Pm.Derived (DerivedState (..), derivedRefs, scanDerived)
+import Pm.DoctorProbe
 import Pm.Finding
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
-import Pm.Hash (sha256File, sha256Handle)
+import Pm.Hash (sha256File)
 import Pm.Import (foldPath)
 import Pm.Journal
 import Pm.Lock (withRootLock)
@@ -44,7 +43,7 @@ import Pm.Plan
 import Pm.Removable (DriveWait, ensureDrive, noDriveWait, requireDrive, withDriveRetry)
 import Pm.Trash
 import Pm.Types
-import Pm.Win (NameKind (..), deleteBoundAt, openStateRead, pathAtOrUnder, probeName, resolveUnder)
+import Pm.Win (NameKind (..), deleteBoundAt, pathAtOrUnder, probeName, resolveUnder)
 
 data DoctorOpts = DoctorOpts
   { doDeep :: Bool
@@ -130,6 +129,10 @@ runDoctor' dw root opts = do
       donesAfterClean = [(jeOpId e, jeVerifiedSha e, jeTrashRel e) | e@JDone {} <- afterClean]
       -- pending = 末事件为 Intent 的 oid（见上 opState 的次序感知语义）
       pending = [(i, op) | (i, (op, True)) <- Map.toList opState]
+      -- 审计 #35：pm 经别的 Copy 落到某 dst 的内容（有 Done）。在途 Copy 的 dst 若正是它——另一份计划把同一路径
+      -- 正当地落成了新内容——那不是 C5 的外来文件：旧 Intent 作废，别给新落位的文件出隔离计划
+      landedBy = Map.fromList [((foldPath (opDstRel op), opSha op), i) | JDone i _ _ _ <- entries, Just op@OpCopy {} <- [Map.lookup i intents]]
+      supersededBy oid dst dsha = mfilter (/= oid) (Map.lookup (foldPath dst, dsha) landedBy)
       -- Exec 组内自动复位（§6.5）/undo 复位会把隔离文件从 trash 移回原位，
       -- 且该 rename 有自己的 Intent+Done。P2.2（复审新发现）：豁免必须
       -- **顺序感知**——只有当 oid 的最后一次 Done 之后还有对应 ~r 复位 Done
@@ -148,7 +151,7 @@ runDoctor' dw root opts = do
             _ -> False
         _ -> False
 
-  pendingFindings <- concat <$> mapM (classifyPending root) pending
+  pendingFindings <- concat <$> mapM (classifyPending root supersededBy) pending
   c4Findings <- concat <$> mapM (verifyDone root intents restoredAfterLastDone) donesAfterClean
 
   -- Trash reconciliation (Q1 + purged records)
@@ -331,61 +334,16 @@ pendingTmp _ _ = Nothing
 -- P3b-8 六轮复审 major：Op 自带的相对路径（victim/dstRel/old/new）同为手编
 -- 输入，拼上 root 前先过 'opPathsOk'——否则合法 oid + @..\/..\/x@ 路径仍能让
 -- doctor 在 root 外探测/核 sha，--repair 还会补 Done 或生成 C5 计划。
-classifyPending :: FilePath -> (Text, Op) -> IO [Finding]
-classifyPending root (oid, op)
+classifyPending :: FilePath -> (Text -> FilePath -> Text -> Maybe Text) -> (Text, Op) -> IO [Finding]
+classifyPending root sup (oid, op)
   | Nothing <- opIdParts oid =
       pure [Finding "OID-MALFORMED" Bad (T.unpack oid <> ": journal 中的 opId 不是 pm 生成的语法，不推导、不修复（需人工核查）") ""]
   | not (opPathsOk op) =
       pure [Finding "OP-PATH" Bad (T.unpack oid <> ": journal 中的 Op 相对路径非法（越界/盘符/ADS/.pm 内部），不推导、不修复（需人工核查）") ""]
-  | otherwise = classifyPending' root (oid, op)
+  | otherwise = classifyPending' root sup (oid, op)
 
--- | @.pm@ 内定点路径（trash 载荷 \/ tmp）的受信探测（P3b-15，十二轮 major）：
--- 完整路径 'resolveUnder' + 'openStateRead'（句柄 link count）+ **同一句柄**
--- hash。此前这里直接 @doesFileExist@\/@sha256File@——trash 载荷被换成指向库外
--- 同内容文件的 symlink\/hardlink 时，doctor 会"核验通过"并让 @--repair@ 补写
--- **虚假的 Done**，把从未落位的隔离认证成已完成。
--- 三态：@PmStateBad@=不可信（只报 Bad，不参与任何 repair 推导）、
--- @PmStateMissing@=缺席、@PmStateSha@=可信内容的 sha。
-data PmProbe = PmStateBad String | PmStateMissing | PmStateSha Text
-
-probePmSha :: FilePath -> FilePath -> IO PmProbe
-probePmSha root rel = do
-  m <- resolveUnder root (".pm" </> rel)
-  case m of
-    Nothing -> pure (PmStateBad (rel <> " 不是 root 下的真实路径（junction/symlink？）"))
-    Just fp -> do
-      r <- try (bracket (openStateRead fp) hClose sha256Handle) :: IO (Either IOException Text)
-      pure $ case r of
-        Right sha -> PmStateSha sha
-        Left e
-          | isDoesNotExistError e -> PmStateMissing
-          | otherwise -> PmStateBad (rel <> " 无法可信读取（" <> show e <> "）")
-
--- | @.pm@ 内定点路径的**存在性**受信探测。问的是哪一种存在必须由调用点显式
--- 说明——P3b-17（十四轮 major）的成因正是它此前不必说：十三轮把复位源的
--- 'existsAny'（文件**或**目录）换成受信探针时只写了 @doesFileExist@，谓词在
--- 安全重构里**被悄悄收窄**。'Pm.Op.OpRename' 合法支持 'FpDir'（'Pm.Names' 的
--- 目录改名计划就是这一种，执行端也确实 stat/hash/move 目录），于是 trash 里
--- **真实存在的目录**复位源被判成"不存在"，与存在且指纹相符的 @new@ 组合成
--- R2 Warn，@--repair@ 随即补写**虚假 Done**（正确格是 R3，不进任何修复线）。
-data PmEntryQ
-  = -- | 只认普通文件（pm 自建的 tmp 落位点）
-    PmEntryFile
-  | -- | 任何目录项，文件或目录（'existsAny' 的受信对偶）
-    PmEntryAny
-
-probePmExists :: PmEntryQ -> FilePath -> FilePath -> IO (Either String Bool)
-probePmExists q root rel = do
-  m <- resolveUnder root (".pm" </> rel)
-  case m of
-    Nothing -> pure (Left (rel <> " 不是 root 下的真实路径（junction/symlink？）"))
-    Just fp ->
-      Right <$> case q of
-        PmEntryFile -> doesFileExist fp
-        PmEntryAny -> existsAny fp
-
-classifyPending' :: FilePath -> (Text, Op) -> IO [Finding]
-classifyPending' root (oid, op) = case op of
+classifyPending' :: FilePath -> (Text -> FilePath -> Text -> Maybe Text) -> (Text, Op) -> IO [Finding]
+classifyPending' root sup (oid, op) = case op of
   OpCopy _ dstRel sha _ _ -> do
     let dstAbs = root </> dstRel
     -- 2026-09-25 审计 #34：dst 存在性三态（同 Rename 臂 F033）——doesFileExist 把 ACL 拒绝塌成
@@ -403,6 +361,8 @@ classifyPending' root (oid, op) = case op of
           Left e -> pure [Finding "C?" Bad (T.unpack oid <> ": dst 读取失败（" <> show e <> "），C2/C5 判不出——稍后重跑 pm doctor") ""]
           Right dsha
             | dsha == sha -> pure [Finding "C2" Warn (T.unpack oid <> ": dst 完好、Done 丢失 (" <> dstRel <> ")") "--repair 将补记 Done"]
+            | Just o2 <- sup oid dstRel dsha ->
+                pure [Finding "C5-SUPERSEDED" Info (T.unpack oid <> ": dst 已由 " <> T.unpack o2 <> " 落成新内容 (" <> dstRel <> ")，这条旧 Intent 作废——不隔离；原计划重跑会按冲突拒绝") ""]
             | otherwise -> pure [Finding "C5" Bad (T.unpack oid <> ": dst 存在但内容不符 (" <> dstRel <> ")") "--repair 将生成 dst 隔离计划（经 pm apply 确认执行），源文件未受影响"]
       Right False -> do
         -- P3b-15：.pm/tmp 的存在性探测也走受信解析（此前 doesFileExist 会
@@ -495,22 +455,6 @@ classifyPending' root (oid, op) = case op of
         pure [Finding "Q2" Info (T.unpack oid <> ": 隔离未执行，" <> note <> "，重跑原计划即可") ""]
       (PmStateMissing, Right False) -> pure [Finding "Q?" Bad (T.unpack oid <> ": victim 与 trash 均不存在，需人工核查") ""]
       (PmStateMissing, Left m) -> pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]
-
-existsAny :: FilePath -> IO Bool
-existsAny p = do
-  f <- doesFileExist p
-  if f then pure True else doesDirectoryExist p
-
--- | 用户侧路径的三态存在性（第一方自审工作流 F033）：'probeName' 走
--- GetFileAttributes，对象自身的 ACL 拒绝不影响它；查不出即 Left。
-userSideExists :: FilePath -> IO (Either String Bool)
-userSideExists p = do
-  k <- probeName p
-  pure $ case k of
-    NameMissing -> Right False
-    NamePlain -> Right True
-    NameSurrogate -> Right True
-    ProbeUnknown -> Left (p <> " 存在性查不出（ACL/介质错误？）")
 
 -- | 三十四轮（同型扫尽）：读失败 ≠ 指纹不符——两者的下一步不同（稍后重跑
 -- vs 人工核查），折叠成 False 会把占用误报成内容问题；Left 由调用方报

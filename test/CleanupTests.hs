@@ -11,7 +11,7 @@ import Control.Monad (forM_)
 import qualified Data.ByteString as BS
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Time (UTCTime (..), defaultTimeLocale, formatTime, fromGregorian, getTimeZone, utcToLocalTime)
-import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (splitDrive, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
@@ -33,7 +33,7 @@ import Pm.SortSource (withSourceQ)
 import Pm.Status (IndexSummary (..), StatusOpts (..), StatusReport (..), localStamp, renderStatus, statusReport)
 import Pm.VaultHold (validateKeyed)
 import Pm.Types (RootRole (..), blankPathArg, showHuman, subpathOk)
-import TestUtil (captureStdout, grepSrc, injectAt, mkCopyOp, mkMain, mkPlanIO, readUtf8, runCrash, scanQuiet, withEnv, writeF)
+import TestUtil (captureStdout, execOk, grepSrc, injectAt, mkCopyOp, mkMain, mkPlanIO, readUtf8, runCrash, scanQuiet, withEnv, writeF)
 
 cleanupTests :: TestTree
 cleanupTests =
@@ -50,6 +50,7 @@ cleanupTests =
     , testCase "#83 整理页重扫先清模型再请求：失败的重扫之后没有旧概览、AI 按钮不亮；AI 请求收尾按当前概览定按钮" caseSortRescanReset
     , testCase "#29 #38 --repair 做了什么进返回的 findings（REPAIR 行，不直接打 stdout）；执行自愈转发它们与 Bad 行，降级成只诊断时不再报「补记 N 条」" caseRepairFindings
     , testCase "#30 隔离预写了 manifest 却没落地（崩在移动前）：pm trash list 标「不在 trash」，不再说「已移出」；victim 仍在原位" caseTrashListNeverLanded
+    , testCase "#35 在途 Copy 的 dst 后来被另一份计划正当落成新内容：doctor 报 C5-SUPERSEDED Info（不再是 C5 Bad、exit 0），--repair 不给那份文件出隔离计划" caseC5Superseded
     , testCase "#26 备份发现按四态读：登记路径上 root-id.json 损坏 / 读不出 → 点名那块盘（不再说「未挂载，插上盘」）；pm apply 的 UUID 绑定同样点名；路径不在照旧「未挂载」" caseBackupMarkerBroken
     ]
 
@@ -290,3 +291,26 @@ caseTrashListNeverLanded = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   code @?= 0
   assertBool out ("v.jpg" `isInfixOf` out && "不在 trash" `isInfixOf` out && not ("已移出" `isInfixOf` out))
   doesFileExist (root </> "v.jpg") >>= (@?= True)
+
+-- | #35：崩在 Intent 之后、写 tmp 之前的 Copy，dst 后来被另一份计划正当地落成新内容——Exec 对重跑的 I5 冲突不记
+-- journal，这条 Intent 永远在途；doctor 此前每轮报 C5 Bad（exit 1），--repair（含执行续跑前的自愈）给那份正当
+-- 落位的文件出隔离计划。dst 的事件夹名用大写，钉住按 NTFS 语义（case-fold）比对。
+caseC5Superseded :: Assertion
+caseC5Superseded = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  let root = dir </> "root"
+      dst = "成片" </> "Ev" </> "x.jpg"
+      plansDir = root </> ".pm" </> "plans"
+  createDirectoryIfMissing True root
+  opA <- mkCopyOp (dir </> "a.jpg") "OLD" dst
+  mkPlanIO root [opA] >>= runCrash (injectAt CpCopyAfterIntent)
+  opB <- mkCopyOp (dir </> "b.jpg") "NEW" dst
+  _ <- mkPlanIO root [opB] >>= execOk
+  (fs, code) <- runDoctor root (DoctorOpts False False)
+  let rows = [(fRow f, fSeverity f) | f <- fs]
+  assertBool (show rows) (("C5-SUPERSEDED", Info) `elem` rows && "C5" `notElem` map fst rows)
+  code @?= 0
+  _ <- runDoctor root (DoctorOpts False True)
+  ex <- doesDirectoryExist plansDir
+  ps <- if ex then listDirectory plansDir else pure []
+  ps @?= []
+  readFile (root </> dst) >>= (@?= "NEW")
