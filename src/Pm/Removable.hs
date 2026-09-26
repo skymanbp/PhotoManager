@@ -56,7 +56,7 @@ import System.FilePath ((</>))
 import Text.Printf (printf)
 
 import Pm.Config (Config (..), readRootInfo)
-import Pm.Exec (ExecEnv (..), ItemOutcome (..), execPlan)
+import Pm.Exec (ExecEnv (..), ItemOutcome (..), execPlan, restoredStat)
 import Pm.Hash (statSnap)
 import Pm.Journal (JEntry (..), readJournal)
 import Pm.Op (Op (..), opId)
@@ -267,7 +267,8 @@ stopMsg (StopAborted m) = m
 --   3. 结算已完成的**组**：组内每项都有结果且都是 DONE\/同内容 SKIP → 按结果计；
 --      否则组内每个待执行项在 journal 里末事件都是 Done → 按 journal 计（Copy 的
 --      dst 现 stat 一次，结果形态与内核落位时相同：@ODone sha stat@ \/ rename
---      @ODone@ 空 \/ 隔离 @ODone sha _ trashRel@）；其余组整组重跑——内核既有的
+--      @ODone@ 空（从 trash 复位的带落位 stat，'restoredStat'，审计 #40）\/ 隔离
+--      @ODone sha _ trashRel@）；其余组整组重跑——内核既有的
 --      崩溃恢复分支接手（victim 已入 trash 且 sha 相符 → 视同完成；dst 已同内容
 --      → SKIP），不重做已落的字节；
 --   4. 只把未结算的项交给下一场 'execPlan'（组闭包天然保全），结果按原序合并。
@@ -340,6 +341,7 @@ settle root prog done pid todo = Map.unions <$> mapM settleGroup groups
           OpCopy {opDstRel = d} -> do
             st <- try (statSnap (root </> d))
             pure (either (\e -> const Nothing (e :: IOException)) (\s -> Just (ODone msha (Just s) Nothing)) st)
+          op@OpRename {opNewRel = n} -> (\mst -> Just (ODone msha mst mtrash)) <$> restoredStat op (root </> n)
           _ -> pure (Just (ODone msha Nothing mtrash))
         _ -> pure Nothing
 

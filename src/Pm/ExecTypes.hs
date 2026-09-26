@@ -10,15 +10,17 @@ module Pm.ExecTypes
   , ItemOutcome (..)
   , outcomeLabel
   , updateCatalog
+  , restoredStat
   ) where
 
+import Control.Exception (IOException, try)
 import Data.List (partition)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Data.Time (UTCTime)
 import System.FilePath (splitDirectories, takeExtension, (</>))
 
-import Pm.Hash (StatSnap (..))
+import Pm.Hash (StatSnap (..), statSnap)
 import Pm.Journal (Sync (..))
 import Pm.Op
 import Pm.Plan (BarrierKind, Plan, PlanItem (..))
@@ -101,21 +103,11 @@ updateCatalog :: UTCTime -> [(PlanItem, ItemOutcome)] -> Catalog -> Catalog
 updateCatalog now results cat = foldl step cat results
  where
   step c (item, out) = case (piOp item, out) of
-    (OpCopy _ dstRel sha _ _, ODone _ (Just st) _) ->
-      c
-        { catEntries =
-            Map.insert
-              dstRel
-              Entry
-                { enPath = dstRel
-                , enSize = ssSize st
-                , enMtimeNs = ssMtimeNs st
-                , enSha = sha
-                , enKind = classifyExt (takeExtension dstRel)
-                , enLastVerified = Just now
-                }
-              (catEntries c)
-        }
+    (OpCopy _ dstRel sha _ _, ODone _ (Just st) _) -> c {catEntries = Map.insert dstRel (landed dstRel sha st) (catEntries c)}
+    -- 审计 #40：从 trash 复位的文件（undo 隔离）——隔离落位时条目删了，trash 下的条目又从不在索引里，
+    -- 下面的改键补不回它；按落位后的 stat（'restoredStat'）与计划时的 sha 补回
+    (OpRename old new (FpFileSha sha), ODone _ (Just st) _)
+      | isTrashSrcRel old -> c {catEntries = Map.insert new (landed new sha st) (catEntries c)}
     (OpRename old new _, ODone {}) ->
       -- 第一方自审工作流 F004：两把 key 可以改写到同一目标（目标前缀下残留着
       -- 过期条目——目录被带外挪走后没重扫；undo 反向 rename 正是这个形状）。
@@ -127,7 +119,17 @@ updateCatalog now results cat = foldl step cat results
     (OpQuarantine victim _ _, ODone {}) ->
       c {catEntries = Map.delete victim (catEntries c)}
     _ -> c
+  landed p sha st =
+    Entry {enPath = p, enSize = ssSize st, enMtimeNs = ssMtimeNs st, enSha = sha, enKind = classifyExt (takeExtension p), enLastVerified = Just now}
   underPrefix old k = take (length (splitDirectories old)) (splitDirectories k) == splitDirectories old
   rekey old new (k, e) =
     let k' = foldr1 (</>) (splitDirectories new <> drop (length (splitDirectories old)) (splitDirectories k))
      in (k', e {enPath = k'})
+
+-- | 审计 #40：从 @.pm\/trash@ 把一个文件复位回原位（undo 隔离）之后那份文件的 stat——隔离落位时索引条目被删了，
+-- 'updateCatalog' 据它补回。内核落位（'Pm.Exec'）与续跑按 journal 结算（'Pm.Removable'）共用，两处结局同形；
+-- 普通改名只需改键、答 Nothing；stat 失败也答 Nothing（条目照旧缺，下一次 pm scan 补）。
+restoredStat :: Op -> FilePath -> IO (Maybe StatSnap)
+restoredStat (OpRename old _ (FpFileSha _)) newAbs
+  | isTrashSrcRel old = either (\e -> const Nothing (e :: IOException)) Just <$> try (statSnap newAbs)
+restoredStat _ _ = pure Nothing

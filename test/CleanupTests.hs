@@ -9,6 +9,7 @@ module CleanupTests (cleanupTests) where
 
 import Control.Monad (forM_)
 import qualified Data.ByteString as BS
+import qualified Data.Map.Strict as Map
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Time (UTCTime (..), defaultTimeLocale, formatTime, fromGregorian, getTimeZone, utcToLocalTime)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
@@ -28,12 +29,13 @@ import Pm.Op (Op (..))
 import Pm.Config (Config (..), loadConfig, writeConfig)
 import Pm.ConfigEdit (checkConfig, runConfigShow)
 import Pm.GitGuard (pmIgnoreGuard)
-import Pm.Catalog (saveCatalog)
+import Pm.Catalog (CatalogLoad (..), loadCatalog, saveCatalog)
 import Pm.SortSource (withSourceQ)
 import Pm.Status (IndexSummary (..), StatusOpts (..), StatusReport (..), localStamp, renderStatus, statusReport)
 import Pm.VaultHold (validateKeyed)
-import Pm.Types (RootRole (..), blankPathArg, showHuman, subpathOk)
-import TestUtil (captureStdout, execOk, grepSrc, injectAt, mkCopyOp, mkMain, mkPlanIO, readUtf8, runCrash, scanQuiet, withEnv, writeF)
+import Pm.Types (Catalog (..), Entry (..), RootRole (..), blankPathArg, showHuman, subpathOk)
+import Pm.Undo (buildUndoPlan)
+import TestUtil (captureStdout, execNow, execOk, grepSrc, injectAt, mkCopyOp, mkMain, mkPlanIO, readUtf8, runCrash, scanQuiet, withEnv, writeF)
 
 cleanupTests :: TestTree
 cleanupTests =
@@ -51,6 +53,7 @@ cleanupTests =
     , testCase "#29 #38 --repair 做了什么进返回的 findings（REPAIR 行，不直接打 stdout）；执行自愈转发它们与 Bad 行，降级成只诊断时不再报「补记 N 条」" caseRepairFindings
     , testCase "#30 隔离预写了 manifest 却没落地（崩在移动前）：pm trash list 标「不在 trash」，不再说「已移出」；victim 仍在原位" caseTrashListNeverLanded
     , testCase "#35 在途 Copy 的 dst 后来被另一份计划正当落成新内容：doctor 报 C5-SUPERSEDED Info（不再是 C5 Bad、exit 0），--repair 不给那份文件出隔离计划" caseC5Superseded
+    , testCase "#40 pm undo 一次隔离（从 trash 改名回原位）后索引补回那条——此前文件回到库里、索引静静地少它一条" caseUndoQuarantineReindexed
     , testCase "#26 备份发现按四态读：登记路径上 root-id.json 损坏 / 读不出 → 点名那块盘（不再说「未挂载，插上盘」）；pm apply 的 UUID 绑定同样点名；路径不在照旧「未挂载」" caseBackupMarkerBroken
     ]
 
@@ -314,3 +317,23 @@ caseC5Superseded = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   ps <- if ex then listDirectory plansDir else pure []
   ps @?= []
   readFile (root </> dst) >>= (@?= "NEW")
+
+-- | #40：pm undo 一次隔离 = 从 .pm/trash 改名回原位；updateCatalog 的改名臂只改键（trash 下的条目从不在索引里），
+-- 隔离落位时删掉的条目于是补不回来。走 CLI 的执行口（execNow → 索引回写），与用户跑 pm apply 同一条路。
+caseUndoQuarantineReindexed :: Assertion
+caseUndoQuarantineReindexed = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  let root = dir </> "root"
+      cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+      v = "相册" </> "v.jpg"
+      entryOf = (\lc -> case lc of CatLoaded c _ -> (\e -> (enSha e, enSize e)) <$> Map.lookup v (catEntries c); _ -> Nothing) <$> loadCatalog root
+  createDirectoryIfMissing True root
+  mkMain root
+  writeF (root </> v) "BACK"
+  scanQuiet "main-rid" root >>= saveCatalog root
+  sha <- sha256File (root </> v)
+  _ <- mkPlanIO root [OpQuarantine v sha "test"] >>= execNow cfg
+  entryOf >>= (@?= Nothing)
+  Right up <- buildUndoPlan root 1
+  _ <- execNow cfg up
+  readFile (root </> v) >>= (@?= "BACK")
+  entryOf >>= (@?= Just (sha, 4))

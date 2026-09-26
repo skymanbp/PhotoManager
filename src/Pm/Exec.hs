@@ -27,6 +27,7 @@ module Pm.Exec
   , admitsUserPath
   , dirFingerprint
   , updateCatalog
+  , restoredStat
   , outcomeLabel
   ) where
 
@@ -641,7 +642,9 @@ execRename' env j oid op oldAbs newAbs = do
                   eeCheckpoint env CpRenAfterMove
                   td <- getCurrentTime
                   jAppend j Barrier (JDone oid Nothing Nothing td)
-                  pure (ODone Nothing Nothing Nothing)
+                  -- 审计 #40：从 trash 复位的文件带回落位后的 stat，索引回写据此补回条目
+                  mst <- restoredStat op newAbs
+                  pure (ODone Nothing mst Nothing)
 
 -- ─── Quarantine (§6.3, write-ahead manifest) ────────────────────────────────
 

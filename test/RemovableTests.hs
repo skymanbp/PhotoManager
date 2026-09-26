@@ -34,6 +34,7 @@ import Pm.Plan
 import Pm.Removable
 import Pm.Scan (ScanOpts (..), ScanResult (..))
 import Pm.Types
+import Pm.Undo (buildUndoPlan)
 import TestUtil
 
 removableTests :: TestTree
@@ -49,6 +50,7 @@ removableTests =
     , testCase "execPlanRetry：Copy 落位后写 Done 前盘掉线 → 自愈补 Done、续跑不重做已完成项、journal 每 oid 一个 Done、doctor 干净" caseExecResume
     , testCase "execPlanRetry：supersede 组内 Copy 写 tmp 时瞬断 → 整组重跑，隔离项走 resume 分支、Copy 落位、trash 只有一份" caseExecGroupRerun
     , testCase "#17 #42 execPlanRetry 停下分两种：锁被占 → StopRefused（什么都没处理过）；执行已开始、续跑那场因身份不符被拒 → StopAborted" caseExecStops
+    , testCase "#40 execPlanRetry：从 trash 复位（undo 隔离）落位后写 Done 前盘掉线 → 按 journal 结算的结局带落位 stat，索引回写补回条目（与内核落位同形）" caseRestoreSettled
     , testCase "#29 execPlanRetry：续跑前的自愈没修成（降级只诊断）→ 停下说原因，不续跑——落了位而缺 Done 的 Rename 不被重判成冲突" caseHealDegradedStops
     , testCase "scanRootRetry：起手盘不在 → 等它回来照常扫完；持续性读错（ACL）有界重试后如实报读错" caseScanRetry
     , testCase "runDoctorWith --deep：盘不在时不交假结论（DEEP-SKIPPED / 消失）——等盘回来重跑；对偶 runDoctor 照旧 DEEP-SKIPPED Bad" caseDoctorDeepDrop
@@ -385,3 +387,30 @@ caseHealDegradedStops = withSystemTempDirectory "pm-rm" $ \dir -> do
     other -> assertFailure ("应停下（StopAborted）: " <> show (fmap (map (outcomeLabel . snd)) other))
   readIORef progress >>= (@?= 0)
   doesFileExist (root </> "new.txt") >>= (@?= True)
+
+-- | #40：续跑按 journal 结算一条从 trash 复位的改名（undo 隔离）——结局须与内核落位时同形（带落位后的 stat），
+-- 否则索引回写补不回隔离时删掉的那条。落位后、写 Done 前拔盘：自愈（doctor --repair）按 R2 补 Done，再按 journal 结算。
+caseRestoreSettled :: IO ()
+caseRestoreSettled = withSystemTempDirectory "pm-rm" $ \dir -> do
+  root <- mkRoot dir
+  let v = "相册" </> "v.jpg"
+  createDirectoryIfMissing True (root </> "相册")
+  writeFile (root </> v) "BACK"
+  sha <- sha256File (root </> v)
+  _ <- mkPlanIO root [OpQuarantine v sha "test"] >>= execOk
+  Right up <- buildUndoPlan root 1
+  (dw, _) <- mkDw root
+  fired <- newIORef False
+  let env =
+        defaultExecEnv
+          { eeCheckpoint = \c -> when (c == CpRenAfterMove) $ do
+              f <- readIORef fired
+              unless f (writeIORef fired True >> unplug root >> throwIO (transient "FlushFileBuffers"))
+          }
+      heal = Nothing <$ runDoctorWith dw root (DoctorOpts False True)
+  r <- execPlanRetry dw heal env up
+  outs <- either (\e -> assertFailure (stopMsg e) >> pure []) pure r
+  readIORef fired >>= (@?= True)
+  now <- getCurrentTime
+  let cat = updateCatalog now outs (Catalog "test-root" now Map.empty)
+  (\e -> (enSha e, enSize e)) <$> Map.lookup v (catEntries cat) @?= Just (sha, 4)
