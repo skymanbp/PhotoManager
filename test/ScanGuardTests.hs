@@ -30,6 +30,7 @@ import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, doesFileExist)
 import System.Environment (lookupEnv, setEnv)
 import System.FilePath ((</>))
+import System.IO (IOMode (..), withBinaryFile)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
@@ -64,6 +65,7 @@ scanGuardTests =
     , testCase "E2E：核对受阻（读取错误）必须计入 pm status 退出码——「一致」不得在受阻时照说" caseStatusFreshnessErrExit
     , testCase "第一方自审工作流 F039：基准目录列不出（RD 拒）→ 覆盖全树，catalog 不报「消失」" caseFreshnessSweepBaseUnlistable
     , testCase "第一方自审工作流 F040：子树列不出 → 旧条目按「查不出」保留并计数，不从快照消失" caseScanPartialWalkKeepsUnknown
+    , testCase "#46 hash 时读不出（被占）的文件：旧条目按「查不出」原样保留并计数，不从快照消失；带路径入错误桶" caseScanHashErrCarried
     , testCase "工作流 F010/F077：init --force 遇旧配置读不出 → 明说未能保留；旧配置完好 → 登记保留且不报" caseInitForcePreservesOrSays
     , testCase "工作流 F046：快照最新代坏、回退到 .1 → status 打 ⚠ 且退出 1（--cached 下唯一的 1 来源）" caseStatusCatalogFallbackExit
     , testCase "工作流 F056/F057 backupVerdict 判定表：零降级零差异才 ✓/0；主库回退告警、备份盘读错/被改/未枚举 → 1" caseBackupVerdict
@@ -419,3 +421,19 @@ caseInitOrphanTmpRefused = withSystemTempDirectory "pm-orph" $ \tmp -> do
     assertBool ("应复述 .tmp 恢复指引: " <> out) (".tmp" `isInfixOf` out)
     doesFileExist cfgFp >>= (@?= False)
     doesFileExist (cfgFp <> ".tmp") >>= (@?= True)
+
+-- | 审计 #46：枚举到了、stat 也成、hash 时读不出的文件（被占的共享冲突 / 介质读错）——此前旧快照里它那条被丢掉，
+-- 快照无条件落盘，「查不出」塌成「不在」（再读得出时 pm status 报成「新增」，三次失败扫描后完整快照被轮转顶掉）。
+-- 被占的替身：本进程以写方式开着它（GHC 的读写锁让 sha256File 的只读打开抛 resource busy）；stat 不开文件，照常成。
+caseScanHashErrCarried :: IO ()
+caseScanHashErrCarried =
+  withSystemTempDirectory "pm-scan-busy" $ \dir -> do
+    let x = "成片" </> "E" </> "x.jpg"
+    createDirectoryIfMissing True (dir </> "成片" </> "E")
+    writeFile (dir </> x) "OLD"
+    r1 <- scanRoot (ScanOpts 1 False) Nothing "rid-t" dir
+    writeFile (dir </> x) "NEWER-BYTES" -- 改过：本轮要重 hash，不按 stat 复用
+    r2 <- withBinaryFile (dir </> x) AppendMode (\_ -> scanRoot (ScanOpts 1 False) (Just (srCatalog r1)) "rid-t" dir)
+    map fst (srErrors r2) @?= [x]
+    Map.lookup x (catEntries (srCatalog r2)) @?= Map.lookup x (catEntries (srCatalog r1))
+    srCarried r2 @?= 1

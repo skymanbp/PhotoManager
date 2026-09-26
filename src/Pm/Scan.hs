@@ -339,7 +339,7 @@ scanRoot opts oldCat rootId root = do
   -- Hash pass (worker pool over a shared queue)
   queue <- newIORef toHash
   done <- newIORef (0 :: Int, 0 :: Integer)
-  out <- newIORef ([] :: [Entry], [] :: [FilePath], [] :: [(FilePath, String)])
+  out <- newIORef ([] :: [Entry], [] :: [FilePath], [] :: [(FilePath, IOException)])
   let pop = atomicModifyIORef' queue $ \q -> case q of
         [] -> ([], Nothing)
         (x : xs) -> (xs, Just x)
@@ -356,7 +356,7 @@ scanRoot opts oldCat rootId root = do
             atomicModifyIORef' out $ \(es, vs, errs) -> case r of
               Right (Right e) -> ((e : es, vs, errs), ())
               Right (Left v) -> ((es, v : vs, errs), ())
-              Left ex -> ((es, vs, (rel, show ex) : errs), ())
+              Left ex -> ((es, vs, (rel, ex) : errs), ())
             case r of
               Right (Right e) -> bump (enSize e)
               _ -> bump 0
@@ -385,7 +385,7 @@ scanRoot opts oldCat rootId root = do
           let s = (n + 1, b + bytes) in (s, s)
         progressWhen (n `mod` 200 == 0) (printf "  … %d/%d 已 hash (%.1f GiB)" n (length toHash) (gib b))
   replicateConcurrently_ (max 1 (soWorkers opts)) worker
-  (newEntries, volatiles, hashErrs) <- readIORef out
+  (newEntries, volatiles, hashExs) <- readIORef out
   now <- getCurrentTime
   -- 未枚举子树里的旧条目是「查不出」不是「不存在」（第一方自审工作流 F040）：
   -- 原样保留上次快照值，而不是让它们从快照消失、随即无条件落盘、三代轮转把
@@ -393,7 +393,14 @@ scanRoot opts oldCat rootId root = do
   -- 同一纪律。本轮真枚举到的条目（reused/newEntries）左优先。
   -- 审计 #8 起同一纪律扩到逐文件：遍历按属性判（对象自身 ACL 不影响）之后，被拒的文件不再在
   -- 遍历层出错，而在上面的 stat——stat 查不出（非「不存在」）与读前闸拦下的，本轮同样没核对。
-  let unchecked = Set.fromList ([rel | (rel, Left e) <- statted, not (isDoesNotExistError e)] <> map fst holdErrs)
+  -- 审计 #46：hash 时读不出（被占的共享冲突 / 介质读错）同一纪律——stat 成了不等于读得出；读的时候文件已不在的
+  -- 才是消失。此前只在上面两处认「查不出」，hash 出错的文件旧条目照样从快照里掉。
+  let unchecked =
+        Set.fromList
+          ( [rel | (rel, Left e) <- statted, not (isDoesNotExistError e)]
+              <> map fst holdErrs
+              <> [rel | (rel, e) <- hashExs, not (isDoesNotExistError e)]
+          )
       unknown = Map.filterWithKey (\k _ -> Set.member k unchecked || coversKey uncovered k) oldEntries
       entries = entryMap (reused <> newEntries) `Map.union` unknown
   pure
@@ -403,7 +410,7 @@ scanRoot opts oldCat rootId root = do
       , srHashed = length newEntries
       , srHashedBytes = sum (map enSize newEntries)
       , srVolatile = volatiles
-      , srErrors = walkErrs <> statErrs <> holdErrs <> hashErrs
+      , srErrors = walkErrs <> statErrs <> holdErrs <> [(rel, show e) | (rel, e) <- hashExs]
       , srCarried = Map.size unknown
       }
  where
