@@ -342,6 +342,10 @@ readPmState root rel = do
         Right bytes -> Right (Just bytes)
         Left e
           | isDoesNotExistError e -> Right Nothing
+          -- 审计 #47：GHC 的进程内单写者锁——同一进程里另一操作正握着写句柄（serve 执行 POST /api/apply
+          -- 时整场握着 journal）。是暂态，不是「不可信」：仍 Left（fail-closed），但不叫人去「人工核查」
+          | isAlreadyInUseError e ->
+              Left ((pmDir root </> rel) <> " 正被本进程的另一操作占用（计划执行中？）——稍后重试")
           -- link count \> 1（hardlink）、ACL 拒绝、目录占名……一律拒绝，不当"缺席"
           | otherwise ->
               Left ((pmDir root </> rel) <> " 无法可信读取（" <> show e <> "）——人工核查")

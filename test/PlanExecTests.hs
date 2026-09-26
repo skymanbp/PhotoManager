@@ -19,10 +19,15 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Config (Config (..))
-import Pm.Journal (JEntry (..), Sync (..), jAppend, withJournal)
+import Network.Wai.Test (assertStatus, runSession)
+import qualified Data.Aeson as Aeson
+import Pm.Config (Config (..), writeRootInfo)
+import Pm.Journal (JEntry (..), Sync (..), jAppend, readJournal, withJournal)
 import Pm.Op
 import Pm.Plan
+import Pm.Serve (serveApp)
+import Pm.Types (RootInfo (..), RootRole (..))
+import ServeTests (decodeBody, field, getReq, liftIO', mkEnv, tok)
 import TestUtil (mkMain, t0)
 
 planExecTests :: TestTree
@@ -34,6 +39,7 @@ planExecTests =
     , testCase "deletePlan 守卫（坏 id/缺席/真删）；prunePlans 只清已执行、活草稿不动、journal 不动" caseDeleteAndPrune
     , testCase "planStale：源全没了才失效（源还在/卷不在/有 Done/仅跳过都不算）；prunePlans 清失效草稿、活草稿不动" caseStale
     , testCase "#64 planStale：源的存在性查不出（非法名 → 错误码 123）按「源还在」计，草稿不失效、prune 不删" caseStaleProbeUnknown
+    , testCase "#47 #48 计划列表逐根：vault 的 journal 有告警不连累主库的失效判定（CLI 与 GET /api/plans 同一份）；journal 被本进程占用说「稍后重试」不说「人工核查」" casePlanRowsPerRoot
     ]
 
 pidA, pidB :: Text
@@ -186,3 +192,29 @@ caseStaleProbeUnknown = withSystemTempDirectory "pm-planstale" $ \tmp -> do
   errs @?= []
   map (plId . snd) deleted @?= []
   doesFileExist (planPath root pidA) >>= (@?= True)
+
+-- | #48：GET /api/plans 此前任一根 journal 有告警就两根都不判失效（CLI 与 prune 逐根）。
+-- #47：serve 执行计划时整场握着 journal 写句柄，同进程的读撞上 GHC 单写者锁，被报成「无法可信读取——人工核查」。
+casePlanRowsPerRoot :: IO ()
+casePlanRowsPerRoot = withSystemTempDirectory "pm-planrows" $ \tmp -> do
+  let root = tmp </> "lib"
+      vdir = tmp </> "vault"
+      cfg = Config root (Just vdir) Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+      draft = Plan pidA "import" root (Just "main-rid") t0 [PlanItem 0 (OpCopy (tmp </> "card" </> "gone.jpg") "Raw/g.jpg" "gg" 1 0) StPending Nothing]
+  mkMain root
+  createDirectoryIfMissing True (root </> "Raw")
+  writeRootInfo vdir (RootInfo "vault-rid" RoleVault t0 Nothing)
+  writeFile (vdir </> ".pm" </> "journal.ndjson") "not-json\n"
+  _ <- savePlan draft
+  (rows, _, warns) <- planRows cfg
+  assertBool ("vault 的 journal 应有告警: " <> show warns) (not (null warns))
+  [(lbl, st) | (lbl, _, _, st) <- rows] @?= [("主库", True)]
+  env <- mkEnv cfg
+  flip runSession (serveApp env) $ do
+    r <- getReq "/api/plans" [] tok
+    assertStatus 200 r
+    liftIO' $ case field ["plans"] (decodeBody r) of
+      Just (Aeson.Array xs) -> map (field ["stale"]) (foldr (:) [] xs) @?= [Just (Aeson.Bool True)]
+      other -> assertFailure ("plans: " <> show other)
+  (_, busy) <- withJournal root (\_ -> readJournal root)
+  assertBool (show busy) (any ("正被本进程的另一操作占用" `isInfixOf`) busy && not (any ("人工核查" `isInfixOf`) busy))

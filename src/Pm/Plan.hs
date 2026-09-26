@@ -28,6 +28,7 @@ module Pm.Plan
   , deletePlan
   , deletePlanAnyRoot
   , prunePlans
+  , planRows
   , planRoots
   , runPlanList
   , runPlanRm
@@ -435,16 +436,37 @@ deletePlanAnyRoot cfg pid = go (planRoots cfg)
       Right () -> pure (Right label)
       Left m -> if null rest then pure (Left m) else go rest
 
+-- | 一个根的计划读出：计划、装不出来的（名, 因）、该根 journal 折叠的执行态、该根 journal 的告警。
+-- 'planRows'（@pm plan list@ 与 @GET \/api\/plans@）与 'prunePlans' 共用——**逐根**：某根 journal
+-- 有告警只停该根的失效判定与清理（审计 #48：serve 版此前任一根有告警就两根都不判失效，同一份草稿
+-- CLI 说「已失效」、GUI 说「未执行」，GUI 自己的清理又把它删了）。
+rootPlans :: FilePath -> IO ([Plan], [(String, String)], Map.Map Text PlanExec, [String])
+rootPlans root = do
+  (ps, errs) <- listPlans root
+  (es, warns) <- readJournal root
+  pure (ps, errs, planExecs es, warns)
+
+-- | 两根的计划行（根标签, 计划, 执行态, 是否失效草稿）+ 装不出来的计划 + journal 告警。
+-- journal 有告警的根不判失效（折叠不全时「从未执行」不可信，与 prune 同一 fail-closed）。
+planRows :: Config -> IO ([(String, Plan, Maybe PlanExec, Bool)], [(String, String)], [String])
+planRows cfg = do
+  rs <- forM (planRoots cfg) $ \(label, root) -> do
+    (ps, errs, runs, warns) <- rootPlans root
+    rows <- forM ps $ \p -> do
+      let mr = Map.lookup (plId p) runs
+      st <- if null warns then planStale p mr else pure False
+      pure (label, p, mr, st)
+    pure (rows, errs, warns)
+  pure (concat [r | (r, _, _) <- rs], concat [e | (_, e, _) <- rs], concat [w | (_, _, w) <- rs])
+
 -- | 清理两根下全部「已执行」（'planExecuted' 的保守判据）与「失效草稿」（1.1.3，
 -- 'planStale'）的计划。返回（删掉的 (根, 计划), 失败原因）；journal 读不出时该根一份
 -- 都不删（fail-closed：折叠不出执行事实就没有「已执行」，也判不出「从未执行」）。
 prunePlans :: Config -> IO ([(String, Plan)], [String])
 prunePlans cfg = do
   rs <- forM (planRoots cfg) $ \(label, root) -> do
-    (ps, errs) <- listPlans root
-    (es, warns) <- readJournal root
-    let runs = planExecs es
-        cleanable p = let mr = Map.lookup (plId p) runs in if planExecuted p mr then pure True else planStale p mr
+    (ps, errs, runs, warns) <- rootPlans root
+    let cleanable p = let mr = Map.lookup (plId p) runs in if planExecuted p mr then pure True else planStale p mr
     victims <- if null warns then filterM cleanable ps else pure []
     dels <- forM victims $ \p -> do
       r <- deletePlan root (plId p)
@@ -455,16 +477,9 @@ prunePlans cfg = do
 -- | @pm plan list@：两根的计划 + journal 折叠的执行态（按生成时间排序）。
 runPlanList :: Config -> IO Int
 runPlanList cfg = do
-  rows <- fmap concat . forM (planRoots cfg) $ \(label, root) -> do
-    (ps, errs) <- listPlans root
-    (es, warns) <- readJournal root
-    mapM_ (\w -> putStrLn ("⚠ journal: " <> w)) warns
-    mapM_ (\(n, e) -> putStrLn ("⚠ 装不出来的计划: " <> n <> "：" <> e)) errs
-    let runs = planExecs es
-    forM ps $ \p -> do
-      let mr = Map.lookup (plId p) runs
-      st <- if null warns then planStale p mr else pure False -- journal 有告警不判失效（同 prune）
-      pure (label, p, mr, st)
+  (rows, errs, warns) <- planRows cfg
+  mapM_ (\w -> putStrLn ("⚠ journal: " <> w)) warns
+  mapM_ (\(n, e) -> putStrLn ("⚠ 装不出来的计划: " <> n <> "：" <> e)) errs
   if null rows
     then putStrLn "还没有计划。" >> pure 0
     else do

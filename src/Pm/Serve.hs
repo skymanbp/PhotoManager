@@ -89,8 +89,7 @@ import Pm.ConfigEdit (checkPatch, configTxn)
 import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
 import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), PlanExec (..), deletePlanAnyRoot, isValidPlanId, listPlans, planExecuted, planExecs, planStale, prunePlans, runTag)
-import Pm.Journal (readJournal)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), PlanExec (..), deletePlanAnyRoot, isValidPlanId, listPlans, planExecuted, planRows, prunePlans, runTag)
 import Pm.Publish (publishCommands)
 import Pm.Scan (cloudOnlyNote)
 import Pm.ServeAi (routeAi)
@@ -406,25 +405,16 @@ routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
       Left m -> err status409 m
       Right ls -> jsonR status200 [] (object ["commands" .= ls])
   ("GET", ["api", "plans"]) -> do
-    (ps, errs) <- listPlans (cfgMainPath cfg)
-    (vps, verrs) <- maybe (pure ([], [])) listPlans (cfgVaultPath cfg)
-    -- 执行态从两根的 journal 折叠（'Pm.Plan.planExecs'——CLI `pm plan list` 同源）：
-    -- 计划文件从不回写执行状态，页面此前把执行完的计划照样标「待执行」。
-    -- journal 读不出（untrusted 等）→ 折叠为空、计划显示未执行（fail-closed），
-    -- 原因进 errors。
-    (mes, mwarns) <- readJournal (cfgMainPath cfg)
-    (ves, vwarns) <- maybe (pure ([], [])) readJournal (cfgVaultPath cfg)
-    let runs = planExecs (mes <> ves)
-        -- 失效草稿要探盘（'Pm.Plan.planStale'，1.1.3），逐份在这里判；journal 有告警就不判
-        -- （折叠不全时「从未执行」不可信，与 prune 同一 fail-closed）；措辞 'runTag' 与 CLI 同一句
-        staleOf p mr = if null mwarns && null vwarns then planStale p mr else pure False
-    sums <- mapM (\p -> let mr = Map.lookup (plId p) runs in fmap (planSummary p mr) (staleOf p mr)) (ps <> vps)
+    -- 与 CLI `pm plan list` 同一份逐根读出（'Pm.Plan.planRows'）：执行态从各根自己的 journal
+    -- 折叠（计划文件从不回写执行状态）；某根 journal 读不出 → 该根折叠为空、不判失效
+    -- （fail-closed），原因进 errors——审计 #48：此前任一根有告警就两根都不判失效。
+    (rows, errs, warns) <- planRows cfg
     jsonR
       status200
       []
       ( object
-          [ "plans" .= sums
-          , "errors" .= (errs <> verrs <> [("journal", w) | w <- mwarns <> vwarns])
+          [ "plans" .= [planSummary p mr st | (_, p, mr, st) <- rows]
+          , "errors" .= (errs <> [("journal", w) | w <- warns])
           ]
       )
   ("GET", ["api", "plan", pid])
