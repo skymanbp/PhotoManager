@@ -96,35 +96,61 @@ findPython = do
         <$> findExecutable "python"
 
 -- | 内嵌的 Pillow 脚本（DESIGN-P8 §20.1 的解码纪律）：16 位样本先按 1\/256 缩到
--- 8 位再转（直接 convert 会截顶）；带 alpha 的合成到白底；保留 EXIF 与 ICC；
+-- 8 位再转（直接 convert 会截顶）；带 alpha 的合成到白底（灰度 + alpha 合成为 L）；保留 EXIF 与 ICC；
 -- @quality=95, subsampling=0, optimize=True@；任何失败 → 非零退出 + 一行 ASCII
 -- 原因。目标文件由 pm 先独占创建，脚本只往这个已存在的普通文件里写。
+--
+-- 横切审计 #82：此前非 RGB\/L 源朴素 @convert('RGB')@ 后原样嵌**源**配置——CMYK 青 (100,0,0,0)
+-- 出成 (0,255,255) 还挂着 CMYK 配置（本机 RSWOP.icm 实测）。现在非 RGB\/L 源带 ICC 时按色彩管理
+-- （@ImageCms.profileToProfile@）转 sRGB、改嵌 sRGB（同一源实测 (0,159,215)）；嵌入的配置颜色空间
+-- 必须与输出一致（RGB ↔ RGB、L ↔ GRAY），对不上即失败（fail-closed：不出错色的 jpg）；LA 合成为 L
+-- （灰度配置因此仍然成立），调色板 → RGB、1 位 → L 显式分支。不带配置的源行为不变。
 pillowScript :: String
 pillowScript =
   unlines
     [ "import sys"
     , "def main():"
+    , "    import io"
     , "    from PIL import Image"
     , "    src, dst = sys.argv[1], sys.argv[2]"
     , "    im = Image.open(src)"
     , "    im.load()"
     , "    info = dict(im.info)"
+    , "    icc = info.get('icc_profile')"
     , "    if im.mode in ('I;16', 'I;16B', 'I;16L', 'I;16N'):"
     , "        im = im.convert('I')"
     , "    if im.mode == 'I':"
     , "        im = im.point(lambda v: v * (1.0 / 256.0)).convert('L')"
-    , "    if im.mode in ('RGBA', 'LA', 'PA') or (im.mode == 'P' and 'transparency' in info):"
+    , "    if im.mode == 'LA':"
+    , "        bg = Image.new('L', im.size, 255)"
+    , "        bg.paste(im.getchannel('L'), mask=im.getchannel('A'))"
+    , "        im = bg"
+    , "    elif im.mode in ('RGBA', 'PA') or (im.mode == 'P' and 'transparency' in info):"
     , "        rgba = im.convert('RGBA')"
     , "        bg = Image.new('RGB', rgba.size, (255, 255, 255))"
     , "        bg.paste(rgba, mask=rgba.getchannel('A'))"
     , "        im = bg"
-    , "    elif im.mode not in ('RGB', 'L'):"
+    , "    elif im.mode == 'P':"
     , "        im = im.convert('RGB')"
+    , "    elif im.mode == '1':"
+    , "        im = im.convert('L')"
+    , "    elif im.mode not in ('RGB', 'L'):"
+    , "        if icc:"
+    , "            from PIL import ImageCms"
+    , "            srgb = ImageCms.createProfile('sRGB')"
+    , "            im = ImageCms.profileToProfile(im, ImageCms.ImageCmsProfile(io.BytesIO(icc)), srgb, outputMode='RGB')"
+    , "            icc = ImageCms.ImageCmsProfile(srgb).tobytes()"
+    , "        else:"
+    , "            im = im.convert('RGB')"
     , "    kw = {'quality': 95, 'subsampling': 0, 'optimize': True}"
     , "    if info.get('exif'):"
     , "        kw['exif'] = info['exif']"
-    , "    if info.get('icc_profile'):"
-    , "        kw['icc_profile'] = info['icc_profile']"
+    , "    if icc:"
+    , "        from PIL import ImageCms"
+    , "        space = ImageCms.ImageCmsProfile(io.BytesIO(icc)).profile.xcolor_space.strip()"
+    , "        if space != {'RGB': 'RGB', 'L': 'GRAY'}[im.mode]:"
+    , "            raise ValueError('ICC profile colour space ' + space + ' does not match the ' + im.mode + ' output')"
+    , "        kw['icc_profile'] = icc"
     , "    im.save(dst, 'JPEG', **kw)"
     , "try:"
     , "    main()"

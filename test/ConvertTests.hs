@@ -35,6 +35,7 @@ convertTests =
     "P8-C2 转换（非 jpg → 派生 jpg → 成片同事件夹 / 相册）"
     [ testCase "参数闸：空 / 缺索引 / 已是 jpg / RAW / 层外 / 绝对与 .. / 同批撞名 / PM_PYTHON 不存在 → exit 2，.pm/derived 不出现" caseRefusals
     , testCase "端到端：16 位 tif→L≈117、RGBA→白底、RGB 原样；--also-album 同组（成片项组头）；复用派生件 / --redo 重派生；I7 成片待裁决 → 相册项不执行；坏源不出计划；源字节不动" caseE2E
+    , testCase "#82 色彩配置：非 RGB/L 源带 ICC → 按色彩管理转 sRGB、嵌 sRGB（此前原样嵌源配置）；配置与数据对不上 → 转换失败；灰度 + alpha → L" caseIccProfiles
     , testCase "doctor：DERIVED-STALE/ORPHAN/TMP Warn、PENDING Info；--repair 只删前三种、留 pending" caseDoctorDerived
     , testCase "派生件写纪律：tmp 名被库外 hardlink 占住 → 清掉重建、库外字节不动；终名是 symlink / 库外 hardlink → 拒绝不复用；同 sha 同名两源 → 先拒；派生调用 PM_CONVERT_TIMEOUT 到点 → 终止、点名变量、pm 自建的 .tmp 已清" caseDerivedGuards
     ]
@@ -101,6 +102,54 @@ pixel exe p = do
 
 near :: Int -> Int -> Bool
 near a b = abs (a - b) <= 4
+
+-- | jpg 里嵌的 ICC 配置的颜色空间（RGB / GRAY / Lab / CMYK …；没嵌 → none）。
+profileSpace :: FilePath -> FilePath -> IO String
+profileSpace exe p = do
+  out <- py exe "import sys, io\nfrom PIL import Image, ImageCms\nicc = Image.open(sys.argv[1]).info.get('icc_profile')\nprint(ImageCms.ImageCmsProfile(io.BytesIO(icc)).profile.xcolor_space.strip() if icc else 'none')" [p]
+  pure (unwords (words out))
+
+-- | 横切审计 #82：此前非 RGB/L 源朴素 convert('RGB') 后原样嵌源配置——CMYK 源的 RGB jpg 挂着 CMYK 配置、
+-- 颜色也没走色彩管理。LAB 源 + LAB 配置（Pillow 自己造，CI 不依赖系统色彩文件）可移植地钉住「转 sRGB、
+-- 嵌 sRGB」；CMYK 数据挂 sRGB 配置（坏文件）→ 转换失败、不出计划；LA → L。本机 RSWOP.icm 的 CMYK 实测
+-- 记在 REVIEW-LOG。
+caseIccProfiles :: IO ()
+caseIccProfiles = withLib $ \root run -> do
+  exe <- python
+  let e1 = root </> "成片" </> "E1"
+  createDirectoryIfMissing True e1
+  _ <-
+    py
+      exe
+      ( unlines
+          [ "import sys"
+          , "from PIL import Image, ImageCms"
+          , "d = sys.argv[1]"
+          , "lab = ImageCms.ImageCmsProfile(ImageCms.createProfile('LAB')).tobytes()"
+          , "srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile('sRGB')).tobytes()"
+          , "Image.new('LAB', (4, 4), (128, 128, 128)).save(d + '/lab.tif', icc_profile=lab)"
+          , "Image.new('CMYK', (4, 4), (255, 0, 0, 0)).save(d + '/bad.tif', icc_profile=srgb)"
+          , "Image.new('LA', (4, 4), (100, 128)).save(d + '/la.png')"
+          , "Image.new('RGB', (4, 4), (1, 2, 3)).save(d + '/rgblab.png', icc_profile=lab)"
+          ]
+      )
+      [e1]
+  (c1, _, o1) <- run False False ["成片/E1/lab.tif", "成片/E1/la.png"]
+  assertEqual o1 0 c1
+  profileSpace exe (e1 </> "lab.jpg") >>= (@?= "RGB")
+  (mLab, _) <- pixel exe (e1 </> "lab.jpg")
+  mLab @?= "RGB"
+  (mLa, vLa) <- pixel exe (e1 </> "la.jpg")
+  mLa @?= "L"
+  assertBool ("la 像素 " <> show vLa) (case vLa of [v] -> near v 177; _ -> False)
+  (c2, mpid2, o2) <- run False False ["成片/E1/bad.tif"]
+  (c2, mpid2) @?= (2, Nothing)
+  assertBool o2 ("转换失败" `isInfixOf` o2)
+  doesFileExist (e1 </> "bad.jpg") >>= (@?= False)
+  -- RGB 数据挂 LAB 配置（坏文件）：不经色彩管理分支，由末道「配置颜色空间须与输出一致」拒绝
+  (c3, mpid3, o3) <- run False False ["成片/E1/rgblab.png"]
+  (c3, mpid3) @?= (2, Nothing)
+  assertBool o3 ("does not match" `isInfixOf` o3)
 
 caseRefusals :: IO ()
 caseRefusals = withLib $ \root run -> do

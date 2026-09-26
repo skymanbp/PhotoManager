@@ -157,7 +157,10 @@ tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换�
   `pip install pillow`。脚本**内嵌在 Haskell 字符串里经 stdin 交给 `python -`**：
   发布件不多带文件，也不产生第二处路径依赖。
 - 解码纪律：16 位样本先按 1/256 缩到 8 位再 `convert("RGB")`（直接 convert 会截顶）；
-  保留 EXIF 块与 ICC profile（`img.info` 里有就带）；`quality=95, subsampling=0,
+  保留 EXIF 块与 ICC profile（`img.info` 里有就带）；非 RGB/L 源（CMYK、LAB…）带 ICC 时按色彩
+  管理（`ImageCms.profileToProfile`）转 sRGB、改嵌 sRGB，嵌入的配置颜色空间必须与输出一致（RGB ↔
+  RGB、L ↔ GRAY），对不上即失败；灰度 + alpha 合成为 L（横切审计 #82：此前朴素 convert 后原样嵌源
+  配置，CMYK 源出来的 RGB jpg 挂着 CMYK 配置、颜色也不对）；`quality=95, subsampling=0,
   optimize=True`；失败 → 非零退出 + stderr 一句原因，pm 原样转给用户，派生目录
   不留半成品（tmp 名先落、成功才 rename；Pillow 12 自己也会删掉编码失败时新建的
   文件——pm 那句 tmp 清理因此没有可注入的判红形态，REVIEW-LOG 登记为残余）。
