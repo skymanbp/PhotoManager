@@ -253,11 +253,18 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 
 - 可执行：`PM_CLAUDE_EXE` → PATH 上的 `claude`（as-built：`findExecutable "claude"` 直接命中
   `claude.exe`；`PM_CLAUDE_EXE` 给了但不存在 → 409，不回退 PATH）。找不到 → 409「未安装 claude CLI」。
-- 调用形：`claude -p --output-format json --permission-mode plan --max-turns 8 <提示>`，
-  **cwd = 主库 root**（分类）或 **源目录**（地点），让 Read 工具落在工作目录内；
-  `--permission-mode plan` 只放行只读工具——模型在构造上写不了任何东西。提示里给
+- 调用形：`claude -p --output-format json --permission-mode plan --max-turns 8 --safe-mode
+  --setting-sources user --strict-mcp-config --add-dir <主库 root（分类）| 源目录（地点）>`，
+  **cwd = pm 自己的空目录**（系统临时目录下 `pm-claude-cwd`）。照片目录**不是 claude 的项目**
+  （横切审计 #81，critical）：`-p` 模式跳过工作区信任确认，cwd 里的 `.claude/settings.json`
+  （hooks / env / apiKeyHelper）、`.mcp.json`、CLAUDE.md 会被直接加载——此前 cwd = 源目录，
+  一张预埋 hooks 的存储卡点一下「AI 建议地点」就能以用户身份执行任意命令（claude 2.1.280
+  探针复现）。现在两层各自单独都挡得住（探针逐层实测）：照片目录只经 `--add-dir` 放行读；
+  `--safe-mode` 不加载任何自定义、`--setting-sources user` 不读项目与本地设置、
+  `--strict-mcp-config` 不接项目 MCP。`--permission-mode plan` 只放行只读工具。提示里给
   **绝对路径清单**让模型 Read 看图。整体超时 180 s（`PM_SUGGEST_TIMEOUT` 可调，测试用 1），超时 `TerminateJobObject` 杀整棵进程树（`Pm.Subprocess.runTool` 把子进程挂在 job 对象里，与转换的 python 同一壳）、409；信封 `is_error:true` → 502。以上旗标
-  已用真实 `claude` 2.1.243 探针核实（cwd 内 Read 图片免提示、`permission_denials: []`；
+  已用真实 `claude` 2.1.243 探针核实（cwd 内 Read 图片免提示、`permission_denials: []`；2.1.280
+  复核：`--add-dir` 内 Read 图片同样免提示、`permission_denials: []`；
   `--output-format json` 信封含 `result` / `is_error` / `total_cost_usd`）。as-built：提示经 stdin
   交给子进程（三根管道 utf8，不走命令行长度限制）；实测每次 ≈ $0.7–1.3（系统提示缓存写入
   占大头），响应带 `cost`，页面文案写明「你自己账号、每次有费用」。

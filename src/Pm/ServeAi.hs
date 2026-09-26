@@ -7,8 +7,15 @@
 -- 建议、不进内核判断、不改任何计划参数、出不来就说出不来。
 --
 --   * 只读级端点：不写 @.pm@、不碰照片。模型跑在 @--permission-mode plan@ 下，
---     只放行只读工具，**构造上写不了任何东西**；cwd = 主库 root（分类）或源目录
---     （地点），让 Read 落在工作目录内（P8-D 探针：cwd 内 Read 图片免提示）。
+--     只放行只读工具。**照片目录不是 claude 的项目**（横切审计 #81，critical）：@-p@ 模式
+--     跳过工作区信任确认，cwd 里的 @.claude\/settings.json@（hooks、env、apiKeyHelper）、
+--     @.mcp.json@、CLAUDE.md 会被直接加载——此前 cwd = 源目录，一张预埋了 hooks 的存储卡
+--     点一下「AI 建议地点」就能以用户身份执行任意命令（真实 claude 2.1.280 探针复现）。
+--     现在两层：cwd = pm 自己的空目录（'neutralCwd'），照片目录经 @--add-dir@ 只放行
+--     读；外加 @--safe-mode@（不加载任何自定义：hooks \/ MCP \/ CLAUDE.md \/ 技能…）、
+--     @--setting-sources user@（不读项目与本地设置）、@--strict-mcp-config@。两层各自
+--     单独都挡得住预埋的 hooks（探针逐层实测）；@--add-dir@ 内 Read 图片免提示、
+--     @permission_denials: []@（真实调用实测）。
 --   * 可执行：@PM_CLAUDE_EXE@ → PATH 上的 @claude@；找不到 → 409。
 --   * 一次只跑一个（'seSuggestLock'，上一次未完成 → 409）；整体超时
 --     @PM_SUGGEST_TIMEOUT@ 秒（缺省 180），超时杀**整棵**进程树 → 409
@@ -18,10 +25,10 @@
 --   * 响应解析：@result@ 文本里取第一段 JSON（裸或 ``` 围栏）；解析不了 → 502
 --     并把 @raw@ 原样带回——页面显示「AI 回复无法解析」，不猜。信封里
 --     @is_error:true@（claude 自己报错，如额度用尽）→ 502 带原文。
-module Pm.ServeAi (routeAi, findClaude, extractJson, evenSample) where
+module Pm.ServeAi (routeAi, findClaude, extractJson, evenSample, claudeArgs, neutralCwd) where
 
 import Control.Concurrent.MVar (putMVar, tryTakeMVar)
-import Control.Exception (finally, mask)
+import Control.Exception (IOException, finally, mask, try)
 import Control.Monad (forM)
 import Data.Aeson (Value (..), object, (.=))
 import qualified Data.Aeson as Aeson
@@ -33,10 +40,10 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Types
 import Network.Wai
-import System.Directory (doesFileExist, findExecutable)
+import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable, getTemporaryDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath (splitDirectories, takeFileName)
+import System.FilePath (splitDirectories, takeFileName, (</>))
 
 import Pm.Catalog (catalogOr, loadCatalog)
 import Pm.Config (Config (..), requireRole)
@@ -273,14 +280,37 @@ instance Aeson.FromJSON SuggestReq where
       "place" -> SuggestPlace <$> o Aeson..: "src" <*> (fromMaybe 72 <$> o Aeson..:? "gap")
       _ -> fail "kind 须为 classify 或 place"
 
--- | 跑 @claude -p --output-format json --permission-mode plan --max-turns 8@，
--- 提示经 stdin 交给它（'runTool'：三个管道显式 UTF-8、整体超时到点杀整棵进程
--- 树）。返回（@result@ 文本，@total_cost_usd@）；信封 @is_error:true@ → 502。
+-- | claude 的参数（横切审计 #81，见模块头）：@dir@ 只经 @--add-dir@ 放行读，**不做 cwd**；
+-- 不加载任何自定义与项目设置。@--add-dir@ 是变长参数，放在最后（提示走 stdin，后面没有
+-- 位置参数）。
+claudeArgs :: FilePath -> [String]
+claudeArgs dir =
+  [ "-p", "--output-format", "json", "--permission-mode", "plan", "--max-turns", "8"
+  , "--safe-mode", "--setting-sources", "user", "--strict-mcp-config"
+  , "--add-dir", dir
+  ]
+
+-- | claude 的工作目录：系统临时目录下 pm 自己的固定空目录（不存在就建；从不删除——不引入
+-- 删除原语，里面即便被放了东西，@--safe-mode@ 与 @--setting-sources user@ 也不加载）。
+neutralCwd :: IO FilePath
+neutralCwd = do
+  t <- getTemporaryDirectory
+  let d = t </> "pm-claude-cwd"
+  createDirectoryIfMissing True d
+  pure d
+
+-- | 跑 claude（参数见 'claudeArgs'，cwd 见 'neutralCwd'），提示经 stdin 交给它（'runTool'：
+-- 三个管道显式 UTF-8、整体超时到点杀整棵进程树）。返回（@result@ 文本，@total_cost_usd@）；
+-- 信封 @is_error:true@ → 502；中立工作目录建不出来 → 409。
 runClaude :: FilePath -> FilePath -> Text -> IO (Either (Status, String) (Text, Value))
 runClaude exe dir prompt = do
   secs <- envTimeout "PM_SUGGEST_TIMEOUT" 180
-  r <- runTool exe ["-p", "--output-format", "json", "--permission-mode", "plan", "--max-turns", "8"] (Just dir) [] prompt secs
-  pure $ case r of
+  ecwd <- try neutralCwd
+  case ecwd of
+    Left (e :: IOException) -> pure (Left (status409, "建不出 claude 的工作目录（系统临时目录下 pm-claude-cwd）: " <> show e))
+    Right cwd0 -> interpret <$> runTool exe (claudeArgs dir) (Just cwd0) [] prompt secs
+ where
+  interpret r = case r of
     ToolFailed e -> Left (status409, "拉起 claude 失败: " <> e)
     ToolTimeout n -> Left (status409, "claude 超过 " <> show n <> " 秒未回复，已终止整棵进程树（PM_SUGGEST_TIMEOUT 可调）")
     ToolRan (ExitFailure n) out errT -> Left (status502, "claude 退出码 " <> show n <> ": " <> T.unpack (T.take 400 (T.strip (errT <> out))))
@@ -290,7 +320,6 @@ runClaude exe dir prompt = do
         Nothing -> Left (status502, "claude 输出缺 result 字段")
         Just (res, _, True) -> Left (status502, "claude 报错（is_error）: " <> T.unpack (T.take 400 (T.strip res)))
         Just (res, cost, False) -> Right (res, cost)
- where
   envelope = Aeson.withObject "claude-json" $ \o ->
     (,,)
       <$> o Aeson..: "result"

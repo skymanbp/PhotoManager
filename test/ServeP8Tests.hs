@@ -33,7 +33,7 @@ import Pm.Config (Config (..))
 import Pm.Op (Op (..))
 import Pm.Plan (Plan (..), PlanItem (..), loadPlan)
 import Pm.Serve (serveApp)
-import Pm.ServeAi (evenSample, extractJson)
+import Pm.ServeAi (evenSample, extractJson, neutralCwd)
 import Pm.Subprocess (ToolOutcome (..), runTool)
 import ServeTests (arrLen, decodeBody, field, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvW, postReq, seedSortSrc, tok)
 import SortTests (photoAt)
@@ -51,6 +51,7 @@ serveP8Tests =
     , testCase "POST /api/convert/plan：只读 403 且 .pm/derived 不出现；真 Pillow 转换 → 派生件落 .pm/derived、计划两项同组；坏源 code 2 不出计划" caseConvertPlan
     , testCase "POST /api/suggest classify：只读级放行；预置回答规范化（未请求的名字丢弃、坐标规范）；400 五种；413；502 垃圾/退出非零/is_error；409 缺 claude/超时/并发；.pm 零写入" caseSuggestClassify
     , testCase "POST /api/suggest place：serve 自己重跑分段抽样；围栏 JSON 解析；只有 RAW 的段不交给模型答 null；>12 段 400" caseSuggestPlace
+    , testCase "#81 claude 不以照片目录为项目：cwd = pm 的空目录，照片目录只经 --add-dir；--safe-mode / --setting-sources user / --strict-mcp-config（分类与地点两条路）" caseSuggestIsolation
     , testCase "纯函数：evenSample 首/中/尾均匀；extractJson 裸/围栏/带前后文/垃圾" casePure
     , testCase "runTool（门禁 F2）：子进程灌满 stdout 且不读 stdin，喂入 100 KiB 提示 → 超时仍生效（ToolTimeout 1），不因管道互等挂死" caseRunToolFlood
     ]
@@ -429,3 +430,39 @@ casePure = do
   extractJson "prose [{\"index\":1}] trailing" @?= arr
   extractJson "no brackets here" @?= Nothing
   extractJson "[not json" @?= Nothing
+
+-- | 横切审计 #81（critical）：@claude -p@ 跳过工作区信任确认，cwd 里的 .claude/settings.json（hooks）
+-- 会被直接加载——此前 cwd = 源目录（地点）/ 主库（分类），预埋 hooks 的存储卡点一下就能执行任意命令。
+-- 假 claude 记下自己的参数行与工作目录；两条路都须：cwd 是 pm 的空目录、照片目录只经 --add-dir。
+caseSuggestIsolation :: IO ()
+caseSuggestIsolation = withSystemTempDirectory "pm-serve-ai-iso" $ \tmp -> do
+  let logf = tmp </> "fake-claude.log"
+      root = tmp </> "root"
+      -- cmd 的 echo 写 CRLF：去掉 \r，否则「cwd ≠ 照片目录」的比较永远不相等、白过
+      readLog = lines . filter (/= '\r') . T.unpack . TE.decodeUtf8With (\_ _ -> Just '?') <$> BS.readFile logf
+      check dir = do
+        ls <- readLog
+        let argl = concat [drop 5 l | l <- ls, take 5 l == "ARGS "]
+            cdl = concat [drop 3 l | l <- ls, take 3 l == "CD "]
+            -- .cmd 桩收到的每个参数都被 process 的 .bat/.cmd 转义加了引号：逐个参数比（测试路径无空格）
+            toks = map (filter (/= '"')) (words argl)
+        forM_ [["--safe-mode"], ["--setting-sources", "user"], ["--strict-mcp-config"], ["--permission-mode", "plan"]] $ \flag ->
+          assertBool ("参数里应有 " <> unwords flag <> ": " <> argl) (flag `isInfixOf` toks)
+        assertBool ("--add-dir 应指向照片目录 " <> dir <> ": " <> argl) (["--ADD-DIR", map toUpper dir] `isInfixOf` map (map toUpper) toks)
+        assertBool ("cwd 不许是照片目录: " <> cdl) (map toUpper cdl /= map toUpper dir)
+        assertBool ("cwd 应是 pm 的空目录 pm-claude-cwd: " <> cdl) ("PM-CLAUDE-CWD" `isInfixOf` map toUpper cdl)
+  (cfg, _, _, _) <- fixture root
+  envR <- mkEnv cfg
+  withFakeClaude "" $ withEnv [("PM_FAKE_CLAUDE_LOG", logf)] $
+    flip runSession (serveApp envR) $ postReq "/api/suggest" (classifyBody ["a.jpg"]) >>= assertStatus 200
+  check root
+  (src, cfgS) <- seedSortSrc tmp
+  BS.writeFile (src </> "DCIM" </> "a.jpg") (photoAt "2026:08:25 11:00:00")
+  envS <- mkEnv cfgS
+  let body = Aeson.encode (Aeson.object ["kind" Aeson..= ("place" :: String), "src" Aeson..= src, "gap" Aeson..= (72 :: Int)])
+  withFakeClaude "place" $ withEnv [("PM_FAKE_CLAUDE_LOG", logf)] $
+    flip runSession (serveApp envS) $ postReq "/api/suggest" body >>= assertStatus 200
+  check src
+  -- 中立目录就是 neutralCwd 给的那个（存在、在系统临时目录下）
+  d <- neutralCwd
+  doesDirectoryExist d >>= (@?= True)

@@ -6,6 +6,11 @@ rem   garbage -> result is not JSON            fail  -> non-zero exit
 rem   sleep   -> ~3 s delay (timeout test with PM_SUGGEST_TIMEOUT=1)
 rem   iserror -> exit 0 but the envelope says is_error:true (quota / auth failure)
 rem Output mimics `claude -p --output-format json`: one JSON object with "result".
+rem PM_FAKE_CLAUDE_LOG set -> first write the argument line and the working directory there (audit #81).
+if defined PM_FAKE_CLAUDE_LOG (
+  >"%PM_FAKE_CLAUDE_LOG%" echo ARGS %*
+  >>"%PM_FAKE_CLAUDE_LOG%" echo CD %CD%
+)
 if "%PM_FAKE_CLAUDE%"=="fail" exit /b 1
 if "%PM_FAKE_CLAUDE%"=="iserror" (
   echo {"result":"Rate limit reached for this account","is_error":true,"total_cost_usd":0}

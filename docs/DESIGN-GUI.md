@@ -112,7 +112,9 @@
   JSON 体读取上提为 `ServeGuard.withJsonBody`（413 超 64 KiB / 400 非 JSON），此前五处
   复制合一。`POST /api/suggest` 是**只读级**（缺省授权即可）：serve 用 `PM_CLAUDE_EXE`
   （给了但不存在 → 409，不回退）或 PATH 上的 `claude` 拉起 `claude -p --output-format json
-  --permission-mode plan --max-turns 8`（cwd ＝ 主库 / 源目录，提示经 stdin，
+  --permission-mode plan --max-turns 8 --safe-mode --setting-sources user --strict-mcp-config
+  --add-dir <主库 | 源目录>`（cwd ＝ pm 自己的空目录：照片目录只经 `--add-dir` 放行读、不作 claude 的
+  项目——横切审计 #81，见 DESIGN-P8 §22.2；提示经 stdin，
   `PM_SUGGEST_TIMEOUT` 秒超时、缺省 180），只把模型答的 JSON 规范化后交回——pm 不据此写
   任何东西，建议落不落盘由用户在页面上点「保存决定」/「生成计划」决定。
   `kind:"classify"`（≤ 20 个相册文件名 → 类目 / 地点 / 坐标 / 来源 / 依据 / 标题；未请求的
@@ -122,7 +124,7 @@
   同一时刻只跑一个（`seSuggestLock` 满 → 409）；找不到 claude / 超时（`Pm.Subprocess.runTool`：子进程挂 job 对象、到点整树杀）/ 子进程 IO 失败 →
   409，模型答非 JSON → 502 带 `raw`，退出非零或信封 `is_error:true` → 502 带原文摘要。每次调用花的是用户自己 Claude 账号的钱
   （实测每次 ≈ $0.7–1.3，系统提示缓存写入占大头），响应带 `cost`、页面文案写明。测试用
-  `test/fixtures/fake-claude.cmd` 顶替（`PM_FAKE_CLAUDE` 六种模式）。
+  `test/fixtures/fake-claude.cmd` 顶替（`PM_FAKE_CLAUDE` 六种模式；`PM_FAKE_CLAUDE_LOG` 给了就先记下参数行与工作目录，#81 钉针用）。
 - **GUI 拉起时静音 stdout（P5-E）**：`pm serve --exit-on-stdin-eof` 打完
   announce 那一行之后把进程 stdout 引到空设备。`pm ui` 只读那一行就丢掉
   BufReader，此后管道无人排空；库层任何一行 `putStrLn` 都会往里灌，填满
