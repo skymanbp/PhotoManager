@@ -13,7 +13,7 @@ import Data.List (isInfixOf, sort)
 import qualified Data.Text as T
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute, removeFile)
 import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath (splitDirectories, takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, readProcessWithExitCode, shell)
 import Test.Tasty
@@ -238,7 +238,12 @@ caseE2E = withLib $ \root run -> do
   items5 <- planItems root pid5
   length items5 @?= 2
   forM_ items5 $ \it -> case piStatus it of
-    StNeedsDecision _ -> piGroup it @?= Nothing
+    StNeedsDecision w -> do
+      piGroup it @?= Nothing
+      -- 审计 #32：成片项的理由点名成片同事件夹（此前沿用相册那句「相册已有同名」），相册项是 I7 耦合
+      let inProcessed = take 1 (splitDirectories (opDstRel (piOp it))) == ["成片"]
+      assertBool (T.unpack w) $
+        if inProcessed then "成片同事件夹" `T.isInfixOf` w && not ("相册已有" `T.isInfixOf` w) else "I7" `T.isInfixOf` w
     s -> assertFailure (opDstRel (piOp it) <> " 应待裁决，得到 " <> show s)
   doesFileExist (alb </> "clash.jpg") >>= (@?= False)
   readFile (e2 </> "clash.jpg") >>= (@?= "OTHER")

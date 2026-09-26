@@ -148,7 +148,8 @@ tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换�
   转换对象；同批里转换后落到同一 `<stem>.jpg`（case-fold，成片同事件夹或相册）
   的先于任何转换整批拒绝（I1：pm 不替用户挑哪份留下）。
 - 目标已存在（同 stem 的 `.jpg` 已在成片同事件夹或相册）：同 sha 跳过；异 sha →
-  NEEDS-DECISION（I5）。派生件文件名固定小写 `.jpg`。判定与相册通道**同一份代码**：
+  NEEDS-DECISION（I5），理由按层点名「成片同事件夹已有同名…」/「相册已有同名…」
+  （审计 #32：成片层此前沿用相册那句）。派生件文件名固定小写 `.jpg`。判定与相册通道**同一份代码**：
   `classifyAlbum` 参数化为 `classifyInto dst`（成片目标 = 源所在事件夹），`--also-album`
   的相册项经上提的 `attachAlbumItems` 挂到成片项上——成片项 PENDING → 同组；成片项
   待裁决 → 相册项一并待裁决且不分组（I7）；成片那份早已落位 → 相册项单独 PENDING。

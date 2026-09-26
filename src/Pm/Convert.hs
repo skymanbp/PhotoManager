@@ -41,7 +41,7 @@ module Pm.Convert
   , runConvertTo
   ) where
 
-import Pm.Album (AlbumReport (..), albumPlanItems, attachAlbumItems, classifyAlbum, classifyInto)
+import Pm.Album (AlbumReport (..), attachAlbumItems, classifyAlbum, classifyInto, planItemsWith)
 import Pm.Catalog (catalogOr, loadCatalog)
 import Pm.Cli (GoOpts, emitPlanTo)
 import Pm.Config (Config (..), ensurePmSubdir, requireRole, withRootLock)
@@ -265,7 +265,7 @@ convertPlan root cat alsoAlbum ds
   mainDs = filter inProcessed ds
   mainDst = Map.fromList [(enPath (dEntry d), takeDirectory (enPath (dSrc d)) </> takeFileName (enPath (dEntry d))) | d <- mainDs]
   mrep = classifyInto (\p -> Map.findWithDefault (enPath p) (enPath p) mainDst) cat (map dEntry mainDs)
-  base = albumPlanItems root 0 mrep
+  base = planItemsWith "成片同事件夹已有同名但内容不同（I5）→ pm resolve --keep src|dst|both" root 0 mrep
   albumDs = [d | d <- ds, not (inProcessed d) || alsoAlbum]
   arep = classifyAlbum cat (map dEntry albumDs)
   conflictSrcs = Set.fromList [enPath e | (e, _) <- arConflict mrep]

@@ -21,6 +21,7 @@ module Pm.Album
   , classifyAlbum
   , classifyInto
   , albumPlanItems
+  , planItemsWith
   , attachAlbumItems
   , withAlbumForImport
   , parseProcessedRel
@@ -122,11 +123,16 @@ mkCopy root e d = OpCopy (root </> enPath e) d (enSha e) (enSize e) (enMtimeNs e
 -- | @pm album add@ 的计划项（序号从 @ix0@ 起）：正常拷贝 PENDING，相册同名异容
 -- NEEDS-DECISION。撞名与非 jpg 不进计划（调用方按 fail-closed 整批拒绝）。
 albumPlanItems :: FilePath -> Int -> AlbumReport -> [PlanItem]
-albumPlanItems root ix0 rep =
+albumPlanItems = planItemsWith conflictWhy
+
+-- | 'albumPlanItems' 的一般形：同名异容的待裁决理由由调用方给——convert 的成片层判的是
+-- 成片同事件夹（'classifyInto'），理由得点名那一层（审计 #32：此前沿用相册那句）。
+planItemsWith :: Text -> FilePath -> Int -> AlbumReport -> [PlanItem]
+planItemsWith why root ix0 rep =
   [PlanItem ix op st Nothing | (ix, (op, st)) <- zip [ix0 ..] (copies <> conflicts)]
  where
   copies = [(mkCopy root e d, StPending) | (e, d) <- arCopy rep]
-  conflicts = [(mkCopy root e d, StNeedsDecision conflictWhy) | (e, d) <- arConflict rep]
+  conflicts = [(mkCopy root e d, StNeedsDecision why) | (e, d) <- arConflict rep]
 
 -- | 给 import 计划追加相册项（@--also-album@）。输入：root、catalog、import 报告
 -- 与 'Pm.Import.importPlanItems' 已生成的基础条目；输出：分组后的基础条目 +
