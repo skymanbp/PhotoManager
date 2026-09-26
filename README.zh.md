@@ -170,7 +170,7 @@ pm resolve <id> --item N [--unskip]            # 跳过该项（默认动作）/
                                                # dedupe 计划全部待裁决，逐份 --unskip 批准后 apply 才会执行
 pm resolve <id> --item N --keep src|dst|both   # 冲突裁决（src=旧目标先隔离）；只适用于 Copy 冲突项
 pm doctor                        # 崩溃恢复对账 + 完整性体检（默认只读）
-pm undo --last [N]               # 由 journal 生成反向计划：撤销最近 N 个已完成操作（默认 1；--backup/--vault 选侧），再 pm apply 执行
+pm undo [--last N]               # 由 journal 生成反向计划：撤销最近 N 个已完成操作（默认 1；--backup/--vault 选侧），再 pm apply 执行
 pm config                        # 打印配置与每条路径的健康状态（只读）
 pm config set --vault <目录>     # 改 vault / --photos-json / --workers / --drive-wait（备份盘掉线后最多等多少秒，0 = 关）/
                                  # --portfolio-dir / --vault-push / --portfolio-push

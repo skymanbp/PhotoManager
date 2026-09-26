@@ -333,7 +333,9 @@ caseReadmeSync = do
   assertEqual ("README.zh.md 全部「N 例」须等于 DESIGN-COMMANDS 状态行的 " <> show dcCount) [] (filter (/= dcCount) zCounts)
   mapM_
     ( \(nm, s) -> do
-        assertBool (nm <> " 的 undo 提要须是真 CLI 形态 pm undo --last") ("pm undo --last" `isInfixOf` s)
+        -- 审计 #13：方括号标的是「整个选项可省」——`--last` 本身必须带值（optparse 对裸 --last 报错），
+        -- 旧哨兵只查子串 "pm undo --last"，放过了 `pm undo --last [N]` 这种错位的方括号
+        assertBool (nm <> " 的 undo 提要须是真 CLI 形态 pm undo [--last N]（同 --help）") ("pm undo [--last N]" `isInfixOf` s)
         assertBool (nm <> " 不得出现 pm undo <planId>（CLI 无此形态）") (not ("pm undo <planId>" `isInfixOf` s))
     )
     [("README.md", readme), ("README.zh.md", zh)]

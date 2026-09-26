@@ -224,7 +224,7 @@ pm resolve <id> --item N [--unskip]            # skip that item (default action)
                                                # dedupe plans all await adjudication — only items approved with --unskip execute on apply
 pm resolve <id> --item N --keep src|dst|both   # conflict adjudication (src = the old target is quarantined first); Copy conflict items only
 pm doctor                        # crash-recovery reconciliation + integrity check (read-only by default)
-pm undo --last [N]               # generate a reverse plan from the journal: undo the last N completed operations (default 1; --backup/--vault select the side), then pm apply
+pm undo [--last N]               # generate a reverse plan from the journal: undo the last N completed operations (default 1; --backup/--vault select the side), then pm apply
 pm config                        # print configuration and the health of every path (read-only)
 pm config set --vault <dir>      # change vault / --photos-json / --workers / --drive-wait (seconds to wait for a dropped backup
                                  # drive, 0 = off) / --portfolio-dir / --vault-push / --portfolio-push
