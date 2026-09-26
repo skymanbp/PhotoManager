@@ -359,7 +359,7 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 | R1 | Rename：{old 在 / new 无} | 未执行，重跑 |
 | R2 | Rename：{old 无 / new 在} | 已执行；按指纹复核后补记 Done |
 | R3 | Rename：{两者都在} | 未执行且目标被占 → conflict 报告，不动 |
-| PM-LINK | Rename 任一侧的**存在性查不出**（ACL 拒绝、介质错误） | 用户侧存在性探测是**三态**（`probeName`：在 / 不在 / 查不出），查不出**不落进 R1–R3 任何一格**：报 `PM-LINK` **Bad**、不推导不修复。布尔探针会把"查不出"塌成"不存在"，{old 查不出 / new 在} 于是错读成 R2，`--repair` 补一条与真 Done 逐字节相同的**假 Done**（还会进 undo） |
+| PM-LINK | Rename 任一侧、Copy 的 dst、Quarantine 的 victim 的**存在性查不出**（ACL 拒绝、介质错误） | 用户侧存在性探测是**三态**（`probeName`：在 / 不在 / 查不出），查不出**不落进 C1/C2/C5、R1–R3、Q2 任何一格**：报 `PM-LINK` **Bad**、不推导不修复。布尔探针会把"查不出"塌成"不存在"，{old 查不出 / new 在} 于是错读成 R2，`--repair` 补一条与真 Done 逐字节相同的**假 Done**（还会进 undo）；Copy 的 dst 被拒则错读成 C1「无痕迹」（审计 #34）。对象自身 ACL 拒绝时名字探针仍答「在」，走各格的「读不出」文本（dst → `C?` Bad，victim → Q2） |
 | Q1 | trash 有文件 / manifest 无条目 | 标 UNREGISTERED，列给用户，不自动处置 |
 | Q2 | manifest 有条目 / trash 无文件 + Intent 无 Done | 未执行，victim 应仍在原位，复核后清除该 manifest 条目 |
 

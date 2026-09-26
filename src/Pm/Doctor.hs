@@ -394,9 +394,12 @@ classifyPending' :: FilePath -> (Text, Op) -> IO [Finding]
 classifyPending' root (oid, op) = case op of
   OpCopy _ dstRel sha _ _ -> do
     let dstAbs = root </> dstRel
-    dstEx <- doesFileExist dstAbs
-    if dstEx
-      then do
+    -- 2026-09-25 审计 #34：dst 存在性三态（同 Rename 臂 F033）——doesFileExist 把 ACL 拒绝塌成
+    -- 「Intent 后无痕迹」C1 Info、exit 0；名字在而读不出 → 下面的 C? Bad，查不出 → PM-LINK Bad。
+    eDst <- userSideExists dstAbs
+    case eDst of
+      Left m -> pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]
+      Right True -> do
         -- 三十四轮（同型扫尽）：doctor 是恢复工具，读口异常逃顶让它在最需要
         -- 的时刻崩掉。dst 读不出 → 判不出 C2/C5，报 Bad 行「C?」——既不在
         -- --repair 的 Warn 白名单（C2/R2/Q-DONE-LOST）也不是 C5 行，不触发
@@ -407,7 +410,7 @@ classifyPending' root (oid, op) = case op of
           Right dsha
             | dsha == sha -> pure [Finding "C2" Warn (T.unpack oid <> ": dst 完好、Done 丢失 (" <> dstRel <> ")") "--repair 将补记 Done"]
             | otherwise -> pure [Finding "C5" Bad (T.unpack oid <> ": dst 存在但内容不符 (" <> dstRel <> ")") "--repair 将生成 dst 隔离计划（经 pm apply 确认执行），源文件未受影响"]
-      else do
+      Right False -> do
         -- P3b-15：.pm/tmp 的存在性探测也走受信解析（此前 doesFileExist 会
         -- 跟随链接，影响 C1 的分类文本；不涉及写，但同规则无例外）。
         -- tmp 问的是 @PmEntryFile@：落位点是 pm 自建的**普通文件**，
@@ -475,8 +478,9 @@ classifyPending' root (oid, op) = case op of
       if isJust mTrashRel
         then probePmSha root (pmSubTrash </> trashRel)
         else pure PmStateMissing
-    victimEx <- doesFileExist (root </> victim)
-    case (tprobe, victimEx) of
+    -- 审计 #34 同形：victim 存在性三态——ACL 拒绝此前塌成「victim 与 trash 均不存在」Q?。
+    eVictim <- userSideExists (root </> victim)
+    case (tprobe, eVictim) of
       (PmStateBad m, _) ->
         pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]
       (PmStateSha tsha, _) ->
@@ -487,7 +491,7 @@ classifyPending' root (oid, op) = case op of
               then Finding "Q-DONE-LOST" Warn (T.unpack oid <> ": 已入 trash、Done 丢失 (" <> trashRel <> ")") "--repair 将补记 Done"
               else Finding "Q-DONE-LOST" Bad (T.unpack oid <> ": trash 位置内容与 Intent sha 不符 (" <> trashRel <> ")，需人工核查") ""
           ]
-      (PmStateMissing, True) -> do
+      (PmStateMissing, Right True) -> do
         -- 三十四轮（同型扫尽）：victim 读不出时如实说"读不出"（Q2 不进任何
         -- 修复推导，note 只影响文本）。
         vshaE <- try (sha256File (root </> victim)) :: IO (Either IOException Text)
@@ -495,7 +499,8 @@ classifyPending' root (oid, op) = case op of
               Left e -> "victim 原位读取失败（" <> show e <> "，被占？稍后重跑）"
               Right vsha -> if vsha == sha then "victim 原位完好" else "victim 原位但内容已变"
         pure [Finding "Q2" Info (T.unpack oid <> ": 隔离未执行，" <> note <> "，重跑原计划即可") ""]
-      (PmStateMissing, False) -> pure [Finding "Q?" Bad (T.unpack oid <> ": victim 与 trash 均不存在，需人工核查") ""]
+      (PmStateMissing, Right False) -> pure [Finding "Q?" Bad (T.unpack oid <> ": victim 与 trash 均不存在，需人工核查") ""]
+      (PmStateMissing, Left m) -> pure [Finding "PM-LINK" Bad (T.unpack oid <> ": " <> m <> "，不推导、不修复（需人工核查）") ""]
 
 existsAny :: FilePath -> IO Bool
 existsAny p = do

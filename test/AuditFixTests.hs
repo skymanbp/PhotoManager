@@ -29,17 +29,18 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Config (Config (..), configFilePath, createRootInfo, loadConfig, readRootInfo, withConfigLock, writeConfig, writeRootInfo)
+import Pm.Doctor (Severity (..))
 import Pm.Exec (defaultExecEnv, execPlan)
 import Pm.Hash (sha256File)
-import Pm.Journal (journalPath)
-import Pm.Op (Fingerprint (..), Op (..), OpIdSuffix (..), describeOp, opPathsOk, trashSrcRel)
+import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, withJournal)
+import Pm.Op (Fingerprint (..), Op (..), OpIdSuffix (..), describeOp, opId, opPathsOk, trashSrcRel)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), savePlan, validatePlan)
 import Pm.Serve (serveApp)
 import Pm.Trash (manifestPath, quarDirFor, trashDir)
 import Pm.Types (RootInfo (..), RootRole (..))
 import ServeTests (fixture, liftIO', mkEnvA, mkEnvW, tok, withVault)
 import qualified ServeTests as ST
-import TestUtil (mkCopyOp, mkPlanIO)
+import TestUtil (doctorRows, mkCopyOp, mkPlanIO, withDenyAll)
 
 auditFixTests :: TestTree
 auditFixTests =
@@ -50,6 +51,7 @@ auditFixTests =
     , testCase "#9 POST /api/apply 执行链抛异常 → 500 JSON（interrupted + planId + log，带 CORS），不再是 warp 裸 500；GUI 认 interrupted" caseServeApplyInterrupted
     , testCase "#9 serveApp 最后一道异常边界：recordPost（hold）写链抛异常 → 500 JSON 带 CORS，主库记录文件零写入" caseServeBoundaryRecordPost
     , testCase "#43 trash 例外只放隔离载荷（≥ 4 级）：trash 根 / manifest / 整个隔离目录作 rename 源，validatePlan 与 execPlan 都拒、manifest 不动；生成形态照旧放行" caseTrashSrcShape
+    , testCase "#34 doctor 在途 Copy 的 dst / Quarantine 的 victim 被 ACL 拒绝：不再塌成「无痕迹」C1 / 「两处都不在」Q?，按「在而读不出」报 C? Bad / Q2" caseDoctorDeniedUserSide
     ]
 
 mkJunction :: FilePath -> FilePath -> IO ()
@@ -227,3 +229,27 @@ caseTrashSrcShape = withSystemTempDirectory "pm-audit" $ \dir -> do
   BS.readFile man >>= (@?= "MANIFEST\n")
   doesFileExist (root </> "m.txt") >>= (@?= False)
   doesFileExist (journalPath root) >>= (@?= False)
+
+-- | #34（low）：classifyPending' 的 Copy 臂用 doesFileExist 探 dst——对象自身 ACL 拒绝（deny F）
+-- 把「已落位、Done 丢失」塌成「C1 Info：Intent 后无痕迹」exit 0，重跑只会撞上一个「外来文件」；
+-- Quarantine 臂的 victim 同形，塌成「Q? victim 与 trash 均不存在」。改走 userSideExists 三态
+-- （同 Rename 臂 F033）：名字在 → dst 读不出报 C? Bad（不进 --repair 白名单）、victim 报 Q2。
+caseDoctorDeniedUserSide :: Assertion
+caseDoctorDeniedUserSide = withSystemTempDirectory "pm-audit" $ \dir -> do
+  let root = dir </> "root"
+  op <- mkCopyOp (dir </> "s.jpg") "X" ("相册" </> "x.jpg")
+  plan <- mkPlanIO root [op]
+  let pid = plId plan
+      dst = root </> "相册" </> "x.jpg"
+      victim = root </> "v.jpg"
+  createDirectoryIfMissing True (root </> "相册")
+  BS.writeFile dst "X" -- 已落位（与 Intent 同内容），Done 丢失
+  BS.writeFile victim "V"
+  vsha <- sha256File victim
+  now <- getCurrentTime
+  withJournal root $ \j -> do
+    jAppend j Barrier (JIntent (opId pid 0) op now)
+    jAppend j Barrier (JIntent (opId pid 1) (OpQuarantine "v.jpg" vsha "t") now)
+  rows <- withDenyAll dst (withDenyAll victim (doctorRows root))
+  assertBool ("dst 在而读不出须报 C? Bad，不得是 C1「无痕迹」: " <> show rows) (("C?", Bad) `elem` rows && "C1" `notElem` map fst rows)
+  assertBool ("victim 在而读不出须报 Q2，不得是 Q?「两处都不在」: " <> show rows) ("Q2" `elem` map fst rows && "Q?" `notElem` map fst rows)
