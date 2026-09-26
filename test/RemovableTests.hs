@@ -49,6 +49,7 @@ removableTests =
     , testCase "execPlanRetry：Copy 落位后写 Done 前盘掉线 → 自愈补 Done、续跑不重做已完成项、journal 每 oid 一个 Done、doctor 干净" caseExecResume
     , testCase "execPlanRetry：supersede 组内 Copy 写 tmp 时瞬断 → 整组重跑，隔离项走 resume 分支、Copy 落位、trash 只有一份" caseExecGroupRerun
     , testCase "#17 #42 execPlanRetry 停下分两种：锁被占 → StopRefused（什么都没处理过）；执行已开始、续跑那场因身份不符被拒 → StopAborted" caseExecStops
+    , testCase "#29 execPlanRetry：续跑前的自愈没修成（降级只诊断）→ 停下说原因，不续跑——落了位而缺 Done 的 Rename 不被重判成冲突" caseHealDegradedStops
     , testCase "scanRootRetry：起手盘不在 → 等它回来照常扫完；持续性读错（ACL）有界重试后如实报读错" caseScanRetry
     , testCase "runDoctorWith --deep：盘不在时不交假结论（DEEP-SKIPPED / 消失）——等盘回来重跑；对偶 runDoctor 照旧 DEEP-SKIPPED Bad" caseDoctorDeepDrop
     ]
@@ -220,7 +221,7 @@ caseExecResume = withSystemTempDirectory "pm-rm" $ \dir -> do
               when (n == 2) (unplug root >> throwIO (transient "FlushFileBuffers"))
           , eeProgress = \it _ -> modifyIORef' progress (Map.insertWith (+) (piIx it) 1)
           }
-      heal = void (runDoctorWith dw root (DoctorOpts False True))
+      heal = Nothing <$ runDoctorWith dw root (DoctorOpts False True)
   r <- execPlanRetry dw heal env plan
   outs <- either (\e -> assertFailure (stopMsg e) >> pure []) pure r
   map (piIx . fst) outs @?= [0, 1, 2]
@@ -258,7 +259,7 @@ caseExecGroupRerun = withSystemTempDirectory "pm-rm" $ \dir -> do
               unless f (writeIORef fired True >> unplug root >> throwIO (transient "hPutBuf"))
           , eeProgress = \it _ -> modifyIORef' progress (Map.insertWith (+) (piIx it) 1)
           }
-      heal = void (runDoctorWith dw root (DoctorOpts False True))
+      heal = Nothing <$ runDoctorWith dw root (DoctorOpts False True)
   r <- execPlanRetry dw heal env plan
   outs <- either (\e -> assertFailure (stopMsg e) >> pure []) pure r
   assertBool (show outs) (all (landedOut . snd) outs)
@@ -334,7 +335,7 @@ caseExecStops = withSystemTempDirectory "pm-rm" $ \dir -> do
   ops <- mapM (\i -> mkCopyOp (dir </> ("s" <> show i <> ".jpg")) ("DATA-" <> show i) ("相册" </> ("a" <> show i <> ".jpg"))) [0 .. 1 :: Int]
   plan <- mkPlanIO root ops
   (dw, _) <- mkDw root
-  let heal = void (runDoctorWith dw root (DoctorOpts False True))
+  let heal = Nothing <$ runDoctorWith dw root (DoctorOpts False True)
       kind = either (\s -> Just (case s of StopRefused _ -> "refused"; StopAborted _ -> "aborted")) (const Nothing)
       msg = either stopMsg (const "")
   r1 <- withForeignLock root (execPlanRetry dw heal defaultExecEnv plan)
@@ -358,3 +359,29 @@ caseExecStops = withSystemTempDirectory "pm-rm" $ \dir -> do
   kind r2 @?= Just "aborted"
   assertBool (msg r2) ("身份不符" `isInfixOf` msg r2 && not ("中断前已完成" `isInfixOf` msg r2))
   readUtf8 (root </> "相册" </> "a0.jpg") >>= (@?= "OTHER")
+
+-- | #29：自愈降级成只诊断（锁被占 / 不可写）时，此前续跑照常进行——Rename 落了位、Done 丢了，下一场判它
+-- 「重命名源不存在」CONFLICT。现在停下说原因；该项没有被再执行，文件在新名下。
+caseHealDegradedStops :: IO ()
+caseHealDegradedStops = withSystemTempDirectory "pm-rm" $ \dir -> do
+  root <- mkRoot dir
+  writeFile (root </> "old.txt") "R"
+  sha <- sha256File (root </> "old.txt")
+  plan <- mkPlanIO root [OpRename "old.txt" "new.txt" (FpFileSha sha)]
+  (dw, _) <- mkDw root
+  progress <- newIORef (0 :: Int)
+  fired <- newIORef False
+  let env =
+        defaultExecEnv
+          { eeCheckpoint = \c -> when (c == CpRenAfterMove) $ do
+              f <- readIORef fired
+              unless f (writeIORef fired True >> unplug root >> throwIO (transient "FlushFileBuffers"))
+          , eeProgress = \_ _ -> modifyIORef' progress (+ 1)
+          }
+      heal = pure (Just "--repair 需要 root 独占锁，另一个 pm 实例正持有——本轮只诊断，未做任何修复")
+  r <- execPlanRetry dw heal env plan
+  case r of
+    Left (StopAborted m) -> assertBool m ("自愈没做成" `isInfixOf` m && "独占锁" `isInfixOf` m)
+    other -> assertFailure ("应停下（StopAborted）: " <> show (fmap (map (outcomeLabel . snd)) other))
+  readIORef progress >>= (@?= 0)
+  doesFileExist (root </> "new.txt") >>= (@?= True)

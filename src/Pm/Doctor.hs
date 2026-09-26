@@ -13,13 +13,15 @@ module Pm.Doctor
   , runDoctor
   , runDoctorWith
   , renderFinding
+  , repairRow
+  , repairDegraded
   ) where
 
-import Control.Monad (filterM, forM, forM_, unless)
+import Control.Monad (filterM, forM)
 import Control.Exception (IOException, bracket, try)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Maybe (isJust, mapMaybe)
+import Data.Maybe (isJust, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
@@ -31,6 +33,7 @@ import System.FilePath (joinPath, makeRelative, splitDirectories, (</>))
 import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog)
 import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
 import Pm.Derived (DerivedState (..), scanDerived)
+import Pm.Finding
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
 import Pm.Hash (sha256File, sha256Handle)
 import Pm.Import (foldPath)
@@ -47,29 +50,6 @@ data DoctorOpts = DoctorOpts
   { doDeep :: Bool
   , doRepair :: Bool
   }
-
-data Severity = Info | Warn | Bad
-  deriving (Show, Eq, Ord)
-
-data Finding = Finding
-  { fRow :: String -- matrix row / category tag
-  , fSeverity :: Severity
-  , fDetail :: String
-  , fRepair :: String -- what --repair would / did do ("" = nothing)
-  }
-
-renderFinding :: Finding -> String
-renderFinding f =
-  sevTag (fSeverity f)
-    <> " ["
-    <> fRow f
-    <> "] "
-    <> fDetail f
-    <> (if null (fRepair f) then "" else "\n      修复: " <> fRepair f)
- where
-  sevTag Info = "  ·"
-  sevTag Warn = "  ⚠"
-  sevTag Bad = "  ✗"
 
 -- | Returns (findings, exit code). Repairs (when requested) happen inside.
 --
@@ -92,6 +72,11 @@ runDoctorWith dw root opts = withDriveRetry dw root "doctor" $ do
   r <- runDoctorGate dw root opts
   requireDrive dw root "doctor"
   pure r
+
+-- | @--repair@ 这一轮没做成——锁被占（I10）或 root 不可写（I11），降级成只诊断——的原因行（审计 #29：
+-- 执行续跑据此停下，不把已落位而缺 Done 的项交给下一场重判）。I10 \/ I11 行只由这里的降级产出。
+repairDegraded :: [Finding] -> Maybe String
+repairDegraded fs = listToMaybe [fDetail f | f <- fs, fRow f `elem` ["I10", "I11"], fSeverity f == Bad]
 
 runDoctorGate :: DriveWait -> FilePath -> DoctorOpts -> IO ([Finding], Int)
 runDoctorGate dw root opts
@@ -241,7 +226,7 @@ runDoctor' dw root opts = do
         w <- requireWritable root
         case w of
           Left m -> pure [Finding "I11" Bad ("--repair 拒绝执行（root 不可写）: " <> m) ""]
-          Right _ -> [] <$ applyRepairs root findings0 pending (stale <> derivedDel)
+          Right _ -> applyRepairs root findings0 pending (stale <> derivedDel)
       else pure []
 
   let allFindings = findings0 <> repairFindings
@@ -675,8 +660,8 @@ deepVerify dw root cat = do
   pure (fs <> [Finding "DEEP-DONE" Info (show total <> " 条目待深验：已重读重 hash " <> show (total - unread) <> "、不符 " <> show (nOf "DEEP-CORRUPT" Bad) <> "、读取失败/消失 " <> show unread) ""])
 
 -- Safe closures only (journal appends / own-tmp deletion). C5 plans are
--- emitted, not executed.
-applyRepairs :: FilePath -> [Finding] -> [(Text, Op)] -> [FilePath] -> IO ()
+-- emitted, not executed. 每个动作回一行 'repairRow'（做成 Info；跳过 Warn；删除失败 Bad）。
+applyRepairs :: FilePath -> [Finding] -> [(Text, Op)] -> [FilePath] -> IO [Finding]
 applyRepairs root findings pending stale = do
   let repairDone =
         [ (oid, op)
@@ -691,9 +676,10 @@ applyRepairs root findings pending stale = do
         , opPathsOk op -- P3b-8 六轮：C5 隔离计划的 dstRel 同样不得越界
         , any (\f -> fRow f == "C5" && (T.unpack oid <> ":") `isPrefixOfStr` fDetail f) findings
         ]
-  unless (null repairDone) $
-    withJournal root $ \j ->
-      forM_ repairDone $ \(oid, op) -> do
+      row sev msg = Finding repairRow sev msg ""
+  done' <-
+    if null repairDone then pure [] else withJournal root $ \j ->
+      forM repairDone $ \(oid, op) -> do
         now <- getCurrentTime
         -- trash 路径由 oid 解析推导（repairDone 已过滤畸形 oid，此处必为 Just）
         let (sha, trash) = case op of
@@ -701,31 +687,31 @@ applyRepairs root findings pending stale = do
               OpQuarantine v s _ -> (Just s, quarTrashRel oid v)
               _ -> (Nothing, Nothing)
         jAppend j Barrier (JDone oid sha trash now)
-        putStrLn ("  修复: 补记 Done " <> T.unpack oid)
+        pure (row Info ("补记 Done " <> T.unpack oid))
   -- 删除线上的都是 pm 自建状态：.pm/tmp 的孤儿 tmp（P6-C）与 .pm/derived 的
   -- 已落位 / 失源 / 半成品派生件（P8-C2）；用户照片从不在这条线上。
-  forM_ stale $ \f -> do
+  cleared <- forM stale $ \f -> do
     -- P3b-14（十一轮 #4）：删除前对完整相对路径再过一次 'resolveUnder'——
     -- staleTmpFiles 枚举与这里的 unlink 之间有窗口，且枚举本身只按层探测。
     -- 解析不出就跳过（不删 = fail-closed），以 doctor 文本暴露给人工。
     m <- resolveUnder root (makeRelative root f)
     case m of
-      Nothing -> putStrLn ("  跳过: " <> f <> " 不再是可信路径（junction/symlink？），不删除——人工核查")
+      Nothing -> pure (row Warn ("跳过: " <> f <> " 不再是可信路径（junction/symlink？），不删除——人工核查"))
       Just fp -> do
         -- 第一方自审工作流 C102（同型）：unlink 会抛（占用超预算/只读属性）；
         -- 逃顶会连带放弃后面的 C5 计划生成。逐项 try、报出、继续。
         r <- try (deleteBoundAt fp) :: IO (Either IOException ())
-        putStrLn $ case r of
-          Right () -> "  修复: 清除 pm 自建文件（孤儿 tmp / 派生件）: " <> f
-          Left e -> "  ✗ pm 自建文件未清除（" <> show e <> "）: " <> f <> " —— 解除占用/只读后重跑"
-  forM_ c5 $ \(oid, op) -> case op of
+        pure $ case r of
+          Right () -> row Info ("清除 pm 自建文件（孤儿 tmp / 派生件）: " <> f)
+          Left e -> row Bad ("pm 自建文件未清除（" <> show e <> "）: " <> f <> " —— 解除占用/只读后重跑")
+  planned <- fmap concat . forM c5 $ \(oid, op) -> case op of
     OpCopy _ dstRel _ _ _ -> do
       -- 三十四轮（同型扫尽）：隔离计划记录的是 victim 当下的 sha，读不出就
       -- 生成不了（也不能拿 Intent 的 sha 顶替——C5 的前提正是内容不符）；
       -- 跳过该项并明说（fail-closed），稍后重跑。
       actualE <- try (sha256File (root </> dstRel)) :: IO (Either IOException Text)
       case actualE of
-        Left e -> putStrLn ("  跳过: C5 隔离计划未生成（dst 读取失败: " <> show e <> "）——稍后重跑 pm doctor --repair")
+        Left e -> pure [row Warn ("跳过: C5 隔离计划未生成（dst 读取失败: " <> show e <> "）——稍后重跑 pm doctor --repair")]
         Right actual -> do
           pid <- newPlanId
           now <- getCurrentTime
@@ -741,8 +727,9 @@ applyRepairs root findings pending stale = do
                       [PlanItem 0 (OpQuarantine dstRel actual ("doctor-c5:" <> oid)) StPending Nothing]
                   }
           fp <- savePlan p
-          putStrLn ("  修复: C5 隔离计划已生成 " <> fp <> " → 审阅后 pm apply " <> T.unpack pid)
-    _ -> pure ()
+          pure [row Info ("C5 隔离计划已生成 " <> fp <> " → 审阅后 pm apply " <> T.unpack pid)]
+    _ -> pure []
+  pure (done' <> cleared <> planned)
 
 isPrefixOfStr :: String -> String -> Bool
 isPrefixOfStr p s = take (length p) s == p

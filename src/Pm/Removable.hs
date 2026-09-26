@@ -261,7 +261,9 @@ stopMsg (StopAborted m) = m
 --
 --   1. 逐项结果经 'eeProgress' 钩子实时记下（内核每执行完一项调一次）；
 --   2. 异常 → 三分法；可重试 → 等盘\/短停 → 调用方给的 @heal@（@doctor --repair@：
---      对「有 Intent 无 Done、盘面证明已落位」的项补记 Done）；
+--      对「有 Intent 无 Done、盘面证明已落位」的项补记 Done）；heal 答 Just 原因 = 这一轮
+--      没修成（锁被占 \/ 不可写降级成只诊断）→ 停下（'StopAborted'），不续跑：已落位而缺
+--      Done 的项结算不了，下一场会重判它（落了位的 Rename 判成「源不存在」冲突，审计 #29）；
 --   3. 结算已完成的**组**：组内每项都有结果且都是 DONE\/同内容 SKIP → 按结果计；
 --      否则组内每个待执行项在 journal 里末事件都是 Done → 按 journal 计（Copy 的
 --      dst 现 stat 一次，结果形态与内核落位时相同：@ODone sha stat@ \/ rename
@@ -271,7 +273,7 @@ stopMsg (StopAborted m) = m
 --   4. 只把未结算的项交给下一场 'execPlan'（组闭包天然保全），结果按原序合并。
 --
 -- 关闭（'noDriveWait'）= 直接 'execPlan'，异常照旧逃顶。
-execPlanRetry :: DriveWait -> IO () -> ExecEnv -> Plan -> IO (Either ExecStop [(PlanItem, ItemOutcome)])
+execPlanRetry :: DriveWait -> IO (Maybe String) -> ExecEnv -> Plan -> IO (Either ExecStop [(PlanItem, ItemOutcome)])
 execPlanRetry dw heal env0 plan
   | not (armed dw) = either (Left . StopRefused) Right <$> execPlan env0 plan
   | otherwise = do
@@ -296,14 +298,17 @@ execPlanRetry dw heal env0 plan
                     v <- judgeIO root e
                     ok <- recover dw root "执行" v (show e)
                     unless ok (throwIO e)
-                    heal
-                    prog <- readIORef seen
-                    done <- lastDone . fst <$> withDriveRetry dw root "读 journal" (readJournal root)
-                    settled <- settle root prog done (plId plan) todo
-                    let committed' = Map.union committed settled
-                        todo' = [it | it <- todo, piIx it `Map.notMember` committed']
-                    dwSay dw (printf "· 从中断处继续：已结算 %d 项，剩 %d 项重跑" (Map.size committed') (length todo'))
-                    go (n + 1 :: Int) committed' todo'
+                    healed <- heal
+                    case healed of
+                      Just why -> pure (Left (StopAborted ("续跑前的自愈没做成（" <> why <> "）——已落位而缺 Done 的项结算不了，不续跑；排除原因后 pm doctor --repair，再重跑同一计划（已落位的项自动跳过）")))
+                      Nothing -> do
+                        prog <- readIORef seen
+                        done <- lastDone . fst <$> withDriveRetry dw root "读 journal" (readJournal root)
+                        settled <- settle root prog done (plId plan) todo
+                        let committed' = Map.union committed settled
+                            todo' = [it | it <- todo, piIx it `Map.notMember` committed']
+                        dwSay dw (printf "· 从中断处继续：已结算 %d 项，剩 %d 项重跑" (Map.size committed') (length todo'))
+                        go (n + 1 :: Int) committed' todo'
       go 0 Map.empty (plItems plan)
  where
   merge committed outs =

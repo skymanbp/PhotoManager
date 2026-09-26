@@ -168,6 +168,7 @@ src/Pm/Plan.hs              -- Diff/规则 → Plan（规则/校验为纯函数�
 src/Pm/Exec.hs              -- ★安全内核：唯一**写入/落位/改名**照片字节的模块（另两处只读的字节出口见下「关键结构性质 2」；pm 状态文件写口在 Config/Journal/Catalog/Plan/Trash，三十六轮收窄措辞；类型面在 Pm.ExecTypes，三十四轮拆出）
 src/Pm/Removable.hs         -- 可移动介质瞬断保护（1.1.2，§6.4 末段）：盘在判据、IOException 三分、等盘/短停重试、扫描按 pass 续、执行按组续跑（内核之外的会话层；不写照片字节）
 src/Pm/Derived.hs           -- .pm/derived 派生件对账口（1.1.2 从 Convert 字节级拆出，解 Doctor→Convert→Cli 依赖环；Convert 再导出）
+src/Pm/Finding.hs           -- doctor 的发现行类型与渲染（Severity/Finding/renderFinding/repairRow；2026-09-26 从 Doctor 字节级拆出，Doctor 再导出；750 行预算）
 src/Pm/Sort.hs              -- 卡/收件目录 → 分段提议与归位计划（源扫描层在 Pm.SortSource，三十五轮拆出）
 src/Pm/Names.hs             -- 事件夹/文件名解析、规范化、rename 计划（目标唯一性校验）
 src/Pm/Versions.hs          -- 版本组聚合报告
@@ -358,7 +359,7 @@ Plan 生成期校验**同批 Rename 目标唯一性**（防两条 Rename 撞同�
 
 | # | 盘上状态 | doctor 判定与动作 |
 |---|---|---|
-| C1 | 孤儿 `.pm/tmp/*` + Intent 无 Done（中断于写 tmp 阶段） | 报告；**`--repair` 不清除该 tmp**——它是在途 Intent 的证据。文案即 `--repair 不清除该 tmp（在途 Intent 的证据）；重跑原计划即可（重写从零开始，落位前覆盖它）`（"续传"同样不实：重跑走独占创建）。`--repair` 真正清的只有**不属于任何 pending Intent** 的孤儿 tmp（`TMP-STALE` 行）；清不掉时打印 `✗ 孤儿 tmp 未清除（…）` 并继续跑完其余修复，不中止 |
+| C1 | 孤儿 `.pm/tmp/*` + Intent 无 Done（中断于写 tmp 阶段） | 报告；**`--repair` 不清除该 tmp**——它是在途 Intent 的证据。文案即 `--repair 不清除该 tmp（在途 Intent 的证据）；重跑原计划即可（重写从零开始，落位前覆盖它）`（"续传"同样不实：重跑走独占创建）。`--repair` 真正清的只有**不属于任何 pending Intent** 的孤儿 tmp（`TMP-STALE` 行）；清不掉时出一条 `✗ [REPAIR] pm 自建文件未清除（…）` 并继续跑完其余修复，不中止（`--repair` 的每个动作——补记 Done、清除、C5 计划、跳过——都回成 `[REPAIR]` 发现行，不再直接打 stdout，审计 #38） |
 | C2 | dst 完好 sha==expected + Intent 无 Done | 补记 Done |
 | C3 | dst 存在 sha==expected + journal **无任何记录** | **doctor 不归属、不补记**。Intent 在动盘前过持久化屏障（I4），这一格只有硬件谎报 flush 才到得了；此时连「pm 做过这一步」的证据都没有——凭内容补一条 Intent+Done 等于伪造历史（盘上那份也可能是人手放进去的，undo 会据此把它隔离掉）。对账走**重跑原计划**：目标已在且内容相同 → SKIP（I5）；该项没有 journal 记录，undo 不覆盖它；字节核查交 `pm scan` / `--deep`（2026-09-25 审计 #36：本行此前写「按内容归属并补记 Done」，代码从未实现） |
 | C4 | **Intent+Done 齐全但 dst sha ≠ expected**（硬件谎报 flush、劣质 USB 桥） | 报 **CORRUPT**，不删任何东西；staging/源那份标回「未确认归档」 |

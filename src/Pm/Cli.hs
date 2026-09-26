@@ -40,6 +40,7 @@ module Pm.Cli
   , exitBoundary
   , parseYmd
   , parseWorkers
+  , healLines
   ) where
 
 import Control.Exception (IOException, displayException, try)
@@ -62,7 +63,7 @@ import Pm.Hash (ContentProbe (..), probeConfined)
 import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), readRootState, requireMain, requireWritable)
 import Pm.Dedupe (recheckDedupeItems)
 import Pm.Diff (BackupDiff (..))
-import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctorWith)
+import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), renderFinding, repairDegraded, repairRow, runDoctorWith)
 import Pm.Exec (ExecEnv (..), ItemOutcome (..), defaultExecEnv, outcomeLabel, updateCatalog)
 import Pm.Import (sameComp, stagingTop, underLayers)
 import Pm.Journal (Sync (..))
@@ -184,7 +185,8 @@ executePlanNow' cfg sink plan = do
       -- 被打断的那一项按 journal 认作完成，不重 hash、不留 C2。
       heal = do
         (fs, _) <- runDoctorWith dw root (DoctorOpts False True)
-        sink (printf "· 自愈：pm doctor --repair 补记 Done %d 条" (length [() | f <- fs, fRow f `elem` ["C2", "R2", "Q-DONE-LOST"], fSeverity f == Warn]))
+        mapM_ sink (healLines fs)
+        pure (repairDegraded fs)
   r <- execPlanRetry dw heal env plan
   case r of
     Left s -> sink (stopMsg s) >> pure (Left s)
@@ -200,6 +202,15 @@ executePlanNow' cfg sink plan = do
   isBad (OConflict _) = True
   isBad (OFailed _) = True
   isBad _ = False
+
+-- | 执行续跑两场之间的自愈（@doctor --repair@）交给打印口的行（审计 #29 #38）：它**实际**做了的
+-- （'Pm.Doctor.repairRow' 行）与没能做 \/ 做坏了的（Bad 行：I10 锁被占、I11 不可写时降级成只诊断，
+-- 删除失败……）。此前按诊断行合成「补记 Done N 条」——降级成只诊断时那个数是假的；逐条修复只
+-- putStrLn，@pm ui@ 下 serve 的 stdout 是空设备，GUI 发起的执行里一条都看不到。
+healLines :: [Finding] -> [String]
+healLines fs = case [f | f <- fs, fRow f == repairRow || fSeverity f == Bad] of
+  [] -> ["· 自愈：pm doctor --repair 无需修复"]
+  acted -> "· 自愈：pm doctor --repair" : map renderFinding acted
 
 -- | 'Pm.Plan.BarrierKind' → 屏障实现。对构造子做 **total** 模式匹配：内核那半
 -- （「要不要屏障」）与这半（「是哪个」）由同一个类型钉死。新加一种屏障漏写

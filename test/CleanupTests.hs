@@ -19,7 +19,9 @@ import Test.Tasty.HUnit
 
 import Pm.Backup (discoverBackupRoots)
 import Pm.BackupCmd (backupInitPreflight, runBackupRun)
-import Pm.Cli (GoOpts (..), parseWorkers, parseYmd)
+import Pm.Cli (GoOpts (..), healLines, parseWorkers, parseYmd)
+import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), repairDegraded, repairRow, runDoctor)
+import Pm.Exec (Checkpoint (..))
 import Pm.Commands (InitOpts (..), ScanCmd (..), runInit, runScanCmd)
 import Pm.Config (Config (..), loadConfig, writeConfig)
 import Pm.ConfigEdit (checkConfig, runConfigShow)
@@ -29,7 +31,7 @@ import Pm.SortSource (withSourceQ)
 import Pm.Status (IndexSummary (..), StatusOpts (..), StatusReport (..), localStamp, renderStatus, statusReport)
 import Pm.VaultHold (validateKeyed)
 import Pm.Types (RootRole (..), blankPathArg, showHuman, subpathOk)
-import TestUtil (captureStdout, grepSrc, mkMain, readUtf8, scanQuiet, withEnv, writeF)
+import TestUtil (captureStdout, grepSrc, injectAt, mkCopyOp, mkMain, mkPlanIO, readUtf8, runCrash, scanQuiet, withEnv, writeF)
 
 cleanupTests :: TestTree
 cleanupTests =
@@ -44,6 +46,7 @@ cleanupTests =
     , testCase "#68 历史时刻按当时的时区偏移换算（冬 / 夏两个时刻各用各的）；src 不再用 getCurrentTimeZone 换算历史时刻" caseHistoricalOffset
     , testCase "#65 #84 命令行参数：日期只收十位 YYYY-MM-DD（26-09-01 不再是公元 26 年）；空路径参数不再落到当前目录（init / backup init / sort）" caseCliArgs
     , testCase "#83 整理页重扫先清模型再请求：失败的重扫之后没有旧概览、AI 按钮不亮；AI 请求收尾按当前概览定按钮" caseSortRescanReset
+    , testCase "#29 #38 --repair 做了什么进返回的 findings（REPAIR 行，不直接打 stdout）；执行自愈转发它们与 Bad 行，降级成只诊断时不再报「补记 N 条」" caseRepairFindings
     ]
 
 -- | #16 / #18 的 GUI 形状（本仓不跑浏览器：源码哨兵 + node --check）。
@@ -214,3 +217,33 @@ caseSortRescanReset = do
       | pat `isPrefixOf` r = (reverse acc, r)
       | otherwise = go (c : acc) cs
     go acc [] = (reverse acc, [])
+
+-- | #38：applyRepairs 此前逐条 putStrLn、不进 findings——@pm ui@ 下 stdout 是空设备，GUI 发起的执行自愈看不到它
+-- 生成了 C5 隔离计划或删了什么。#29：自愈按诊断行合成「补记 Done N 条」，降级成只诊断（I10 / I11）时那个数是假的。
+caseRepairFindings :: Assertion
+caseRepairFindings = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True root
+  opA <- mkCopyOp (dir </> "a.jpg") "AAA" ("相册" </> "a.jpg")
+  planA <- mkPlanIO root [opA]
+  runCrash (injectAt CpCopyAfterMove) planA -- C2：已落位、缺 Done
+  -- 孤儿 tmp：.pm/tmp 下不属于任何在途 Intent 的 pm 自建文件（在途 Intent 的 tmp 按设计不删）
+  writeF (root </> ".pm" </> "tmp" </> "20260101-000000-abcdef" </> "0-b.jpg.tmp") "junk"
+  (out, (fs, _)) <- captureStdout (runDoctor root (DoctorOpts False True))
+  let rep = [fDetail f | f <- fs, fRow f == repairRow]
+  assertBool (show rep) (any ("补记 Done " `isPrefixOf`) rep && any ("清除 pm 自建文件" `isPrefixOf`) rep)
+  assertBool ("修复不得绕过 findings 直接打 stdout: " <> out) (not ("补记 Done" `isInfixOf` out))
+  -- 自愈：降级只诊断 → 转发 I10 那行，不报「补记」；实际做了的 REPAIR 行照转；什么都没做 → 一行「无需修复」
+  let degraded = healLines [Finding "C2" Warn "p:0: 已落位" "", Finding "I10" Bad "--repair 需要 root 独占锁——本轮只诊断，未做任何修复" ""]
+  assertBool (unlines degraded) (any ("未做任何修复" `isInfixOf`) degraded && not (any ("补记" `isInfixOf`) degraded))
+  assertBool "REPAIR 行照转" (any ("补记 Done p:0" `isInfixOf`) (healLines [Finding repairRow Info "补记 Done p:0" ""]))
+  healLines [] @?= ["· 自愈：pm doctor --repair 无需修复"]
+  -- 执行续跑据此停下（降级那条的原因原样交回）；修成了（没有 I10 / I11）= Nothing
+  repairDegraded [Finding "I10" Bad "锁被占" "", Finding "C2" Warn "x" ""] @?= Just "锁被占"
+  repairDegraded [Finding repairRow Info "补记 Done p:0" ""] @?= Nothing
+  repairDegraded [Finding "I11" Bad "不可写" ""] @?= Just "不可写"
+  -- 执行路径的 heal 把它交回 execPlanRetry（executePlanNowWith 自建 ExecEnv，注入不进来：钉源码）
+  cli <- readUtf8 ("src" </> "Pm" </> "Cli.hs")
+  assertBool "Cli 的 heal 须把 repairDegraded 交回续跑" ("pure (repairDegraded fs)" `isInfixOf` cli)
+  hits <- grepSrc ("补记 Done %d 条" `isInfixOf`)
+  hits @?= []
