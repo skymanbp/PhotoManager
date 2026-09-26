@@ -18,7 +18,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import Data.Time (UTCTime (..), fromGregorian, getCurrentTime)
-import Network.HTTP.Types (hAuthorization, hContentType, hHost, hOrigin, methodPost, status500)
+import Network.HTTP.Types (hAuthorization, hContentType, hHost, hOrigin, methodPost, status409, status500)
 import Network.Wai (Request (..), defaultRequest)
 import Network.Wai.Test (SRequest (..), SResponse (..), Session, runSession, setPath, srequest)
 import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, removeFile, setModificationTime, setOwnerWritable, setPermissions)
@@ -51,7 +51,7 @@ import Pm.Types (Catalog (..), Entry (..), RootInfo (..), RootRole (..))
 import Pm.Win (NameKind (..), probeName)
 import ServeTests (fixture, liftIO', mkEnvA, mkEnvW, tok, withVault)
 import qualified ServeTests as ST
-import TestUtil (captureStdout, doctorRows, execOk, isClean, journalEntries, mkCopyOp, mkPlanIO, setForeignReparse, setOffline, truncateJournalTo, withDenyAll, withEnv)
+import TestUtil (captureStdout, doctorRows, execOk, isClean, journalEntries, mkCopyOp, mkPlanIO, setForeignReparse, setOffline, truncateJournalTo, withDenyAll, withEnv, withForeignLock)
 
 auditFixTests :: TestTree
 auditFixTests =
@@ -61,6 +61,7 @@ auditFixTests =
     , testCase "#5 root 是 junction：createRootInfo 落到真名下、不抛、无 .tmp 残留；已有身份仍 Left 不覆盖且不留 .tmp" caseRootIdJunctionRoot
     , testCase "#9 POST /api/apply 执行链抛异常 → 500 JSON（interrupted + planId + log，带 CORS），不再是 warp 裸 500；GUI 认 interrupted" caseServeApplyInterrupted
     , testCase "#9 serveApp 最后一道异常边界：recordPost（hold）写链抛异常 → 500 JSON 带 CORS，主库记录文件零写入" caseServeBoundaryRecordPost
+    , testCase "#17 POST /api/apply 内核整批拒绝（锁被占）→ 409 + 原因（页面「没有执行」），不再是 200 + 退出码 2 + 空逐项；字节没动" caseServeApplyRefused
     , testCase "#43 trash 例外只放隔离载荷（≥ 4 级）：trash 根 / manifest / 整个隔离目录作 rename 源，validatePlan 与 execPlan 都拒、manifest 不动；生成形态照旧放行" caseTrashSrcShape
     , testCase "#34 doctor 在途 Copy 的 dst / Quarantine 的 victim 被 ACL 拒绝：不再塌成「无痕迹」C1 / 「两处都不在」Q?，按「在而读不出」报 C? Bad / Q2" caseDoctorDeniedUserSide
     , testCase "#58 测试里临时改环境变量须原样还原（有值写回、没有才删、异常同样还原）；test/ 里删环境变量只许在 TestUtil.withEnv" caseWithEnvRestores
@@ -493,3 +494,23 @@ caseExitBoundary = do
   r @?= Left UserInterrupt
   m <- T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile ("app" </> "Main.hs")
   assertBool "main 须经 exitBoundary 调命令体" ("exitBoundary (run cmd)" `isInfixOf` m)
+
+-- | #17：内核整批拒绝此前答 200 + 退出码 2 + 空逐项，页面说「有未完成/待裁决项，见逐项结果 … pm undo」。
+caseServeApplyRefused :: IO ()
+caseServeApplyRefused = withSystemTempDirectory "pm-apply-ref" $ \root -> do
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  op <- mkCopyOp (root </> "src" </> "a.jpg") "AAA" ("成片" </> "a.jpg")
+  plan <- mkPlanIO root [op]
+  _ <- savePlan plan
+  env <- mkEnvA (ST.mkCfg root)
+  withForeignLock root . flip runSession (serveApp env) $ do
+    r <- postWithOrigin "/api/apply" (Aeson.encode (Aeson.object ["planId" Aeson..= plId plan]))
+    liftIO' $ do
+      simpleStatus r @?= status409
+      case Aeson.decode (simpleBody r) of
+        Just (Aeson.Object o) -> case KM.lookup "error" o of
+          Just (Aeson.String e) -> assertBool (T.unpack e) ("I10" `T.isInfixOf` e)
+          other -> assertFailure ("error 应为字符串: " <> show other)
+        other -> assertFailure ("响应不是对象: " <> show (other :: Maybe Aeson.Value))
+  doesFileExist (root </> "成片" </> "a.jpg") >>= (@?= False)

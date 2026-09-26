@@ -71,7 +71,7 @@ import System.Win32.Types (LPTSTR, withTString)
 import Test.Tasty.HUnit
 
 import Pm.Catalog (saveCatalog)
-import Pm.Cli (PlanRun (..), executePlanNowWith)
+import Pm.Cli (PlanRun (..), executePlanNowWith, planRunOf)
 import Pm.Config (Config (..), RootIdState (..), createRootInfo, readRootState, writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity, runDoctor)
 import Pm.Exec
@@ -351,7 +351,7 @@ mkMain root = writeRootInfo root (RootInfo "main-rid" RoleMain t0 Nothing)
 -- | 立即执行的 runPlan（测试用：跳过交互确认，仍走完整 Exec 内核）。
 -- 返回 'PlanRun'：push 的收尾自工作流 F068 起按逐项结果判，不按退出码。
 execNow :: Config -> Plan -> IO PlanRun
-execNow cfg p = savePlan p >> uncurry PrRun <$> executePlanNowWith cfg putStrLn p
+execNow cfg p = savePlan p >> planRunOf <$> executePlanNowWith cfg putStrLn p
 
 -- | 「陈旧 catalog 命中 stat」夹具（P4-7 hold 与 P8-C note 共用）：@jpg@ 先写
 -- "AAA"，跑完 @between@ 后取 stat 快照与旧 sha，再**等长替换**成 "BBB" 并还原

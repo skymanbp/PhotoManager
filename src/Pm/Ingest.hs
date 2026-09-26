@@ -42,7 +42,7 @@ import Data.Time (getCurrentTime)
 import System.Directory (doesDirectoryExist, doesFileExist, makeAbsolute)
 import System.FilePath (takeFileName, (</>))
 
-import Pm.Cli (PlanRun (..), fullyExecuted)
+import Pm.Cli (ExecStop (..), PlanRun (..), fullyExecuted)
 import Pm.Config (Config (..), requireMain)
 import Pm.GitGuard (classifyGitProbe)
 import Pm.Hash (StatSnap (..), sha256File, statSnap)
@@ -150,6 +150,12 @@ runTwoPlans cfg runPlan applyMode cat files vaultDir mainPlan vaultPlan = do
             _ -> do
               mapM_ putStrLn (ingestOrderLines (plId mainPlan) pidV cat)
               pure 1
+    PrExecStopped s -> do
+      -- 审计 #42：没交回逐项结果就停下——此前落进下面「有未完成项 → pm resolve」那句，被拒时没有东西可裁决
+      putStrLn $ case s of
+        StopRefused _ -> "主库（相册）那份没有执行（执行被拒，原因见上）：vault 那份不执行（I7：相册在前）；排除原因后重跑本命令"
+        StopAborted _ -> "主库（相册）那份执行中断（可能已有项落位，原因见上）：vault 那份不执行（I7）；pm apply " <> T.unpack (plId mainPlan) <> " 续跑（已落位的项自动跳过）后重跑本命令"
+      pure 2
     PrRun c1 rs1
       | c1 == 0 && fullyExecuted rs1 -> do
           r2 <- runPlan vaultPlan
@@ -158,6 +164,11 @@ runTwoPlans cfg runPlan applyMode cat files vaultDir mainPlan vaultPlan = do
             PrSaved -> do
               putStrLn ("vault 那份已存盘未执行：pm apply " <> T.unpack pidV <> "（相册已完成，次序满足）；完成后重跑本命令拿收尾步骤")
               pure 1
+            PrExecStopped s -> do
+              putStrLn $ case s of
+                StopRefused _ -> "vault 那份没有执行（执行被拒，原因见上）：相册已完成；排除原因后 pm apply " <> T.unpack pidV <> "，完成后重跑本命令拿收尾步骤"
+                StopAborted _ -> "vault 那份执行中断（可能已有项落位，原因见上）——收尾步骤不给：**源文件必须留在原位**；pm apply " <> T.unpack pidV <> " 续跑后重跑本命令"
+              pure 2
             PrRun c2 rs2
               | c2 == 0 && fullyExecuted rs2 -> do
                   mapM_ putStrLn (ingestSteps cfg vaultDir pidV cat files)

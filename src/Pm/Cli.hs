@@ -12,8 +12,10 @@ module Pm.Cli
   , executePlanNow
   , executePlanNowWith
   , PlanRun (..)
+  , ExecStop (..)
   , planRunCode
   , planIdOf
+  , planRunOf
   , fullyExecuted
   , landedItems
   , savePlanAndMaybeRun
@@ -67,7 +69,7 @@ import Pm.Journal (Sync (..))
 import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
-import Pm.Removable (driveWaitFor, execPlanRetry, withDriveRetry)
+import Pm.Removable (ExecStop (..), driveWaitFor, execPlanRetry, stopMsg, withDriveRetry)
 import Pm.Scan (ScanResult (..), cloudOnlyNote, freshPending, freshnessSweep)
 import Pm.Types
 import Pm.Win (volumeFsType)
@@ -142,7 +144,7 @@ renderPlanBriefTo sink plan = do
 -- P2.2 fail-closed（复审 cx-1 残留）：CLI 层一律拒绝执行无 rootId 的计划，
 -- 包括 --apply 即时路径——root 没有身份就没有执行资格，没有例外。
 executePlanNow :: Config -> Plan -> IO Int
-executePlanNow cfg = fmap fst . executePlanNowWith cfg putStrLn
+executePlanNow cfg = fmap (either (const 2) fst) . executePlanNowWith cfg putStrLn
 
 -- | 同上，但**打印口由调用方给**，且把逐项结果一并交回。
 --
@@ -152,15 +154,17 @@ executePlanNow cfg = fmap fst . executePlanNowWith cfg putStrLn
 -- broken pipe）。端点因此传一个把行收进 IORef 的 sink，把它们放进 JSON 响应体。
 --
 -- 逐项结果同样交回：CLI 只要退出码，API 要把每一项的结局报给页面。两者共用
--- **同一次**执行与同一次 catalog 回写，不另起一条执行路径。
-executePlanNowWith :: Config -> (String -> IO ()) -> Plan -> IO (Int, [(PlanItem, ItemOutcome)])
+-- **同一次**执行与同一次 catalog 回写，不另起一条执行路径。没交回结果就停下时答 'ExecStop'
+-- （被拒 / 执行已开始后停下，原因已由 sink 打出；审计 #17 #42：此前折成 @(2, [])@）。
+executePlanNowWith :: Config -> (String -> IO ()) -> Plan -> IO (Either ExecStop (Int, [(PlanItem, ItemOutcome)]))
 executePlanNowWith cfg sink plan = case plRootId plan of
   Nothing -> do
-    sink "计划缺 root 标识，拒绝执行（cx-1 fail-closed）→ pm init 建立 root 标识后重新生成计划"
-    pure (2, [])
+    let m = "计划缺 root 标识，拒绝执行（cx-1 fail-closed）→ pm init 建立 root 标识后重新生成计划"
+    sink m
+    pure (Left (StopRefused m))
   Just _ -> executePlanNow' cfg sink plan
 
-executePlanNow' :: Config -> (String -> IO ()) -> Plan -> IO (Int, [(PlanItem, ItemOutcome)])
+executePlanNow' :: Config -> (String -> IO ()) -> Plan -> IO (Either ExecStop (Int, [(PlanItem, ItemOutcome)]))
 executePlanNow' cfg sink plan = do
   let root = plRootPath plan
       dw = driveWaitFor cfg sink
@@ -183,7 +187,7 @@ executePlanNow' cfg sink plan = do
         sink (printf "· 自愈：pm doctor --repair 补记 Done %d 条" (length [() | f <- fs, fRow f `elem` ["C2", "R2", "Q-DONE-LOST"], fSeverity f == Warn]))
   r <- execPlanRetry dw heal env plan
   case r of
-    Left e -> sink e >> pure (2, [])
+    Left s -> sink (stopMsg s) >> pure (Left s)
     Right results -> do
       forM_ results $ \(it, out) ->
         sink (printf "  %3d → %s" (piIx it) (outcomeLabel out))
@@ -191,7 +195,7 @@ executePlanNow' cfg sink plan = do
       let bad = [() | (_, out) <- results, isBad out]
       unless (null bad) $
         sink (printf "⚠ %d 项 CONFLICT/FAILED（其余不受影响；详见逐项结果）" (length bad))
-      pure (if null bad then 0 else 1, results)
+      pure (Right (if null bad then 0 else 1, results))
  where
   isBad (OConflict _) = True
   isBad (OFailed _) = True
@@ -222,6 +226,8 @@ data PlanRun
     -- ^ 计划已存盘、未执行（无 --apply，或用户在 y/N 答了 n）
   | PrRun Int [(PlanItem, ItemOutcome)]
     -- ^ 已执行：退出码 + 逐项结局
+  | PrExecStopped ExecStop
+    -- ^ 已存盘；执行没交回逐项结果就停下（被拒 / 执行已开始后停下，原因已打印；审计 #17 #42）
 
 -- | 存盘 → 展示 → 确认 → 执行。执行期屏障由 'executePlanNowWith' 装进
 -- ExecEnv、由内核在锁内跑，这里既不必也不能选择跳过它。
@@ -236,6 +242,11 @@ planRunCode :: PlanRun -> Int
 planRunCode (PrRefused _) = 2
 planRunCode PrSaved = 1
 planRunCode (PrRun c _) = c
+planRunCode (PrExecStopped _) = 2
+
+-- | 'executePlanNowWith' 的结局 → 'PlanRun'（存盘之后的那一半；测试的 execNow 同走这里）。
+planRunOf :: Either ExecStop (Int, [(PlanItem, ItemOutcome)]) -> PlanRun
+planRunOf = either PrExecStopped (uncurry PrRun)
 
 -- | 「计划 id 只在真出了计划时是 Just」（第一方自审工作流 F052）：'PrRefused'
 -- 在 savePlan **之前**返回，盘上没有文件——给出 id 就是指向一个不存在的计划
@@ -284,7 +295,7 @@ savePlanAndMaybeRunTo sink cfg go plan = do
       sink ("执行: pm apply " <> T.unpack (plId plan))
       ok <- confirm go
       if ok
-        then uncurry PrRun <$> executePlanNowWith cfg sink plan
+        then planRunOf <$> executePlanNowWith cfg sink plan
         else pure PrSaved
 
 -- | 「造计划 → 存盘 → 展示 → 确认 → 执行 → (退出码, 计划 id)」的公共收尾。

@@ -82,7 +82,7 @@ import System.FilePath (takeExtension)
 import System.IO (IOMode (ReadMode), hClose, hFlush, stdout)
 
 import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog, loadNote)
-import Pm.Cli (GoOpts (..), executePlanNowWith)
+import Pm.Cli (ExecStop (..), GoOpts (..), executePlanNowWith)
 import Pm.Commands (afterApply, loadPlanAnyRoot, prepareApply)
 import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, withConfigLock)
 import Pm.ConfigEdit (checkPatch, configTxn)
@@ -344,20 +344,28 @@ routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
         r <- try $ do
           prep <- prepareApply cfg sink pid only
           case prep of
-            Left m -> pure (Left m)
+            Left m -> pure (Left (False, m))
             Right (plan, added) -> do
               -- 屏障不在这里调：它随 cfg 装进 ExecEnv，由内核在 root 锁内
               -- 跑（二十九轮 critical）。seApplyLock 只是**进程内**互斥，
               -- 挡不住第二个 pm；跨进程那一半现在由 I10 锁负责。屏障的
               -- 降级理由、收尾 git 步骤、备份缓存告警同走这个 sink（F022/C106）。
-              (code, results) <- executePlanNowWith cfg sink plan
-              afterApply cfg sink plan results
-              pure (Right (plan, added, code, results))
+              out <- executePlanNowWith cfg sink plan
+              case out of
+                -- 审计 #17：内核整批拒绝（什么都没动）= 409「没有执行」，与准备阶段的拒绝同形；执行已开始后
+                -- 停下 = 500 interrupted（可能已有项落位）。此前两者都答 200 + 退出码 2 + 空逐项，页面说
+                -- 「有未完成/待裁决项，见逐项结果 … pm undo」。Left 的 Bool = 执行是否已开始
+                Left (StopRefused m) -> pure (Left (False, m))
+                Left (StopAborted m) -> pure (Left (True, m))
+                Right (code, results) -> do
+                  afterApply cfg sink plan results
+                  pure (Right (plan, added, code, results))
         logs <- reverse <$> readIORef logRef
+        let interrupted m = jsonR status500 [] (object ["error" .= ("执行中断: " <> m), "interrupted" .= True, "planId" .= pid, "log" .= logs])
         case r of
-          Left (ex :: IOException) ->
-            jsonR status500 [] (object ["error" .= ("执行中断: " <> show ex), "interrupted" .= True, "planId" .= pid, "log" .= logs])
-          Right (Left m) -> err status409 m
+          Left (ex :: IOException) -> interrupted (show ex)
+          Right (Left (True, m)) -> interrupted m
+          Right (Left (False, m)) -> err status409 m
           Right (Right (plan, added, code, results)) ->
             jsonR
               status200

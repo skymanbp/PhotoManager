@@ -39,6 +39,8 @@ module Pm.Removable
   , requireDrive
   , scanRootRetry
   , execPlanRetry
+  , ExecStop (..)
+  , stopMsg
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -237,6 +239,23 @@ scanRootRetry dw opts old0 rid root = go (0 :: Int) old0
             if ok then go (n + 1) (Just (srCatalog res)) else pure res
   clean res = null (srErrors res) && srCarried res == 0
 
+-- | 执行在交回逐项结果之前停下的两种（审计 #17 #42）。此前两者都是一个 String，'Pm.Cli' 换算成
+-- @(2, [])@——与「跑了、有未完成项」同为非零码：CLI 的 ingest 说「有未完成项 → pm resolve」，GUI 说
+-- 「见逐项结果 … pm undo」。
+data ExecStop
+  = StopRefused String
+  -- ^ 什么都没处理过：内核在任何写入之前整批拒绝（锁被占 / 身份不符 / 计划校验 / I11 / .pm 可信性 /
+  -- 屏障）。盘上没动，排除原因后重跑同一计划即可
+  | StopAborted String
+  -- ^ 执行已开始（有项被处理过，或按 journal 结算过前序落位）之后，续跑的一场被拒：可能已有项落位，
+  -- 逐项结果没有交回（索引待 pm scan 补齐）
+  deriving (Show, Eq)
+
+-- | 停下的原因（调用方打印给用户的那一行）。
+stopMsg :: ExecStop -> String
+stopMsg (StopRefused m) = m
+stopMsg (StopAborted m) = m
+
 -- | 'Pm.Exec.execPlan' 的会话级续跑。内核一场会话持有 root 锁与 journal 句柄，盘
 -- 掉线两者都死，异常逃顶 = 进程死亡语义（Exec 模块头）；这里在**会话之间**接手：
 --
@@ -252,9 +271,9 @@ scanRootRetry dw opts old0 rid root = go (0 :: Int) old0
 --   4. 只把未结算的项交给下一场 'execPlan'（组闭包天然保全），结果按原序合并。
 --
 -- 关闭（'noDriveWait'）= 直接 'execPlan'，异常照旧逃顶。
-execPlanRetry :: DriveWait -> IO () -> ExecEnv -> Plan -> IO (Either String [(PlanItem, ItemOutcome)])
+execPlanRetry :: DriveWait -> IO () -> ExecEnv -> Plan -> IO (Either ExecStop [(PlanItem, ItemOutcome)])
 execPlanRetry dw heal env0 plan
-  | not (armed dw) = execPlan env0 plan
+  | not (armed dw) = either (Left . StopRefused) Right <$> execPlan env0 plan
   | otherwise = do
       seen <- newIORef Map.empty
       let env = env0 {eeProgress = \it out -> modifyIORef' seen (Map.insert (piIx it) (it, out)) >> eeProgress env0 it out}
@@ -262,9 +281,14 @@ execPlanRetry dw heal env0 plan
           go n committed todo = do
             r <- try (execPlan env plan {plItems = todo})
             case r of
-              Right (Left e)
-                | Map.null committed -> pure (Left e)
-                | otherwise -> pure (Left (e <> "（中断前已完成 " <> show (Map.size committed) <> " 项；索引待 pm scan 补齐）"))
+              Right (Left e) -> do
+                -- 审计 #17 #42：本次调用什么都没处理过（没有逐项进度、也没有按 journal 结算的前序落位）
+                -- 才是「被拒」；否则是执行已开始之后停下——可能已有项落位
+                prog <- readIORef seen
+                pure . Left $
+                  if Map.null committed && Map.null prog
+                    then StopRefused e
+                    else StopAborted (if Map.null committed then e else e <> "（中断前已完成 " <> show (Map.size committed) <> " 项；索引待 pm scan 补齐）")
               Right (Right outs) -> pure (Right (merge committed outs))
               Left e
                 | n >= dwAttempts dw -> throwIO e

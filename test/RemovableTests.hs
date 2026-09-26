@@ -24,6 +24,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (CatalogLoad (..), loadCatalog, loadNote, saveCatalog)
+import Pm.Config (writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor, runDoctorWith)
 import Pm.Exec
 import Pm.Hash (sha256File)
@@ -47,6 +48,7 @@ removableTests =
     , testCase "#62 readOnDrive：盘不在时 loadCatalog 不抛而答「没有」——读前等盘、读后复核，途中掉盘重读；对偶：光包 withDriveRetry 读到假的「没有」" caseReadOnDrive
     , testCase "execPlanRetry：Copy 落位后写 Done 前盘掉线 → 自愈补 Done、续跑不重做已完成项、journal 每 oid 一个 Done、doctor 干净" caseExecResume
     , testCase "execPlanRetry：supersede 组内 Copy 写 tmp 时瞬断 → 整组重跑，隔离项走 resume 分支、Copy 落位、trash 只有一份" caseExecGroupRerun
+    , testCase "#17 #42 execPlanRetry 停下分两种：锁被占 → StopRefused（什么都没处理过）；执行已开始、续跑那场因身份不符被拒 → StopAborted" caseExecStops
     , testCase "scanRootRetry：起手盘不在 → 等它回来照常扫完；持续性读错（ACL）有界重试后如实报读错" caseScanRetry
     , testCase "runDoctorWith --deep：盘不在时不交假结论（DEEP-SKIPPED / 消失）——等盘回来重跑；对偶 runDoctor 照旧 DEEP-SKIPPED Bad" caseDoctorDeepDrop
     ]
@@ -220,7 +222,7 @@ caseExecResume = withSystemTempDirectory "pm-rm" $ \dir -> do
           }
       heal = void (runDoctorWith dw root (DoctorOpts False True))
   r <- execPlanRetry dw heal env plan
-  outs <- either (\e -> assertFailure e >> pure []) pure r
+  outs <- either (\e -> assertFailure (stopMsg e) >> pure []) pure r
   map (piIx . fst) outs @?= [0, 1, 2]
   assertBool (show outs) (all (landedOut . snd) outs)
   -- 已完成的项不重做：0 与 2 各执行一次；1 由 journal（doctor 补的 Done）结算，没有再执行
@@ -258,7 +260,7 @@ caseExecGroupRerun = withSystemTempDirectory "pm-rm" $ \dir -> do
           }
       heal = void (runDoctorWith dw root (DoctorOpts False True))
   r <- execPlanRetry dw heal env plan
-  outs <- either (\e -> assertFailure e >> pure []) pure r
+  outs <- either (\e -> assertFailure (stopMsg e) >> pure []) pure r
   assertBool (show outs) (all (landedOut . snd) outs)
   readFile (root </> victimRel) >>= (@?= "NEW")
   -- 隔离项第一场已执行、第二场走 resume 分支（victim 不在原位、trash 内容相符 → 视同完成）
@@ -322,3 +324,37 @@ caseDoctorDeepDrop = withSystemTempDirectory "pm-rm" $ \dir -> do
   plug root
   code0 @?= 1
   assertBool (show (map fRow fs0)) ("DEEP-SKIPPED" `elem` map fRow fs0)
+
+-- | #17 #42：此前两种停下都是一个 String，'Pm.Cli' 换算成 (2, [])，ingest 与 GUI 按「跑了、有未完成项」说话。
+-- ① 锁被别人占着：什么都没处理过 → StopRefused。② 第 0 项 I5 冲突（处理过、没动盘、不结算），第 1 项写 tmp
+-- 时拔盘、盘回来换了身份 → 续跑那场被拒：执行已开始 → StopAborted（没有结算项，不带「中断前已完成」）。
+caseExecStops :: IO ()
+caseExecStops = withSystemTempDirectory "pm-rm" $ \dir -> do
+  root <- mkRoot dir
+  ops <- mapM (\i -> mkCopyOp (dir </> ("s" <> show i <> ".jpg")) ("DATA-" <> show i) ("相册" </> ("a" <> show i <> ".jpg"))) [0 .. 1 :: Int]
+  plan <- mkPlanIO root ops
+  (dw, _) <- mkDw root
+  let heal = void (runDoctorWith dw root (DoctorOpts False True))
+      kind = either (\s -> Just (case s of StopRefused _ -> "refused"; StopAborted _ -> "aborted")) (const Nothing)
+      msg = either stopMsg (const "")
+  r1 <- withForeignLock root (execPlanRetry dw heal defaultExecEnv plan)
+  kind r1 @?= Just ("refused" :: String)
+  assertBool (msg r1) ("I10" `isInfixOf` msg r1)
+  writeF (root </> "相册" </> "a0.jpg") "OTHER"
+  fired <- newIORef False
+  let env =
+        defaultExecEnv
+          { eeCheckpoint = \c -> when (c == CpCopyAfterTmp) $ do
+              f <- readIORef fired
+              unless f $ do
+                writeIORef fired True
+                unplug root
+                now <- getCurrentTime
+                writeRootInfo root (RootInfo "swapped-id" RoleMain now Nothing)
+                renameFile (idPath root) (idAway root)
+                throwIO (transient "hPutBuf")
+          }
+  r2 <- execPlanRetry dw heal env plan
+  kind r2 @?= Just "aborted"
+  assertBool (msg r2) ("身份不符" `isInfixOf` msg r2 && not ("中断前已完成" `isInfixOf` msg r2))
+  readUtf8 (root </> "相册" </> "a0.jpg") >>= (@?= "OTHER")

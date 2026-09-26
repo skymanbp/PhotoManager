@@ -167,9 +167,10 @@ runApply o cfg = do
           -- 执行期屏障由内核在 withRootLock 内跑（二十九轮 critical）；三条
           -- 执行路径共用 'Pm.Cli.executePlanNowWith' 这一个装配点，没有哪一处
           -- 还需要（也没有哪一处还能够）自己决定挂不挂屏障。
-          (code, results) <- executePlanNowWith cfg putStrLn plan2
-          afterApply cfg putStrLn plan2 results
-          pure code
+          ran <- executePlanNowWith cfg putStrLn plan2
+          case ran of
+            Left _ -> pure 2 -- 原因已打出；没有逐项结果可收尾（审计 #17 #42）
+            Right (code, results) -> afterApply cfg putStrLn plan2 results >> pure code
 
 -- | apply 之后的缓存/提示收尾（可测）。P3b-7 复审 B1：备份缓存写进
 -- @\<cfgMainPath\>\/.pm\/backup-cache@，主路径必须是 RoleMain root——

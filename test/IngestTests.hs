@@ -25,7 +25,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (saveCatalog)
-import Pm.Cli (GoOpts (..), PlanRun (..), savePlanAndMaybeRun')
+import Pm.Cli (ExecStop (..), GoOpts (..), PlanRun (..), savePlanAndMaybeRun')
 import Pm.Config (Config (..), writeRootInfo)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Hash (sha256File)
@@ -37,7 +37,7 @@ import Pm.Types (RootInfo (..), RootRole (..))
 import Pm.VaultHold (VaultHold (..))
 import Pm.Win (openExclusiveBinary)
 import System.IO (hClose)
-import TestUtil (captureStdout, elemSubstr, isIntent, journalEntries, mkVaultCfg, scanQuiet, t0, tpid, writeF)
+import TestUtil (captureStdout, elemSubstr, isIntent, journalEntries, mkVaultCfg, scanQuiet, t0, tpid, withForeignLock, writeF)
 
 ingestTests :: TestTree
 ingestTests =
@@ -48,6 +48,7 @@ ingestTests =
     , testCase "I5 分流 + I7 耦合：主库待裁决 → vault 同名项也待裁决；同名同内容 → PENDING" caseIngestConflict
     , testCase "端到端 --apply --yes：两份各落一份、源零改动、journal 记库外 srcAbs（I7）、收尾步骤打印" caseIngestE2E
     , testCase "R4 闸：主库有待裁决项（退出码仍 0）→ vault 那份不执行" caseIngestVaultGate
+    , testCase "#42 主库那份没交回结果就停下：锁被占（真内核）说「没有执行」、中途停下说「执行中断 → pm apply 续跑」，都不再指向 pm resolve；vault 那份不执行" caseIngestMainStopped
     , testCase "R5 闸：vault 那份未全落完 → 收尾步骤（move _done）不打印" caseIngestStepsGate
     , testCase "R6 闸：配置主库路径指向 backup root → requireMain 拒绝，一份计划不出" caseIngestRequireMain
     , testCase "三十三轮 F1：源/目标存在但读不出（独占占住）→ 错误清单 + 退出 2 + 零计划，不是 CLI 崩溃" caseIngestUnreadable
@@ -391,3 +392,18 @@ withI7Root k = withSystemTempDirectory "pm-i7" $ \root -> do
 plantCopyIntent :: FilePath -> FilePath -> FilePath -> T.Text -> IO ()
 plantCopyIntent root srcAbs dstRel sha =
   withJournal root $ \j -> jAppend j Buffered (JIntent (opId tpid 0) (OpCopy srcAbs dstRel sha 1 0) t0)
+
+-- | #42：主库那份被内核整批拒绝（锁被占）此前与「有未完成项」同一句，指向 pm resolve——没有东西可裁决。
+caseIngestMainStopped :: IO ()
+caseIngestMainStopped = withIngestEnv $ \cfg inbox -> do
+  writeFile (inbox </> "a.jpg") "AAA"
+  (out, c) <- withForeignLock (cfgMainPath cfg) (captureStdout (runVaultIngest (realRun cfg) True "landscape" [inbox </> "a.jpg"] cfg))
+  c @?= 2
+  assertBool out ("主库（相册）那份没有执行" `isInfixOf` out && "I10" `isInfixOf` out && not ("pm resolve" `isInfixOf` out))
+  doesFileExist (cfgMainPath cfg </> "相册" </> "a.jpg") >>= (@?= False)
+  (runP, gotP) <- capturePlans (PrExecStopped (StopAborted "盘没回来"))
+  (out2, c2) <- captureStdout (runVaultIngest runP True "landscape" [inbox </> "a.jpg"] cfg)
+  c2 @?= 2
+  assertBool out2 ("主库（相册）那份执行中断" `isInfixOf` out2 && "pm apply " `isInfixOf` out2 && not ("pm resolve" `isInfixOf` out2))
+  -- vault 那份不执行（桩只收到主库那一份）
+  length <$> gotP >>= (@?= 1)

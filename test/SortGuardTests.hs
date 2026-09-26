@@ -22,7 +22,7 @@ import Pm.Catalog (saveCatalog)
 import Pm.Scan (pmStateDirSkipNote, reparseSkipNote)
 import Pm.Hash (ContentProbe (..), probeConfined)
 import Pm.Scan (DotDirs (..), listTreeWith)
-import Pm.Cli (GoOpts (..), PlanRun (..), planIdOf)
+import Pm.Cli (ExecStop (..), GoOpts (..), PlanRun (..), planIdOf, planRunCode)
 import Pm.Config (Config (..))
 import Pm.Exif (parseCaptureTime, readCaptureTime)
 import Pm.Op (Op (..))
@@ -68,6 +68,9 @@ casePlanIdOfTable = do
   planIdOf (PrRefused "root 不可写") "p1" @?= Nothing
   planIdOf PrSaved "p1" @?= Just "p1"
   planIdOf (PrRun 0 []) "p1" @?= Just "p1"
+  -- 审计 #17 #42：执行没交回结果就停下——计划已存盘（id 照给），退出码 2
+  planIdOf (PrExecStopped (StopRefused "I10")) "p1" @?= Just "p1"
+  planRunCode (PrExecStopped (StopAborted "x")) @?= 2
   -- 设计内跳过不是硬错误；其它一律是
   hardErrors [("link", reparseSkipNote), ("locked", "目录列举失败: denied")] @?= [("locked", "目录列举失败: denied")]
   -- 审计 #53：pm 状态目录的不进入同是设计内跳过
