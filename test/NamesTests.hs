@@ -227,9 +227,15 @@ caseDesignedGroups = do
           , mkE ("Raw" </> "2025" </> "25-01-AT-Raw" </> "T.ARW") "s15"
           , mkE ("Raw" </> "2023" </> "23-04-EU-Raw" </> "U.jpg") "s16"
           , mkE ("Raw" </> "2023" </> "23-04-EU-Raw" </> "sub" </> "U.jpg") "s16"
+          , -- ③ 反（审计 #11）：文件直接躺在年份夹里（无事件夹）——定位不到事件夹就不认
+            -- 设计内。此前 rawEventOf 把 V.JPG 自己的名字当事件夹，旁边同 stem 的 V.ARW
+            -- 以它自己的名字为键，永远对不上，这对 Raw↔成片 同 sha 被当设计冗余丢掉
+            mkE ("Raw" </> "2024" </> "V.JPG") "s17"
+          , mkE ("Raw" </> "2024" </> "V.ARW") "s98"
+          , mkE ("成片" </> "24-05-X" </> "V.JPG") "s17"
           ]
       rep' = versionsReport cat
-  sort (map fst (vgExactDups rep')) @?= ["s11", "s14", "s15", "s16"]
+  sort (map fst (vgExactDups rep')) @?= ["s11", "s14", "s15", "s16", "s17"]
 
 -- ─── helpers ────────────────────────────────────────────────────────────────
 

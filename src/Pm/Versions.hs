@@ -140,10 +140,12 @@ versionsReport cat =
   last' xs = case reverse xs of (x : _) -> x; [] -> ""
   stemOf p = map toLower (normalizeStem (takeBaseName p))
 
-  -- Raw 事件夹 = @Raw\<年>\<事件>@ 前三段。定位不到（层级不足）就返回
-  -- Nothing，判据③随之拒绝认定设计内——宁可多报一行噪音。
+  -- Raw 事件夹 = @Raw\<年>\<事件>@ 前三段，且文件至少在它**下面**一层。定位不到
+  -- （层级不足）就返回 Nothing，判据③随之拒绝认定设计内——宁可多报一行噪音。
+  -- 2026-09-25 审计 #11：此前只要三段，@Raw\<年>\<文件>@ 会把文件自己的名字当事件夹，
+  -- 每个文件各成一键，旁边同 stem 的 RAW 永远对不上，判据③失效、该对被当设计冗余丢掉。
   rawEventOf p = case splitDirectories p of
-    (a : b : c : _) -> Just (joinPath [a, b, c])
+    (a : b : c : _ : _) -> Just (joinPath [a, b, c])
     _ -> Nothing
 
   -- 各 Raw 事件夹里**出现过 RAW 原始档**的帧：(事件夹, 规范化 stem)。
