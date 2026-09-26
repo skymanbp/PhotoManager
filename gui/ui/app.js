@@ -546,7 +546,7 @@
       }
       sortNote("ok", `AI 建议已到：预填 ${filled} 段的地点（<…?> 是把握低的占位，请改）。看清每段再点「生成计划」。` + (j.cost != null ? `\n本次约 $${Number(j.cost).toFixed(2)}（你的 Claude 账号）。` : ""));
     } catch (e) { sortNote("bad", "请求失败：" + e.message); }
-    finally { aiBusy = false; btn.disabled = false; btn.textContent = label; }
+    finally { aiBusy = false; btn.disabled = !lastSurvey || !lastSurvey.segments.length; btn.textContent = label; }
   }
   async function sortScan() {
     const src = $("#sort-src").value.trim();
@@ -555,6 +555,10 @@
     $("#sort-result").className = "banner hidden";
     $("#sort-segments").innerHTML = ""; $("#sort-left").innerHTML = "";
     $("#sort-summary").textContent = "扫描中…（读 EXIF 拍摄时间，不改动源目录）";
+    // 横切审计 #83：清画面的同时清模型——此前只清 DOM，重扫失败（源不存在 / 网络错）后 lastSurvey 与
+    // segInputs 还是上一次的、AI 按钮还亮着：再点「AI 建议地点」会拿旧源付费跑 claude、往已摘下的输入框
+    // 里填、报「已预填」。成功的这次由 renderSurvey 重新立起来。
+    lastSurvey = null; segInputs.clear(); $("#btn-sort-ai").disabled = true;
     // 同一类竞态：换了源目录再点一次，旧源的提议晚到会把「生成计划」绑到
     // 旧的 sv.src 上——计划生成会落到错的目录。
     const gen = stamp("sort");

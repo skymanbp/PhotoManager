@@ -9,7 +9,7 @@ module CleanupTests (cleanupTests) where
 
 import Control.Monad (forM_)
 import qualified Data.ByteString as BS
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import Data.Time (UTCTime (..), defaultTimeLocale, formatTime, fromGregorian, getTimeZone, utcToLocalTime)
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath ((</>))
@@ -43,6 +43,7 @@ cleanupTests =
     , testCase "#69 给人看的名字不经 show：pm status 的暂存事件、记录校验的坏名字照原样显示中文（此前是 \\26477 这类转义）" caseHumanText
     , testCase "#68 历史时刻按当时的时区偏移换算（冬 / 夏两个时刻各用各的）；src 不再用 getCurrentTimeZone 换算历史时刻" caseHistoricalOffset
     , testCase "#65 #84 命令行参数：日期只收十位 YYYY-MM-DD（26-09-01 不再是公元 26 年）；空路径参数不再落到当前目录（init / backup init / sort）" caseCliArgs
+    , testCase "#83 整理页重扫先清模型再请求：失败的重扫之后没有旧概览、AI 按钮不亮；AI 请求收尾按当前概览定按钮" caseSortRescanReset
     ]
 
 -- | #16 / #18 的 GUI 形状（本仓不跑浏览器：源码哨兵 + node --check）。
@@ -193,3 +194,23 @@ caseHistoricalOffset = do
     want <- expect t
     localStamp t >>= (@?= want)
   grepSrc ("getCurrentTimeZone" `isInfixOf`) >>= (@?= [])
+
+-- | #83：sortScan 此前只清 DOM——重扫失败后 lastSurvey \/ segInputs 仍是上一次的、AI 按钮仍亮，再点「AI 建议地点」
+-- 拿旧源付费跑 claude 并报「已预填」。本仓不跑浏览器：钉源码——请求之前就把模型清掉，AI 收尾不无条件放开按钮。
+caseSortRescanReset :: Assertion
+caseSortRescanReset = do
+  app <- readUtf8 ("gui" </> "ui" </> "app.js")
+  let (_, scan) = breakOn "async function sortScan()" app
+      (beforeReq, _) = breakOn "await req(" scan
+      (_, ai) = breakOn "async function sortAiPlaces()" app
+      (aiBody, _) = breakOn "async function sortScan()" ai
+  assertBool "sortScan 须在请求之前清掉 lastSurvey / segInputs 并关掉 AI 按钮" ("lastSurvey = null; segInputs.clear(); $(\"#btn-sort-ai\").disabled = true;" `isInfixOf` beforeReq)
+  assertBool "AI 收尾不得无条件放开按钮" (not ("btn.disabled = false" `isInfixOf` aiBody))
+  assertBool "AI 收尾按当前概览定按钮" ("btn.disabled = !lastSurvey || !lastSurvey.segments.length" `isInfixOf` aiBody)
+ where
+  breakOn pat s = go "" s
+   where
+    go acc r@(c : cs)
+      | pat `isPrefixOf` r = (reverse acc, r)
+      | otherwise = go (c : acc) cs
+    go acc [] = (reverse acc, [])
