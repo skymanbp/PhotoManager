@@ -37,6 +37,7 @@ serveWriteTests =
     [ testCase "P4-5 POST /api/vault/push-plan：只读 serve → 403；坏 JSON/空指派/非法类目/非 NEW → 400；超大体 → 413" caseServePushPlanGuards
     , testCase "P4-5 POST /api/vault/push-plan：合法指派 → 计划落到 <vault>/.pm/plans，可经 loadPlan 装回，项与指派一致" caseServePushPlanOk
     , testCase "P4-6 POST /api/vault/push-plan：DRIFT-only（无 NEW）空指派 → 纯裁决计划；照片零改动" caseServePushPlanDrift
+    , testCase "#57 POST /api/vault/push-plan：只有非 jpg 的 DRIFT → 分类页 DRIFT 计数 0、空指派 400，vault 零改动" caseServePushPlanPngDrift
     , testCase "P4-7 POST /api/vault/hold：只读 403；标记后 new 移出、held 列出；同名同时标与撤 400；撤销恢复；被 hold 的不能 push" caseServeHold
     , testCase "P4-8 GET /api/config：路径与健康状态；主库恒 editable=false" caseServeConfigGet
     , testCase "工作流 F051/F052/F078 POST /api/sort/plan：交代清单与中止说明随 log 回响应；撞名 → code 2 + planId null + 两条源路径都在 log" caseServeSortPlanLog
@@ -161,6 +162,8 @@ caseServePushPlanDrift = withSystemTempDirectory "pm-serve" $ \dir -> do
     let v = decodeBody r
     liftIO' $ do
       arrLen (field ["plan", "items"] v) @?= Just 1
+      -- #52：纯裁决计划执行前什么都不落位，不给 git 步骤
+      arrLen (field ["gitSteps"] v) @?= Just 0
       case field ["plan", "id"] v of
         Just (Aeson.String p) -> pure p
         other -> assertFailure ("响应缺 plan.id: " <> show other)
@@ -549,3 +552,22 @@ caseServeApplyGitStepsLog = withSystemTempDirectory "pm-serve" $ \dir -> do
       assertBool ("收尾 git 步骤应进 log: " <> show ls) (any ("git -C" `T.isInfixOf`) ls)
       assertBool ("add 应只列落位类目 portrait: " <> show ls) (any ("add -- portrait" `T.isSuffixOf`) ls)
   doesFileExist (vdir </> "portrait" </> "a.jpg") >>= (@?= True)
+
+-- | #57：非 jpg 的 DRIFT（vault 里已有 landscape/p.png 且与相册的不同）不是可裁决推送项——
+-- 此前计数进分类页、空指派被放行，出一份经 push 写路径把 .png 拷进 vault 的计划。
+caseServePushPlanPngDrift :: IO ()
+caseServePushPlanPngDrift = withSystemTempDirectory "pm-serve" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, jpgBytes, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  BS.writeFile (vdir </> "landscape" </> "a.jpg") jpgBytes
+  BS.writeFile (root </> "相册" </> "p.png") "PNG-ALBUM"
+  BS.writeFile (vdir </> "landscape" </> "p.png") "PNG-VAULT"
+  env <- mkEnvW cfg
+  flip runSession (serveApp env) $ do
+    g <- getReq "/api/vault/new" [] tok
+    assertStatus 200 g
+    liftIO' (arrLen (field ["drift"] (decodeBody g)) @?= Just 0)
+    postReq "/api/vault/push-plan" "{\"assignments\":[]}" >>= assertStatus 400
+  BS.readFile (vdir </> "landscape" </> "p.png") >>= (@?= "PNG-VAULT")

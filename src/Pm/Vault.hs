@@ -30,6 +30,7 @@ module Pm.Vault
   , runVaultPush
   , newActive
   , newAssignable
+  , driftPushable
   , freshSrcSha
   , hasDiffR
   , checkAssignments
@@ -234,6 +235,13 @@ newActive r = [n | n <- vdNew (vrDiff r), n `notElem` map fst (vrHeld r)]
 newAssignable :: VaultReport -> [FilePath]
 newAssignable = filter pushableExt . newActive
 
+-- | 可**裁决推送**的 DRIFT（审计 #57，与 'newAssignable' 同一道写路径闸）：vault 里已有的
+-- @<类目>\/x.png@ 与相册 @x.png@ 内容不同也是 DRIFT（六态是对外契约，照报），但不进 push 计划——
+-- 此前 DRIFT 项不过 'pushableExt'，@pm resolve --keep src@ + apply 会把 .png 经 push 写路径拷进 vault。
+-- 计划构造、CLI 提示、GUI 的 DRIFT 计数与空指派放行都用它。
+driftPushable :: VaultReport -> [(FilePath, String, Text, Text)]
+driftPushable = filter (\(n, _, _, _) -> pushableExt n) . vdDrift . vrDiff
+
 -- | 退出码语义（legacy :237）：duplicate 与 unpushable 不算差异；NEW 用
 -- 'newActive'——用户已经决定暂不同步的照片不该让 `pm vault status` 永远
 -- exit 1。这是**唯一**的"不能报 0"谓词：曾经并存的 'hasDiff'（按整个 vdNew
@@ -254,7 +262,9 @@ hasDiffR r =
 computeVault :: Bool -> Config -> IO (Either (String, Int) VaultReport)
 computeVault quiet cfg = case cfgVaultPath cfg of
   Nothing ->
-    pure (Left ("配置无 vault 路径 → pm init --main <主库> --vault <展示集路径>（或手动补 config.toml 的 [vault] path）", 2))
+    -- 横切审计 #80：这里一定已有配置（withCfg 载入过）——pm init 会拒「配置已存在」，--force 又会丢掉
+    -- photos-json / workers；补 vault 的正路是 config set（与 pm config、Ingest 的同一提示）
+    pure (Left ("配置无 vault 路径 → pm config set --vault <展示集路径>", 2))
   Just vaultDir -> do
     -- P3b-6 复审 B1：相册源与 vault-cache 都以「主库」身份读写 cfgMainPath，
     -- 指向备份/vault root 时不得放行。
@@ -458,7 +468,7 @@ renderHuman r = do
   mapM_
     ( \(n, c, sh, vh) ->
         putStrLn
-          ("  ~ DRIFT " <> c </> n <> " (src " <> T.unpack (T.take 16 sh) <> " ≠ vault " <> T.unpack (T.take 16 vh) <> ") → pm vault push 生成裁决计划")
+          ("  ~ DRIFT " <> c </> n <> " (src " <> T.unpack (T.take 16 sh) <> " ≠ vault " <> T.unpack (T.take 16 vh) <> ") → " <> driftNext n)
     )
     (vdDrift d)
   mapM_ (\(n, cats) -> putStrLn ("  ! DUPLICATE " <> n <> " → " <> unwords cats)) (vdDuplicate d)
@@ -603,12 +613,15 @@ runVaultPush runPlan mCat files cfg = do
                     putStrLn ("  🔁 RENAME 源 '" <> n <> "' ≡ vault '" <> c </> m <> "'（未被 photos.json 引用；改名功能后续增量，暂只报告）")
               forM_ (vdMissing d) $ \(n, c) ->
                 putStrLn ("  - MISSING " <> c </> n <> "（可能有意撤下，决定权在用户，只报告）")
+              forM_ [(n, c) | (n, c, _, _) <- vdDrift d, not (pushableExt n)] $ \(n, c) ->
+                putStrLn ("  ~ DRIFT " <> c </> n <> "（" <> driftNext n <> "）")
               -- 计划面：选中的 NEW + 全部 DRIFT
               let allItems = vaultPushItems r pairs'
               if null allItems
                 then do
-                  unless (null (newActive r)) $ do
-                    putStrLn ("  → " <> show (length (newActive r)) <> " 个 NEW 待分类：pm vault push --category <类目> <文件…>（类目: " <> unwords fixedCategories <> "）")
+                  -- 审计 #55：只数可指派的 NEW（与 renderHuman 同谓词）——.png 照着提示推会被 checkAssignments 拒
+                  unless (null (newAssignable r)) $ do
+                    putStrLn ("  → " <> show (length (newAssignable r)) <> " 个 NEW 待分类：pm vault push --category <类目> <文件…>（类目: " <> unwords fixedCategories <> "）")
                   putStrLn "（无可执行项，未生成计划）"
                   pure (if hasDiffR r then 1 else 0)
                 else do
@@ -621,9 +634,13 @@ runVaultPush runPlan mCat files cfg = do
                       -- 没落；add 清单取自落位项。退出码换算不变（'planRunCode'）。
                       pr <- runPlan plan
                       case pr of
-                        PrRun _ rs
-                          | not (null (landedItems rs)) ->
-                              mapM_ putStrLn (gitStepsLines cfg (vrVaultDir r) (plId plan) (resultCategories rs))
+                        PrRun _ rs -> do
+                          unless (null (landedItems rs)) $
+                            mapM_ putStrLn (gitStepsLines cfg (vrVaultDir r) (plId plan) (resultCategories rs))
+                          -- 审计 #56：与 pm apply / GUI 的 afterApply 同一收尾——重算即重写 vault 缓存，
+                          -- 否则 pm status 继续把刚推的照片算成 NEW（Pm.Apply 反向依赖本模块，只能在此镜像）
+                          _ <- computeVault True cfg
+                          pure ()
                         _ -> pure ()
                       pure (planRunCode pr)
 
@@ -667,7 +684,7 @@ vaultPushItems r pairs' = newItems <> driftItems
     [ ( OpCopy (vrSrcDir r </> n) (c </> n) (enSha e) (enSize e) (enMtimeNs e)
       , StNeedsDecision "DRIFT：相册是上游真相 → pm resolve <计划> --item N --keep src（旧字节先入 vault .pm/trash）或 --keep dst 保留现状"
       )
-    | (n, c, _, _) <- vdDrift (vrDiff r)
+    | (n, c, _, _) <- driftPushable r
     , Just e <- [Map.lookup n (vrSrcMeta r)]
     ]
 
@@ -690,3 +707,9 @@ mkVaultPushPlan r allItems = do
           , plCreated = now
           , plItems = [PlanItem i op st Nothing | (i, (op, st)) <- zip [0 ..] allItems]
           }
+
+-- | DRIFT 的下一步（审计 #57）：jpg → 生成裁决计划；非 jpg → 写路径拒收，只报告。
+driftNext :: FilePath -> String
+driftNext n
+  | pushableExt n = "pm vault push 生成裁决计划"
+  | otherwise = "非 jpg：push 写路径拒收、不进裁决计划，只报告 → pm convert 派生 jpg"

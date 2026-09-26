@@ -17,6 +17,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Pm.Apply (RootSel (..), pickRoot)
 import Pm.Cli (PlanRun (..), bindExecRoot, executePlanNow)
 import Pm.Commands (afterApply, resolveKeep)
 import Pm.Exec (ItemOutcome (..))
@@ -63,6 +64,7 @@ vaultTests =
     , testCase "三十四轮 F1 同族：photos.json 被独占占住 → Left（fail-closed，不得答「未被引用」）" casePhotosJsonRefLocked
     , testCase "三十五轮 F1：只有 UNSTABLE 的 push 无项分支 → exit 1（与 status 同谓词，不报 0）" caseUnstablePushExit
     , testCase "工作流 F069 unpushable 与 push 门同谓词：.png 入列、.jpg/.jpeg 不入（pushableExt 唯一定义）；N4 newAssignable 扣掉它" caseUnpushableMatchesPushGate
+    , testCase "#55 #56 #57 #80 push 出口同一道写路径闸：无项提示只数可指派 NEW、非 jpg DRIFT 不进计划只报告；--apply 后刷新 vault 缓存；缺 vault 指到 config set" casePushGateEveryExit
     ]
 
 h :: Char -> Text
@@ -695,3 +697,30 @@ caseUnpushableMatchesPushGate = withSystemTempDirectory "pm-vault" $ \tmp -> do
       newActive v @?= ["a.jpg", "b.jpeg", "c.png"]
       newAssignable v @?= ["a.jpg", "b.jpeg"]
       hasDiffR v @?= True
+
+-- | #55：无项分支的「N 个 NEW 待分类」此前数 newActive（含 .png），照着推被 checkAssignments 拒。
+-- #57：vault 已有 <类目>/q.png 与相册 q.png 不同 = DRIFT，此前不过 pushableExt 直接进计划。
+-- #56：--apply 直推不走 afterApply，vault 缓存停在推之前，pm status 继续把刚推的算 NEW。
+-- #80：缺 vault 的提示此前指到 pm init（已有配置时被拒，--force 丢 photos-json / workers）。
+casePushGateEveryExit :: IO ()
+casePushGateEveryExit = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"; vdir = tmp </> "vault"
+      cfg = mkVaultCfg root vdir
+  mkMain root
+  writeF (root </> "相册" </> "p.png") "PNG"
+  writeF (root </> "相册" </> "q.png") "Q-ALBUM"
+  writeF (vdir </> "landscape" </> "q.png") "Q-VAULT"
+  (out, code) <- captureStdout (runVaultPush (execNow cfg) Nothing [] cfg)
+  code @?= 1
+  assertBool out (not ("个 NEW 待分类" `isInfixOf` out))
+  assertBool out ("DRIFT landscape\\q.png（非 jpg" `isInfixOf` out && "未生成计划" `isInfixOf` out)
+  readFile (vdir </> "landscape" </> "q.png") >>= (@?= "Q-VAULT")
+  Right r <- computeVault True cfg
+  map (\(n, _, _, _) -> n) (vdDrift (vrDiff r)) @?= ["q.png"]
+  vaultPushItems r [] @?= []
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  runVaultPush (execNow cfg) (Just "landscape") ["a.jpg"] cfg >>= (@?= 0)
+  readVaultCacheMeta root >>= \m -> fmap (fmap vmNew) m @?= Right (Just 1)
+  Left (m1, 2) <- computeVault True cfg {cfgVaultPath = Nothing}
+  Left (m2, 2) <- pickRoot cfg {cfgVaultPath = Nothing} SelVault
+  assertBool (m1 <> m2) (all ("→ pm config set --vault" `isInfixOf`) [m1, m2])

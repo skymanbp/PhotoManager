@@ -81,7 +81,8 @@ pickRoot cfg SelBackup = do
       rr <- requireRole RoleBackup p
       pure (either (\m -> Left (m, 2)) (const (Right p)) rr)
 pickRoot cfg SelVault = case cfgVaultPath cfg of
-  Nothing -> pure (Left ("配置无 vault 路径 → pm init --main <主库> --vault <展示集路径>", 2))
+  -- 横切审计 #80：同 'Pm.Vault.computeVault'——已有配置时补 vault 用 config set，不是 init
+  Nothing -> pure (Left ("配置无 vault 路径 → pm config set --vault <展示集路径>", 2))
   Just vp -> do
     st <- readRootState vp
     case st of

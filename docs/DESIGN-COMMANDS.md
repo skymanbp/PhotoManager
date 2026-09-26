@@ -366,7 +366,10 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   写路径只收 jpg/jpeg（case-fold）。
 - DRIFT：相册是上游真相 → 逐项确认后走 §6.5 supersede 复合（victim 进
   vault root 的 `.pm/trash/`，**不依赖「git 历史里有旧版」这类 pm 无法核实的
-  外部前提**）。
+  外部前提**）。写路径闸同样作用于 DRIFT：非 jpg 的 DRIFT（vault 里已有
+  `<类目>\x.png` 且与相册的不同）照报、不进裁决计划，CLI 打一行「只报告 → pm convert」，
+  GUI 分类页的 DRIFT 计数与空指派放行只数 jpg（`Pm.Vault.driftPushable`，与
+  `newAssignable` 同一道闸；审计 #57）。无项时「N 个 NEW 待分类」只数可指派的 NEW（审计 #55）。
 - RENAME：**默认只报告**。vault 文件名是 GitHub Pages URL 的一部分、被
   portfolio `photos.json` 以完整 URL 引用（§1.3）——pm 对 photos.json 做只读
   引用检查（路径入 Config），被引用的项标 `BLOCKED(photos.json:<行>)`，
@@ -376,7 +379,9 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   ——类目取自**逐项落位结果**（`Pm.Vault.resultCategories`；一项都没落位则整段 git
   步骤不打，见本文 §11），两条打印口同源：`pm vault push` 直跑（`Pm.Vault`）与 push
   计划的 `pm apply`（`Pm.Apply`）都走 `gitStepsLines`；GUI 生成计划时给的是**预览**，
-  类目取计划面（`Pm.Serve`，`planCategories`）。固定三类 `landscape portrait urban`
+  类目取计划面（`Pm.Serve`，`planCategories`；纯裁决计划没有类目 → `gitSteps` 为空，审计 #52）。
+  `pm vault push --apply` 直跑执行后与 `pm apply` 的 `afterApply` 同样重算并重写 vault 缓存
+  （审计 #56：此前直跑不刷新，`pm status` 继续把刚推的照片算成 NEW）。固定三类 `landscape portrait urban`
   只出现在上线命令里（`Pm.Publish.publishCommands`）。明确禁止 `git add -A`/`git add .`
   （防把 `.pm/` 等误提交），操作数前必有 `--`；push 目标取自 `vault.push` 设置。命令文本与上线命令
   （DESIGN-GUI.md §11 `GET /api/publish-commands`）**同一生成点**
@@ -438,7 +443,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 470 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 472 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。

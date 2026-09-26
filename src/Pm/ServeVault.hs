@@ -23,7 +23,7 @@ import Pm.Plan (Plan (..), savePlan)
 import Pm.ServeEnv
 import Pm.ServeGuard (withJsonBody)
 import Pm.Types
-import Pm.Vault (VaultDiff (..), VaultReport (..), checkAssignments, computeVault, fixedCategories, gitStepsLines, mkVaultPushPlan, newAssignable, planCategories, renderVaultJson, vaultPushItems)
+import Pm.Vault (VaultReport (..), checkAssignments, computeVault, driftPushable, fixedCategories, gitStepsLines, mkVaultPushPlan, newAssignable, planCategories, renderVaultJson, vaultPushItems)
 import Pm.VaultCmd (holdOpsIO, noteOpsIO, noteStatuses, renderNotesJson, withVaultTxn)
 import Pm.VaultHold (VaultHold (..), readHolds, writeHolds)
 import Pm.VaultNote (NoteFields, VaultNote (..), readNotes, writeNotes)
@@ -76,7 +76,8 @@ routeVault cfg env req jsonR err corsHdrs respond = case (requestMethod req, pat
                      ]
               , "heldStale" .= [object ["name" .= n, "why" .= w] | (n, w) <- vrHeldStale r]
               , -- 页面要知道「没有 NEW 但有 DRIFT」也能出纯裁决计划（二十轮 minor）
-                "drift" .= [object ["name" .= n, "category" .= c] | (n, c, _, _) <- vdDrift (vrDiff r)]
+                -- 审计 #57：只数可裁决推送的（jpg）；非 jpg 的 DRIFT 在 vault/status 里照报
+                "drift" .= [object ["name" .= n, "category" .= c] | (n, c, _, _) <- driftPushable r]
               ]
           )
   -- P4-5：唯一的写端点——由页面的分类指派**生成** vault push 计划（不执行、
@@ -99,7 +100,7 @@ routeVault cfg env req jsonR err corsHdrs respond = case (requestMethod req, pat
             Right r
               -- 空指派只在「有 DRIFT 待裁决」时有意义（纯裁决计划）——否则
               -- vault 只有 DRIFT 时页面按钮永远灰着（二十轮 minor）。
-              | null as && null (vdDrift (vrDiff r)) ->
+              | null as && null (driftPushable r) ->
                   err status400 "assignments 为空，且没有 DRIFT 待裁决项——无计划可生成"
               | otherwise -> do
                   let pairs' = [(paCategory a, paName a) | a <- as]
@@ -128,7 +129,9 @@ routeVault cfg env req jsonR err corsHdrs respond = case (requestMethod req, pat
                                         , "path" .= fp
                                         , "apply" .= ("pm apply " <> T.unpack (plId plan))
                                         , -- 与 CLI 收尾、上线命令同一生成点（Pm.Publish.vaultCommands）
-                                          "gitSteps" .= gitStepsLines cfg (plRootPath plan) (plId plan) (planCategories plan)
+                                          -- 审计 #52：纯裁决计划（没有类目）不给 git 步骤——执行前什么都不会落位，
+                                          -- 与 CLI 收尾 / afterApply「有落位才给」同口径
+                                          "gitSteps" .= (let cs = planCategories plan in if null cs then [] else gitStepsLines cfg (plRootPath plan) (plId plan) cs)
                                         ]
                                     )
   -- P4-7：第二个写端点——记录/撤销「暂不同步」的决定。写域是**主库**的
