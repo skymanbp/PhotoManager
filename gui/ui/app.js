@@ -682,7 +682,16 @@
   cfgClick("#btn-cfg-vault-clear", () => saveConfig({ vault: null }));
   cfgClick("#btn-cfg-photos", () => saveConfig({ photosJson: val("#cfg-photos") }));
   cfgClick("#btn-cfg-photos-clear", () => saveConfig({ photosJson: null }));
-  cfgClick("#btn-cfg-workers", () => saveConfig({ workers: Number(val("#cfg-workers")) }));
+  // 数字项（并发数 / 掉线等待）留空点保存：此前 Number("") → 0 直接提交——workers 0 被
+  // 服务端 400 拒（怪到用户没输过的值），driveWait 0 却是合法的「关闭瞬断保护」，静默写盘
+  // 且横幅报成功（2026-09-25 审计 #2）。留空不是一个数：拒绝提交并指向「恢复默认」；
+  // <input type=number> 里非法文本的 value 也是空串，同一出口。清空只走各自的清空按钮。
+  const numOrRefuse = (id, what) => {
+    const v = val(id);
+    if (v === "") { cfgBanner(false, what + "留空不能保存——要恢复默认请点「恢复默认」"); return null; }
+    return Number(v);
+  };
+  cfgClick("#btn-cfg-workers", () => { const n = numOrRefuse("#cfg-workers", "并发数"); return n === null ? null : saveConfig({ workers: n }); });
   cfgClick("#btn-cfg-workers-clear", () => saveConfig({ workers: null }));
   // 上线命令三项：placeholder 写明「留空 = 默认」，因此空着点保存 = 清空
   // （null），而不是把空串塞给字符闸吃一个「不合法」。
@@ -694,7 +703,7 @@
   cfgClick("#btn-cfg-portfolio-push", () => saveConfig({ portfolioPush: valOrNull("#cfg-portfolio-push") }));
   cfgClick("#btn-cfg-portfolio-push-clear", () => saveConfig({ portfolioPush: null }));
   cfgClick("#btn-cfg-backup", () => registerBackup());
-  cfgClick("#btn-cfg-drive-wait", () => saveConfig({ driveWait: Number(val("#cfg-drive-wait")) }));
+  cfgClick("#btn-cfg-drive-wait", () => { const n = numOrRefuse("#cfg-drive-wait", "掉线等待"); return n === null ? null : saveConfig({ driveWait: n }); });
   cfgClick("#btn-cfg-drive-wait-clear", () => saveConfig({ driveWait: null }));
   $("#btn-publish-copy").onclick = () => copyPublishCommands();
 

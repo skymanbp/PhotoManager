@@ -33,6 +33,7 @@ docDriftTests =
     , testCase "CSP 逐字：DESIGN-GUI 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）" caseCspQuoted
     , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链" caseGuiNoInlineStyle
     , testCase "750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）" caseLineBudget
+    , testCase "审计 #2：设置页数字项（并发数 / 掉线等待）留空点保存须拒绝并指向「恢复默认」，不得 Number(val( 直提成 0" caseGuiNumericSaveRefusesEmpty
     , testCase "死名清扫：opRelPaths / isPng / stemKey / jpegExt 不再出现在 src/app" caseNoDeadNames
     , testCase "Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记" caseHaddockMarkerHygiene
     , testCase "讹传清扫：被否证的机制解释（F048 列表脊、46 轮 openBoundTo 共享模式）不再出现在 src/app/test" caseFolkloreNotInTests
@@ -389,6 +390,19 @@ caseNoPathsModule = do
       exes = stanzas code
   assertBool "package.yaml executables: 块内至少一个 exe stanza" (not (null exes))
   assertBool "package.yaml 每个 exe stanza 均须显式 other-modules: []（非注释行；否则 hpack 自动加 Paths 模块）" (all (any ("other-modules: []" `isInfixOf`)) exes)
+
+-- | 2026-09-25 审计 #2（medium）：设置页两个数字项的保存按钮曾是 @Number(val(…))@ 直提——
+-- 留空（设置未设时的常态，placeholder 写着默认值）得 0：workers 0 被服务端 400 拒（怪到
+-- 用户没输过的值），driveWait 0 却是合法的「关闭瞬断保护」，静默写盘且横幅报成功。
+-- 两个处理器必须经 @numOrRefuse@（留空拒绝提交、指向「恢复默认」按钮；@type=number@ 里
+-- 非法文本的 value 也是空串，同一出口），脚本里不得再出现 @Number(val(@ 直提。
+caseGuiNumericSaveRefusesEmpty :: IO ()
+caseGuiNumericSaveRefusesEmpty = do
+  js <- readUtf8 ("gui" </> "ui" </> "app.js")
+  let handlers = [l | l <- lines js, any (`isInfixOf` l) ["cfgClick(\"#btn-cfg-workers\"", "cfgClick(\"#btn-cfg-drive-wait\""]]
+  assertEqual "并发数 / 掉线等待各恰一个保存处理器" 2 (length handlers)
+  assertBool ("两个数字保存处理器都须经 numOrRefuse: " <> show handlers) (all ("numOrRefuse" `isInfixOf`) handlers)
+  assertBool "app.js 不得再 Number(val( 直提（留空 → 0）" (not ("Number(val(" `isInfixOf` js))
 
 -- | 750 行硬预算（DESIGN §16）：此前只是评审期约定、零自动化——P8-A 拆分三个
 -- 触顶文件（Serve.hs / app.js / DESIGN.md）时写成哨兵，CI 的 `stack test` 顺带
