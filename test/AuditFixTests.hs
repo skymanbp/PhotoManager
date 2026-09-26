@@ -7,7 +7,7 @@
 module AuditFixTests (auditFixTests) where
 
 import Control.Exception (finally)
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
@@ -29,8 +29,13 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Config (Config (..), configFilePath, createRootInfo, loadConfig, readRootInfo, withConfigLock, writeConfig, writeRootInfo)
-import Pm.Plan (Plan (..), savePlan)
+import Pm.Exec (defaultExecEnv, execPlan)
+import Pm.Hash (sha256File)
+import Pm.Journal (journalPath)
+import Pm.Op (Fingerprint (..), Op (..), OpIdSuffix (..), describeOp, opPathsOk, trashSrcRel)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), savePlan, validatePlan)
 import Pm.Serve (serveApp)
+import Pm.Trash (manifestPath, quarDirFor, trashDir)
 import Pm.Types (RootInfo (..), RootRole (..))
 import ServeTests (fixture, liftIO', mkEnvA, mkEnvW, tok, withVault)
 import qualified ServeTests as ST
@@ -44,6 +49,7 @@ auditFixTests =
     , testCase "#5 root 是 junction：createRootInfo 落到真名下、不抛、无 .tmp 残留；已有身份仍 Left 不覆盖且不留 .tmp" caseRootIdJunctionRoot
     , testCase "#9 POST /api/apply 执行链抛异常 → 500 JSON（interrupted + planId + log，带 CORS），不再是 warp 裸 500；GUI 认 interrupted" caseServeApplyInterrupted
     , testCase "#9 serveApp 最后一道异常边界：recordPost（hold）写链抛异常 → 500 JSON 带 CORS，主库记录文件零写入" caseServeBoundaryRecordPost
+    , testCase "#43 trash 例外只放隔离载荷（≥ 4 级）：trash 根 / manifest / 整个隔离目录作 rename 源，validatePlan 与 execPlan 都拒、manifest 不动；生成形态照旧放行" caseTrashSrcShape
     ]
 
 mkJunction :: FilePath -> FilePath -> IO ()
@@ -185,3 +191,39 @@ caseServeBoundaryRecordPost = withSystemTempDirectory "pm-serve-bound" $ \dir ->
       o <- json500 r
       assertBool ("应带 error: " <> show o) (KM.member "error" o)
   doesFileExist (root </> ".pm" </> "vault-holds.json") >>= (@?= False)
+
+-- | #43（low）：'Pm.Op.isTrashSrcRel' 此前只比首两级，@.pm\/trash@ 本身（FpDir）与
+-- @.pm\/trash\/manifest.ndjson@ 都算合法的 rename 源——手编计划经 validatePlan 放行，
+-- apply 把 write-ahead manifest（或整个隔离区）搬进用户数据，此后隔离载荷全部失登记、
+-- @pm trash empty@ 无可清、undo 拒绝反转。收紧到生成形态（≥ 4 级）后 validatePlan 与
+-- execPlan（取锁前、零写入）都拒，manifest 原地不动；组复位与 undo 反转拼出的真实
+-- 形态（'trashSrcRel' + 'quarDirFor'）照旧放行。
+caseTrashSrcShape :: Assertion
+caseTrashSrcShape = withSystemTempDirectory "pm-audit" $ \dir -> do
+  let root = dir </> "root"
+      man = manifestPath root
+  op <- mkCopyOp (dir </> "s.jpg") "X" ("相册" </> "x.jpg")
+  plan <- mkPlanIO root [op]
+  createDirectoryIfMissing True (trashDir root)
+  BS.writeFile man "MANIFEST\n"
+  msha <- sha256File man
+  let pid = plId plan
+      qdir = quarDirFor pid SfxPlain
+  -- 生成形态照旧放行：普通隔离与 ~d 位移隔离的载荷
+  opPathsOk (OpRename (trashSrcRel (qdir </> "v.jpg")) "v.jpg" (FpFileSha "aa")) @?= True
+  opPathsOk (OpRename (trashSrcRel (quarDirFor pid (SfxDisplaced 2) </> "a" </> "v.jpg")) ("a" </> "v.jpg") (FpFileSha "aa")) @?= True
+  -- 报告的两个反例、大小写别名、整个隔离目录：都不是单个隔离载荷
+  forM_
+    [ OpRename (".pm" </> "trash") "x" (FpDir "aa")
+    , OpRename (".pm" </> "trash" </> "manifest.ndjson") "m.txt" (FpFileSha msha)
+    , OpRename (".PM" </> "Trash" </> "manifest.ndjson") "m.txt" (FpFileSha msha)
+    , OpRename (trashSrcRel qdir) "x" (FpDir "aa")
+    ]
+    $ \bad -> do
+      let p' = plan {plItems = [PlanItem 0 bad StPending Nothing]}
+      either (const (pure ())) (const (assertFailure ("validatePlan 应拒绝 " <> describeOp bad))) (validatePlan p')
+      r <- execPlan defaultExecEnv p'
+      either (const (pure ())) (const (assertFailure ("execPlan 应拒绝 " <> describeOp bad))) r
+  BS.readFile man >>= (@?= "MANIFEST\n")
+  doesFileExist (root </> "m.txt") >>= (@?= False)
+  doesFileExist (journalPath root) >>= (@?= False)

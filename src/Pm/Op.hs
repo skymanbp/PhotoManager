@@ -212,12 +212,25 @@ relPathOk p =
 userRelOk :: FilePath -> Bool
 userRelOk p = relPathOk p && map normComp (take 1 (splitDirectories p)) /= [".pm"]
 
--- | 该相对路径是否落在 @.pm\/trash@ 之内（规范化后比对首两级）。这是 pm 唯一
+-- | 该相对路径是否是 @.pm\/trash@ 里某个隔离目录**之内**的载荷：规范化后比对
+-- 首两级，且至少四级（@.pm\/trash\/\<隔离目录\>\/\<victim…\>@）。这是 pm 唯一
 -- 允许 Op 触及 @.pm@ 内部的形态——undo\/组复位 rename 的**源**，把隔离文件搬回
 -- 原位。单一真源：'opPathsOk' 的例外判定与 'Pm.Exec' 的限域分流都用它，
 -- 免得两处对"什么算 trash 源"给出不同答案。
+--
+-- 2026-09-25 审计 #43：此前只比首两级，@.pm\/trash@ 本身（FpDir）与第三级的
+-- @manifest.ndjson@ 也算合法源——手编计划一次 apply 就把 write-ahead manifest
+-- （或整个隔离区）搬进用户数据，此后隔离载荷全部失登记。所有产地（组复位、
+-- undo 反转）拼的都是 @trashSrcRel (quarDirFor pid sfx \<\/\> victim)@，至少四级；
+-- trash 下的目录只有 'Pm.Trash.quarDirFor' 造的隔离目录，三级以内的东西（trash
+-- 根、manifest、隔离目录本身）都是 pm 自身状态或整批载荷，不是单个隔离文件。
 isTrashSrcRel :: FilePath -> Bool
-isTrashSrcRel p = relPathOk p && map normComp (take 2 (splitDirectories p)) == map normComp [".pm", pmSubTrash]
+isTrashSrcRel p =
+  relPathOk p
+    && length comps >= 4
+    && map normComp (take 2 comps) == map normComp [".pm", pmSubTrash]
+ where
+  comps = splitDirectories p
 
 -- | 同一判定的**拼装侧**：undo\/组复位 rename 源的唯一拼法。谓词与拼法同源
 -- （工作流 F002\/F023：此前 'Pm.Exec' 写字面 @"trash"@、'Pm.Undo' 写
