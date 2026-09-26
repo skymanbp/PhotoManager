@@ -19,7 +19,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 
 import Pm.Catalog (saveCatalog)
-import Pm.Scan (reparseSkipNote)
+import Pm.Scan (pmStateDirSkipNote, reparseSkipNote)
 import Pm.Hash (ContentProbe (..), probeConfined)
 import Pm.Scan (DotDirs (..), listTreeWith)
 import Pm.Cli (GoOpts (..), PlanRun (..), planIdOf)
@@ -57,7 +57,7 @@ sortGuardTests =
     , testCase "被选中清单不得截断：超过 40 个也要逐条列全" caseChosenNotTruncated
     , testCase "工作流 F041：root-id.json 被 ACL 全拒 → 仍判 pm 状态目录不进入（布尔探针塌 False 会走进 .pm\\trash）" caseSourcePmDirProbeDenied
     , testCase "工作流 F052：planIdOf——PrRefused 无 id（盘上没有计划）；PrSaved/PrRun 带 id" casePlanIdOfTable
-    , testCase "工作流 F054：sort 提议/计划——子树列不出（ACL 拒）→ 退出码 1，不替没看过的目录担保；junction 跳过仍是 0" caseSortErrorsExit
+    , testCase "#53 工作流 F054：sort 提议/计划——子树列不出（ACL 拒）→ 退出码 1，不替没看过的目录担保；junction 与 pm 状态目录的设计内跳过仍是 0" caseSortErrorsExit
     , testCase "工作流 F097 holdKin：主文件待裁决 → 同目录同 stem 侧车（case-fold）一并悬置；别组不受牵连" caseSidecarHeldWithMaster
     ]
 
@@ -70,6 +70,8 @@ casePlanIdOfTable = do
   planIdOf (PrRun 0 []) "p1" @?= Just "p1"
   -- 设计内跳过不是硬错误；其它一律是
   hardErrors [("link", reparseSkipNote), ("locked", "目录列举失败: denied")] @?= [("locked", "目录列举失败: denied")]
+  -- 审计 #53：pm 状态目录的不进入同是设计内跳过
+  hardErrors [("lib\\.pm", pmStateDirSkipNote)] @?= []
 
 -- | 源里有一棵子树没枚举出来（ACL 拒），「✓ 没有需要归位的新照片」+ 退出码 0
 -- 就是在替一个没看过的目录担保——survey 与 plan 两个形态都要抬到 1；
@@ -90,6 +92,14 @@ caseSortErrorsExit = withLib $ \src root cfg -> do
   cLink @?= 0
   (_, sLink) <- captureStdout (runSortSurvey src 72 cfg)
   sLink @?= 0
+  -- 审计 #53：源里躺着一个 pm 库根（.pm\root-id.json）——不进入是设计内的，两个形态都仍是 0
+  createDirectoryIfMissing True (src </> "DCIM" </> "oldlib" </> ".pm")
+  writeFile (src </> "DCIM" </> "oldlib" </> ".pm" </> "root-id.json") "{}"
+  (outPm, cPm) <- captureStdout (sortPlan src cfg)
+  cPm @?= 0
+  assertBool outPm (not (elemSub "未能枚举" outPm))
+  (_, sPm) <- captureStdout (runSortSurvey src 72 cfg)
+  sPm @?= 0
   -- ACL 全拒的子目录：列不出 → 两个形态都必须是 1，且说明为什么
   createDirectoryIfMissing True (src </> "DCIM" </> "locked")
   withDenyAll (src </> "DCIM" </> "locked") $ do

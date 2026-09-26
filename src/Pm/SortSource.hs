@@ -32,7 +32,7 @@ import Text.Printf (printf)
 import Pm.Exif (readCaptureTime)
 import Pm.Hash (StatSnap, sha256File, statSnap)
 import Pm.Import (stemOf)
-import Pm.Scan (DotDirs (..), listTreeWith, readHold, reparseSkipNote)
+import Pm.Scan (DotDirs (..), listTreeWith, pmStateDirSkipNote, readHold, reparseSkipNote)
 import Pm.Types
 import Pm.Win (NameKind (..), probeName)
 
@@ -209,10 +209,10 @@ withSource sink src onMissing k = do
 
 -- | 遍历错误里**真正的**失败（第一方自审工作流 F054）：源里有一棵子树没枚举
 -- 出来，「✓ 没有需要归位的新照片」/退出码 0 就是在替一个没看过的目录担保。
--- 'Pm.Scan.reparseSkipNote' 是设计内跳过，不是失败，排除后再判；云端未下载
--- （'Pm.Scan.cloudOnlyNote'，审计 #8）不排除——那些照片没读过。
+-- 'Pm.Scan.reparseSkipNote' 与 'Pm.Scan.pmStateDirSkipNote'（审计 #53）是设计内跳过，不是失败，排除
+-- 后再判；云端未下载（'Pm.Scan.cloudOnlyNote'，审计 #8）与「root-id.json 存在性查不出」不排除——没读过。
 hardErrors :: [(FilePath, String)] -> [(FilePath, String)]
-hardErrors = filter ((/= reparseSkipNote) . snd)
+hardErrors = filter ((`notElem` [reparseSkipNote, pmStateDirSkipNote]) . snd)
 
 -- | 把 'hardErrors' 折进退出码：只把「一切正常」的 0 抬成 1，拒绝（2）与
 -- 「计划已存」（1）原样保留，并说明为什么。

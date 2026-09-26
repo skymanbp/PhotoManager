@@ -506,7 +506,7 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 |---|---|---|
 | `pm undo` | 生成反向计划后退出 **1**（计划已存、未执行——与其它计划生成器同码；此前 0 把"还有事没做"读成"全部成功"） | B（`PlanRun` 三态收口） |
 | `pm vault push` / push 计划的 `pm apply` | 收尾 git 步骤按**逐项落位结果**打印：有落位项才给 `git -C … add -- <落位类目>`；全部待裁决 → 无 git 步骤 | B |
-| `pm sort` | 子树列不出（ACL 拒）→ 提议/计划两形态都退出 **1** 并打「未能枚举」——不替没看过的目录担保；junction 跳过仍是 0 | B |
+| `pm sort` | 子树列不出（ACL 拒）→ 提议/计划两形态都退出 **1** 并打「未能枚举」——不替没看过的目录担保；junction 跳过与 pm 状态目录（内含 `root-id.json`）的不进入都是设计内的，仍是 0（`Pm.Scan.reparseSkipNote` / `pmStateDirSkipNote` 唯一定义、`hardErrors` 豁免；审计 #53：此前只豁免 junction，源恰好含一个 pm 库根时干净的一跑也退 1）；「root-id.json 存在性查不出」仍算未能枚举 | B |
 | `pm trash list/empty` | manifest 整文件读不出（hardlink 占名等）→ **exit 2**、视图整体拒绝，不再显示「隔离区为空」（坏基准上 empty 会"无事可做"地成功） | A（三态加载器） |
 | `pm doctor` | 快照被拒（≠缺席）→ `CATALOG` **Bad** 行；`--deep` 无快照可深验 → `DEEP-SKIPPED` **Bad** + exit 1（此前静默跳过深验照报 0） | A |
 | `pm status` | 快照坏代回退 → ⚠ 行 + **exit 1**（`--cached` 只关掉新鲜度核对那一项；`--cached` 下 exit 1 共四个来源——快照坏代回退告警、暂存区尚有事件（含内容已全部归档、只打「冗余」不打 ⚠ 的那种；事件归属按 import 的同一套布局 `Pm.Import.stagingEventDir`——`Raw\<年>\<事件>` 报事件不报年份，import 认不出的形状记「(无法识别)」照样计入，待修改不计，审计 #54）、备份缓存不可信、vault 缓存不可信（仅在配置了 vault 时）；不带 `--cached` 另有第五个：新鲜度核对 pending（新增/变更/消失/读取错误之和）> 0，见 `Pm.Status` 的退出码判定）；核对受阻（读取错误 >0）不打「✓ 索引与磁盘一致」 | A |

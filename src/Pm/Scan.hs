@@ -18,6 +18,7 @@ module Pm.Scan
   , coversKey
   , maxPathLen
   , reparseSkipNote
+  , pmStateDirSkipNote
   , cloudOnlyNote
   , isCloudOnlyAttr
   , readHold
@@ -56,6 +57,13 @@ maxPathLen = 240
 -- F054）；字面量只在这里定义一次。
 reparseSkipNote :: String
 reparseSkipNote = "链接（junction / symlink / 挂载点）：不跟随"
+
+-- | 源遍历遇到 pm 状态目录（内含 @root-id.json@）的**设计内**不进入——同 'reparseSkipNote'，进错误表
+-- 只为逐条交代，未枚举覆盖为空，不是失败（审计 #53：此前 'Pm.Sort.hardErrors' 只豁免链接这一条，源恰好
+-- 是 \/ 含一个 pm 库根时，干净的一跑也退 1 并打「未能枚举」）。字面量只在这里定义一次。
+-- 「root-id.json 存在性查不出、按状态目录处理」那条**不**是它：那是查不出，照旧算硬错误。
+pmStateDirSkipNote :: String
+pmStateDirSkipNote = "pm 状态目录（内含 root-id.json），源遍历不进入"
 
 -- | 云端未下载（2026-09-25 审计 #8，用户裁定「不读，单列出来」）：内容不在本机的文件，读它
 -- 就是触发下载 \/ 回迁——整库扫描会变成整库下载。要读内容的两处（'scanRoot' 的 hash、sort 的
@@ -194,7 +202,7 @@ listTreeCov dots root = go ""
                         case k of
                           NameMissing -> go relPath
                           ProbeUnknown -> pure ([], [(relPath, "root-id.json 存在性查不出（ACL/介质错误？），按 pm 状态目录处理、不进入")], [relPath])
-                          _ -> pure ([], [(relPath, "pm 状态目录（内含 root-id.json），源遍历不进入")], [])
+                          _ -> pure ([], [(relPath, pmStateDirSkipNote)], [])
                       SkipDotDirs
                         | take 1 (takeFileName name) == "." -> pure ([], [], [])
                         | otherwise -> go relPath
