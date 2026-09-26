@@ -9,7 +9,6 @@
 module ServeP8Tests (serveP8Tests) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Exception (bracket_)
 import Control.Monad (forM_, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
@@ -22,7 +21,6 @@ import qualified Data.Text.Encoding as TE
 import Data.Time (diffUTCTime, getCurrentTime)
 import Network.Wai.Test
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, makeAbsolute)
-import System.Environment (setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readProcessWithExitCode)
@@ -40,7 +38,7 @@ import Pm.Subprocess (ToolOutcome (..), runTool)
 import ServeTests (arrLen, decodeBody, field, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvW, postReq, seedSortSrc, tok)
 import SortTests (photoAt)
 import System.Timeout (timeout)
-import TestUtil (mkMain, scanQuiet, writeF)
+import TestUtil (mkMain, scanQuiet, withEnv, writeF)
 
 serveP8Tests :: TestTree
 serveP8Tests =
@@ -284,7 +282,7 @@ caseConvertPlan = withLib $ \root cfg -> do
 withFakeClaude :: String -> IO a -> IO a
 withFakeClaude mode act = do
   exe <- makeAbsolute ("test" </> "fixtures" </> "fake-claude.cmd")
-  bracket_ (setEnv "PM_CLAUDE_EXE" exe >> setEnv "PM_FAKE_CLAUDE" mode) (unsetEnv "PM_CLAUDE_EXE" >> unsetEnv "PM_FAKE_CLAUDE") act
+  withEnv [("PM_CLAUDE_EXE", exe), ("PM_FAKE_CLAUDE", mode)] act
 
 classifyBody :: [String] -> BSL.ByteString
 classifyBody names = Aeson.encode (Aeson.object ["kind" Aeson..= ("classify" :: String), "names" Aeson..= names])
@@ -333,7 +331,7 @@ caseSuggestClassify = withSystemTempDirectory "pm-serve-ai" $ \dir -> do
     assertStatus 502 r
     liftIO' (assertBool "应点名 is_error" ("is_error" `BS.isInfixOf` BSL.toStrict (simpleBody r)))
   -- 超时：PM_SUGGEST_TIMEOUT=1 而夹具睡 ~3 s → 409 并点名可调的环境变量（断言用 ASCII 子串）
-  withFakeClaude "sleep" $ bracket_ (setEnv "PM_SUGGEST_TIMEOUT" "1") (unsetEnv "PM_SUGGEST_TIMEOUT") $
+  withFakeClaude "sleep" $ withEnv [("PM_SUGGEST_TIMEOUT", "1")] $
     flip runSession (serveApp envR) $ do
       r <- postReq "/api/suggest" (classifyBody ["a.jpg"])
       assertStatus 409 r
@@ -351,7 +349,7 @@ caseSuggestClassify = withSystemTempDirectory "pm-serve-ai" $ \dir -> do
     flip runSession (serveApp envR) $ postReq "/api/suggest" (classifyBody ["a.jpg"]) >>= assertStatus 409
     takeMVar done
   -- 缺 claude：409
-  bracket_ (setEnv "PM_CLAUDE_EXE" (dir </> "nope.exe")) (unsetEnv "PM_CLAUDE_EXE") $
+  withEnv [("PM_CLAUDE_EXE", dir </> "nope.exe")] $
     flip runSession (serveApp envR) $ postReq "/api/suggest" (classifyBody ["a.jpg"]) >>= assertStatus 409
   -- 契约：建议不写 .pm 的记录与计划、照片字节不动
   doesFileExist (root </> ".pm" </> "vault-holds.json") >>= (@?= False)

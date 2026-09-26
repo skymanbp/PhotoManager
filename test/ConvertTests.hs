@@ -7,13 +7,11 @@
 -- python 或没装 Pillow 时用例直接失败（不跳过：这台机的发布前提）。
 module ConvertTests (convertTests, writeRgbPng) where
 
-import Control.Exception (bracket_)
 import Control.Monad (forM_)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, sort)
 import qualified Data.Text as T
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, makeAbsolute, removeFile)
-import System.Environment (setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -29,7 +27,7 @@ import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
 import Pm.Hash (sha256File)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan)
 import Pm.Op (Op (..))
-import TestUtil (doctorRows, mkMain, scanQuiet, writeF)
+import TestUtil (doctorRows, mkMain, scanQuiet, withEnv, writeF)
 
 convertTests :: TestTree
 convertTests =
@@ -127,7 +125,7 @@ caseRefusals = withLib $ \root run -> do
   refuse "同名同目录" ["成片/E1/dup.png", "成片/E1/DUP.tif"]
   -- 一条坏参数整批拒：合法的 rgb.png 与坏的 ghost 同批 → 不转任何一张
   refuse "不在索引" ["成片/E1/rgb.png", "成片/E1/ghost.png"]
-  bracket_ (setEnv "PM_PYTHON" (root </> "nope.exe")) (unsetEnv "PM_PYTHON") $
+  withEnv [("PM_PYTHON", root </> "nope.exe")] $
     refuse "PM_PYTHON 指向的文件不存在" ["成片/E1/rgb.png"]
   doesDirectoryExist (root </> ".pm" </> "derived") >>= (@?= False)
 
@@ -251,7 +249,7 @@ caseDerivedGuards = withLib $ \root run -> do
   --    exit 2、点名变量、pm 自建的 .tmp 已清（杀树本身无独立判红形态，见 REVIEW-LOG）。
   --    此刻 ddir 里没有 rgb.jpg（③ 末尾已删、④ 在派生前就被拒），派生一定真的发生。
   slow <- makeAbsolute ("test" </> "fixtures" </> "slow-python.cmd")
-  bracket_ (setEnv "PM_PYTHON" slow >> setEnv "PM_CONVERT_TIMEOUT" "1") (unsetEnv "PM_PYTHON" >> unsetEnv "PM_CONVERT_TIMEOUT") $ do
+  withEnv [("PM_PYTHON", slow), ("PM_CONVERT_TIMEOUT", "1")] $ do
     (c5, mpid5, o5) <- run False False ["成片/E1/rgb.png"]
     (c5, mpid5) @?= (2, Nothing)
     assertBool o5 ("PM_CONVERT_TIMEOUT" `isInfixOf` o5)

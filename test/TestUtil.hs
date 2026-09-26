@@ -35,6 +35,7 @@ module TestUtil
   , trashViewOK
   , withDenyAll
   , withDenyList
+  , withEnv
   , disableBackupPrivileges
   ) where
 
@@ -45,7 +46,7 @@ import Data.Word (Word32)
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (peek)
-import System.Environment (getEnv)
+import System.Environment (getEnv, lookupEnv, setEnv, unsetEnv)
 import System.Process (readCreateProcess, shell)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -95,6 +96,14 @@ withDenyList p act = do
   user <- getEnv "USERNAME"
   let icacls args = () <$ readCreateProcess (shell ("icacls \"" <> p <> "\" " <> args <> " >nul")) ""
   bracket_ (icacls ("/deny \"" <> user <> "\":(RD)")) (icacls ("/remove:d \"" <> user <> "\"")) act
+
+-- | 临时改写环境变量、结束后**原样还原**（审计 #58）：原来有值 → 写回原值，原来没有 → 删掉；
+-- 设置中途或动作里抛出同样还原。此前 ConvertTests / ServeP8Tests 手写 @bracket_ (setEnv …)
+-- (unsetEnv …)@，把跑测试的人自己设的值（如 PM_PYTHON）一并删掉，串行的后续用例随之失败。
+withEnv :: [(String, String)] -> IO a -> IO a
+withEnv kvs act = do
+  olds <- mapM (\(k, _) -> (,) k <$> lookupEnv k) kvs
+  (mapM_ (uncurry setEnv) kvs >> act) `finally` mapM_ (\(k, mv) -> maybe (unsetEnv k) (setEnv k) mv) olds
 
 -- | 上面两种注入的**前提**：本进程的令牌里 SeBackupPrivilege / SeRestorePrivilege
 -- 没有启用。启用着的话，pm 的探针（GetFileAttributesEx / FindFirstFile / 带

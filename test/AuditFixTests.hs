@@ -6,13 +6,13 @@
 -- 仍就地扩展。每条钉一个屏障：拆掉对应修复，用例必须转红。
 module AuditFixTests (auditFixTests) where
 
-import Control.Exception (finally)
-import Control.Monad (forM_, when)
+import Control.Exception (IOException, finally, try)
+import Control.Monad (filterM, forM_, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import Data.List (isInfixOf, isSuffixOf)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
@@ -40,7 +40,7 @@ import Pm.Trash (manifestPath, quarDirFor, trashDir)
 import Pm.Types (RootInfo (..), RootRole (..))
 import ServeTests (fixture, liftIO', mkEnvA, mkEnvW, tok, withVault)
 import qualified ServeTests as ST
-import TestUtil (doctorRows, mkCopyOp, mkPlanIO, withDenyAll)
+import TestUtil (doctorRows, mkCopyOp, mkPlanIO, withDenyAll, withEnv)
 
 auditFixTests :: TestTree
 auditFixTests =
@@ -52,6 +52,7 @@ auditFixTests =
     , testCase "#9 serveApp 最后一道异常边界：recordPost（hold）写链抛异常 → 500 JSON 带 CORS，主库记录文件零写入" caseServeBoundaryRecordPost
     , testCase "#43 trash 例外只放隔离载荷（≥ 4 级）：trash 根 / manifest / 整个隔离目录作 rename 源，validatePlan 与 execPlan 都拒、manifest 不动；生成形态照旧放行" caseTrashSrcShape
     , testCase "#34 doctor 在途 Copy 的 dst / Quarantine 的 victim 被 ACL 拒绝：不再塌成「无痕迹」C1 / 「两处都不在」Q?，按「在而读不出」报 C? Bad / Q2" caseDoctorDeniedUserSide
+    , testCase "#58 测试里临时改环境变量须原样还原（有值写回、没有才删、异常同样还原）；test/ 里删环境变量只许在 TestUtil.withEnv" caseWithEnvRestores
     ]
 
 mkJunction :: FilePath -> FilePath -> IO ()
@@ -253,3 +254,28 @@ caseDoctorDeniedUserSide = withSystemTempDirectory "pm-audit" $ \dir -> do
   rows <- withDenyAll dst (withDenyAll victim (doctorRows root))
   assertBool ("dst 在而读不出须报 C? Bad，不得是 C1「无痕迹」: " <> show rows) (("C?", Bad) `elem` rows && "C1" `notElem` map fst rows)
   assertBool ("victim 在而读不出须报 Q2，不得是 Q?「两处都不在」: " <> show rows) ("Q2" `elem` map fst rows && "Q?" `notElem` map fst rows)
+
+-- | #58（low）：ConvertTests / ServeP8Tests 用 bracket_ 临时设环境变量、收尾一律删掉——把跑测试的
+-- 人自己设的值（如 PM_PYTHON，ConvertTests 头注推荐的路子）一并删掉，串行的后续用例随之「找不到
+-- python」。五处改走 TestUtil.withEnv：原来有值写回原值、原来没有才删，异常出口同样还原。另钉类
+-- 规则：test/ 里「删环境变量」只许出现在 TestUtil（新代码不得再手写「删掉当还原」）。
+caseWithEnvRestores :: Assertion
+caseWithEnvRestores = do
+  let k1 = "PM_AUDIT58_PRESET"
+      k2 = "PM_AUDIT58_ABSENT"
+  withEnv [(k1, "user-value")] $ do
+    withEnv [(k1, "tmp1"), (k2, "tmp2")] $ do
+      lookupEnv k1 >>= (@?= Just "tmp1")
+      lookupEnv k2 >>= (@?= Just "tmp2")
+    lookupEnv k1 >>= (@?= Just "user-value")
+    lookupEnv k2 >>= (@?= Nothing)
+    r <- try (withEnv [(k1, "boom")] (ioError (userError "中途抛出"))) :: IO (Either IOException ())
+    either (const (pure ())) (const (assertFailure "应抛出")) r
+    lookupEnv k1 >>= (@?= Just "user-value")
+  lookupEnv k1 >>= (@?= Nothing)
+  -- 类规则：非注释行里的「删环境变量」只许在 TestUtil；needle 拼接构造，免得本例自指命中
+  let needle = "unset" <> "Env" :: String
+      codeRefs s = any (\l -> not ("--" `isPrefixOf` dropWhile (== ' ') l) && needle `isInfixOf` l) (lines s)
+  ts <- filter (\f -> ".hs" `isSuffixOf` f && f /= "TestUtil.hs") <$> listDirectory "test"
+  bad <- filterM (\f -> codeRefs . T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile ("test" </> f)) ts
+  bad @?= []
