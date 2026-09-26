@@ -25,7 +25,7 @@
 --   * 响应解析：@result@ 文本里取第一段 JSON（裸或 ``` 围栏）；解析不了 → 502
 --     并把 @raw@ 原样带回——页面显示「AI 回复无法解析」，不猜。信封里
 --     @is_error:true@（claude 自己报错，如额度用尽）→ 502 带原文。
-module Pm.ServeAi (routeAi, findClaude, extractJson, evenSample, claudeArgs, neutralCwd) where
+module Pm.ServeAi (routeAi, findClaude, extractJson, evenSample, claudeArgs, neutralCwd, albumFlatEntries, coordsText) where
 
 import Control.Concurrent.MVar (putMVar, tryTakeMVar)
 import Control.Exception (IOException, finally, mask, try)
@@ -43,7 +43,8 @@ import Network.Wai
 import System.Directory (createDirectoryIfMissing, doesFileExist, findExecutable, getTemporaryDirectory)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath (splitDirectories, takeFileName, (</>))
+import Numeric (showFFloat)
+import System.FilePath ((</>))
 
 import Pm.Catalog (catalogOr, loadCatalog)
 import Pm.Config (Config (..), requireRole)
@@ -110,8 +111,7 @@ classify cfg jsonR err exe names
           case catalogOr "主库尚未索引 → 先 pm scan" lc of
             Left m -> err status404 m
             Right (cat, _) -> do
-              let inAlbum e = take 1 (splitDirectories (enPath e)) == [albumTop] && enKind e == KindPhoto
-                  byName = Map.fromList [(takeFileName (enPath e), e) | e <- Map.elems (catEntries cat), inAlbum e]
+              let byName = albumFlatEntries cat names
               resolved <- forM names $ \n -> case Map.lookup n byName of
                 Nothing -> pure (n, Nothing)
                 Just e -> (,) n <$> resolveUnder root (enPath e)
@@ -188,7 +188,7 @@ normItem it =
     [ "name" .= aiName it
     , "category" .= (aiCategory it >>= \c -> if T.unpack c `elem` fixedCategories then Just c else Nothing)
     , "location" .= (aiLocation it >>= nonBlank)
-    , "coordinates" .= (aiCoordinates it >>= \c -> (\(la, ln) -> T.pack (show la <> ", " <> show ln)) <$> parseCoordinates c)
+    , "coordinates" .= (aiCoordinates it >>= fmap coordsText . parseCoordinates)
     , "source" .= (case aiSource it of Just s | s `elem` noteSources -> s; _ -> "none")
     , "basis" .= (aiBasis it >>= nonBlank)
     , "title" .= (aiTitle it >>= nonBlank)
@@ -340,3 +340,23 @@ extractJson t = case mapMaybe (Aeson.decodeStrict' . TE.encodeUtf8) candidates o
     (Just i, Just j) | j > i -> [T.take (j - i) (T.drop i s)]
     _ -> []
   candidates = [s | isJust open] <> clipped
+
+-- | 分类请求里的平铺相册名 → 它在主库索引里的条目（审计 #49）：按**确切键** @相册\\<名>@ 查。
+-- 此前按文件名扫整个相册子树建表，@相册\\old\\IMG_0001.jpg@ 按键序排在 @相册\\IMG_0001.jpg@ 之后、
+-- 顶掉了平铺那张——交给模型的是子目录里的文件，建议却预填到（存下来也记到）平铺那张上；只在子目录里
+-- 有的名字也被当成相册照片。vault / GUI 的相册语义本就只看平铺层。
+albumFlatEntries :: Catalog -> [FilePath] -> Map.Map FilePath Entry
+albumFlatEntries cat names =
+  Map.fromList
+    [ (n, e)
+    | n <- names
+    , isFlatName n
+    , Just e <- [Map.lookup (albumTop </> n) (catEntries cat)]
+    , enKind e == KindPhoto
+    ]
+
+-- | 坐标的规范文本「lat, lng」（审计 #50）：定点小数。此前用 'show'，|值| < 0.1 时出指数形式
+-- （@0.0523@ → @5.23e-2@），预填进页面、存进 vault-notes.json、再由 @pm vault notes --json@
+-- 导出，与文档与提示词说的「十进制」不符。
+coordsText :: (Double, Double) -> Text
+coordsText (la, ln) = T.pack (showFFloat Nothing la "" <> ", " <> showFFloat Nothing ln "")

@@ -33,12 +33,14 @@ import Pm.Config (Config (..))
 import Pm.Op (Op (..))
 import Pm.Plan (Plan (..), PlanItem (..), loadPlan)
 import Pm.Serve (serveApp)
-import Pm.ServeAi (evenSample, extractJson, neutralCwd)
+import Pm.ServeAi (albumFlatEntries, coordsText, evenSample, extractJson, neutralCwd)
+import qualified Data.Map.Strict as Map
+import Pm.Types (Entry (..), FileKind (..))
 import Pm.Subprocess (ToolOutcome (..), runTool)
 import ServeTests (arrLen, decodeBody, field, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvW, postReq, seedSortSrc, tok)
 import SortTests (photoAt)
 import System.Timeout (timeout)
-import TestUtil (mkMain, scanQuiet, withEnv, withForeignLock, writeF)
+import TestUtil (mkCat, mkMain, scanQuiet, withEnv, withForeignLock, writeF)
 
 serveP8Tests :: TestTree
 serveP8Tests =
@@ -51,6 +53,7 @@ serveP8Tests =
     , testCase "GET /api/plans 执行态字段（done/executed）+ POST /api/plan/delete（只读 403 / 404 / 真删）+ /api/plans/prune（无已执行 → deleted 空）" casePlanEndpoints
     , testCase "POST /api/convert/plan：只读 403 且 .pm/derived 不出现；真 Pillow 转换 → 派生件落 .pm/derived、计划两项同组；坏源 code 2 不出计划" caseConvertPlan
     , testCase "POST /api/suggest classify：只读级放行；预置回答规范化（未请求的名字丢弃、坐标规范）；400 五种；413；502 垃圾/退出非零/is_error；409 缺 claude/超时/并发；.pm 零写入" caseSuggestClassify
+    , testCase "#49 #50 AI 建议：分类按确切键 相册\\<名> 取条目（子目录同名不顶替、只在子目录里的不算）；坐标定点小数不出指数" caseSuggestLookupAndCoords
     , testCase "POST /api/suggest place：serve 自己重跑分段抽样；围栏 JSON 解析；只有 RAW 的段不交给模型答 null；>12 段 400" caseSuggestPlace
     , testCase "#81 claude 不以照片目录为项目：cwd = pm 的空目录，照片目录只经 --add-dir；--safe-mode / --setting-sources user / --strict-mcp-config（分类与地点两条路）" caseSuggestIsolation
     , testCase "纯函数：evenSample 首/中/尾均匀；extractJson 裸/围栏/带前后文/垃圾" casePure
@@ -479,3 +482,16 @@ caseIgnoreLockBusy = withLib $ \root cfg -> do
     flip runSession (serveApp envW) $ postReq "/api/album/ignore" "{\"ignore\":[\"E1/a.jpg\"]}" >>= assertStatus 409
   doesFileExist (root </> ".pm" </> "album-ignore.json") >>= (@?= False)
   flip runSession (serveApp envW) $ postReq "/api/album/ignore" "{\"ignore\":[\"E1/a.jpg\"]}" >>= assertStatus 200
+
+-- | #49：byName 此前按文件名扫整个相册子树，键序靠后的子目录同名文件顶替平铺那张。
+-- #50：坐标此前用 show 渲染，|值| < 0.1 出指数形式。
+caseSuggestLookupAndCoords :: IO ()
+caseSuggestLookupAndCoords = do
+  let e p = Entry p 1 0 "aa" KindPhoto Nothing
+      flat = "相册" </> "IMG_0001.jpg"
+      cat = mkCat [e p | p <- [flat, "相册" </> "old" </> "IMG_0001.jpg", "相册" </> "old" </> "only-sub.jpg"]]
+      m = albumFlatEntries cat ["IMG_0001.jpg", "only-sub.jpg"]
+  fmap enPath (Map.lookup "IMG_0001.jpg" m) @?= Just flat
+  Map.member "only-sub.jpg" m @?= False
+  coordsText (0.0523, -0.0015) @?= "0.0523, -0.0015"
+  coordsText (47.5, 13.6) @?= "47.5, 13.6"
