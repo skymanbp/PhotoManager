@@ -50,6 +50,8 @@ import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, planPath)
 import Pm.Sort
   ( SortPick (..)
+  , SortSegment (..)
+  , SortSurvey (..)
   , Verdict (..)
   , classifyDst
   , eventNameFor
@@ -59,6 +61,7 @@ import Pm.Sort
   , runSortPlan
   , segmentBy
   , snapshotWith
+  , surveySort
   )
 import Pm.Types (FileKind (..), RootRole (..), classifyExt, rawExts)
 import TestUtil (ensureTestRoot, scanQuiet)
@@ -86,6 +89,7 @@ sortTests =
     , testCase "E2E：索引落后于暂存区盘面 → 拒绝出计划（该闸此前全项目无用例）" caseSortE2EStale
     , testCase "EXIF：IFD 偏移必须 ≥ 8；声明「没有 IFD」的文件不得返回时间" caseExifIfdOffset
     , testCase "classifyExt：相机原生 raw 与 classifyExt 必须同一份清单" caseRawExts
+    , testCase "审计 #10：Raw\\ 下的普通文件（desktop.ini / Thumbs.db）不是年份夹——概览照常出、同年月事件照常提议" caseSurveyRawStrayFile
     ]
 
 -- ─── pm sort 纯核心 ────────────────────────────────────────────────────────
@@ -460,6 +464,24 @@ caseSortE2E = withLib $ \src root cfg -> do
   ls <- sort <$> listDirectory (src </> "DCIM")
   ls @?= ["a.ARW", "a.xmp", "b.ARW", "z.ARW"]
   BS.readFile (src </> "DCIM" </> "a.xmp") >>= (@?= "sidecar-for-a")
+
+-- | 2026-09-25 审计 #10（medium）：'existingEvents' 对 @Raw\\@ 的每个子项都 listDirectory，
+-- Explorer 留下的 @Raw\\desktop.ini@ 让 FindFirstFile 在 @file\\*@ 上失败，整个概览 Left
+-- （`pm sort <src>` exit 2、/api/sort/survey 与 /api/suggest 409）并把原因说成被占/介质错误，
+-- 而 `pm sort --place` 与 `pm names` 在同一库上照常。R1 的 whenPresent 改写把此前的
+-- 「是不是目录」守卫换成了「名字在不在」探针。修法：明确判定为普通文件的子项跳过；
+-- 目录、ACL 拒绝、缺失仍走 whenPresent 三态（查不出 → 整体 Left 不变）。
+caseSurveyRawStrayFile :: IO ()
+caseSurveyRawStrayFile = withLib $ \src root cfg -> do
+  createDirectoryIfMissing True (root </> "Raw" </> "2026" </> "26-08-Atlanta-Raw")
+  BS.writeFile (root </> "Raw" </> "desktop.ini") "[.ShellClassInfo]"
+  BS.writeFile (root </> "Raw" </> "Thumbs.db") "x"
+  r <- surveySort src 72 cfg
+  case r of
+    Left e -> assertFailure ("Raw 下的普通文件不该让概览失败: " <> e)
+    Right sv -> do
+      length (ssSegments sv) @?= 1
+      concatMap sgSameMonthEvents (ssSegments sv) @?= ["26-08-Atlanta"]
 
 caseSortE2EGates :: IO ()
 caseSortE2EGates = withLib $ \src root cfg -> do

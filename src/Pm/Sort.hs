@@ -56,7 +56,7 @@ module Pm.Sort
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad (forM, forM_, unless)
+import Control.Monad (filterM, forM, forM_, unless)
 import Data.List (sort, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -70,7 +70,7 @@ import Data.Time
   , diffLocalTime
   , toGregorian
   )
-import System.Directory (listDirectory)
+import System.Directory (doesFileExist, listDirectory)
 import System.FilePath (takeFileName, (</>))
 import Text.Printf (printf)
 
@@ -464,12 +464,19 @@ existingEvents :: FilePath -> IO (Either String [String])
 existingEvents root = do
   r <- try $ do
     a <- lsDir (root </> stagingTop </> "Raw")
-    b <- concat <$> (mapM (lsDir . ((root </> "Raw") </>)) =<< lsDir (root </> "Raw"))
+    ys <- filterM (fmap not . doesFileExist . (rawTop </>)) =<< lsDir rawTop
+    b <- concat <$> mapM (lsDir . (rawTop </>)) ys
     pure (sort (Set.toList (Set.fromList (a <> map stripRawSuffix b))))
   pure $ case (r :: Either IOException [String]) of
     Left e -> Left ("已有事件夹枚举失败（被占/介质错误？）: " <> show e)
     Right evs -> Right evs
  where
+  rawTop = root </> "Raw"
+  -- 2026-09-25 审计 #10：@Raw\\@ 的直接子项里明确判定为**普通文件**的（Explorer 的
+  -- desktop.ini / Thumbs.db）不是年份夹，跳过；此前对它 listDirectory 必抛
+  -- （FindFirstFile 于 @file\\*@），整个概览 Left 并把原因说成被占/介质错误。
+  -- doesFileExist 只在「确定是文件」时为 True：目录、ACL 拒绝、缺失都留在清单里
+  -- 继续走下面 whenPresent 的三态（查不出 → 抛 → 整体 Left），R1 的保证不削弱。
   -- 第一方自审 R1：存在性三态（'whenPresent'）——@doesDirectoryExist@ 把 ACL
   -- 拒绝塌成「没有事件夹」，提议就会让用户新建一个重名的。查不出 → 抛进外层
   -- try，与枚举失败同一出口（survey 整体 Left）。
