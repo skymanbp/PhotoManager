@@ -35,7 +35,7 @@ module Pm.Commands
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (forM, forM_, unless)
 import Data.Function (on)
 import Data.List (intercalate, nubBy)
 import Data.Maybe (fromMaybe)
@@ -401,9 +401,13 @@ trashEmptyLocked' cfg root yes tv = do
               -- execPlan 收尾写它——崩在隔离 Done 之后的批次（或 doctor --repair 补记的 Done）再清空
               -- 隔离区，下一次 doctor 就把刚清掉的载荷报成 C4「目标不存在」，直到别的计划跑一次。
               -- 清掉了东西就在锁内补写一条（同 execPlan：锁内、无在途批次，这条标记是真话）。
-              when (either (\(k, _, _) -> k) id done > 0) $
-                withJournal root $ \j -> getCurrentTime >>= jAppend j Barrier . JCleanShutdown
-              case done of
+              -- 这条写入自己也会失败（盘掉了、.pm 不可写）：同 C102 的纪律不许逃顶——照常报清除结果，
+              -- 另报一行、exit 2（横切审计「异常处理」抓到 #37 首版在这里没有 try）。
+              mark <-
+                if either (\(k, _, _) -> k) id done > 0
+                  then try (withJournal root $ \j -> getCurrentTime >>= jAppend j Barrier . JCleanShutdown) :: IO (Either IOException ())
+                  else pure (Right ())
+              code <- case done of
                 Right n -> do
                   putStrLn ("✓ 已清除 " <> show n <> " 项（manifest 记录保留为历史）")
                   pure (if heldN == 0 then 0 else 1)
@@ -411,6 +415,15 @@ trashEmptyLocked' cfg root yes tv = do
                   putStrLn
                     ( "✗ " <> p <> ": " <> show e <> " —— 已清除 " <> show k <> "/" <> show (length purgeable)
                         <> " 项，其余未动；解除占用/只读后重跑 pm trash empty（pm trash list 可查看）"
+                    )
+                  pure 2
+              case mark of
+                Right () -> pure code
+                Left e -> do
+                  putStrLn
+                    ( "✗ 收尾标记没写进 journal: " <> show e
+                        <> " —— 若下一次 pm doctor 把刚清除的载荷报成 C4「目标不存在」，那是这条标记没写上，不是丢失；"
+                        <> "排除原因后执行任意一个计划即可补上"
                     )
                   pure 2
  where

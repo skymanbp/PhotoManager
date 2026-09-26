@@ -21,7 +21,7 @@ import Data.Time (UTCTime (..), fromGregorian, getCurrentTime)
 import Network.HTTP.Types (hAuthorization, hContentType, hHost, hOrigin, methodPost, status500)
 import Network.Wai (Request (..), defaultRequest)
 import Network.Wai.Test (SRequest (..), SResponse (..), Session, runSession, setPath, srequest)
-import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeFile, setModificationTime)
+import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, removeFile, setModificationTime, setOwnerWritable, setPermissions)
 import System.Environment (lookupEnv, setEnv)
 import System.FilePath (joinPath, splitDirectories, takeDirectory, takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -65,6 +65,7 @@ auditFixTests =
     , testCase "#34 doctor 在途 Copy 的 dst / Quarantine 的 victim 被 ACL 拒绝：不再塌成「无痕迹」C1 / 「两处都不在」Q?，按「在而读不出」报 C? Bad / Q2" caseDoctorDeniedUserSide
     , testCase "#58 测试里临时改环境变量须原样还原（有值写回、没有才删、异常同样还原）；test/ 里删环境变量只许在 TestUtil.withEnv" caseWithEnvRestores
     , testCase "#37 批次崩在隔离 Done 之后再 pm trash empty：清除后补写 CleanShutdown，下一次 doctor 不再把已清除的载荷误报成 C4「目标不存在」" caseTrashEmptyClosesWindow
+    , testCase "#37 回归：补写收尾标记失败（journal 只读）不逃顶——照常报「已清除 1 项」、另报一行、exit 2；标记没写上，doctor 如报文所说报 C4" caseTrashEmptyMarkFails
     , testCase "#8 遍历按 name-surrogate 位判链接：第三方非 surrogate 的 reparse 文件照常枚举（此前落进「链接跳过」不进索引），置上 surrogate 位的仍不跟随；源码里 pathIsSymbolicLink 只剩 Exec 的占用判定" caseWalkForeignReparse
     , testCase "#8 云端未下载（OFFLINE 位）：scan / sort 不读、单列「云端未下载」；已索引没改过的按 stat 复用，改过的保留旧条目，新鲜度照常核对；属性位按 SDK 取值" caseCloudOnlyNotRead
     , testCase "#3 暂存区 / 布局层名折大小写认：手建的 to-be-sync'd、raw 照样过新鲜度守卫、照样路由与归档判定；规范拼写与盘面拼写不算新增 + 消失；两种拼写并存拒绝；src 不再拿层名做 == / elem 比较" caseStagingCaseFold
@@ -313,6 +314,29 @@ caseTrashEmptyClosesWindow = withSystemTempDirectory "pm-audit" $ \dir -> do
   code @?= 0
   rows <- doctorRows root
   assertBool ("已清除的隔离载荷不得再报 C4: " <> show rows) ("C4" `notElem` map fst rows)
+
+-- | #37 回归（2026-09-26 横切审计「异常处理」）：#37 首版在清除后补写 CleanShutdown 时没有 try——
+-- journal 写不进（盘掉了、.pm 不可写）就异常逃顶：清除报告没打印，进程以 1 退出（与「清干净但有
+-- HELD」同码），正是 C102 修掉过的形状。现在照常报清除结果、另报一行、exit 2。journal 置只读
+-- 让这条写入必然失败；同 #37 的崩溃形态（截掉 CleanShutdown），标记没写上时 doctor 确实会报 C4。
+caseTrashEmptyMarkFails :: Assertion
+caseTrashEmptyMarkFails = withSystemTempDirectory "pm-audit" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True root
+  BS.writeFile (root </> "v.jpg") "VICTIM"
+  vsha <- sha256File (root </> "v.jpg")
+  plan <- mkPlanIO root [OpQuarantine "v.jpg" vsha "t"]
+  _ <- execOk plan
+  journalEntries root >>= truncateJournalTo root . filter (not . isClean)
+  let jf = journalPath root
+  p0 <- getPermissions jf
+  setPermissions jf (setOwnerWritable False p0)
+  (out, code) <- captureStdout (runTrash (mkCfg root) (TrashEmpty True) root) `finally` setPermissions jf p0
+  code @?= 2
+  assertBool out ("✓ 已清除 1 项" `isInfixOf` out)
+  assertBool out ("收尾标记没写进 journal" `isInfixOf` out)
+  rows <- doctorRows root
+  assertBool ("标记没写上，doctor 如报文所说报 C4: " <> show rows) ("C4" `elem` map fst rows)
 
 -- | #8（medium）：遍历此前用 pathIsSymbolicLink 判「链接」——它对**任何** reparse 属性答 True，
 -- OneDrive 云占位（含已下载的）、Dedup、WOF 压缩的文件整批落进「链接跳过」：不进索引、不进整理、
