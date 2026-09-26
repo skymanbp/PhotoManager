@@ -23,13 +23,12 @@ module Pm.Clean
 import Control.Monad (foldM)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
-import System.FilePath (splitDirectories)
 
 import Data.Maybe (isJust)
 
 import Pm.Hash (ContentProbe (..), anyCopyAliveExcept, probeConfined)
 import Pm.Win (FileId)
-import Pm.Import (inArchiveLayer, pendingEditDir, stagingTop)
+import Pm.Import (inArchiveLayer, pendingEditDir, stagingTop, underLayers)
 import Pm.Op
 import Pm.Plan (ItemStatus (..), PlanItem (..))
 import Pm.Types
@@ -60,9 +59,9 @@ planClean mainCat bakCat =
     , clPendingEdit = pendingEdit
     }
  where
-  parts e = splitDirectories (enPath e)
-  inStaging e = take 1 (parts e) == [stagingTop]
-  isPendingEdit e = take 2 (parts e) == [stagingTop, pendingEditDir]
+  -- 审计 #3：暂存区 / 待修改按折大小写认（'Pm.Import.underLayers'：手建的 to-be-sync'd 也是它）
+  inStaging e = underLayers [stagingTop] (enPath e)
+  isPendingEdit e = underLayers [stagingTop, pendingEditDir] (enPath e)
   staging = [e | e <- Map.elems (catEntries mainCat), inStaging e]
   pendingEdit = [enPath e | e <- staging, isPendingEdit e]
   -- 「归档副本」口径共用 'Pm.Import.inArchiveLayer'（mj-5：只认 Raw/成片，

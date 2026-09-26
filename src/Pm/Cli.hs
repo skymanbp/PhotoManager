@@ -45,8 +45,7 @@ import Data.List (intercalate, nubBy, partition)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
-import System.Directory (canonicalizePath)
-import System.FilePath (splitDirectories)
+import System.Directory (canonicalizePath, listDirectory)
 import System.IO (hFlush, stdout)
 import Text.Printf (printf)
 import Text.Read (readMaybe)
@@ -60,7 +59,7 @@ import Pm.Dedupe (recheckDedupeItems)
 import Pm.Diff (BackupDiff (..))
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctorWith)
 import Pm.Exec (ExecEnv (..), ItemOutcome (..), defaultExecEnv, outcomeLabel, updateCatalog)
-import Pm.Import (stagingTop)
+import Pm.Import (sameComp, stagingTop, underLayers)
 import Pm.Journal (Sync (..))
 import Pm.Lock (withRootLock)
 import Pm.Op
@@ -469,23 +468,31 @@ parseOnly maxIx spec = concat <$> mapM part (splitOn ',' spec)
 -- 实现共享 'freshnessSweep'（pm status 用同一函数做全库核对）。
 stagingFresh :: FilePath -> Catalog -> IO (Either String ())
 stagingFresh root cat = do
-  let catStaging =
-        Map.filterWithKey
-          (\k _ -> take 1 (splitDirectories k) == [stagingTop])
-          (catEntries cat)
-  q@(newN, changedN, goneN, errN) <- freshnessSweep root stagingTop catStaging
-  pure $
-    if freshPending q == 0
-      then Right ()
-      else
-        Left
-          ( printf
-              "暂存区与索引不一致（新增 %d / 变更 %d / 消失 %d / 读取错误 %d）→ 先 pm scan"
-              newN
-              changedN
-              goneN
-              errN
-          )
+  -- 审计 #3（用户裁定「大小写都认」）：暂存区按折大小写认——用户手建的 to-be-sync'd 在 NTFS 上
+  -- 就是它。catalog 切片走 'underLayers'，核对前缀取盘上拼写（sweepCounts 的键同样按路径身份比）。
+  -- 此前两边一个精确、一个折叠：切片为空、盘面满，每个文件都算「新增」，pm scan 也补不回来。按
+  -- 目录启用了大小写敏感的卷上两种拼写可以并存——不替用户挑，拒绝并说明。
+  let catStaging = Map.filterWithKey (\k _ -> underLayers [stagingTop] k) (catEntries cat)
+  el <- try (listDirectory root) :: IO (Either IOException [FilePath])
+  case filter (`sameComp` stagingTop) <$> el of
+    Left e -> pure (Left ("主库根列不出，暂存区核对不了: " <> show e))
+    Right vs@(_ : _ : _) ->
+      pure (Left ("主库根下有 " <> show (length vs) <> " 个只差大小写的暂存区目录（" <> intercalate "、" vs <> "）——不替你挑，合并成一个再重跑"))
+    Right vs -> do
+      let spelled = case vs of (v : _) -> v; [] -> stagingTop
+      q@(newN, changedN, goneN, errN) <- freshnessSweep root spelled catStaging
+      pure $
+        if freshPending q == 0
+          then Right ()
+          else
+            Left
+              ( printf
+                  "暂存区与索引不一致（新增 %d / 变更 %d / 消失 %d / 读取错误 %d）→ 先 pm scan"
+                  newN
+                  changedN
+                  goneN
+                  errN
+              )
 
 -- | 主库整体新鲜度守卫（工作流 F057）：@pm backup@ 的 diff 以主库快照为基准，
 -- 快照落后于盘面就是在替一个没看过的库担保「备份盘已与主库一致」。同一实现

@@ -32,7 +32,7 @@ import Text.Printf (printf)
 import Pm.Backup (BackupCacheMeta (..), readBackupCacheMeta)
 import Pm.Catalog (catalogMaybe, loadCatalog)
 import Pm.Config (Config (..))
-import Pm.Import (stagingArchivedSummary, stagingTop)
+import Pm.Import (sameComp, stagingArchivedSummary, stagingTop)
 import Pm.Scan (freshPending, freshnessSweep)
 import Pm.Types
 import Pm.Vault (VaultCacheMeta (..), readVaultCacheMeta)
@@ -278,7 +278,7 @@ topComponent rel = case splitDirectories rel of
 stagingEventOf :: FilePath -> Maybe String
 stagingEventOf rel = case splitDirectories rel of
   (top : sub : event : _ : _)
-    | top == stagingTop && sub `elem` ["Raw", "Processed"] -> Just event
+    | sameComp top stagingTop && any (sameComp sub) ["Raw", "Processed"] -> Just event
   _ -> Nothing
 
 gib :: Integer -> Double

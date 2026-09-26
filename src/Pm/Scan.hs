@@ -27,6 +27,7 @@ import Control.Concurrent.Async (replicateConcurrently_)
 import Control.Exception (IOException, try)
 import Control.Monad (forM)
 import Data.Bits ((.&.))
+import Data.Char (toLower)
 import Data.IORef
 import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
@@ -261,17 +262,26 @@ coversKey uncovered k = any (\p -> null p || p == k || (p <> [pathSeparator]) `i
 -- ——两类调用方（stagingFresh 按 errN 拒绝、pm status 依它出「一致」结论）
 -- 由此都拿到真话。
 sweepCounts :: [(FilePath, Either IOException StatSnap)] -> [FilePath] -> Map.Map FilePath Entry -> (Int, Int, Int, Int)
-sweepCounts snaps walkErrPaths catSlice = (newN, changedN, goneN, errN)
+sweepCounts snaps walkErrPaths catSlice0 = (newN, changedN, goneN, errN)
  where
-  disk = Map.fromList [(rel, s) | (rel, Right s) <- snaps]
-  statFails = Set.fromList [rel | (rel, Left _) <- snaps]
+  -- 审计 #3：键按 NTFS 的路径身份比（折大小写，mj-2 同一纪律）——计划落位按规范拼写记进
+  -- catalog（To-Be-Sync'd\Raw\…），盘面是用户手建的 to-be-sync'd\raw\…：同一个文件，不得
+  -- 算成「新增 + 消失」。只折大小写、不 normalise（不借 'Pm.Import.foldPath'）：这里的键都是 pm
+  -- 自己拼出的相对路径，而 normalise 把空路径变成 "."——全库核对时基准自身出错的覆盖键就是空
+  -- 路径（'uncoveredKey'），它一变成普通前缀，库根列不出时整份 catalog 就报「消失」
+  -- （ScanGuardTests 的 sweepCounts 穷举钉着这一格）。
+  key = map toLower
+  catSlice = Map.mapKeys key catSlice0
+  uncov = map key walkErrPaths
+  disk = Map.fromList [(key rel, s) | (rel, Right s) <- snaps]
+  statFails = Set.fromList [key rel | (rel, Left _) <- snaps]
   -- 遍历错误按**子树**覆盖（39 轮 #1）：目录 @sub@ 列举失败时，catalog 里
   -- @sub\a.jpg@ 同样核不了——只按精确键剔除会让后代条目被误报「消失」且与
   -- 该目录的错误双重计数。空路径 = 基准自身出错，覆盖整棵树（'coversKey'）。
   newN = Map.size (disk `Map.difference` catSlice)
   goneN =
     Map.size
-      (Map.filterWithKey (\k _ -> not (coversKey walkErrPaths k)) (Map.withoutKeys (catSlice `Map.difference` disk) statFails))
+      (Map.filterWithKey (\k _ -> not (coversKey uncov k)) (Map.withoutKeys (catSlice `Map.difference` disk) statFails))
   changedN =
     length
       [ ()

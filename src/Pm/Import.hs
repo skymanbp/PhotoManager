@@ -19,6 +19,8 @@ module Pm.Import
   , stagingTop
   , pendingEditDir
   , foldPath
+  , sameComp
+  , underLayers
   , stemOf
   , inArchiveLayer
   , planImport
@@ -66,13 +68,14 @@ data ImportReport = ImportReport
 route :: FilePath -> Either () (Maybe FilePath)
 route rel = case splitDirectories rel of
   (top : sub : more)
-    | top == stagingTop ->
-        if sub == pendingEditDir
+    | sameComp top stagingTop ->
+        if sameComp sub pendingEditDir
           then Left ()
-          else case (sub, more) of
-            ("Raw", parts) -> Right (routeRaw parts)
-            ("Processed", event : rest@(_ : _)) ->
-              Right ((\c -> "成片" </> c </> joinPath rest) <$> canonProcessedEvent event)
+          else case more of
+            _ | sameComp sub "Raw" -> Right (routeRaw more)
+            (event : rest@(_ : _))
+              | sameComp sub "Processed" ->
+                  Right ((\c -> "成片" </> c </> joinPath rest) <$> canonProcessedEvent event)
             _ -> Right Nothing
   _ -> Right Nothing
  where
@@ -93,7 +96,7 @@ planImport cat =
   let staging =
         [ e
         | e <- Map.elems (catEntries cat)
-        , take 1 (splitDirectories (enPath e)) == [stagingTop]
+        , underLayers [stagingTop] (enPath e)
         ]
       routed = [(e, route (enPath e)) | e <- staging]
       pendingEdit = [enPath e | (e, Left ()) <- routed]
@@ -139,6 +142,19 @@ planImport cat =
 foldPath :: FilePath -> FilePath
 foldPath = map toLower . normalise
 
+-- | 两个路径分量是不是同一个名字（2026-09-25 审计 #3，mj-2 同一纪律）：NTFS 按折大小写认路径
+-- 身份，用户手建的 @to-be-sync'd@ \/ @raw@ 与 pm 写死的拼写是同一个目录。凡拿路径分量比布局层名
+-- （暂存区、Raw \/ Processed、归档三层），一律经这里或 'underLayers'，不用 @==@（AuditFixTests
+-- #3 钉住这一类：此前暂存区精确比较，手建的小写暂存区让 import \/ clean \/ sort 永远被新鲜度守卫拒）。
+sameComp :: FilePath -> FilePath -> Bool
+sameComp a b = foldPath a == foldPath b
+
+-- | @rel@ 的开头几个分量依次就是这几层（逐个 'sameComp'）。
+underLayers :: [FilePath] -> FilePath -> Bool
+underLayers names rel =
+  let cs = take (length names) (splitDirectories rel)
+   in length cs == length names && and (zipWith sameComp cs names)
+
 -- | 侧车与主文件的配对键：(所在目录, 折叠后的 stem)，两个分量都过 'foldPath'。
 -- 按目录分键：不同目录下同名的两组照片各有各的侧车，全局按 stem 索引会把
 -- 它们串在一起。计划器的撞名\/返修升级（评审 mj-3）、sort 的组悬置
@@ -154,7 +170,7 @@ stemOf p = (foldPath (takeDirectory p), foldPath (takeBaseName p))
 -- 归档，相册镜像被报成「已归档，冗余」）。与 'Pm.Dedupe.archiveLayerRel'
 -- （含相册，dedupe 报告范围）不同名不同义。
 inArchiveLayer :: Entry -> Bool
-inArchiveLayer e = take 1 (splitDirectories (enPath e)) `elem` [["Raw"], ["成片"]]
+inArchiveLayer e = any (\l -> underLayers [l] (enPath e)) ["Raw", processedTop]
 
 -- | Plan items for the actionable part of the report. @root@ is the main
 -- library root (staging lives inside it) — sources become absolute here.
@@ -189,8 +205,8 @@ stagingArchivedSummary cat =
   let (staging, archive) =
         Map.foldr
           ( \e (s, a) ->
-              if take 1 (splitDirectories (enPath e)) == [stagingTop]
-                then (if take 2 (splitDirectories (enPath e)) == [stagingTop, pendingEditDir] then s else e : s, a)
+              if underLayers [stagingTop] (enPath e)
+                then (if underLayers [stagingTop, pendingEditDir] (enPath e) then s else e : s, a)
                 else (s, if inArchiveLayer e then Set.insert (enSha e) a else a)
           )
           ([], Set.empty)

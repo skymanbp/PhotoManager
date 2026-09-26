@@ -17,9 +17,9 @@ module Pm.Diff
   ) where
 
 import qualified Data.Map.Strict as Map
-import System.FilePath (splitDirectories, (</>))
+import System.FilePath ((</>))
 
-import Pm.Import (stagingTop)
+import Pm.Import (stagingTop, underLayers)
 import Pm.Op
 import Pm.Plan (ItemStatus (..), PlanItem (..))
 import Pm.Types
@@ -56,8 +56,8 @@ backupDiff mainCat bakCat =
     }
  where
   -- 主库侧先收窄到备份范围（模块头：暂存区不进备份盘）。谓词与
-  -- 'Pm.Import'/'Pm.Clean' 的暂存判定同形（首组件 == stagingTop）。
-  mainE = Map.filterWithKey (\rel _ -> take 1 (splitDirectories rel) /= [stagingTop]) (catEntries mainCat)
+  -- 'Pm.Import'/'Pm.Clean' 的暂存判定同一个（'Pm.Import.underLayers'，折大小写——审计 #3）。
+  mainE = Map.filterWithKey (\rel _ -> not (underLayers [stagingTop] rel)) (catEntries mainCat)
   bakE = catEntries bakCat
 
 -- | Plan items mutating the BACKUP root. Adds become plain copies; updates

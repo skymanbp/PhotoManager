@@ -12,7 +12,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, nub, sort)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -23,18 +23,22 @@ import Network.Wai (Request (..), defaultRequest)
 import Network.Wai.Test (SRequest (..), SResponse (..), Session, runSession, setPath, srequest)
 import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeFile, setModificationTime)
 import System.Environment (lookupEnv, setEnv)
-import System.FilePath (takeFileName, (</>))
+import System.FilePath (joinPath, splitDirectories, takeDirectory, takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Cli (reportScanIssues)
+import Pm.Clean (CleanReport (..), planClean)
+import Pm.Cli (reportScanIssues, stagingFresh)
 import Pm.Commands (TrashCmd (..), runTrash)
 import Pm.Config (Config (..), configFilePath, createRootInfo, loadConfig, readRootInfo, withConfigLock, writeConfig, writeRootInfo)
+import Pm.Dedupe (archiveLayerRel)
+import Pm.Diff (BackupDiff (..), backupDiff)
 import Pm.Doctor (Severity (..))
 import Pm.Exec (defaultExecEnv, execPlan)
 import Pm.Hash (sha256File)
+import Pm.Import (ImportReport (..), planImport, stagingArchivedSummary, stagingTop, underLayers)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, withJournal)
 import Pm.Op (Fingerprint (..), Op (..), OpIdSuffix (..), describeOp, opId, opPathsOk, trashSrcRel)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), savePlan, validatePlan)
@@ -43,7 +47,7 @@ import Pm.Serve (serveApp)
 import Pm.Sort (runSortSurvey)
 import Pm.SortSource (SourceFiles (..), listSource)
 import Pm.Trash (manifestPath, quarDirFor, trashDir)
-import Pm.Types (Catalog (..), RootInfo (..), RootRole (..))
+import Pm.Types (Catalog (..), Entry (..), RootInfo (..), RootRole (..))
 import Pm.Win (NameKind (..), probeName)
 import ServeTests (fixture, liftIO', mkEnvA, mkEnvW, tok, withVault)
 import qualified ServeTests as ST
@@ -63,6 +67,7 @@ auditFixTests =
     , testCase "#37 批次崩在隔离 Done 之后再 pm trash empty：清除后补写 CleanShutdown，下一次 doctor 不再把已清除的载荷误报成 C4「目标不存在」" caseTrashEmptyClosesWindow
     , testCase "#8 遍历按 name-surrogate 位判链接：第三方非 surrogate 的 reparse 文件照常枚举（此前落进「链接跳过」不进索引），置上 surrogate 位的仍不跟随；源码里 pathIsSymbolicLink 只剩 Exec 的占用判定" caseWalkForeignReparse
     , testCase "#8 云端未下载（OFFLINE 位）：scan / sort 不读、单列「云端未下载」；已索引没改过的按 stat 复用，改过的保留旧条目，新鲜度照常核对；属性位按 SDK 取值" caseCloudOnlyNotRead
+    , testCase "#3 暂存区 / 布局层名折大小写认：手建的 to-be-sync'd、raw 照样过新鲜度守卫、照样路由与归档判定；规范拼写与盘面拼写不算新增 + 消失；两种拼写并存拒绝；src 不再拿层名做 == / elem 比较" caseStagingCaseFold
     ]
 
 mkJunction :: FilePath -> FilePath -> IO ()
@@ -326,13 +331,8 @@ caseWalkForeignReparse = withSystemTempDirectory "pm-audit" $ \dir -> do
   sort files @?= ["plain.jpg", "tp.jpg"]
   errs @?= [("ns.jpg", reparseSkipNote)]
   uncovered @?= []
-  let walkHs d = do
-        es <- listDirectory d
-        concat <$> mapM (\e -> doesDirectoryExist (d </> e) >>= \isD -> if isD then walkHs (d </> e) else pure [d </> e | ".hs" `isSuffixOf` e]) es
-      codeRefs s = any (\l -> not ("--" `isPrefixOf` dropWhile (== ' ') l) && "pathIsSymbolicLink" `isInfixOf` l) (lines s)
-  hs <- (<>) <$> walkHs "src" <*> walkHs "app"
-  bad <- filterM (\f -> codeRefs . T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile f) hs
-  map takeFileName bad @?= ["Exec.hs"]
+  bad <- codeLinesWhere ("pathIsSymbolicLink" `isInfixOf`) =<< srcHsFiles
+  nub (map fst bad) @?= ["Exec.hs"]
 
 -- | #8 用户裁定「不读，单列出来」：内容不在本机的文件（云端未下载）读它就是触发下载——整库扫描会
 -- 变成整库下载。要读内容的两处（scan 的 hash、sort 的源清单）读前不读、单列「云端未下载」；stat
@@ -383,3 +383,77 @@ caseCloudOnlyNotRead = withSystemTempDirectory "pm-audit" $ \dir -> do
   assertBool ("sort 清单应把云端未下载单列一格: " <> outS) ("云端未下载 1 个（" `isInfixOf` outS && not ("遍历时出错 1 个" `isInfixOf` outS))
   js <- T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile ("gui" </> "ui" </> "app.js")
   assertBool "GUI 整理页须单列 sv.cloudOnly" ("sv.cloudOnly" `isInfixOf` js)
+
+-- | src 与 app 下全部 .hs（递归）——类规则钉针（#8 / #3）共用。
+srcHsFiles :: IO [FilePath]
+srcHsFiles = (<>) <$> walk "src" <*> walk "app"
+ where
+  walk d = do
+    es <- listDirectory d
+    concat <$> mapM (\e -> doesDirectoryExist (d </> e) >>= \isD -> if isD then walk (d </> e) else pure [d </> e | ".hs" `isSuffixOf` e]) es
+
+-- | 这些文件的非注释行里满足谓词的 (文件名, 行)。
+codeLinesWhere :: (String -> Bool) -> [FilePath] -> IO [(FilePath, String)]
+codeLinesWhere p fs = concat <$> mapM one fs
+ where
+  one f = map ((,) (takeFileName f)) . filter code . lines . T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile f
+  code l = not ("--" `isPrefixOf` dropWhile (== ' ') l) && p l
+
+-- | #3（medium）：暂存区按写死的拼写 To-Be-Sync'd 精确比较。用户手建成 to-be-sync'd（NTFS 上就是同一个
+-- 目录）时，新鲜度守卫的 catalog 切片（精确 → 空）对上盘面（折大小写 → 满），每个文件都算「新增」，
+-- pm scan 也补不回来：import / clean / sort 永远被拒，pm status 却说一致。用户裁定「大小写都认」：布局
+-- 层名（暂存区、Raw / Processed、归档三层）一律经 Pm.Import.sameComp / underLayers 折叠比较；新鲜度
+-- 核对的前缀取盘上拼写、键按路径身份比。类规则：src 里不再拿层名做 == / /= / elem 比较。
+caseStagingCaseFold :: Assertion
+caseStagingCaseFold = withSystemTempDirectory "pm-audit" $ \dir -> do
+  now <- getCurrentTime
+  let root = dir </> "root"
+      stg = "to-be-sync'd"
+      put rel c = createDirectoryIfMissing True (takeDirectory (root </> rel)) >> BS.writeFile (root </> rel) c
+      emptyCat = Catalog "b" now mempty
+  put (stg </> "raw" </> "26-08-Atlanta" </> "a.ARW") "AAA"
+  put (stg </> "processed" </> "26-08-Atlanta" </> "a.jpg") "JJJ"
+  put (stg </> "待修改" </> "w.jpg") "WWW"
+  put (stg </> "raw" </> "26-07-Boston" </> "b.ARW") "BBB"
+  put ("raw" </> "2026" </> "26-07-Boston-Raw" </> "b.ARW") "BBB" -- 同内容已在归档层（小写 raw）
+  cat <- srCatalog <$> scanRoot (ScanOpts 1 False) Nothing "rid" root
+  -- 守卫：catalog 与盘面一致即放行（修复前「新增 4」，pm scan 也补不回来）
+  stagingFresh root cat >>= (@?= Right ())
+  -- 计划落位按规范拼写记进 catalog（updateCatalog 按 dstRel）：同一个文件，不得算成「新增 + 消失」
+  let respell q = if underLayers [stagingTop] q then joinPath (stagingTop : drop 1 (splitDirectories q)) else q
+      canon = Map.fromList [(respell k, e {enPath = respell k}) | (k, e) <- Map.toList (catEntries cat)]
+  stagingFresh root cat {catEntries = canon} >>= (@?= Right ())
+  -- import 路由：小写层名照样认，目标用规范拼写；同内容已在（小写 raw 的）归档层 → 已归档冗余
+  let rep = planImport cat
+  sort (map snd (irCopy rep)) @?= sort ["Raw" </> "2026" </> "26-08-Atlanta-Raw" </> "a.ARW", "成片" </> "26-08-Atlanta" </> "a.jpg"]
+  map snd (irAlready rep) @?= ["Raw" </> "2026" </> "26-07-Boston-Raw" </> "b.ARW"]
+  irPendingEdit rep @?= [stg </> "待修改" </> "w.jpg"]
+  irUnrecognized rep @?= []
+  stagingArchivedSummary cat @?= (3, 1)
+  clPendingEdit (planClean cat emptyCat) @?= [stg </> "待修改" </> "w.jpg"]
+  map enPath (bdAdd (backupDiff cat emptyCat)) @?= ["raw" </> "2026" </> "26-07-Boston-Raw" </> "b.ARW"]
+  archiveLayerRel ("raw" </> "x.jpg") @?= True
+  -- 折叠没把守卫变成摆设：盘上多一个文件照常拦下
+  put (stg </> "raw" </> "26-08-Atlanta" </> "c.ARW") "CCC"
+  stagingFresh root cat >>= either (\m -> assertBool m ("新增 1" `isInfixOf` m)) (const (assertFailure "新文件须拦下"))
+  -- 按目录启用了大小写敏感的根（fsutil 设不了就跳过这一段）：写死的拼写找不到手建的 to-be-sync'd，
+  -- 核对前缀必须取盘上拼写；两种拼写并存时不替用户挑，拒绝并说明
+  let root2 = dir </> "cs"
+      put2 rel c = createDirectoryIfMissing True (takeDirectory (root2 </> rel)) >> BS.writeFile (root2 </> rel) c
+  createDirectoryIfMissing True root2
+  en <- try (readCreateProcess (shell ("fsutil file setCaseSensitiveInfo \"" <> root2 <> "\" enable")) "") :: IO (Either IOException String)
+  when (either (const False) (const True) en) $ do
+    put2 (stg </> "raw" </> "26-08-Atlanta" </> "a.ARW") "AAA"
+    cat2 <- srCatalog <$> scanRoot (ScanOpts 1 False) Nothing "rid2" root2
+    stagingFresh root2 cat2 >>= (@?= Right ())
+    createDirectoryIfMissing True (root2 </> stagingTop)
+    stagingFresh root2 cat2 >>= either (\m -> assertBool m ("只差大小写" `isInfixOf` m)) (const (assertFailure "两种拼写并存须拒绝"))
+  -- 类规则：src 的非注释行里不再拿布局层名做 == / /= / elem 比较，也不拿它们当 case 模式字面量
+  -- （比较符须紧挨层名：同一行里拿别的值比较、顺手拼个 "Raw" 路径不算）
+  let pats =
+        [o <> n | o <- ["== ", "/= "], n <- ["stagingTop", "[stagingTop", "\"Raw\"", "\"Processed\"", "[\"Raw\"", "[[\"Raw\"]"]]
+          <> [n <> " " <> o | o <- ["==", "/="], n <- ["stagingTop", "\"Raw\"", "\"Processed\""]]
+          <> ["`elem` archiveLayers", "`elem` map (: []) archiveLayers", "`elem` [[\"Raw\"]", "`elem` [\"Raw\"", "(\"Raw\",", "(\"Processed\","]
+      cmpLayer l = any (`isInfixOf` l) pats
+  bad <- codeLinesWhere cmpLayer =<< srcHsFiles
+  bad @?= []

@@ -29,6 +29,7 @@ import Text.Printf (printf)
 
 import Pm.Catalog (catalogOr, loadCatalog)
 import Pm.Config (Config (..))
+import Pm.Import (sameComp)
 import Pm.Types
 
 -- ─── stem 规范化（纯） ──────────────────────────────────────────────────────
@@ -113,7 +114,7 @@ versionsReport cat =
     [ e
     | e <- Map.elems (catEntries cat)
     , enKind e == KindPhoto
-    , topOf (enPath e) `elem` archiveLayers
+    , any (sameComp (topOf (enPath e))) archiveLayers -- 层名折大小写（审计 #3）
     ]
   topOf p = case splitDirectories p of (x : _) -> x; [] -> ""
   versionKey e =
@@ -156,14 +157,14 @@ versionsReport cat =
       [ (ev, stemOf p)
       | e <- photos
       , let p = enPath e
-      , topOf p == "Raw"
+      , sameComp (topOf p) "Raw"
       , map toLower (takeExtension p) `elem` rawExts
       , Just ev <- [rawEventOf p]
       ]
 
   -- 相册是**平铺**的：它已占用的文件名（case-fold），判据②要用。
   albumNames =
-    Set.fromList [baseOf (enPath e) | e <- photos, topOf (enPath e) == "相册"]
+    Set.fromList [baseOf (enPath e) | e <- photos, sameComp (topOf (enPath e)) albumTop]
 
   -- | 设计内冗余：同一张照片在归档三层里各留一份是**拓扑**，不是重复。
   --
@@ -177,7 +178,7 @@ versionsReport cat =
   -- **同一层出现两份**（两个事件夹各一份、根与子目录各一份）一律不是设计内。
   -- 成片是链条中枢：Raw↔相册 直连属于跳层，也不认。
   designedGroup ps =
-    let atLayer l = [p | p <- ps, topOf p == l]
+    let atLayer l = [p | p <- ps, sameComp (topOf p) l]
         raw = atLayer "Raw"
         fin = atLayer "成片"
         alb = atLayer "相册"

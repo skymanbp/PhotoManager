@@ -143,6 +143,10 @@ Catalog   = snapshot (catalog.json, 原子替换写 + rename 前 fsync) + journa
   保证 roundtrip 与二次规范化不动点。
 - **扩展名判定全局 case-fold**（§1.1 实测大小写混用；与 `build_site.py` 的
   `suffix.lower()`、`sync_photos.py` 的大小写枚举集合等价）。
+- **布局层名同样按折大小写认**（2026-09-25 审计 #3）：暂存区 `To-Be-Sync'd` 及其下
+  `Raw` / `Processed` / `待修改`、归档三层 `Raw` / `成片` / `相册`，一律经
+  `Pm.Import.sameComp` / `underLayers` 比较——NTFS 按折大小写认路径身份，用户手建的
+  `to-be-sync'd` 就是暂存区；按目录启用大小写敏感的卷上两种拼写并存 → 拒绝并说明。
 
 ---
 

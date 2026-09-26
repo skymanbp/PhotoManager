@@ -36,12 +36,11 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
-import System.FilePath (splitDirectories)
 
 import Data.Maybe (isJust)
 
 import Pm.Hash (ContentProbe (..), anyCopyAliveExcept, probeConfined)
-import Pm.Import (foldPath)
+import Pm.Import (foldPath, underLayers)
 import Pm.Win (FileId)
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..))
@@ -95,7 +94,7 @@ dedupePlanItems gs = zipWith mk [0 ..] flat
 -- 与 'Pm.Import.inArchiveLayer'（只认 Raw\/成片，clean\/status 的「已归档」
 -- 口径）不同义：dedupe 连相册内的重复也要报。
 archiveLayerRel :: FilePath -> Bool
-archiveLayerRel p = take 1 (splitDirectories p) `elem` map (: []) archiveLayers
+archiveLayerRel p = any (\l -> underLayers [l] p) archiveLayers -- 层名折大小写（审计 #3）
 
 -- 路径键走 'Pm.Import.foldPath'（normalise + case-fold；第一方自审 R6）：此前
 -- 这里另抄一份只做 case-fold 的定义——与 25 轮 rawExts 同型的「同一知识两处」，
