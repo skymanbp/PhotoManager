@@ -24,9 +24,11 @@ import Pm.Commands (InitOpts (..), ScanCmd (..), runInit, runScanCmd)
 import Pm.Config (Config (..), loadConfig, writeConfig)
 import Pm.ConfigEdit (checkConfig, runConfigShow)
 import Pm.GitGuard (pmIgnoreGuard)
+import Pm.Catalog (saveCatalog)
 import Pm.SortSource (withSourceQ)
+import Pm.Status (IndexSummary (..), StatusOpts (..), StatusReport (..), statusReport)
 import Pm.Types (RootRole (..), blankPathArg, subpathOk)
-import TestUtil (captureStdout, mkMain, readUtf8, withEnv)
+import TestUtil (captureStdout, mkMain, readUtf8, scanQuiet, withEnv, writeF)
 
 cleanupTests :: TestTree
 cleanupTests =
@@ -36,6 +38,7 @@ cleanupTests =
     , testCase "#28 #73 §5.1「2 = 错误」：pm backup 找不到备份盘退 2（不是 1）；命令行用法错误退 2（parserInfo 设 failureCode 2）" caseErrorExitCodes
     , testCase "#41 #66 开头的 UTF-8 BOM：config.toml 照常载入（此前每条命令起不来）；.gitignore 首行 .pm/ 照常算覆盖；中间的 BOM 不认" caseLeadingBom
     , testCase "#14 #27 配置写口：并发数 / 掉线等待越界与非盘内相对的备份 subpath 由 checkConfig 统一拒（pm init --workers 0 不再写进配置）；发现侧对手编 subpath 说清原因" caseConfigSink
+    , testCase "#54 pm status 的暂存事件按 import 的同一套布局：Raw\\<年>\\<事件> 报事件不报年份；import 认不出的形状记「(无法识别)」、待修改不计" caseStagingEventLayout
     , testCase "#65 #84 命令行参数：日期只收十位 YYYY-MM-DD（26-09-01 不再是公元 26 年）；空路径参数不再落到当前目录（init / backup init / sort）" caseCliArgs
     ]
 
@@ -140,3 +143,20 @@ caseCliArgs = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   withSourceQ "" "missing" (\_ _ -> pure "listed") >>= (@?= ("missing" :: String))
   -- 空参数没在当前目录（测试进程的 cwd = 仓库根）留下任何 .pm
   listDirectory "." >>= \es -> assertBool "仓库根不应出现 .pm" (".pm" `notElem` es)
+
+-- | #54：stagingEventOf 此前按固定位置取第 3 个分量——年份布局把年份报成事件；直接放在 Raw\ 下的文件
+-- 不产生事件，status 不打暂存行，import 却报「无法识别」。
+caseStagingEventLayout :: Assertion
+caseStagingEventLayout = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  let root = dir </> "main"
+      cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+      st = "To-Be-Sync'd"
+  mkMain root
+  writeF (root </> st </> "Raw" </> "2026" </> "26-08-Hangzhou" </> "a.ARW") "A"
+  writeF (root </> st </> "Raw" </> "2026" </> "26-07-Wien" </> "b.ARW") "B"
+  writeF (root </> st </> "Raw" </> "x.ARW") "X"
+  writeF (root </> st </> "待修改" </> "y.jpg") "Y"
+  scanQuiet "main-rid" root >>= saveCatalog root
+  r <- statusReport cfg (StatusOpts True)
+  fmap isStagingEvents (srIndex r) @?= Just ["(无法识别)", "26-07-Wien", "26-08-Hangzhou"]
+  srExit r @?= 1

@@ -443,7 +443,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 476 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 477 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -509,7 +509,7 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm sort` | 子树列不出（ACL 拒）→ 提议/计划两形态都退出 **1** 并打「未能枚举」——不替没看过的目录担保；junction 跳过仍是 0 | B |
 | `pm trash list/empty` | manifest 整文件读不出（hardlink 占名等）→ **exit 2**、视图整体拒绝，不再显示「隔离区为空」（坏基准上 empty 会"无事可做"地成功） | A（三态加载器） |
 | `pm doctor` | 快照被拒（≠缺席）→ `CATALOG` **Bad** 行；`--deep` 无快照可深验 → `DEEP-SKIPPED` **Bad** + exit 1（此前静默跳过深验照报 0） | A |
-| `pm status` | 快照坏代回退 → ⚠ 行 + **exit 1**（`--cached` 只关掉新鲜度核对那一项；`--cached` 下 exit 1 共四个来源——快照坏代回退告警、暂存区尚有事件（含内容已全部归档、只打「冗余」不打 ⚠ 的那种）、备份缓存不可信、vault 缓存不可信（仅在配置了 vault 时）；不带 `--cached` 另有第五个：新鲜度核对 pending（新增/变更/消失/读取错误之和）> 0，见 `Pm.Status` 的退出码判定）；核对受阻（读取错误 >0）不打「✓ 索引与磁盘一致」 | A |
+| `pm status` | 快照坏代回退 → ⚠ 行 + **exit 1**（`--cached` 只关掉新鲜度核对那一项；`--cached` 下 exit 1 共四个来源——快照坏代回退告警、暂存区尚有事件（含内容已全部归档、只打「冗余」不打 ⚠ 的那种；事件归属按 import 的同一套布局 `Pm.Import.stagingEventDir`——`Raw\<年>\<事件>` 报事件不报年份，import 认不出的形状记「(无法识别)」照样计入，待修改不计，审计 #54）、备份缓存不可信、vault 缓存不可信（仅在配置了 vault 时）；不带 `--cached` 另有第五个：新鲜度核对 pending（新增/变更/消失/读取错误之和）> 0，见 `Pm.Status` 的退出码判定）；核对受阻（读取错误 >0）不打「✓ 索引与磁盘一致」 | A |
 | `pm backup` | 主库快照坏代 → ⚠「diff 基于较旧一代」；主库索引与盘面不一致 → **拒绝 exit 2** 指向 `pm scan`（mainFresh 闸）；「✓ 备份盘已与主库一致」只在零降级零差异时打（`backupVerdict` 判定表） | A |
 | `pm init --force` | 旧配置读不出 → 明说「未能保留」备份盘登记等字段（此前静默丢失还打 ✓）；整份新配置过 `checkConfig` 汇点 | A + G6 |
 | `pm config set` | `--X` 与 `--no-X` 同给 = 矛盾 → **exit 2**（此前解析器静默折成清空）；写入前整份配置过 `checkConfig`：主库/vault/备份盘两两不嵌套、备份登记成对、路径绝对、并发数 1..64、掉线等待 0..86400、备份 subpath 为盘内相对路径（不含盘符、不以分隔符开头、无 `.`/`..` 分量）——四条写路径（init / config set / POST config / backup init）同一汇点，且锁内按盘上最新配置复验（值域此前只在 checkPatch，`pm init --workers 0` 绕过：审计 #14；subpath 此前不验，手编成 `E:\Photography` 让每个卷都命中同一路径、认对的盘被报成整盘克隆：审计 #27——发现侧同一谓词拒并说清原因，`pm config` 对手编越界值标 ⚠，`pm scan` 拒用越界的配置并发数、不静默夹紧） | G6 |

@@ -32,7 +32,7 @@ import Text.Printf (printf)
 import Pm.Backup (BackupCacheMeta (..), readBackupCacheMeta)
 import Pm.Catalog (catalogMaybe, loadCatalog)
 import Pm.Config (Config (..))
-import Pm.Import (sameComp, stagingArchivedSummary, stagingTop)
+import Pm.Import (stagingArchivedSummary, stagingEventDir)
 import Pm.Scan (freshPending, freshnessSweep)
 import Pm.Types
 import Pm.Vault (VaultCacheMeta (..), readVaultCacheMeta)
@@ -136,7 +136,9 @@ statusReport cfg opts = do
           oldest = case verifTimes of
             [] -> Nothing
             ts -> Just (round (diffUTCTime now (minimum ts) / 86400) :: Integer)
-          stagingEvents = Set.toList . Set.fromList $ mapMaybe stagingEventOf (Map.keys (catEntries cat))
+          -- 审计 #54：事件归属按 import 的同一套布局（'Pm.Import.stagingEventDir'）；import 认不出的形状
+          -- 记作「(无法识别)」——照样出暂存行、计入退出码，与 pm import 报「无法识别」对得上
+          stagingEvents = Set.toList . Set.fromList $ [maybe "(无法识别)" id ev | Just ev <- map stagingEventDir (Map.keys (catEntries cat))]
           (nStaging, nArchived) = stagingArchivedSummary cat
       -- 备份盘（只读缓存，不探硬件 —— 拔盘状态下也能报，§9）
       -- P3b-15（十二轮 minor）：status 只读不写，没有配对写侧替它暴露失信——
@@ -274,12 +276,6 @@ topComponent :: FilePath -> String
 topComponent rel = case splitDirectories rel of
   (c : _ : _) -> c
   _ -> "(根)"
-
-stagingEventOf :: FilePath -> Maybe String
-stagingEventOf rel = case splitDirectories rel of
-  (top : sub : event : _ : _)
-    | sameComp top stagingTop && any (sameComp sub) ["Raw", "Processed"] -> Just event
-  _ -> Nothing
 
 gib :: Integer -> Double
 gib b = fromIntegral b / (1024 * 1024 * 1024)

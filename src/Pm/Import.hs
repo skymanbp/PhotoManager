@@ -26,6 +26,7 @@ module Pm.Import
   , planImport
   , importPlanItems
   , stagingArchivedSummary
+  , stagingEventDir
   ) where
 
 import Data.Char (isDigit, toLower)
@@ -89,7 +90,25 @@ route rel = case splitDirectories rel of
       (yr, canon) <- canonRawEvent event
       Just ("Raw" </> yr </> canon </> joinPath rest)
     _ -> Nothing
-  isYearDir s = length s == 4 && all isDigit s
+
+-- | 显式年份层（@Raw\\<年>\\<事件>@ 布局的中间那层）。
+isYearDir :: FilePath -> Bool
+isYearDir s = length s == 4 && all isDigit s
+
+-- | 暂存区条目属于哪个事件夹（盘上的名字；@pm status@ 的事件清单用）。与 'route' **同一套布局**
+-- （审计 #54：status 此前按固定位置取第 3 个分量，@Raw\\<年>\\<事件>@ 布局把年份报成事件、同一年的
+-- 事件全并成一个；直接放在 @Raw\\@ 下的文件不产生事件，status 不打暂存行、可退 0，import 却报无法识别）：
+-- Nothing = 不在暂存区或在待修改（不计）；@Just Nothing@ = import 认不出的形状（会报「无法识别」）；
+-- @Just (Just ev)@ = 事件夹名。
+stagingEventDir :: FilePath -> Maybe (Maybe String)
+stagingEventDir rel
+  | not (underLayers [stagingTop] rel) = Nothing
+  | otherwise = case (route rel, splitDirectories rel) of
+      (Left (), _) -> Nothing
+      (Right Nothing, _) -> Just Nothing
+      (Right (Just _), _ : sub : y : event : _ : _) | sameComp sub "Raw", isYearDir y -> Just (Just event)
+      (Right (Just _), _ : _ : event : _) -> Just (Just event)
+      _ -> Just Nothing
 
 planImport :: Catalog -> ImportReport
 planImport cat =
