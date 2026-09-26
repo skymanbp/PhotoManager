@@ -33,6 +33,7 @@ docDriftTests =
     , testCase "CSP 逐字：DESIGN-GUI 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）" caseCspQuoted
     , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链" caseGuiNoInlineStyle
     , testCase "750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）" caseLineBudget
+    , testCase "审计 #19：本套件读到的非源码文件（行预算清单 + tauri.conf.json）全部登记在 package.yaml extra-source-files" caseExtraSourceFiles
     , testCase "审计 #2：设置页数字项（并发数 / 掉线等待）留空点保存须拒绝并指向「恢复默认」，不得 Number(val( 直提成 0" caseGuiNumericSaveRefusesEmpty
     , testCase "审计 #1：整理页 AI 建议地点须在 await 之后按 sort 代号与概览对象守卫；请求在途时重扫不得放开按钮" caseGuiSortAiGenerationGuard
     , testCase "审计 #7：app/Main.hs 的 main 在进程起手设 SEM_FAILCRITICALERRORS（suppressCriticalErrorDialogs），不只备份发现那一条路" caseMainSuppressesCriticalDialogs
@@ -444,6 +445,13 @@ caseMainSuppressesCriticalDialogs = do
 -- .cabal）与第三方评审原件（docs/reviews/，证据不得修剪）不在清单里。
 caseLineBudget :: IO ()
 caseLineBudget = do
+  files <- budgetFiles
+  over <- concat <$> mapM (\f -> (\s -> [(f, n) | let n = length (lines s), n > 750]) <$> readUtf8 f) files
+  assertEqual "超过 750 行预算的手写文件（DESIGN §16）" [] over
+
+-- | 行预算扫描的文件清单——也是 'caseExtraSourceFiles' 核对 sdist 登记的底账（审计 #19）。
+budgetFiles :: IO [FilePath]
+budgetFiles = do
   ms <- srcModules
   dirs <-
     concat
@@ -457,11 +465,27 @@ caseLineBudget = do
         , ("scripts", [".py"])
         , ("cbits", [".c", ".h"])
         ]
-  let files = map snd ms <> dirs <> ["README.md", "README.zh.md"]
-  over <- concat <$> mapM (\f -> (\s -> [(f, n) | let n = length (lines s), n > 750]) <$> readUtf8 f) files
-  assertEqual "超过 750 行预算的手写文件（DESIGN §16）" [] over
+  pure (map snd ms <> dirs <> ["README.md", "README.zh.md"])
  where
   listWith (d, exts) = map (d </>) . sort . filter (\f -> any (`isSuffixOf` f) exts) <$> listDirectory d
+
+-- | 审计 #19：package.yaml 的 extra-source-files 自称登记本套件读的全部非源码文件（41 轮 #9），
+-- 后续轮次加读（HISTORY、行预算的目录扫描）没跟上，sdist 树里这些用例会找不到文件。改成机器
+-- 核对：行预算清单与 tauri.conf.json 里不属包源码（src/ app/ test/ 与 c-sources 的 .c）的
+-- 文件，都须被某条登记覆盖（精确路径，或 @dir/*.ext@ 形 glob，不跨子目录）。
+caseExtraSourceFiles :: IO ()
+caseExtraSourceFiles = do
+  pkg <- readUtf8 "package.yaml"
+  files <- budgetFiles
+  let slash = map (\c -> if c == '\\' then '/' else c)
+      ls = map (filter (/= '\r')) (lines pkg)
+      entries = map (drop 2) (takeWhile ("- " `isPrefixOf`) (drop 1 (dropWhile (/= "extra-source-files:") ls)))
+      covers f e = case break (== '*') e of
+        (pre, '*' : ext) -> pre `isPrefixOf` f && '/' `notElem` drop (length pre) f && ext `isSuffixOf` f
+        _ -> e == f
+      need = [f | f <- map slash (files <> ["gui/src-tauri/tauri.conf.json"]), not (any (`isPrefixOf` f) ["src/", "app/", "test/"]), not (".c" `isSuffixOf` f)]
+  assertBool "package.yaml 的 extra-source-files 段应能解析出条目" (not (null entries))
+  assertEqual "本套件读到、却没登记进 package.yaml extra-source-files 的文件" [] [f | f <- need, not (any (covers f) entries)]
 
 -- | @countsBefore suf s@：s 里所有「数字串 + suf」形态的数字。
 countsBefore :: String -> String -> [Int]

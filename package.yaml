@@ -7,14 +7,19 @@ language: GHC2021
 
 # 41 轮 GO-note #9：DocDriftTests 按仓库根相对路径读这些非源码文件——
 # 登记进 sdist，契约从「碰巧在」变成「声明在」。
+# 2026-09-25 审计 #19：后续轮次加读的（HISTORY、行预算扫描的整目录）没跟上登记；
+# 改按目录 glob 登记，DocDrift caseExtraSourceFiles 机器核对，新读口不登记即红。
 extra-source-files:
 - README.md
 - README.zh.md
-- docs/DESIGN.md
-- docs/DESIGN-COMMANDS.md
-- docs/DESIGN-GUI.md
-- gui/ui/index.html
+- docs/*.md
+- docs/specs/*.md
+- gui/ui/*.html
+- gui/ui/*.js
+- gui/ui/*.css
 - gui/src-tauri/tauri.conf.json
+- gui/src-tauri/src/*.rs
+- scripts/*.py
 
 ghc-options:
 - -Wall
