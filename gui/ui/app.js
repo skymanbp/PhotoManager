@@ -86,7 +86,13 @@
       const banner = $("#status-banner"); banner.className = "banner hidden"; banner.textContent = "";
       const steps = [];
       if (!s.index) {
-        banner.className = "banner warn"; banner.textContent = "主库尚未索引：" + s.root + "\n→ 在终端运行 pm scan（首次全量约 10–25 分钟）";
+        // 审计 #16：index 为空分两种——从没扫过（warnings 空）与索引读不出（可信闸拒 / 快照坏 / 身份缺，
+        // warnings 带原因）。后者此前也说「尚未索引 → pm scan」，真正的原因被丢掉。
+        if (s.warnings.length) {
+          banner.className = "banner bad"; banner.textContent = "主库索引读不出：" + s.root + "\n" + s.warnings.join("\n") + "\n→ 排除原因后重试，或在终端 pm scan 重建";
+        } else {
+          banner.className = "banner warn"; banner.textContent = "主库尚未索引：" + s.root + "\n→ 在终端运行 pm scan（首次全量约 10–25 分钟）";
+        }
         $("#layer-cards").innerHTML = ""; return;
       }
       const i = s.index;

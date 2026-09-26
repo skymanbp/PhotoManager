@@ -26,7 +26,8 @@ window.pmArchive = function (u) {
       const s = await getJson("/api/status");
       if (stale("archive", gen)) return;
       const i = s.index, st = $("#archive-staging");
-      if (!i) st.textContent = "主库尚未索引——先在终端 pm scan。";
+      // 审计 #16：索引读不出（warnings 带原因）≠ 尚未索引
+      if (!i) st.textContent = (s.warnings || []).length ? "主库索引读不出：" + s.warnings.join("；") + "——排除原因后重试" : "主库尚未索引——先在终端 pm scan。";
       else if (!i.stagingEvents.length) st.textContent = "暂存区没有待归档的事件夹。";
       else st.textContent = `暂存区 ${i.stagingEvents.length} 个事件夹 · ${i.stagingFiles} 文件（其中 ${i.stagingArchived} 已在归档层有同内容副本）：` + i.stagingEvents.slice(0, 12).join("、") + (i.stagingEvents.length > 12 ? " …" : "");
       const grid = $("#album-grid"); grid.innerHTML = "";
@@ -35,7 +36,10 @@ window.pmArchive = function (u) {
       let c;
       try { c = await getJson("/api/album/candidates"); } catch (e) {
         if (stale("archive", gen)) return;
-        grid.appendChild(el("div", "muted", "候选读不出来：" + e.message)); renderConvert([]); updateButtons(); return;
+        // 审计 #18：读不出 ≠ 没有——非 jpg 清单按「未知」渲染，上一轮留下的候选说明 / 已忽略清单 / 告警一并清掉
+        grid.appendChild(el("div", "muted", "候选读不出来：" + e.message));
+        $("#album-cand-meta").textContent = "候选读不出来"; renderIgnored([], []); $("#archive-warnings").textContent = "";
+        renderConvert(null); updateButtons(); return;
       }
       if (stale("archive", gen)) return;
       const total = c.events.reduce((n, ev) => n + ev.photos.length, 0);
@@ -132,6 +136,8 @@ window.pmArchive = function (u) {
   }
   function renderConvert(list) {
     const ul = $("#convert-list"); ul.innerHTML = "";
+    // list === null = 候选读不出来：清单未知，不是「没有」（审计 #18）
+    if (list === null) { $("#convert-meta").textContent = "候选读不出来，非 jpg 清单未知"; return; }
     $("#convert-meta").textContent = list.length ? `${list.length} 个非 jpg 照片（相册只收 jpg；RAW 不在此列）` : "成片 / 相册下没有非 jpg 照片";
     for (const x of list) {
       const li = el("li"), lab = el("label"), cb = document.createElement("input");
