@@ -195,7 +195,7 @@ caseIgnoreE2E = withAlbumRoot $ \root cfg -> do
         out <- unlines . reverse <$> readIORef ref
         pure (c, out)
   (c1, o1) <- runIg ["E1/a.jpg"] []
-  assertEqual o1 0 c1
+  assertEqual o1 (Right ()) c1
   doesFileExist (root </> ".pm" </> "album-ignore.json") >>= (@?= True)
   igs <- readIgnores root >>= either (\e -> assertFailure e >> pure []) pure
   ig0 <- one "忽略记录" igs
@@ -206,7 +206,7 @@ caseIgnoreE2E = withAlbumRoot $ \root cfg -> do
   map (enPath . fst) (acIgnored ac1) @?= ["成片" </> "E1" </> "a.jpg"]
   -- unignore 按 sha 恢复
   (c2, o2) <- runIg [] [T.unpack (aiSha ig0)]
-  assertEqual o2 0 c2
+  assertEqual o2 (Right ()) c2
   readIgnores root >>= either assertFailure (@?= [])
   let ac2 = albumCandidates Set.empty cat1
   map (length . snd) (acEvents ac2) @?= [2]

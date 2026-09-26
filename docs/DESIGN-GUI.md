@@ -60,7 +60,9 @@
   `POST /api/convert/plan`（P8-D，见下「归档页与 AI 建议」条）、
   `POST /api/album/ignore`（2026-08-31 用户裁定：忽略/取消候选，按内容 sha 写主库
   `.pm/album-ignore.json`——校验与 CLI `pm album ignore|unignore` 共用
-  `runAlbumIgnoreTo`，requireMain 预检 + 主库 root lock 事务，照片零改动）、
+  `runAlbumIgnoreTo`，requireMain 预检 + 主库 root lock 事务，照片零改动；没写成按类给状态码
+  `Pm.Album.IgnoreFail`——对象不合法 400、身份不符 / 尚未索引 / 清单读不出 404、锁被别的 pm 占着
+  409、写不进 403，与 hold / notes 的 `recordPost` 同口径，CLI 一律退 2；审计 #51：此前全答 400）、
   `POST /api/plan/delete {planId}` 与 `POST /api/plans/prune`（同批裁定：删除/一键清理
   计划文件——与 CLI `pm plan rm` / `pm plan prune` 共用 `deletePlanAnyRoot` /
   `prunePlans`，只删可再生成的 `.pm/plans` 文件，journal/undo/doctor 不受影响；delete 的状态码按

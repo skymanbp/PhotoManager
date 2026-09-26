@@ -443,7 +443,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 474 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 475 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -586,7 +586,7 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm plan [list]` | 新顶层子命令（缺省 = list）：列出主库/vault 的计划与**执行态**——已执行 / 部分执行 m/n / 未执行（+失败注记），从 journal 折叠（`Pm.Plan.planExecs`：普通 Done 计入、`~r` 组回滚复位剔除、`~d<N>` 位移不计、同序号重试成功抹失败）；计划文件本身**不回写**执行状态（§3：耐久层是 journal） | DESIGN-GUI §11 |
 | `pm plan rm <id>…` | 删除计划文件：id 格式闸 → 可信闸 → 完整路径受信解析 → 句柄式删除（与 `loadPlan`/`savePlan` 删旧同规格）；删的是可再生成的文件，journal/undo/doctor 零影响；主库 → vault 按序查找，存在性走三态探针 `probeName`（查不出 ≠ 没有）；各根都没删成时**有真失败报真失败**（带根名），全是「没有」才报不存在（审计 #44：此前只留最后一个根的原因，主库删不掉被 vault 的「计划不存在」盖住） | — |
 | `pm plan prune` | 一键清理**已执行**（`planExecuted` 保守判据：至少一个待执行项、待执行项全部 Done、无待裁决残余）；从未执行的草稿与带裁决残余的计划不动（prune 不替用户裁决，删它们走显式 `pm plan rm`）；journal 读不出的根一份不删（fail-closed）。1.1.3 起失效草稿也清、journal 有告警的根整根不删（见下节） | — |
-| `pm album ignore <事件夹>/<文件名>…` / `pm album unignore <路径\|sha>…` | 新子命令：按**内容 sha** 忽略/恢复候选（改名/挪事件夹后忽略仍生效；重新导出=新字节会重新出现——正是要的语义）；写主库 `.pm/album-ignore.json`（`requireMain` 预检 + 主库 root lock 事务，照片零改动）；忽略对象必须是当前候选、错误一次列完 exit 2；unignore 收 64 位 sha、当前路径或记录存档路径（对象已删也能清） | — |
+| `pm album ignore <事件夹>/<文件名>…` / `pm album unignore <路径\|sha>…` | 新子命令：按**内容 sha** 忽略/恢复候选（改名/挪事件夹后忽略仍生效；重新导出=新字节会重新出现——正是要的语义）；写主库 `.pm/album-ignore.json`（`requireMain` 预检 + 主库 root lock 事务，照片零改动）；忽略对象必须是当前候选、错误一次列完 exit 2（没写成的四类——对象不合法 / 库状态不符 / 锁被占 / 写不进——CLI 都是 2，API 分 400 / 404 / 409 / 403，审计 #51）；unignore 收 64 位 sha、当前路径或记录存档路径（对象已删也能清） | — |
 | `pm album candidates` | 输出加「已忽略 N 张」清单与失效记录提示（对象已不在候选——只提示不自动清）；过滤在 `albumCandidates` 一个谓词上游完成，CLI 与 GUI 归档页同源 | — |
 | `pm serve` | `--writable` 写端点九个 → **十二个**（忽略/计划删除/一键清理）；`GET /api/plans` 加 done / failed / executed / lastRunAt；`GET /api/album/candidates` 加 ignored / ignoreStale；端点清单与形状见 DESIGN-GUI §11（路由哨兵 `caseRouteRoster` 盯守） | DESIGN-GUI §11 |
 

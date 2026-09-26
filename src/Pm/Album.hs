@@ -40,6 +40,7 @@ module Pm.Album
   , splitIgnores
   , runAlbumIgnore
   , runAlbumIgnoreTo
+  , IgnoreFail (..)
   ) where
 
 import Control.Monad (forM, forM_)
@@ -391,22 +392,31 @@ ignoreRequest cat olds addRels delToks now
       <> ["同一内容不能同时忽略与取消: " <> T.unpack s | s <- addShas, s `elem` delShas]
   adds = [AlbumIgnore (enSha e) (enPath e) now | e <- okAdds]
 
+-- | 忽略清单事务没写成的类（审计 #51，与 'Pm.VaultCmd.withVaultTxn' / @recordPost@ 同一分类）：
+-- 此前一律退 2，API 全答 400——锁被占（暂态，该 409）与请求本身不合法分不开。CLI 一律折成 2。
+data IgnoreFail
+  = IgnoreBadRequest -- ^ 对象不合法（解析 / 不是当前候选 / 同时忽略又取消）→ 400
+  | IgnoreStateMissing -- ^ 主库身份不符、尚未索引、清单读不出 → 404
+  | IgnoreLockBusy -- ^ 主库 .pm/lock 被别的 pm 占着 → 409
+  | IgnoreUnwritable -- ^ 清单写不进主库 .pm → 403
+  deriving (Show, Eq)
+
 -- | 忽略清单的「读 → 校验 → 写」是跨进程事务（I10——CLI 与 GUI 的 serve 并发
 -- 读改写会丢更新，同 'Pm.VaultCmd.withVaultTxn' 的理由；这里不需要 vault 六态，
 -- 不跑 computeVault）。取锁前 'requireMain' 零写入预检；实体级 resolveUnder
 -- 不做——这里只写 @.pm@ 记录、不动任何照片字节，catalog 成员资格即足够判据。
-runAlbumIgnoreTo :: (String -> IO ()) -> [String] -> [String] -> Config -> IO Int
+runAlbumIgnoreTo :: (String -> IO ()) -> [String] -> [String] -> Config -> IO (Either IgnoreFail ())
 runAlbumIgnoreTo sink addArgs delToks cfg
-  | not (null perrs) = mapM_ (sink . ("  ✗ " <>)) perrs >> pure 2
+  | not (null perrs) = mapM_ (sink . ("  ✗ " <>)) perrs >> pure (Left IgnoreBadRequest)
   | otherwise = do
       pre <- requireMain cfg
       case pre of
-        Left m -> sink m >> pure 2
+        Left m -> sink m >> pure (Left IgnoreStateMissing)
         Right _ -> do
           m <- withRootLock root txn
           case m of
-            Nothing -> sink "另一个 pm 正在写主库（.pm/lock 被占用）——稍后重试" >> pure 2
-            Just code -> pure code
+            Nothing -> sink "另一个 pm 正在写主库（.pm/lock 被占用）——稍后重试" >> pure (Left IgnoreLockBusy)
+            Just r -> pure r
  where
   root = cfgMainPath cfg
   parsed = map parseProcessedRel addArgs
@@ -415,30 +425,32 @@ runAlbumIgnoreTo sink addArgs delToks cfg
   txn = do
     lc <- loadCatalog root
     case catalogOr "主库尚未索引 → 先 pm scan" lc of
-      Left m -> sink m >> pure 2
+      Left m -> sink m >> pure (Left IgnoreStateMissing)
       Right (cat, warns) -> do
         mapM_ (\w -> sink ("⚠ 快照损坏已跳过: " <> w)) warns
         eo <- readIgnores root
         case eo of
-          Left m -> sink m >> pure 2
+          Left m -> sink m >> pure (Left IgnoreStateMissing)
           Right olds -> do
             now <- getCurrentTime
             case ignoreRequest cat olds rels delToks now of
-              Left errs -> mapM_ (sink . ("  ✗ " <>)) errs >> pure 2
+              Left errs -> mapM_ (sink . ("  ✗ " <>)) errs >> pure (Left IgnoreBadRequest)
               Right kept -> do
                 w <- writeIgnores root kept
                 case w of
-                  Left m -> sink m >> pure 2
+                  Left m -> sink m >> pure (Left IgnoreUnwritable)
                   Right () -> do
                     sink
                       ( "✓ 忽略 " <> show (length rels) <> " · 取消 " <> show (length delToks)
                           <> "（清单现共 " <> show (length kept) <> " 条）"
                       )
                     sink "  只是主库 .pm 里的一条本地决定——照片零改动，pm album unignore 随时恢复。"
-                    pure 0
+                    pure (Right ())
 
 -- | @pm album ignore|unignore <事件夹\/文件名|sha>…@ 的 CLI 渲染层。
 runAlbumIgnore :: Bool -> [String] -> Config -> IO Int
-runAlbumIgnore doIgnore args cfg
-  | doIgnore = runAlbumIgnoreTo putStrLn args [] cfg
-  | otherwise = runAlbumIgnoreTo putStrLn [] args cfg
+runAlbumIgnore doIgnore args cfg = either (const 2) (const 0) <$> run
+ where
+  run
+    | doIgnore = runAlbumIgnoreTo putStrLn args [] cfg
+    | otherwise = runAlbumIgnoreTo putStrLn [] args cfg

@@ -38,7 +38,7 @@ import Pm.Subprocess (ToolOutcome (..), runTool)
 import ServeTests (arrLen, decodeBody, field, fixture, getReq, liftIO', mkCfg, mkEnv, mkEnvW, postReq, seedSortSrc, tok)
 import SortTests (photoAt)
 import System.Timeout (timeout)
-import TestUtil (mkMain, scanQuiet, withEnv, writeF)
+import TestUtil (mkMain, scanQuiet, withEnv, withForeignLock, writeF)
 
 serveP8Tests :: TestTree
 serveP8Tests =
@@ -47,6 +47,7 @@ serveP8Tests =
     [ testCase "POST /api/import/plan：只读 403 且 .pm/plans 不出现；alsoAlbum → 相册项进计划、log 有「相册 +1」" caseImportPlan
     , testCase "GET /api/album/candidates + POST /api/album/add-plan：候选按事件夹（rel 可回传）、非 jpg 单列；坏路径 code 2 / planId null / log 交代；合法 → 计划可装回、相册未动" caseCandidatesAndAddPlan
     , testCase "POST /api/album/ignore：只读 403；忽略 → candidates 压进 ignored、.pm/album-ignore.json 落盘；unignore 按 sha 恢复；坏对象 400 details" caseIgnoreEndpoint
+    , testCase "#51 POST /api/album/ignore：主库锁被别的 pm 占着 → 409（与 hold / notes 同口径，不是 400）、清单不落盘；尚未索引 → 404" caseIgnoreLockBusy
     , testCase "GET /api/plans 执行态字段（done/executed）+ POST /api/plan/delete（只读 403 / 404 / 真删）+ /api/plans/prune（无已执行 → deleted 空）" casePlanEndpoints
     , testCase "POST /api/convert/plan：只读 403 且 .pm/derived 不出现；真 Pillow 转换 → 派生件落 .pm/derived、计划两项同组；坏源 code 2 不出计划" caseConvertPlan
     , testCase "POST /api/suggest classify：只读级放行；预置回答规范化（未请求的名字丢弃、坐标规范）；400 五种；413；502 垃圾/退出非零/is_error；409 缺 claude/超时/并发；.pm 零写入" caseSuggestClassify
@@ -466,3 +467,15 @@ caseSuggestIsolation = withSystemTempDirectory "pm-serve-ai-iso" $ \tmp -> do
   -- 中立目录就是 neutralCwd 给的那个（存在、在系统临时目录下）
   d <- neutralCwd
   doesDirectoryExist d >>= (@?= True)
+
+-- | #51：runAlbumIgnoreTo 此前把一切没写成都折成 2 → 400；锁被占是暂态（409），与 recordPost 的两个记录端点同口径。
+caseIgnoreLockBusy :: IO ()
+caseIgnoreLockBusy = withLib $ \root cfg -> do
+  writeF (root </> "成片" </> "E1" </> "a.jpg") "AAA"
+  envW <- mkEnvW cfg
+  flip runSession (serveApp envW) $ postReq "/api/album/ignore" "{\"ignore\":[\"E1/a.jpg\"]}" >>= assertStatus 404
+  index root
+  withForeignLock root $
+    flip runSession (serveApp envW) $ postReq "/api/album/ignore" "{\"ignore\":[\"E1/a.jpg\"]}" >>= assertStatus 409
+  doesFileExist (root </> ".pm" </> "album-ignore.json") >>= (@?= False)
+  flip runSession (serveApp envW) $ postReq "/api/album/ignore" "{\"ignore\":[\"E1/a.jpg\"]}" >>= assertStatus 200

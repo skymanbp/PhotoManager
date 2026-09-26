@@ -22,7 +22,7 @@ import Network.HTTP.Types
 import Network.Wai
 import System.FilePath (joinPath, splitDirectories, takeFileName)
 
-import Pm.Album (AlbumCandidates (..), AlbumIgnore (..), albumCandidates, readIgnores, runAlbumAddTo, runAlbumIgnoreTo, splitIgnores)
+import Pm.Album (AlbumCandidates (..), AlbumIgnore (..), IgnoreFail (..), albumCandidates, readIgnores, runAlbumAddTo, runAlbumIgnoreTo, splitIgnores)
 import Pm.Catalog (catalogOr, loadCatalog)
 import Pm.Cli (GoOpts (..))
 import Pm.Commands (runImportTo)
@@ -66,12 +66,13 @@ routeAlbum cfg env req jsonR err = case (requestMethod req, pathInfo req) of
     | not (seWritable env) -> Just (err status403 "serve 以只读启动（无 --writable），拒绝写入忽略清单")
     | otherwise -> Just $ withJsonBody req err $ \(IgnoreReq is us) -> withMVar (seVaultLock env) $ \_ -> do
         logRef <- newIORef []
-        r <- try (runAlbumIgnoreTo (\l -> modifyIORef' logRef (l :)) is us cfg) :: IO (Either IOException Int)
+        r <- try (runAlbumIgnoreTo (\l -> modifyIORef' logRef (l :)) is us cfg) :: IO (Either IOException (Either IgnoreFail ()))
         logs <- reverse <$> readIORef logRef
         case r of
           Left ex -> jsonR status500 [] (object ["error" .= ("写入忽略清单中断: " <> show ex), "log" .= logs])
-          Right 0 -> jsonR status200 [] (object ["ok" .= True, "log" .= logs])
-          Right _ -> jsonR status400 [] (object ["error" .= ("忽略清单未写入" :: String), "details" .= logs])
+          Right (Right ()) -> jsonR status200 [] (object ["ok" .= True, "log" .= logs])
+          -- 审计 #51：按类给状态码（与 hold / notes 的 recordPost 同口径）——锁被占是 409 暂态，不是 400
+          Right (Left f) -> jsonR (ignoreStatus f) [] (object ["error" .= ("忽略清单未写入" :: String), "details" .= logs])
   -- 成片 → 相册 计划：paths 是相对成片层的 <事件夹>/<文件名>（'parseProcessedRel' 闸）。
   ("POST", ["api", "album", "add-plan"]) ->
     Just $ planPost env req jsonR err "生成相册计划" $ \(PathsReq ps) -> Right (\sink -> runAlbumAddTo sink noGo ps cfg)
@@ -189,3 +190,10 @@ data ConvertReq = ConvertReq [String] Bool
 instance Aeson.FromJSON ConvertReq where
   parseJSON = Aeson.withObject "convert-plan" $ \o ->
     ConvertReq <$> o Aeson..: "paths" <*> (fromMaybe False <$> o Aeson..:? "alsoAlbum")
+
+-- | 忽略清单没写成的类 → 状态码（审计 #51）。
+ignoreStatus :: IgnoreFail -> Status
+ignoreStatus IgnoreBadRequest = status400
+ignoreStatus IgnoreStateMissing = status404
+ignoreStatus IgnoreLockBusy = status409
+ignoreStatus IgnoreUnwritable = status403
