@@ -65,6 +65,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory
   ( XdgDirectory (XdgConfig)
+  , canonicalizePath
   , createDirectoryIfMissing
   , doesDirectoryExist
   , doesFileExist
@@ -108,16 +109,23 @@ import Pm.Win
 -- 相对 → 绝对）。P6-C 起 'writeConfig' 的落位走 'Pm.Win.rawBoundTo' 的句柄
 -- 后验，比较基准是 GetFinalPathNameByHandleW 的反斜杠规范形——`D:/…` 拼写或
 -- 相对路径原样传下去会被当成「句柄绑定的不是这条路径」拒绝，且首次失败残留的
--- @.tmp@ 会卡死后续所有配置写。这里是全部提交路里唯一不经 canonicalize 的
--- 路径入口，归一在源头做一次，别处不再各自兜。
+-- @.tmp@ 会卡死后续所有配置写。
+--
+-- 2026-09-25 审计 #4：makeAbsolute 看不见 junction / SUBST / 8.3 短名——%APPDATA%
+-- 或 PM_CONFIG 途经它们时，'withConfigLock' 的 'Pm.Win.openBoundTo' 后验同样对不上
+-- 规范形，userError 不是 EBUSY、被原样重抛：pm init / config set / backup init 崩
+-- （报文还把用户自己的目录说成别名攻击），读照常。归一改为 'canonicalizePath'
+-- （存在的最长前缀按 GetFinalPathNameByHandle 解析，尚不存在的 config.toml 照常
+-- 拼上；锁 / tmp / 正文三个名字都从这一个结果派生，形态一致）。解析失败（非法
+-- 字符、盘不可达）退回 makeAbsolute 形态：不比此前更差，写侧照旧由句柄后验拒绝。
+-- 这里是全部提交路里唯一不经 canonicalize 的路径入口，归一在源头做一次，别处不再各自兜。
 configFilePath :: IO FilePath
 configFilePath = do
   mo <- lookupEnv "PM_CONFIG"
-  case mo of
+  raw <- case mo of
     Just p | not (null p) -> makeAbsolute p
-    _ -> do
-      dir <- getXdgDirectory XdgConfig "pm"
-      pure (dir </> "config.toml")
+    _ -> (</> "config.toml") <$> getXdgDirectory XdgConfig "pm"
+  either (\(_ :: IOException) -> raw) id <$> try (canonicalizePath raw)
 
 -- | 配置载入三态（工作流 F010/F077）：「不存在」与「读不出」此前同为 Left，
 -- 'Pm.Commands.runInit' 再把 Left 压回 Nothing——两次有损折叠，正好落在唯一
