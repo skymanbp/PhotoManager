@@ -34,6 +34,7 @@ docDriftTests =
     , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链" caseGuiNoInlineStyle
     , testCase "750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）" caseLineBudget
     , testCase "审计 #2：设置页数字项（并发数 / 掉线等待）留空点保存须拒绝并指向「恢复默认」，不得 Number(val( 直提成 0" caseGuiNumericSaveRefusesEmpty
+    , testCase "审计 #1：整理页 AI 建议地点须在 await 之后按 sort 代号与概览对象守卫；请求在途时重扫不得放开按钮" caseGuiSortAiGenerationGuard
     , testCase "死名清扫：opRelPaths / isPng / stemKey / jpegExt 不再出现在 src/app" caseNoDeadNames
     , testCase "Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记" caseHaddockMarkerHygiene
     , testCase "讹传清扫：被否证的机制解释（F048 列表脊、46 轮 openBoundTo 共享模式）不再出现在 src/app/test" caseFolkloreNotInTests
@@ -403,6 +404,24 @@ caseGuiNumericSaveRefusesEmpty = do
   assertEqual "并发数 / 掉线等待各恰一个保存处理器" 2 (length handlers)
   assertBool ("两个数字保存处理器都须经 numOrRefuse: " <> show handlers) (all ("numOrRefuse" `isInfixOf`) handlers)
   assertBool "app.js 不得再 Number(val( 直提（留空 → 0）" (not ("Number(val(" `isInfixOf` js))
+
+-- | 2026-09-25 审计 #1（medium）：@sortAiPlaces@ 的 await 之后此前不看代际——AI 看图期间
+-- 用户重新扫描（可能换了源目录），renderSurvey 重建 segInputs，晚到的响应按段号写进**新**
+-- 概览的空输入框：上一张卡的地点填进另一张卡，再点「生成计划」就是错名的事件夹。处理器
+-- 须在 @await post(@ 之后同时按 sort 代号（@stale("sort", gen)@）与概览对象
+-- （@lastSurvey !== survey@）守卫——与 loadStatus / sortScan 的 stamp/stale 纪律同源。
+-- 同根的第二形态：renderSurvey 按分段数重置按钮，请求在途时重扫会把它放开、可并发第二发
+-- （先回的那发 finally 再把按钮文案复位，后一发的文案卡死）——须按 @aiBusy@ 门控。
+caseGuiSortAiGenerationGuard :: IO ()
+caseGuiSortAiGenerationGuard = do
+  js <- readUtf8 ("gui" </> "ui" </> "app.js")
+  let fn = maybe "" (T.unpack . fst . T.breakOn (T.pack "async function sortScan") . T.pack) (breakOn "async function sortAiPlaces" js)
+      afterAwait = maybe "" id (breakOn "await post(" fn)
+  assertBool "sortAiPlaces 里应有 await post(" (not (null afterAwait))
+  mapM_
+    (\g -> assertBool ("sortAiPlaces 的 await 之后须守卫 " <> g) (g `isInfixOf` afterAwait))
+    ["stale(\"sort\", gen)", "lastSurvey !== survey"]
+  assertBool "renderSurvey 不得在 AI 请求在途时放开「AI 建议地点」按钮" ("disabled = aiBusy ||" `isInfixOf` js)
 
 -- | 750 行硬预算（DESIGN §16）：此前只是评审期约定、零自动化——P8-A 拆分三个
 -- 触顶文件（Serve.hs / app.js / DESIGN.md）时写成哨兵，CI 的 `stack test` 顺带

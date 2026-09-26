@@ -503,6 +503,7 @@
   // 不碰照片）。页面**不**执行任何计划——那是计划页/终端的事。
   let lastSurvey = null;
   const segInputs = new Map(); // index -> { place, hint }：AI 建议地点（P8-D）回填用
+  let aiBusy = false; // AI 请求在途：renderSurvey 不得把按钮重新放开（否则重扫后可并发第二发，审计 #1）
   function sortNote(kind, text) {
     const b = $("#sort-result"); b.className = "banner " + kind; b.textContent = text;
   }
@@ -512,10 +513,16 @@
   async function sortAiPlaces() {
     if (!lastSurvey || !lastSurvey.segments.length) { sortNote("warn", "先扫描并分段，再让 AI 建议地点"); return; }
     const btn = $("#btn-sort-ai"), label = btn.textContent;
-    btn.disabled = true; btn.textContent = "AI 看图中…（claude -p，最长 3 分钟）";
+    btn.disabled = true; btn.textContent = "AI 看图中…（claude -p，最长 3 分钟）"; aiBusy = true;
+    // 代际守卫（2026-09-25 审计 #1）：AI 看图期间用户再扫描（可能换了源目录），renderSurvey
+    // 会重建 segInputs，晚到的响应按段号写进**新**概览的空输入框——上一张卡的地点填进另一
+    // 张卡，再点「生成计划」就是错名的事件夹。捕获本次的概览对象与 sort 代号，await 之后
+    // 任一变了就整批丢弃并说明（同 loadStatus / sortScan 的 stamp/stale 纪律）。
+    const survey = lastSurvey, gen = gens.sort;
     try {
-      const r = await post("/api/suggest", { kind: "place", src: lastSurvey.src, gap: lastSurvey.gapHours });
+      const r = await post("/api/suggest", { kind: "place", src: survey.src, gap: survey.gapHours });
       const j = await r.json().catch(() => ({}));
+      if (stale("sort", gen) || lastSurvey !== survey) { sortNote("warn", "AI 看图期间重新扫描过：这批建议对应上一次的分段，已丢弃——需要就再点一次「AI 建议地点」"); return; }
       if (!r.ok) { sortNote("bad", "AI 建议失败：" + (j.error || ("HTTP " + r.status)) + bodyLines(j) + (j.raw ? "\n模型原文：" + j.raw : "")); return; }
       let filled = 0;
       for (const s of j.segments || []) {
@@ -525,7 +532,7 @@
       }
       sortNote("ok", `AI 建议已到：预填 ${filled} 段的地点（<…?> 是把握低的占位，请改）。看清每段再点「生成计划」。` + (j.cost != null ? `\n本次约 $${Number(j.cost).toFixed(2)}（你的 Claude 账号）。` : ""));
     } catch (e) { sortNote("bad", "请求失败：" + e.message); }
-    finally { btn.disabled = false; btn.textContent = label; }
+    finally { aiBusy = false; btn.disabled = false; btn.textContent = label; }
   }
   async function sortScan() {
     const src = $("#sort-src").value.trim();
@@ -555,7 +562,7 @@
       ` · 候选分段 ${sv.segments.length}（间隔 > ${sv.gapHours} 小时切一刀）· 侧车 ${sv.sidecars} 个`;
     const box = $("#sort-segments"); box.innerHTML = "";
     segInputs.clear();
-    $("#btn-sort-ai").disabled = !sv.segments.length;
+    $("#btn-sort-ai").disabled = aiBusy || !sv.segments.length;
     if (!sv.segments.length) { box.appendChild(el("div", "muted", "没有可定时的照片——下面列出的每一类都不会被归位。")); }
     for (const g of sv.segments) {
       // 类名是 sort-seg 不是 seg：分类推送页的类目按钮行也叫 .seg，两套规则
