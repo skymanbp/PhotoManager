@@ -21,7 +21,7 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
 > 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
 > 为准，不在这里手抄**），凡有可观测自动化落点的闸都配"删掉它就转红"的突变
-> 验证用例（482 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
+> 验证用例（483 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
 > 性观察点）在 REVIEW-LOG 登记为残余，不冒充覆盖。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
@@ -278,7 +278,7 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 | 增量扫描（4633 文件，复用 4633 / 待 hash 0，workers=16） | 1.58 s | `pm scan` 2026-09-02，1.1.1 上实测，[release-notes/v1.1.1](docs/release-notes/v1.1.1.md) |
 | hash 吞吐（122 个 ARW 共 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26——1.1.1 之前「未来 mtime 每次重 hash」的那批，修后不再发生 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（482 例，整套序列化跑——进程级 stdout 重定向所需） | 10–90 s | `stack test` |
+| 测试套件（483 例，整套序列化跑——进程级 stdout 重定向所需） | 10–90 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
 | 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | 突变验证 | 凡有可观测自动化落点的承重闸各配一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过；无落点者登记为残余） | REVIEW-LOG 各轮收敛证据 |
@@ -334,7 +334,7 @@ RUSTFLAGS="--remap-path-prefix=$USERPROFILE=~" \
 # → target/x86_64-pc-windows-msvc/release/bundle/nsis/pm-ui_<版本>_x64-setup.exe
 
 # 发布前：二进制脱敏扫描（用户目录 / %APPDATA% 段 / 仓库路径，UTF-8 与 UTF-16 两种
-# 编码；模式全部运行期从环境派生；任一命中即退出 1）。0.6.0 起纳入发布链。
+# 编码；模式全部运行期从环境派生；任一命中即退出 1，用法错或文件读不到退出 2）。0.6.0 起纳入发布链。
 V=$(awk '/^version:/{print $2}' ../../package.yaml)   # 版本单一真源，别手抄
 python ../../scripts/leakscan.py binaries/pm-x86_64-pc-windows-msvc.exe \
   target/x86_64-pc-windows-msvc/release/pm-ui.exe \

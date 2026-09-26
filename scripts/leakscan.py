@@ -4,7 +4,9 @@
 用法：python scripts/leakscan.py <file>...  [--extra PAT ...]
       环境变量 PM_LEAK_PATTERNS="a;b;c" 追加本地才知道的模式（如档案 vault 目录名，
       这些名字本身就不该进公开仓，所以不写在这里）。
-任一命中 → 退出码 1；每文件打印每模式的 utf8/utf16 命中数。
+任一命中 → 退出码 1；每文件打印每模式的 utf8/utf16 命中数。用法错（--extra 缺值或给空串、没给
+文件）或有文件读不到（且无命中）→ 2——与命中 1、干净 0 分得开（审计 #21：此前 --extra 放在最后抛
+未捕获的 StopIteration 退 1、与命中同码；没给文件答「干净」0；空串模式处处「命中」）。
 
 模式全部在运行期从环境派生（用户目录名、%APPDATA%/%LOCALAPPDATA% 相对用户目录的
 段、本仓库绝对路径及其父目录），文件里不出现任何本机字面量。
@@ -48,19 +50,36 @@ def derived_patterns():
     return sorted(p for p in pats if len(p) >= 4)
 
 
+def usage(why):
+    line = next(l for l in __doc__.splitlines() if l.startswith("用法"))
+    sys.stderr.write("leakscan: %s\n%s\n" % (why, line))
+    return 2
+
+
 def main(argv):
     files, extra = [], []
     it = iter(argv)
     for a in it:
         if a == "--extra":
-            extra.append(next(it))
+            v = next(it, None)
+            if not v:
+                return usage("--extra 后面要跟一个非空模式")
+            extra.append(v)
         else:
             files.append(a)
+    if not files:
+        return usage("没给要扫的文件")
     pats = derived_patterns() + extra
-    bad = 0
+    bad = unreadable = 0
     out = sys.stdout.buffer
     for fp in files:
-        data = open(fp, "rb").read()
+        try:
+            with open(fp, "rb") as f:
+                data = f.read()
+        except OSError as ex:
+            unreadable += 1
+            out.write(("%s: 读不到 (%s)\n" % (fp, ex)).encode("utf-8", "replace"))
+            continue
         rows = []
         for p in pats:
             n8 = data.count(p.encode("utf-8"))
@@ -70,8 +89,9 @@ def main(argv):
                 bad += n8 + n16
         line = "%s (%d bytes): %s" % (fp, len(data), "; ".join(rows) if rows else "clean")
         out.write((line + "\n").encode("utf-8", "replace"))
-    out.write(("patterns=%d total hits=%d\n" % (len(pats), bad)).encode("utf-8"))
-    return 1 if bad else 0
+    tail = " unreadable=%d" % unreadable if unreadable else ""
+    out.write(("patterns=%d total hits=%d%s\n" % (len(pats), bad, tail)).encode("utf-8"))
+    return 1 if bad else 2 if unreadable else 0
 
 
 if __name__ == "__main__":

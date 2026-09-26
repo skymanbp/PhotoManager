@@ -32,6 +32,7 @@ scriptTests =
     "scripts/ 辅助脚本"
     [ testCase "#20 #23 核验途中盘没回来：已核出的结果照写 --out、没读到的记进 bad、退出码 3；隔离件的「不在」只在盘在时算，盘不在记「没核」而不是 0/N" caseDriveGaveUp
     , testCase "#22 verify_backup_dst 只核 pending 条目：pm resolve 跳过 / 待裁决的 copy 与隔离件 Exec 不执行，不再被报成缺失" casePendingOnly
+    , testCase "#21 leakscan 用法错与读不到退 2（与命中 1、干净 0 分得开）：--extra 在末尾 / 给空串、没给文件、文件不存在；命中优先" caseLeakscanUsage
     ]
 
 -- | 跑 python（参数原样）；stdout 与 stderr 合写进 @dir\/py.log@，返回 (退出码, 日志)。
@@ -137,3 +138,28 @@ casePendingOnly = withSystemTempDirectory "pm-script" $ \dir -> do
   assertBool ("须交代跳过了几条\n" <> log') ("skip 3 items not pending" `isInfixOf` log')
   assertBool ("隔离件只数 pending 的那一条\n" <> log') ("TRASH victims present 1/1" `isInfixOf` log')
   assertEqual ("退出码（只核 pending：全部一致 = 0）\n" <> log') 0 code
+
+-- | #21：@--extra@ 放在最后此前抛未捕获的 StopIteration（退出 1，与「命中」同码）；没给文件答「干净」0；
+-- @--extra ""@ 的空模式处处「命中」。现在用法错与读不到的文件一律 2，命中（1）优先于读不到。
+caseLeakscanUsage :: Assertion
+caseLeakscanUsage = withSystemTempDirectory "pm-script" $ \dir -> do
+  let clean = dir </> "clean.bin"
+      hit = dir </> "hit.bin"
+      missing = dir </> "missing.bin"
+  writeF clean "nothing to see"
+  writeF hit "xx-QQLEAKQQ-xx"
+  scanner <- makeAbsolute ("scripts" </> "leakscan.py")
+  let expect args want = do
+        (c, log') <- runPy dir (scanner : args)
+        assertEqual (unwords args <> "\n" <> log') want c
+        pure log'
+  usage <- expect [clean, "--extra"] 2
+  assertBool ("用法错须给出用法行\n" <> usage) ("leakscan.py" `isInfixOf` usage)
+  _ <- expect [clean, "--extra", ""] 2
+  _ <- expect [] 2
+  _ <- expect ["--extra", "QQLEAKQQ"] 2
+  _ <- expect [missing] 2
+  _ <- expect [clean, "--extra", "QQLEAKQQ"] 0
+  _ <- expect [hit, "--extra", "QQLEAKQQ"] 1
+  _ <- expect [missing, hit, "--extra", "QQLEAKQQ"] 1
+  pure ()
