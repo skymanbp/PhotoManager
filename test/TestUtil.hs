@@ -39,12 +39,19 @@ module TestUtil
   , disableBackupPrivileges
   , setForeignReparse
   , setOffline
+  , readUtf8
+  , grepSrc
   ) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, bracket_, finally, throwIO, try)
 import Control.Monad (forM_, void, when)
 import Data.Bits ((.|.))
+import qualified Data.ByteString as BS
+import Data.Char (isSpace)
+import Data.List (isPrefixOf, isSuffixOf)
+import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Encoding.Error as TEE
 import Data.Word (Word32)
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr)
@@ -55,7 +62,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime (..), addUTCTime, fromGregorian, getCurrentTime)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, setModificationTime)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, setModificationTime)
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO (IOMode (..), hClose, hFlush, hGetContents, hSetEncoding, openFile, stdout, utf8)
 import System.IO.Temp (withSystemTempDirectory)
@@ -387,3 +394,16 @@ withForeignLock root act = do
   void . forkIO . void $ withRootLock root (putMVar gotLock () >> takeMVar release)
   takeMVar gotLock
   act `finally` putMVar release ()
+
+-- | 以 UTF-8 读源码 / 文档（宽松解码）：源码哨兵用。
+readUtf8 :: FilePath -> IO String
+readUtf8 fp = T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile fp
+
+-- | 源码哨兵：扫 @app/Main.hs@ 与 @src/Pm/*.hs@ 的**代码行**（跳过 @--@ 注释行），返回满足谓词的
+-- 行（「文件:行号: 内容」）。哨兵断言它为空，钉住一类写法不再出现。
+grepSrc :: (String -> Bool) -> IO [String]
+grepSrc keep = do
+  fs <- filter (".hs" `isSuffixOf`) <$> listDirectory ("src" </> "Pm")
+  let paths = ("app" </> "Main.hs") : [("src" </> "Pm" </> f) | f <- fs]
+      code l = not ("--" `isPrefixOf` dropWhile isSpace l)
+  concat <$> mapM (\p -> (\s -> [p <> ":" <> show n <> ": " <> l | (n, l) <- zip [1 :: Int ..] (lines s), code l, keep l]) <$> readUtf8 p) paths

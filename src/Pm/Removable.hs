@@ -12,8 +12,8 @@
 --   * 盘在不在 = @.pm\/root-id.json@ 读得出（'driveOk'；与 @scripts\/backup_verify.py@
 --     的 @Drive.ok@ 同一判据）。
 --   * 一个 'IOException' 的三分法（'judgeIO'）：错误类型属确定性一族（用户错误、
---     权限、已存在、非法操作…）→ 原样抛出，**测试注入的 @userError@ 与 pm 自己的
---     fail-closed 拒绝都在这一族，行为与 1.1.1 逐字相同**；否则看盘——盘不在 →
+--     已存在、非法操作…；权限拒绝只在盘在时算）→ 原样抛出，**测试注入的 @userError@
+--     与 pm 自己的 fail-closed 拒绝都在这一族，行为与 1.1.1 逐字相同**；否则看盘——盘不在 →
 --     'Dropped'（等它回来、冷却、重试）；盘在而错误是 EINVAL 一类 → 'Hiccup'
 --     （2 s 内已重挂的那种，短暂停后重试，有界）；盘在而「不存在」→ 确定性。
 --   * 续跑单位：扫描按 pass（已 hash 的条目经 catalog 复用，重扫只补漏）；执行按
@@ -34,6 +34,7 @@ module Pm.Removable
   , Verdict (..)
   , judgeIO
   , withDriveRetry
+  , readOnDrive
   , ensureDrive
   , requireDrive
   , scanRootRetry
@@ -109,8 +110,14 @@ data Verdict = Deterministic | Dropped | Hiccup
 -- 不是介质事件。
 judgeIO :: FilePath -> IOException -> IO Verdict
 judgeIO root e
-  | t `elem` [UserError, PermissionDenied, AlreadyExists, IllegalOperation, InappropriateType, UnsupportedOperation] =
+  | t `elem` [UserError, AlreadyExists, IllegalOperation, InappropriateType, UnsupportedOperation] =
       pure Deterministic
+  -- 横切审计 #60：GHC 在 Windows 上把介质错误（ERROR_NOT_READY 21、CRC 23、读写故障 29/30、
+  -- GEN_FAILURE 31 等 Win32 19–36 段）也映射成 PermissionDenied，与真正的 ACL 拒绝分不开。
+  -- 盘在 → 仍按确定性原样抛（ACL 拒绝、测试注入不变）；盘不在 → 掉线，等它回来。
+  | t == PermissionDenied = do
+      ok <- driveOk root
+      pure (if ok then Deterministic else Dropped)
   | otherwise = do
       ok <- driveOk root
       pure (if not ok then Dropped else if t == NoSuchThing then Deterministic else Hiccup)
@@ -171,6 +178,19 @@ withDriveRetry dw root what act = go (0 :: Int)
             v <- judgeIO root e
             ok <- recover dw root what v (show e)
             if ok then go (n + 1) else throwIO e
+
+-- | 读口的等盘包装（横切审计 #62）。有的读口在盘不在时**不抛**、而是答「没有 \/ 读不出」
+-- （'Pm.Catalog.loadCatalog' 把掉线的盘读成 CatAbsent 或 CatRefused）——外面光包
+-- 'withDriveRetry' 永远不触发，@pm backup@ 就把掉线当成「备份盘上还没有索引」，接着整盘重
+-- hash。读前 'ensureDrive'（盘不在先等）、读后 'requireDrive'（读的途中掉了 → 抛
+-- ResourceVanished，外层三分判掉线、等盘重读）。关闭时两者都是空操作，与直接读逐字相同。
+-- 盘在而读口自己答「读不出」（CatRefused）不在此列：那是可信闸的结论，不重试。
+readOnDrive :: DriveWait -> FilePath -> String -> IO a -> IO a
+readOnDrive dw root what act = withDriveRetry dw root what $ do
+  ensureDrive dw root what
+  r <- act
+  requireDrive dw root what
+  pure r
 
 -- | 盘不在就等它回来（关闭时不做任何事）。等不到 → 抛一个 'ResourceVanished' 型
 -- 异常——不是 @userError@，外层 'withDriveRetry' 还能再判一次。用在**布尔探针之前**

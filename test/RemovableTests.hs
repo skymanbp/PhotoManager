@@ -23,7 +23,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Catalog (saveCatalog)
+import Pm.Catalog (CatalogLoad (..), loadCatalog, loadNote, saveCatalog)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor, runDoctorWith)
 import Pm.Exec
 import Pm.Hash (sha256File)
@@ -39,10 +39,12 @@ removableTests :: TestTree
 removableTests =
   testGroup
     "瞬断保护 (1.1.2 Pm.Removable)"
-    [ testCase "withDriveRetry：确定性异常（userError / 权限拒绝）立刻原样抛出，不等、不重试、不出声" caseDeterministic
+    [ testCase "withDriveRetry：确定性异常（userError / 盘在时的权限拒绝）立刻原样抛出，不等、不重试、不出声" caseDeterministic
+    , testCase "#60 withDriveRetry：盘不在时的权限拒绝（GHC 把 Win32 介质错误也映射成它）按掉线等盘重试；盘在时照旧判确定性" caseDroppedPermissionDenied
     , testCase "withDriveRetry：盘在、EINVAL 型读错 → 按瞬断短停重试，第二次成功" caseHiccup
     , testCase "withDriveRetry：盘掉线 → 等它回来再重试；等不到则抛原异常" caseDropped
     , testCase "对偶：noDriveWait 下瞬断异常照旧逃顶（关闭 = 1.1.1 行为）" caseOff
+    , testCase "#62 readOnDrive：盘不在时 loadCatalog 不抛而答「没有」——读前等盘、读后复核，途中掉盘重读；对偶：光包 withDriveRetry 读到假的「没有」" caseReadOnDrive
     , testCase "execPlanRetry：Copy 落位后写 Done 前盘掉线 → 自愈补 Done、续跑不重做已完成项、journal 每 oid 一个 Done、doctor 干净" caseExecResume
     , testCase "execPlanRetry：supersede 组内 Copy 写 tmp 时瞬断 → 整组重跑，隔离项走 resume 分支、Copy 落位、trash 只有一份" caseExecGroupRerun
     , testCase "scanRootRetry：起手盘不在 → 等它回来照常扫完；持续性读错（ACL）有界重试后如实报读错" caseScanRetry
@@ -135,6 +137,60 @@ caseDropped = withSystemTempDirectory "pm-rm" $ \dir -> do
   either (\e -> ioe_type e @?= InvalidArgument) (const (assertFailure "等不到盘应抛原异常")) r
   readIORef calls2 >>= (@?= 1)
   plug root
+
+-- | 横切审计 #60：GHC 在 Windows 上把介质错误（ERROR_NOT_READY 21、CRC 23、读写故障 29/30、GEN_FAILURE 31）
+-- 映射成 PermissionDenied。此前 judgeIO 对它一律判确定性——备份盘以这类错误掉线时不等不重试、整批逃顶。
+caseDroppedPermissionDenied :: IO ()
+caseDroppedPermissionDenied = withSystemTempDirectory "pm-rm" $ \dir -> do
+  root <- mkRoot dir
+  (dw, logOf) <- mkDw root
+  calls <- newIORef (0 :: Int)
+  unplug root
+  v <- withDriveRetry dw root "t" $ do
+    n <- atomicModifyIORef' calls (\c -> (c + 1, c + 1))
+    when (n == 1) (throwIO (IOError Nothing PermissionDenied "hGetBuf" "device not ready (模拟 ERROR_NOT_READY)" Nothing Nothing))
+    pure (9 :: Int)
+  v @?= 9
+  readIORef calls >>= (@?= 2)
+  ls <- logOf
+  assertBool (show ls) (any ("掉线" `isInfixOf`) ls && any ("盘回来了" `isInfixOf`) ls)
+  -- 盘已插回：同一错误判确定性（真正的 ACL 拒绝不等不重试）
+  judgeIO root (IOError Nothing PermissionDenied "t" "denied" Nothing Nothing) >>= (@?= Deterministic)
+
+-- | 横切审计 #62：'loadCatalog' 在盘不在时不抛（答 CatAbsent / CatRefused），外面光包 'withDriveRetry'
+-- 永远不触发——pm backup 把掉线读成「备份盘还没有索引」，接着整盘重 hash。
+caseReadOnDrive :: IO ()
+caseReadOnDrive = withSystemTempDirectory "pm-rm" $ \dir -> do
+  root <- mkRoot dir
+  createDirectoryIfMissing True (root </> "Raw")
+  writeFile (root </> "Raw" </> "a.arw") "a"
+  cat <- scanQuiet "test-root" root
+  saveCatalog root cat
+  (dw, logOf) <- mkDw root
+  unplug root
+  -- 对偶（修前的写法）：光包 withDriveRetry，盘不在时读到的不是索引，也不等盘
+  r0 <- withDriveRetry dw root "读备份索引" (loadCatalog root)
+  case r0 of
+    CatLoaded {} -> assertFailure "盘不在时 loadCatalog 不该读到索引（对偶前提不成立）"
+    _ -> pure ()
+  -- 读前等盘：盘回来后读到真索引
+  r1 <- readOnDrive dw root "读备份索引" (loadCatalog root)
+  case r1 of
+    CatLoaded c _ -> catEntries c @?= catEntries cat
+    other -> assertFailure ("readOnDrive 应等盘回来读到索引，实得: " <> loadNote other)
+  logOf >>= \ls -> assertBool (show ls) (any ("盘回来了" `isInfixOf`) ls)
+  -- 读的途中掉盘：读后复核发现盘不在 → 抛掉线、等盘、重读
+  calls <- newIORef (0 :: Int)
+  r2 <- readOnDrive dw root "读备份索引" $ do
+    n <- atomicModifyIORef' calls (\c -> (c + 1, c + 1))
+    when (n == 1) (unplug root)
+    loadCatalog root
+  readIORef calls >>= (@?= 2)
+  case r2 of
+    CatLoaded {} -> pure ()
+    other -> assertFailure ("途中掉盘应等盘重读，实得: " <> loadNote other)
+  -- 哨兵：源码里不许再有「withDriveRetry 直接包 loadCatalog」这种不会触发的写法
+  grepSrc (\l -> "withDriveRetry" `isInfixOf` l && "loadCatalog" `isInfixOf` l) >>= (@?= [])
 
 caseOff :: IO ()
 caseOff = withSystemTempDirectory "pm-rm" $ \dir -> do

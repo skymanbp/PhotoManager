@@ -381,7 +381,8 @@ Copy 目标重 hash 判同」（§6.1 步 2，每次掉线白读几十 GB），�
 报「victim 内容与计划时不符」，组闭包连带 Copy 不执行），只有 `--repair` 能补记。
 1.1.1 时这些由仓内脚本在外面兜（分块 `--only` 续跑的看门狗，已退役）；1.1.2 把同一
 套判据收进 pm：盘在 = `.pm/root-id.json` 读得出；一个 `IOException` 三分——确定性
-一族（userError / 权限 / 已存在 / 非法操作…）原样抛出（测试注入与 pm 自己的
+一族（userError / 已存在 / 非法操作…；权限拒绝只在盘在时算——GHC 把 Win32 介质错误
+21/23/29–31 也映射成权限拒绝，盘不在时按掉线，横切审计 #60）原样抛出（测试注入与 pm 自己的
 fail-closed 拒绝都在这一族，行为与 1.1.1 逐字相同），盘不在 → 等它回来（缺省
 1800 s，`[backup] drive-wait`，0 = 关闭）再冷却 30 s，盘在而 EINVAL 一类 → 短停，
 同一步骤最多 5 次。续跑单位：扫描按 pass（拿这一遍的 catalog 当旧快照重扫，只补
@@ -393,6 +394,9 @@ Q-DONE-LOST 补上，再按「组内每项都 DONE/同内容 SKIP」或「组内
 分支接手：victim 已入 trash 且 sha 相符视同完成、dst 已同内容 SKIP，字节不重拷）；
 `doctor --backup [--deep]` 整场幂等可重跑，`--deep` 逐条先等盘再探存在性（盘不在
 时 `doesFileExist` 答 False，会把掉线报成「消失」），场末盘不在则整场作废重跑。
+盘不在时**不抛而答「没有」**的读口（`loadCatalog` 把掉线读成「尚无索引」）不能光包
+`withDriveRetry`：`Pm.Removable.readOnDrive` 读前等盘、读后复核盘在，途中掉了就抛掉线、
+等盘重读（横切审计 #62；此前 `pm backup` 会把掉线当成备份盘没有索引而整盘重 hash）。
 锁与 journal 句柄随会话死、随会话重开；两场之间无锁窗口只对同 root 的另一个 pm
 可见（它拿到锁就是常规 I10 竞争）。写入后的**字节核验**仍是另一件事：走
 `scripts/verify_backup_dst.py`（按计划 sha 全文重读）/ `verify_backup_entries.py`
