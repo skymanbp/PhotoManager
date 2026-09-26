@@ -36,6 +36,7 @@ import Pm.Backup (discoverBackupRoots)
 import Pm.Config (Config (..), checkAbsolute, configFilePath, loadConfig, withConfigLock, writeConfig)
 import Pm.Publish (cmdPath, pushTarget)
 import Pm.Removable (defaultDriveWaitSecs)
+import Pm.Types (driveWaitOk, subpathOk, workersOk)
 
 -- | 两个 root 是否嵌套（任一方向）：canonicalize 两侧（解析已存在前缀的
 -- junction/symlink 与真实大小写），再按 case-fold 分量做祖先判断——文本级
@@ -73,11 +74,16 @@ checkConfig c = do
         Left _ -> pure []
     _ -> pure []
   let absErr = either (: []) (const []) (checkAbsolute c)
+      -- 审计 #14：并发数 / 掉线等待的边界此前只在 checkPatch（config set / POST /api/config），pm init
+      -- --workers 绕过它；挪进这个共用出口（checkPatch 末尾对施加后的配置调它，init / backup init 也调它）
+      rangeErr =
+        ["并发数 " <> show w <> " 越界（1..64）" | Just w <- [cfgWorkers c], not (workersOk w)]
+          <> ["掉线等待 " <> show d <> " 秒越界（0..86400；0 = 关闭瞬断保护）" | Just d <- [cfgDriveWait c], not (driveWaitOk d)]
       pairErr = case (cfgBackupId c, cfgBackupSubpath c) of
         (Just _, Nothing) -> ["备份盘登记不完整（只有 id、缺 subpath）—— 重跑 pm backup init <盘上镜像路径>"]
         (Nothing, Just _) -> ["备份盘登记不完整（只有 subpath、缺 id）—— 重跑 pm backup init <盘上镜像路径>"]
         _ -> []
-  pure (absErr <> nested <> pairErr <> bkNested)
+  pure (absErr <> rangeErr <> subpathErr c <> nested <> pairErr <> bkNested)
  where
   bkOne b = do
     nm <- rootsNested (cfgMainPath c) b
@@ -85,6 +91,18 @@ checkConfig c = do
     pure
       (["备份盘与主库嵌套（" <> b <> "）——镜像必须在库外" | nm]
         <> ["备份盘与 vault 嵌套（" <> b <> "）——镜像必须在展示集之外" | nv])
+
+-- | 备份 subpath 的词法闸（审计 #27）：发现时它被 @</>@ 拼到每个卷根上，而 @</>@ 遇到带盘符或前导
+-- 分隔符的右操作数会**原样**返回它——手编成 @E:\Photography@ \/ @\Photography@ 就让每个卷都探同一路径，
+-- 认对了的盘被报成「多卷身份冲突（整盘克隆）」。pm 自己写的永远是盘内相对路径（@splitDrive@ 的第二段，
+-- 盘根镜像是空串）。发现侧（'Pm.Backup.discoverBackupRoots'）用同一谓词，手编值在那里说清楚原因。
+subpathErr :: Config -> [String]
+subpathErr c =
+  [ "备份 subpath 须为盘内相对路径（如 Photography；盘根镜像为空），不含盘符、前导分隔符或 . / .. 分量: " <> s
+      <> " —— 重跑 pm backup init <盘上镜像路径>"
+  | Just s <- [cfgBackupSubpath c]
+  , not (subpathOk s)
+  ]
 
 -- | 三态字段：'Nothing' = 本次不动；@Just Nothing@ = 清空；@Just (Just x)@ = 设成 x。
 data ConfigPatch = ConfigPatch
@@ -156,13 +174,8 @@ checkPatch c p = do
         ([v <> " 不是一个已存在的目录（portfolio 仓路径；不需要就留空）" | not isDir]
           <> either (\why -> [v <> " 无法安全嵌入上线命令（" <> why <> "）——这项只用于生成命令，换一个只含字母数字、空格与 -_.()'+,=@~#& 的盘符绝对路径，或留空"]) (const []) (cmdPath v))
     _ -> pure []
-  let ew = case cpWorkers p of
-        Just (Just w) | w < 1 || w > 64 -> ["并发数 " <> show w <> " 越界（1..64）"]
-        _ -> []
-      ed = case cpDriveWait p of
-        Just (Just d) | d < 0 || d > 86400 -> ["掉线等待 " <> show d <> " 秒越界（0..86400；0 = 关闭瞬断保护）"]
-        _ -> []
-      -- push 目标进的是「整块复制到终端」的命令文本：语法闸见 'Pm.Publish.pushTarget'。
+  -- 并发数 / 掉线等待的边界在 checkConfig（末尾那次调用覆盖施加后的值；审计 #14 挪过去的）
+  let -- push 目标进的是「整块复制到终端」的命令文本：语法闸见 'Pm.Publish.pushTarget'。
       es =
         [ "push 目标 " <> show t <> " 不合法（" <> why <> "；须为 <remote> [<refspec>]，每段以字母数字开头，只含字母数字与 -._/:@~^，≤200 字符）"
         | Just (Just t) <- [cpVaultPush p, cpPortfolioPush p]
@@ -173,7 +186,7 @@ checkPatch c p = do
       em = ["主库路径只读：改它等于换一个库，请在终端 pm init --main <路径>" | Just _ <- [cpMain p]]
       en = ["没有要改的项" | p == emptyPatch]
   whole <- checkConfig (applyPatch c p)
-  pure (em <> en <> ev <> ej <> ep <> ew <> ed <> es <> whole)
+  pure (em <> en <> ev <> ej <> ep <> es <> whole)
 
 -- | 施加（纯函数）。调用方须先过 'checkPatch'。
 applyPatch :: Config -> ConfigPatch -> Config
@@ -240,9 +253,11 @@ runConfigShow c = do
       ex <- doesDirectoryExist d
       putStrLn ("  portfolio " <> d <> mark ex)
   putStrLn ("  push 目标  展示集 " <> maybe "（默认 git push）" id (cfgVaultPush c) <> " · portfolio " <> maybe "（默认 git push）" id (cfgPortfolioPush c))
-  putStrLn ("  并发数    " <> maybe "（默认=核数）" show (cfgWorkers c))
-  putStrLn ("  掉线等待  " <> maybe ("（默认 " <> show defaultDriveWaitSecs <> " s）") (\d -> if d == 0 then "0（瞬断保护关闭）" else show d <> " s") (cfgDriveWait c) <> "——备份盘瞬断后等它回来再从中断处续跑")
+  -- 审计 #14：手编的越界值（写口已拒新增）如实标出；#74：缺省是逻辑处理器数（getNumProcessors），不是物理核数
+  putStrLn ("  并发数    " <> maybe "（默认=逻辑处理器数）" (\w -> show w <> outOf (workersOk w) "1..64" "--workers <N>") (cfgWorkers c))
+  putStrLn ("  掉线等待  " <> maybe ("（默认 " <> show defaultDriveWaitSecs <> " s）") (\d -> (if d == 0 then "0（瞬断保护关闭）" else show d <> " s") <> outOf (driveWaitOk d) "0..86400" "--drive-wait <秒>") (cfgDriveWait c) <> "——备份盘瞬断后等它回来再从中断处续跑")
   case (cfgBackupId c, cfgBackupSubpath c) of
+    (Just _, Just s) | not (subpathOk s) -> putStrLn ("  备份盘    ⚠ 盘内路径不是相对路径（" <> s <> "；审计 #27）→ 重跑 pm backup init <盘上镜像路径>")
     (Just i, Just s) -> putStrLn ("  备份盘    UUID " <> T.unpack i <> " · 盘内路径 " <> s <> "（按 UUID 认盘，与盘符无关）")
     (Nothing, Nothing) -> putStrLn "  备份盘    （未登记）→ pm backup init <盘上镜像路径>"
     -- 半对登记（手编残余）：checkConfig 在写入口拒新增，这里如实报存量
@@ -251,7 +266,7 @@ runConfigShow c = do
  where
   mark True = ""
   mark False = "  ⚠ 路径不存在"
-
+  outOf ok range fix = if ok then "" else "  ⚠ 越界（" <> range <> "）→ pm config set " <> fix
 -- | 改配置：与 @POST /api/config@ 共用 'checkPatch' / 'configTxn'。
 --
 -- 第二个参数（调用方 'Pm.Cli.withCfg' 载入的那份配置）**只用来确认配置存在**：

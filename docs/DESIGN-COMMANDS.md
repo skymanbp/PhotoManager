@@ -17,7 +17,8 @@
 （`Pm.Exif`：第一方最小解析器，只取一个标签、所有偏移过同一个边界检查、读不到
 即 Nothing 交人判断——这条路径决定照片被移到哪，不引未审依赖），按间隔给出
 **候选分段**并打印每段该敲的命令；给齐 `--place`/`--event` 与 `--from/--to`
-才生成计划。**分段只是提议**：真实库证明时间切不开事件（纽约 2024-12-25→
+才生成计划（日期只收十位 `YYYY-MM-DD`：time 的 `Read Day` 接受任意位数年份，`26-09-01`
+此前被读成公元 26 年、区间静默落空或放宽——横切审计 #65）。**分段只是提议**：真实库证明时间切不开事件（纽约 2024-12-25→
 2025-01-02 与亚特兰大 2025-01-02→01-05 首尾相接，7 张连号 ARW 因此落进两个
 事件夹），边界一律由用户确认；地点更推不出（实测相机零 GPS）。**没有为此发明
 待裁决文件格式**——`StNeedsDecision`/`pm resolve` 是计划形成**后**的冲突裁决，
@@ -301,7 +302,8 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
   介质：结果打印后用户随时可能拔盘，Done 必须在汇报前已落盘；
   doctor（`--backup`）的 C4 行（复核 Done）专门接这个残余（连 Intent 都没落盘的 C3 情形 doctor 不归属，见 DESIGN §6.4）。
 - 备份盘 hash 并行度**恒定默认 1**（HDD 防寻道抖动，`Pm.BackupCmd` `fromMaybe 1 mworkers`；
-  **不读** `[main] workers`），只能用 `pm backup --workers N` 逐次覆盖。**pm 不探介质**
+  **不读** `[main] workers`），只能用 `pm backup --workers N`（1..64，与其余三个 `--workers`
+  同一解析 `Pm.Cli.parseWorkers`：审计 #14）逐次覆盖。**pm 不探介质**
   ——seek-penalty/MediaType 探测从未实现；`Pm.Win.listCandidateDrives` 的 `DriveKind` 仅按
   GetDriveTypeW 筛 REMOVABLE/FIXED 做**发现**，并发数与它无关。worker 数**不是 Root 属性**：
   `root-id.json` 只记 `id/role/created/fsType`。主库扫描是另一条口径（`[main] workers`，
@@ -436,7 +438,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 468 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 470 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -505,7 +507,7 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 | `pm status` | 快照坏代回退 → ⚠ 行 + **exit 1**（`--cached` 只关掉新鲜度核对那一项；`--cached` 下 exit 1 共四个来源——快照坏代回退告警、暂存区尚有事件（含内容已全部归档、只打「冗余」不打 ⚠ 的那种）、备份缓存不可信、vault 缓存不可信（仅在配置了 vault 时）；不带 `--cached` 另有第五个：新鲜度核对 pending（新增/变更/消失/读取错误之和）> 0，见 `Pm.Status` 的退出码判定）；核对受阻（读取错误 >0）不打「✓ 索引与磁盘一致」 | A |
 | `pm backup` | 主库快照坏代 → ⚠「diff 基于较旧一代」；主库索引与盘面不一致 → **拒绝 exit 2** 指向 `pm scan`（mainFresh 闸）；「✓ 备份盘已与主库一致」只在零降级零差异时打（`backupVerdict` 判定表） | A |
 | `pm init --force` | 旧配置读不出 → 明说「未能保留」备份盘登记等字段（此前静默丢失还打 ✓）；整份新配置过 `checkConfig` 汇点 | A + G6 |
-| `pm config set` | `--X` 与 `--no-X` 同给 = 矛盾 → **exit 2**（此前解析器静默折成清空）；写入前整份配置过 `checkConfig`：主库/vault/备份盘两两不嵌套、备份登记成对、路径绝对——四条写路径（init / config set / POST config / backup init）同一汇点，且锁内按盘上最新配置复验 | G6 |
+| `pm config set` | `--X` 与 `--no-X` 同给 = 矛盾 → **exit 2**（此前解析器静默折成清空）；写入前整份配置过 `checkConfig`：主库/vault/备份盘两两不嵌套、备份登记成对、路径绝对、并发数 1..64、掉线等待 0..86400、备份 subpath 为盘内相对路径（不含盘符、不以分隔符开头、无 `.`/`..` 分量）——四条写路径（init / config set / POST config / backup init）同一汇点，且锁内按盘上最新配置复验（值域此前只在 checkPatch，`pm init --workers 0` 绕过：审计 #14；subpath 此前不验，手编成 `E:\Photography` 让每个卷都命中同一路径、认对的盘被报成整盘克隆：审计 #27——发现侧同一谓词拒并说清原因，`pm config` 对手编越界值标 ⚠，`pm scan` 拒用越界的配置并发数、不静默夹紧） | G6 |
 | `pm serve` | 启动失败（端口/权限）→ **exit 2**（此前 0）；`POST /api/sort/plan` 与 `POST /api/apply` 响应**都含 `log`**（与 CLI 同一打印流；sort 的 log 里带渲染好的逐项计划行）；**结构化逐项结果（`ix`/`outcome`/`status`）只在 `/api/apply` 的 `items` 里**——`/api/sort/plan` 只回 `code`/`planId`/`log`；缩略图对「快照读不出」答 **503**（缺席仍 404） | B + A |
 | 配置渲染 | `[backup]` 表与其它表同一渲染 helper：半对登记（手编残余）忠实保全，不再被静默归零 | G6 |
 | freshness 判定 | root 自身是 junction 属合法用法：`pm status`/新鲜度闸照常核对（此前每轮报一条「基准探不出」读取错误）；库内子层 junction 保持「探不出 = 错误」 | D |

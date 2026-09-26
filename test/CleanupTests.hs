@@ -7,19 +7,25 @@
 -- 「2026-09-26 横切审计补跑与遗留清理」节。
 module CleanupTests (cleanupTests) where
 
+import Control.Monad (forM_)
 import qualified Data.ByteString as BS
 import Data.List (isInfixOf)
-import System.Directory (createDirectoryIfMissing)
+import Data.Time (fromGregorian)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.BackupCmd (runBackupRun)
-import Pm.Cli (GoOpts (..))
+import Pm.Backup (discoverBackupRoots)
+import Pm.BackupCmd (backupInitPreflight, runBackupRun)
+import Pm.Cli (GoOpts (..), parseWorkers, parseYmd)
+import Pm.Commands (InitOpts (..), ScanCmd (..), runInit, runScanCmd)
 import Pm.Config (Config (..), loadConfig, writeConfig)
+import Pm.ConfigEdit (checkConfig, runConfigShow)
 import Pm.GitGuard (pmIgnoreGuard)
-import Pm.Types (RootRole (..))
+import Pm.SortSource (withSourceQ)
+import Pm.Types (RootRole (..), blankPathArg, subpathOk)
 import TestUtil (captureStdout, mkMain, readUtf8, withEnv)
 
 cleanupTests :: TestTree
@@ -29,6 +35,8 @@ cleanupTests =
     [ testCase "#16 #18 GUI：索引读不出 ≠ 尚未索引（状态页 / 归档页带原因）；候选读不出 ≠ 没有非 jpg（按未知渲染、清掉上一轮残留）" caseGuiUnknownNotAbsent
     , testCase "#28 #73 §5.1「2 = 错误」：pm backup 找不到备份盘退 2（不是 1）；命令行用法错误退 2（parserInfo 设 failureCode 2）" caseErrorExitCodes
     , testCase "#41 #66 开头的 UTF-8 BOM：config.toml 照常载入（此前每条命令起不来）；.gitignore 首行 .pm/ 照常算覆盖；中间的 BOM 不认" caseLeadingBom
+    , testCase "#14 #27 配置写口：并发数 / 掉线等待越界与非盘内相对的备份 subpath 由 checkConfig 统一拒（pm init --workers 0 不再写进配置）；发现侧对手编 subpath 说清原因" caseConfigSink
+    , testCase "#65 #84 命令行参数：日期只收十位 YYYY-MM-DD（26-09-01 不再是公元 26 年）；空路径参数不再落到当前目录（init / backup init / sort）" caseCliArgs
     ]
 
 -- | #16 / #18 的 GUI 形状（本仓不跑浏览器：源码哨兵 + node --check）。
@@ -77,3 +85,58 @@ caseLeadingBom = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   BS.writeFile (g </> ".gitignore") ("_site/\n" <> bom <> ".pm/\n")
   r2 <- pmIgnoreGuard RoleVault g
   either (const (pure ())) (const (assertFailure "中间的 BOM 不认（git 也只跳开头那一个）")) r2
+
+-- | #14：并发数边界此前只在 checkPatch，pm init --workers 0 / 65 原样写进配置。#27：subpath 被 </> 拼到每个
+-- 卷根上，带盘符 / 前导分隔符的手编值让每个卷都命中同一路径，认对的盘被报成「整盘克隆」。
+caseConfigSink :: Assertion
+caseConfigSink = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  let root = dir </> "main"
+      cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+      bad = cfg {cfgBackupId = Just "bid"}
+  createDirectoryIfMissing True root
+  checkConfig cfg >>= (@?= [])
+  e1 <- checkConfig cfg {cfgWorkers = Just 0}
+  assertBool (show e1) (any ("并发数 0 越界" `isInfixOf`) e1)
+  e2 <- checkConfig cfg {cfgWorkers = Just 65, cfgDriveWait = Just (-1)}
+  assertBool (show e2) (any ("并发数 65 越界" `isInfixOf`) e2 && any ("掉线等待 -1 秒越界" `isInfixOf`) e2)
+  withEnv [("PM_CONFIG", dir </> "config.toml")] $ do
+    (_, code) <- captureStdout (runInit (InitOpts root Nothing Nothing (Just 0) False))
+    code @?= 2
+    doesFileExist (dir </> "config.toml") >>= (@?= False)
+  forM_ ["", "Photography", "a\\b", "a/b", "a\\\\b", "Photography\\"] $ \s -> assertBool ("应收: " <> s) (subpathOk s)
+  forM_ ["\\Photography", "/x", "\\\\server\\share", "E:\\Photography", "E:x", "..", "a\\..\\b", "."] $ \s -> assertBool ("应拒: " <> s) (not (subpathOk s))
+  -- 手编的越界值：扫描拒（不夹紧），pm config 标 ⚠；命令行给了合法 --workers 就不看配置值
+  mkMain root
+  (so, sco) <- captureStdout (runScanCmd (ScanCmd Nothing True) cfg {cfgWorkers = Just 100000})
+  sco @?= 2
+  assertBool so ("并发数 100000 越界" `isInfixOf` so)
+  (_, sco2) <- captureStdout (runScanCmd (ScanCmd (Just 2) True) cfg {cfgWorkers = Just 0})
+  sco2 @?= 0
+  withEnv [("PM_CONFIG", dir </> "config.toml")] $ do
+    (shown, _) <- captureStdout (runConfigShow cfg {cfgWorkers = Just 0, cfgDriveWait = Just (-5), cfgBackupId = Just "bid", cfgBackupSubpath = Just "E:\\Photography"})
+    assertBool shown ("0  ⚠ 越界（1..64）" `isInfixOf` shown && "-5 s  ⚠ 越界（0..86400）" `isInfixOf` shown && "盘内路径不是相对路径" `isInfixOf` shown)
+  e3 <- checkConfig bad {cfgBackupSubpath = Just "\\Photography"}
+  assertBool (show e3) (any ("盘内相对路径" `isInfixOf`) e3)
+  r <- discoverBackupRoots bad {cfgBackupSubpath = Just "E:\\Photography"}
+  either (\m -> assertBool m ("不是盘内相对路径" `isInfixOf` m)) (const (assertFailure "手编的绝对 subpath 应在发现侧拒绝")) r
+
+-- | #65：Read Day 接受任意位数年份。#84：makeAbsolute "" 答当前目录——空路径参数一路下去被当成 cwd。
+caseCliArgs :: Assertion
+caseCliArgs = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  parseYmd "2026-09-01" @?= Just (fromGregorian 2026 9 1)
+  forM_ ["26-09-01", "12026-09-01", "2026-9-1", "2026-02-30", "2026/09/01", " 2026-09-01", ""] $ \s ->
+    assertBool ("应拒: " <> show s) (parseYmd s == Nothing)
+  parseWorkers "8" @?= Right 8
+  forM_ ["0", "65", "-1", "100000", "x", ""] $ \s -> assertBool ("应拒: " <> show s) (either (const True) (const False) (parseWorkers s))
+  forM_ ["", " ", "\t"] $ \s -> assertBool ("应判空: " <> show s) (blankPathArg s)
+  assertBool "非空路径不算空" (not (blankPathArg "."))
+  let cfg = Config (dir </> "main") Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+  withEnv [("PM_CONFIG", dir </> "config.toml")] $ do
+    (out, code) <- captureStdout (runInit (InitOpts "" Nothing Nothing Nothing False))
+    code @?= 2
+    assertBool out ("--main 为空" `isInfixOf` out)
+    doesFileExist (dir </> "config.toml") >>= (@?= False)
+  backupInitPreflight cfg "" >>= either (\m -> assertBool m ("备份路径为空" `isInfixOf` m)) (\p -> assertFailure ("空备份路径应拒，实得 " <> p))
+  withSourceQ "" "missing" (\_ _ -> pure "listed") >>= (@?= ("missing" :: String))
+  -- 空参数没在当前目录（测试进程的 cwd = 仓库根）留下任何 .pm
+  listDirectory "." >>= \es -> assertBool "仓库根不应出现 .pm" (".pm" `notElem` es)

@@ -40,6 +40,11 @@ discoverAmong bid cands = do
 -- Right (探过的卷数, 全部命中路径)；Left = 未登记。
 discoverBackupRoots :: Config -> IO (Either String (Int, [FilePath]))
 discoverBackupRoots cfg = case (cfgBackupId cfg, cfgBackupSubpath cfg) of
+  -- 审计 #27：手编成绝对 / 带前导分隔符的 subpath 会让每个卷都「命中」同一路径——在这里说清楚，
+  -- 而不是报一句「多卷身份冲突（整盘克隆）」
+  (Just _, Just sub)
+    | not (subpathOk sub) ->
+        pure (Left ("备份 subpath 不是盘内相对路径（" <> sub <> "）——config.toml 被手改过？重跑 pm backup init <盘上镜像路径>"))
   (Just bid, Just sub) -> do
     suppressCriticalErrorDialogs
     drives <- listCandidateDrives

@@ -182,7 +182,8 @@ snapshotWith stat hash p = do
 withSourceQ :: FilePath -> a -> (FilePath -> SourceFiles -> IO a) -> IO a
 withSourceQ src onMissing k = do
   absSrc <- makeAbsolute src
-  ok <- doesDirectoryExist absSrc
+  -- 横切审计 #84 的类：空源 = 没给源，不是「当前目录」
+  ok <- if blankPathArg src then pure False else doesDirectoryExist absSrc
   if not ok
     then pure onMissing
     else listSource absSrc >>= k absSrc
@@ -199,9 +200,9 @@ withSourceQ src onMissing k = do
 withSource :: (String -> IO ()) -> FilePath -> a -> (FilePath -> SourceFiles -> IO a) -> IO a
 withSource sink src onMissing k = do
   absSrc <- makeAbsolute src
-  ok <- doesDirectoryExist absSrc
+  ok <- if blankPathArg src then pure False else doesDirectoryExist absSrc
   if not ok
-    then sink ("源目录不存在: " <> absSrc) >> pure onMissing
+    then sink (if blankPathArg src then "源目录为空（空串会被当成当前目录）" else "源目录不存在: " <> absSrc) >> pure onMissing
     else withSourceQ src onMissing $ \a sf -> do
       mapM_ (\n -> sink ("· " <> n)) (sfNotes sf)
       k a sf

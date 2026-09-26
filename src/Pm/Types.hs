@@ -14,10 +14,14 @@ module Pm.Types
   , processedTop
   , entryMap
   , stripBom
+  , subpathOk
+  , blankPathArg
+  , workersOk
+  , driveWaitOk
   ) where
 
 import Data.Aeson
-import Data.Char (toLower)
+import Data.Char (isSpace, toLower)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -194,3 +198,34 @@ entryMap es = Map.fromList [(enPath e, e) | e <- es]
 -- 只认开头一个，与 git 的 skip_utf8_bom 同口径；中间的 U+FEFF 原样保留。
 stripBom :: Text -> Text
 stripBom t = maybe t id (T.stripPrefix "\xFEFF" t)
+
+-- | 用户给的路径参数是否为空白（横切审计 #84 的类）：@makeAbsolute ""@ 答当前工作目录，空串一路
+-- 下去就被当成「当前目录」——@pm init --main ""@ 把 cwd 初始化成主库、@pm backup init ""@ 在 cwd 建
+-- 备份身份、@pm sort ""@ 盘点 cwd。入口一律先拒（存在性检查挡不住：cwd 总是存在的目录）。
+blankPathArg :: FilePath -> Bool
+blankPathArg = all isSpace
+
+-- | 值域的唯一定义（审计 #14）：并发数 1..64、掉线等待 0..86400 秒（0 = 关闭瞬断保护）。此前只在
+-- @checkPatch@ 一处，@pm init --workers@ / @pm scan --workers@ / @pm backup --workers@ 与手编配置都绕过它。
+-- 用在：命令行解析（'Pm.Cli.parseWorkers'）、配置写口（'Pm.ConfigEdit.checkConfig'）、消费侧
+-- （@runScanCmd@ 拒手编越界值）、展示（@pm config@ 标 ⚠）。
+workersOk :: Int -> Bool
+workersOk w = w >= 1 && w <= 64
+
+driveWaitOk :: Int -> Bool
+driveWaitOk d = d >= 0 && d <= 86400
+
+-- | 备份 subpath 的形状（审计 #27）：空串（盘根镜像）或盘内相对路径——不含 @:@（盘符 / 盘相对）、不以
+-- 分隔符开头（带根 / UNC），没有 @.@ \/ @..@ 分量。重复或结尾的分隔符无害（@</>@ 之后 Windows 照常解析），
+-- 不拦。'Pm.ConfigEdit.checkConfig'（写口）与 'Pm.Backup.discoverBackupRoots'（发现）共用。
+subpathOk :: FilePath -> Bool
+subpathOk s =
+  null s
+    || ( notElem ':' s
+          && take 1 s `notElem` ["\\", "/"]
+          && all (\comp -> comp `notElem` [".", ".."]) (splitSeps s)
+       )
+ where
+  splitSeps x = case break (`elem` ("\\/" :: String)) x of
+    (a, []) -> [a]
+    (a, _ : rest) -> a : splitSeps rest

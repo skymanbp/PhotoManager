@@ -12,10 +12,9 @@ import qualified Data.Text as T
 import Data.Time (Day)
 import Options.Applicative
 import System.Exit (ExitCode (..), exitSuccess, exitWith)
-import Text.Read (readMaybe)
 
 import Pm.Album (runAlbumAdd, runAlbumCandidates, runAlbumIgnore)
-import Pm.Cli (GoOpts (..), exitBoundary, savePlanAndMaybeRun, savePlanAndMaybeRun')
+import Pm.Cli (GoOpts (..), exitBoundary, parseWorkers, parseYmd, savePlanAndMaybeRun, savePlanAndMaybeRun')
 import Pm.Plan (runPlanList, runPlanPrune, runPlanRm)
 import Pm.Commands
 import Pm.ConfigEdit (ConfigSetOpts (..), mkPatch, runConfigSet, runConfigShow)
@@ -242,8 +241,8 @@ parserInfo =
       <$> pair "vault" "展示集（vault）目录"
       <*> pair "photos-json" "portfolio 的 photos.json（只读引用检查）"
       <*> ( (,)
-              <$> optional (option auto (long "workers" <> metavar "N" <> help "扫描并发数（1..64）；备份盘不读它，默认单线程防 HDD 寻道抖动，另用 pm backup --workers"))
-              <*> switch (long "no-workers" <> help "清空并发数（回到默认=核数）")
+              <$> optional (option workersReader (long "workers" <> metavar "N" <> help "扫描并发数（1..64）；备份盘不读它，默认单线程防 HDD 寻道抖动，另用 pm backup --workers"))
+              <*> switch (long "no-workers" <> help "清空并发数（回到默认=逻辑处理器数）")
           )
       <*> ( (,)
               <$> optional (option auto (long "drive-wait" <> metavar "秒" <> help "备份盘瞬断保护：盘掉线后最多等多少秒再从中断处续跑（0..86400；0 = 关闭，出错照旧中止；缺省 1800）"))
@@ -272,12 +271,12 @@ parserInfo =
         <$> strOption (long "main" <> metavar "PATH" <> help "主库路径，如 D:\\Photography")
         <*> optional (strOption (long "vault" <> metavar "PATH" <> help "vault 展示集路径（P3 使用）"))
         <*> optional (strOption (long "photos-json" <> metavar "PATH" <> help "portfolio photos.json 路径（P3 使用）"))
-        <*> optional (option auto (long "workers" <> metavar "N" <> help "hash 并行度（默认=物理核数）"))
+        <*> optional (option workersReader (long "workers" <> metavar "N" <> help "hash 并行度（1..64；默认=逻辑处理器数）"))
         <*> switch (long "force" <> help "已有配置时允许覆盖（备份盘登记保留）")
   scanP =
     fmap CmdScan $
       ScanCmd
-        <$> optional (option auto (long "workers" <> metavar "N" <> help "hash 并行度"))
+        <$> optional (option workersReader (long "workers" <> metavar "N" <> help "hash 并行度（1..64；缺省取配置，未设=逻辑处理器数）"))
         <*> switch (long "quiet" <> help "不打印进度")
   statusP =
     fmap CmdStatus $
@@ -333,7 +332,10 @@ parserInfo =
         <*> optional (option dayReader (long "to" <> metavar "YYYY-MM-DD" <> help "区间止（含）"))
         <*> option auto (long "gap-hours" <> metavar "H" <> value 72 <> showDefault <> help "提议分段用的间隔阈值（只影响提议，不影响归位）")
         <*> goOpts
-  dayReader = maybeReader (readMaybe :: String -> Maybe Day)
+  -- 横切审计 #65：只收十位 YYYY-MM-DD（Read Day 接受任意位数年份，26-09-01 会被读成公元 26 年）
+  -- 审计 #14：四个 --workers 同一值域（Pm.Types.workersOk），越界在解析处拒（退 2）
+  workersReader = eitherReader parseWorkers
+  dayReader = eitherReader (\s -> maybe (Left ("日期须为 YYYY-MM-DD（四位年份，如 2026-09-01）: " <> s)) Right (parseYmd s))
   backupP =
     fmap CmdBackup $
       hsubparser
@@ -344,7 +346,7 @@ parserInfo =
                 (progDesc "登记已插入的备份盘（写 .pm/root-id.json，按 UUID 认盘不认盘符）")
             )
         )
-        <|> (BackupRun <$> goOpts <*> optional (option auto (long "workers" <> metavar "N" <> help "备份盘 hash 并行度（默认 1，HDD 防寻道抖动）")))
+        <|> (BackupRun <$> goOpts <*> optional (option workersReader (long "workers" <> metavar "N" <> help "备份盘 hash 并行度（1..64；默认 1，HDD 防寻道抖动）")))
   cleanP =
     fmap CmdClean $
       hsubparser

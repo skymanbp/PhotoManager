@@ -48,7 +48,12 @@ data BackupCmd
 -- （.git 文件、祖先仓、反规则全覆盖），不再只看本目录的 .git 目录。
 -- Right = 规范化绝对路径。
 backupInitPreflight :: Config -> FilePath -> IO (Either String FilePath)
-backupInitPreflight cfg path = do
+backupInitPreflight cfg path
+  | blankPathArg path = pure (Left "备份路径为空（空串会被当成当前目录）→ pm backup init <盘上镜像路径>")
+  | otherwise = backupInitPreflight' cfg path
+
+backupInitPreflight' :: Config -> FilePath -> IO (Either String FilePath)
+backupInitPreflight' cfg path = do
   abs0 <- makeAbsolute path
   -- 第一方自审 R8：登记只记「盘内相对路径」，发现只枚举本机盘符卷——UNC 或
   -- 无盘符的路径登记得上、却永远发现不了（`splitDrive` 会把 `\\server\share`

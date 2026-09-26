@@ -120,7 +120,12 @@ initPreflight mainPath = do
         _ -> Right ()
 
 runInit :: InitOpts -> IO Int
-runInit o = do
+runInit o
+  | blankPathArg (ioMain o) = putStrLn "--main 为空（空串会被当成当前目录）→ pm init --main <主库路径>" >> pure 2
+  | otherwise = runInit' o
+
+runInit' :: InitOpts -> IO Int
+runInit' o = do
   mainPath <- makeAbsolute (ioMain o)
   okMain <- doesDirectoryExist mainPath
   pre <-
@@ -201,7 +206,8 @@ runInit o = do
         Just (Right (fp, lost)) -> do
           forM_ lost $ \why ->
             putStrLn ("⚠ 旧配置读不出（" <> why <> "）——备份盘登记与发布路径/push 目标未能保留，重建后请重跑 pm backup init / pm config set")
-          putStrLn ("✓ 配置已写入 " <> fp) >> initMarker o mainPath
+          -- 横切审计 #84：成功行点名主库的绝对路径（相对路径 / 空串被解析成什么，一眼看得见）
+          putStrLn ("✓ 配置已写入 " <> fp <> "（主库: " <> mainPath <> "）") >> initMarker o mainPath
 
 -- | init 的第二段：主库 root 标识。不动配置文件，在配置锁外。
 initMarker :: InitOpts -> FilePath -> IO Int
@@ -237,7 +243,16 @@ initMarker o mainPath = do
       pure 0
 
 runScanCmd :: ScanCmd -> Config -> IO Int
-runScanCmd sc cfg = do
+runScanCmd sc cfg
+  -- 审计 #14：手编进 config.toml 的越界并发数（写口已拒新增）在用它的地方说清楚，不静默夹紧
+  | Nothing <- scWorkers sc
+  , Just w <- cfgWorkers cfg
+  , not (workersOk w) =
+      putStrLn ("配置里的并发数 " <> show w <> " 越界（1..64）——config.toml 被手改过？→ pm config set --workers <N>（或 --no-workers 回到默认）") >> pure 2
+  | otherwise = runScanCmd' sc cfg
+
+runScanCmd' :: ScanCmd -> Config -> IO Int
+runScanCmd' sc cfg = do
   let root = cfgMainPath cfg
   -- P3b-5 复审 B1：主库路径必须是 RoleMain root（指向备份/vault 会改错库）
   er <- requireRole RoleMain root

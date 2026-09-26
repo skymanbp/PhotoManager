@@ -36,16 +36,18 @@ module Pm.Cli
   , reportScanIssues
   , refreshBackupCache
   , exitBoundary
+  , parseYmd
+  , parseWorkers
   ) where
 
 import Control.Exception (IOException, displayException, try)
 import Control.Monad (forM, forM_, unless, when)
-import Data.Char (toLower)
+import Data.Char (isDigit, toLower)
 import Data.Function (on)
 import Data.List (intercalate, nubBy, partition)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
-import Data.Time (getCurrentTime)
+import Data.Time (Day, getCurrentTime)
 import System.Directory (canonicalizePath, listDirectory)
 import System.IO (hFlush, hPutStrLn, stderr, stdout)
 import Text.Printf (printf)
@@ -84,6 +86,21 @@ exitBoundary act = do
       hFlush stdout
       hPutStrLn stderr ("pm: " <> displayException (e :: IOException))
       pure 2
+
+-- | @pm sort --from/--to@ 的日期（横切审计 #65）：只收十位 @YYYY-MM-DD@。time 的 @Read Day@ 接受任意位数
+-- 的年份——本项目事件名是 @YY-MM-地点@，顺手敲的 @26-09-01@ 被读成公元 26 年，区间整个落空或（只一端写短）
+-- 静默放宽到把无关的旧照片也捡进计划。
+parseYmd :: String -> Maybe Day
+parseYmd s
+  | length s == 10 && and [if i == 4 || i == 7 then c == '-' else isDigit c | (i, c) <- zip [0 :: Int ..] s] = readMaybe s
+  | otherwise = Nothing
+
+-- | 四个 @--workers@（init / config set / scan / backup）共用的解析（审计 #14）：值域见 'workersOk'。
+-- 此前是裸 @option auto@，@pm scan --workers 100000@ 直接开十万个 hash 线程。
+parseWorkers :: String -> Either String Int
+parseWorkers s = case readMaybe s of
+  Just w | workersOk w -> Right w
+  _ -> Left ("并发数须为 1..64 的整数: " <> s)
 
 -- | 写盘命令共有的两段式开关（DESIGN.md §5）。
 data GoOpts = GoOpts
