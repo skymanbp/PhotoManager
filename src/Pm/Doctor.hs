@@ -31,6 +31,7 @@ import System.FilePath (joinPath, makeRelative, splitDirectories, (</>))
 import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog)
 import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
 import Pm.Derived (DerivedState (..), derivedRefs, scanDerived)
+import Pm.DoctorDeep (deepVerify, recordVerified)
 import Pm.DoctorProbe
 import Pm.Finding
 import Pm.Exec (dirFingerprint)
@@ -40,7 +41,7 @@ import Pm.Journal
 import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
-import Pm.Removable (DriveWait, ensureDrive, noDriveWait, requireDrive, withDriveRetry)
+import Pm.Removable (DriveWait, noDriveWait, requireDrive, withDriveRetry)
 import Pm.Trash
 import Pm.Types
 import Pm.Win (NameKind (..), deleteBoundAt, pathAtOrUnder, probeName, resolveUnder)
@@ -84,21 +85,22 @@ runDoctorGate dw root opts
       case w of
         Left m -> diagnoseOnly (Finding "I11" Bad ("--repair 拒绝执行（root 不可写）: " <> m) "")
         Right _ -> do
-          r <- withRootLock root (runDoctor' dw root opts)
+          r <- withRootLock root (runDoctor' dw True root opts)
           case r of
             Just x -> pure x
             Nothing ->
               diagnoseOnly
                 (Finding "I10" Bad "--repair 需要 root 独占锁，另一个 pm 实例正持有——本轮只诊断，未做任何修复" "")
-  | otherwise = runDoctor' dw root opts
+  | otherwise = runDoctor' dw False root opts
  where
   diagnoseOnly f = do
-    (fs, _) <- runDoctor' dw root opts {doRepair = False}
+    (fs, _) <- runDoctor' dw False root opts {doRepair = False}
     let all' = fs <> [f]
     pure (all', if maximum (Info : map fSeverity all') >= Warn then 1 else 0)
 
-runDoctor' :: DriveWait -> FilePath -> DoctorOpts -> IO ([Finding], Int)
-runDoctor' dw root opts = do
+-- | @held@ = 已在该 root 的锁内（@--repair@ 那条路）：@--deep@ 记回验证时间时不再重复取锁（横切审计 #67）。
+runDoctor' :: DriveWait -> Bool -> FilePath -> DoctorOpts -> IO ([Finding], Int)
+runDoctor' dw held root opts = do
   (entries, jwarns) <- readJournal root
   let journalFindings =
         [ Finding
@@ -193,12 +195,15 @@ runDoctor' dw root opts = do
     CatRefused ws ->
       pure ([Finding "CATALOG" Bad w "排除原因后重试，或 pm scan 重建；快照被拒说明有人手编过或介质出错" | w <- ws] <> deepSkipped "快照载入失败")
     CatLoaded cat ws -> do
-      deepFindings <- if doDeep opts then deepVerify dw root cat else pure []
+      (deepFindings, verified) <- if doDeep opts then deepVerify dw root cat else pure ([], [])
+      -- 横切审计 #67：核对无误的记回 lastVerified（锁内 RMW；没记上明说，见 'recordVerified'）
+      stamped <- recordVerified dw held root verified
       let nUnverified = length [() | e <- Map.elems (catEntries cat), enLastVerified e == Nothing]
       pure
         ( [Finding "CATALOG" Warn ("快照坏代已跳过（本轮按较旧一代核对）: " <> w) "pm scan 重建" | w <- ws]
             <> [Finding "VERIFY-AGE" Info (show (Map.size (catEntries cat)) <> " 条目; 无验证时间戳条目 " <> show nUnverified) ""]
             <> deepFindings
+            <> stamped
         )
 
   -- I7 判定侧（§10.3 第 2 项）：相册 ⊆ 成片 ∪ inbox-origin。判据的两个输入
@@ -581,36 +586,6 @@ staleTmpFiles root expected = do
       pure $ case (r :: Either IOException [FilePath]) of
         Left e -> Left (show e)
         Right fs -> Right fs
-
-deepVerify :: DriveWait -> FilePath -> Catalog -> IO [Finding]
-deepVerify dw root cat = do
-  results <- forM (Map.elems (catEntries cat)) $ \e -> do
-    let abs' = root </> enPath e
-    -- 1.1.2：盘不在时 doesFileExist 答 False——先等盘，否则掉线被报成「消失」
-    ensureDrive dw root "深验"
-    ex <- doesFileExist abs'
-    if not ex
-      then pure [Finding "DEEP" Warn ("条目在盘上消失: " <> enPath e) "跑 pm scan 刷新索引"]
-      else do
-        -- 三十四轮（同型扫尽）：--deep 扫全库、窗口以分钟计，一个被占的
-        -- 文件不该让整轮诊断崩掉；读失败也不得折叠成 CORRUPT（下一步不同：
-        -- 稍后重跑 vs 核查介质）。1.1.2：读错先按瞬断判（盘不在等它回来、
-        -- 再读这一条），确定性的读错与等不到盘才落成 Warn。
-        actualE <- try (withDriveRetry dw root ("深验 " <> enPath e) (sha256File abs')) :: IO (Either IOException Text)
-        pure $ case actualE of
-          Left ioe ->
-            [Finding "DEEP" Warn ("条目读取失败（被占/介质？）: " <> enPath e <> "（" <> show ioe <> "）") "稍后重跑 pm doctor --deep"]
-          Right actual ->
-            [ Finding "DEEP-CORRUPT" Bad ("内容与索引 sha 不符: " <> enPath e) "核查介质；如源仍在他处，重新拷贝"
-            | actual /= enSha e
-            ]
-  -- P7-S（0.6.1，端到端运行时测试的观测缺口）：干净库上 --deep 此前一个字都不多
-  -- 打，用户分不清「深验跑了没发现」与「没跑」；Info 行汇报覆盖面，不改退出码。
-  let fs = concat results
-      nOf row sev = length [() | f <- fs, fRow f == row, fSeverity f == sev]
-      total = Map.size (catEntries cat)
-      unread = nOf "DEEP" Warn -- 消失/读不出：一个字节都没重读，不得算进「已重读」（48 轮）
-  pure (fs <> [Finding "DEEP-DONE" Info (show total <> " 条目待深验：已重读重 hash " <> show (total - unread) <> "、不符 " <> show (nOf "DEEP-CORRUPT" Bad) <> "、读取失败/消失 " <> show unread) ""])
 
 -- Safe closures only (journal appends / own-tmp deletion). C5 plans are
 -- emitted, not executed. 每个动作回一行 'repairRow'（做成 Info；跳过 Warn；删除失败 Bad）。

@@ -2,6 +2,8 @@
 用法: python verify_backup_entries.py --root <备份盘 root> [--verified-on 2026-08-26] [--retry 上次结果.json] [--out 结果.json]
       公共选项（--drive-wait / --cooldown / --max-drops / --attempts / --max-mbps）见 backup_verify.add_common_args。
   --verified-on  只核 lastVerified 以该日期开头的条目（例如只在写入端算过 sha、从没回读过的那批）；不给则全部条目（= 手工 --deep 的范围）
+                 pm doctor --backup --deep 核对无误的条目会把 lastVerified 刷成那次深验的读前时刻（横切审计 #67）——
+                 回读过的自然不再落在写入那天，同一个日期再筛，剩下的就是还没回读过的
 """
 import argparse
 import json

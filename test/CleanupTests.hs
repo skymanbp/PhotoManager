@@ -11,8 +11,8 @@ import Control.Monad (forM_)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.List (isInfixOf, isPrefixOf)
-import Data.Time (UTCTime (..), defaultTimeLocale, formatTime, fromGregorian, getTimeZone, utcToLocalTime)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory)
+import Data.Time (UTCTime (..), defaultTimeLocale, formatTime, fromGregorian, getCurrentTime, getTimeZone, utcToLocalTime)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, listDirectory, setModificationTime)
 import System.FilePath (splitDrive, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
@@ -22,6 +22,7 @@ import Pm.Backup (discoverAmongStates, discoverBackupRoot, discoverBackupRoots)
 import Pm.BackupCmd (backupInitPreflight, runBackupRun)
 import Pm.Cli (GoOpts (..), bindExecRootWith, healLines, parseWorkers, parseYmd)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), repairDegraded, repairRow, runDoctor)
+import Pm.DoctorDeep (deepVerify, recordVerified)
 import Pm.Exec (Checkpoint (..), defaultExecEnv, execPlan)
 import Pm.Plan (validatePlan)
 import Pm.Scan (maxPathLen)
@@ -31,6 +32,8 @@ import Pm.Op (Op (..))
 import Pm.Config (Config (..), loadConfig, writeConfig)
 import Pm.ConfigEdit (checkConfig, runConfigShow)
 import Pm.GitGuard (pmIgnoreGuard)
+import Pm.Removable (noDriveWait)
+import Pm.Lock (withRootLock)
 import Pm.Catalog (CatalogLoad (..), loadCatalog, saveCatalog)
 import Pm.SortSource (withSourceQ)
 import Pm.Status (IndexSummary (..), StatusOpts (..), StatusReport (..), localStamp, renderStatus, statusReport)
@@ -59,6 +62,7 @@ cleanupTests =
     , testCase "#45 计划校验对派生路径同守长路径上限：隔离的 trash 目标 / Copy 的 tmp 名越过上限 → validatePlan 与 execPlan 整份拒绝、victim 不动（此前执行时才以 Win32 错误逐项失败）" casePlanDerivedPathLength
     , testCase "#15 打包版 pm-ui 起不来（pm serve 没报端口 / 窗口建不起来）时退出前弹系统消息框、按 2 退出（无控制台时此前一声不响就没了）" caseUiStartupDialog
     , testCase "#70 控制台输出代码页：stdout 或 stderr 任一是控制台就切 UTF-8（stdout 重定向时 stderr 的进度不再按 936 乱码）" caseConsoleCpEitherHandle
+    , testCase "#67 pm doctor --deep 把核对无误的条目的验证时间记回索引（内容不符 / stat 与索引不一致 / 已有更晚的都不动；锁被占明说没记上；--repair 锁内照记）" caseDeepStamps
     , testCase "#26 备份发现按四态读：登记路径上 root-id.json 损坏 / 读不出 → 点名那块盘（不再说「未挂载，插上盘」）；pm apply 的 UUID 绑定同样点名；路径不在照旧「未挂载」" caseBackupMarkerBroken
     ]
 
@@ -389,3 +393,65 @@ caseConsoleCpEitherHandle = do
       has s = any (s `isInfixOf`) body
   assertBool "任一句柄是控制台就切" (has "tty <- (||) <$> hIsTerminalDevice stdout <*> hIsTerminalDevice stderr")
   assertBool "切的是输出代码页 65001、受 tty 守卫" (has "when tty $" && has "setConsoleOutputCP 65001")
+
+-- | 横切审计 #67（用户裁定「校验后写回」）：@pm doctor --deep@ 此前只出发现行、不回写，状态页「最久未验证字节」深验
+-- 多少次都只涨不降。四张照片：a 正常；b 等长改了内容、mtime 拨回原值（stat 与索引一致，只有 sha 不符）；c 内容没
+-- 变、只改了 mtime（stat 与索引不一致——该由 scan 重 hash，不该由深验替它盖章）；d 已有比这次更晚的验证时间。
+caseDeepStamps :: Assertion
+caseDeepStamps = withSystemTempDirectory "pm-deep-stamp" $ \dir -> do
+  let root = dir </> "root"
+      ev = "成片" </> "26-06-R66"
+      f n = root </> ev </> n
+      old = UTCTime (fromGregorian 2025 1 1) 0
+      future = UTCTime (fromGregorian 2099 1 1) 0
+      loaded = do
+        lc <- loadCatalog root
+        case lc of
+          CatLoaded c [] -> pure c
+          _ -> assertFailure "快照应能干净载入" >> pure (Catalog "" old Map.empty)
+      stampsOf = (\c -> Map.fromList [(n, enLastVerified =<< Map.lookup (ev </> n) (catEntries c)) | n <- ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]]) <$> loaded
+      setOld = do
+        cat <- loaded
+        let back e = e {enLastVerified = Just (if enPath e == ev </> "d.jpg" then future else old)}
+        saveCatalog root cat {catEntries = Map.map back (catEntries cat)}
+      rowsOf fs = [(fRow x, fSeverity x) | x <- fs]
+  mkMain root
+  mapM_ (\(n, s) -> writeF (f n) s) [("a.jpg", "AAA"), ("b.jpg", "BBB"), ("c.jpg", "CCC"), ("d.jpg", "DDD")]
+  scanQuiet "main-rid" root >>= saveCatalog root
+  setOld
+  mtB <- getModificationTime (f "b.jpg")
+  writeFile (f "b.jpg") "BBX"
+  setModificationTime (f "b.jpg") mtB
+  setModificationTime (f "c.jpg") (UTCTime (fromGregorian 2024 1 1) 0)
+  t1 <- getCurrentTime
+  (fs, code) <- runDoctor root (DoctorOpts True False)
+  assertBool ("b 应报 DEEP-CORRUPT: " <> show (rowsOf fs)) (("DEEP-CORRUPT", Bad) `elem` rowsOf fs)
+  assertBool ("应报记回 1 条（Info）: " <> show [fDetail x | x <- fs, fRow x == "DEEP-STAMP"]) ([fDetail x | x <- fs, fRow x == "DEEP-STAMP", fSeverity x == Info] == ["核对无误的条目里 1 条已把验证时间记回索引（pm status 的「最久未验证字节」据此刷新）"])
+  code @?= 1
+  st <- stampsOf
+  assertBool ("a 应记上本次读前时刻: " <> show (Map.lookup "a.jpg" st)) (maybe False (maybe False (>= t1)) (Map.lookup "a.jpg" st))
+  (Map.lookup "b.jpg" st, Map.lookup "c.jpg" st, Map.lookup "d.jpg" st) @?= (Just (Just old), Just (Just old), Just (Just future))
+  -- 锁被别的 pm 占着：深验照跑，验证时间没记上并明说（Warn）
+  setOld
+  held <- withRootLock root (runDoctor root (DoctorOpts True False))
+  case held of
+    Nothing -> assertFailure "外层锁竟然没拿到"
+    Just (fs2, _) -> assertBool ("锁被占应报 DEEP-STAMP Warn: " <> show (rowsOf fs2)) (("DEEP-STAMP", Warn) `elem` rowsOf fs2)
+  (Map.lookup "a.jpg" <$> stampsOf) >>= (@?= Just (Just old))
+  -- --repair 那条路已在锁内：不重复取锁，照记
+  (fs3, _) <- runDoctor root (DoctorOpts True True)
+  assertBool ("--repair 下应记上（Info）: " <> show (rowsOf fs3)) (("DEEP-STAMP", Info) `elem` rowsOf fs3)
+  (maybe False (maybe False (> old)) . Map.lookup "a.jpg" <$> stampsOf) >>= (@?= True)
+  -- 深验与记回之间，别的进程（scan）把条目改写了：stat 没变、sha 变了 → 不记（两段直接调，模拟那个交错）
+  setOld
+  cat5 <- loaded
+  (_, vs) <- deepVerify noDriveWait root cat5
+  saveCatalog root cat5 {catEntries = Map.adjust (\e -> e {enSha = "0000"}) (ev </> "a.jpg") (catEntries cat5)}
+  _ <- recordVerified noDriveWait False root vs
+  (Map.lookup "a.jpg" <$> stampsOf) >>= (@?= Just (Just old))
+  -- root 不可写（I11：在 git 工作树里而 .gitignore 没覆盖 .pm/——同 --repair 的写前闸）：深验照跑，验证时间不写、明说
+  setOld
+  createDirectoryIfMissing True (root </> ".git")
+  (fs4, _) <- runDoctor root (DoctorOpts True False)
+  assertBool ("不可写应报 DEEP-STAMP Warn: " <> show (rowsOf fs4)) (any (\x -> fRow x == "DEEP-STAMP" && fSeverity x == Warn && "root 不可写" `isInfixOf` fDetail x) fs4)
+  (Map.lookup "a.jpg" <$> stampsOf) >>= (@?= Just (Just old))

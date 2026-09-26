@@ -92,7 +92,7 @@ R4 Haskell）落成以下**硬不变量**，每条都有机制背书，不靠自
 | I1 | 任何 pm 操作不使任何仓库丢失字节或信息（含文件名） | I2+I4+I5；重命名旧名先持久化进日志再动盘 |
 | I2 | **pm 没有删除原语，也没有覆盖写原语**。唯一移出机制 = quarantine（移入 `.pm/trash/` 保持相对路径 + manifest）。产地据实清点（步 9 C10；DocDrift `caseQuarantineCensus` 钉住引用 `OpQuarantine` 的模块集合，新模块一碰就转红）：`pm clean staging`（Clean）、`pm undo`（Undo）、supersede 复合——`pm resolve --keep src`（Apply，§6.5）、`pm dedupe`（Dedupe）、`pm doctor --repair` 的 C5 隔离计划（Doctor）、`pm diff` 备份盘更新的旧件（Diff，`supersede:backup-update`）、执行期回滚的位移件 `rollback-displaced:`（Exec） | `Op` 代数只有 `Copy/Rename/Quarantine` 构造子；落位一律走「目标存在即失败」的 rename（§6.1 步 7） |
 | I3 | 每次写盘前有可打印的 Plan 且经确认；每个文件落盘后 sha256 复读校验（**缓存级**：捕获写逻辑错误/截断/串文件与缓存副本位翻转，不覆盖介质层损坏——介质层见 I3b） | Exec 只接受 Plan；写协议 §6.1 |
-| I3b | 介质级验证为显式能力：`pm doctor --deep` 把 catalog 的**全部**条目重读重 hash 一遍（默认那次只复验上次 CleanShutdown 之后的 Done），`pm status` 显示「最久未验证字节的年龄」（`lastVerified` 随每次 hash 写进 catalog）。**没有轮转/抽样机制**——全库覆盖只有 `--deep` 一条路；落位后绕缓存重读的 `--verify-media` **尚未实现**（§6.6/§12 的它是设计预留） | §6.6 + §12 单列开销 |
+| I3b | 介质级验证为显式能力：`pm doctor --deep` 把 catalog 的**全部**条目重读重 hash 一遍（默认那次只复验上次 CleanShutdown 之后的 Done），`pm status` 显示「最久未验证字节的年龄」（`lastVerified` 随每次 hash 写进 catalog——`--deep` 核对无误的条目同样记回，横切审计 #67）。**没有轮转/抽样机制**——全库覆盖只有 `--deep` 一条路；落位后绕缓存重读的 `--verify-media` **尚未实现**（§6.6/§12 的它是设计预留） | §6.6 + §12 单列开销 |
 | I4 | 所有 mutation 先写 intent、成功后写 done（append-only NDJSON），**带真实持久化屏障**：intent 在其效果落盘前 `hFlush + FlushFileBuffers`；Copy 的 done 可组提交，Rename 的屏障强制且不可组提交（旧名仅存于日志）。**追加前先封尾**：`.pm/journal.ndjson` 与隔离区 manifest 的每次追加都先查末字节，不是换行（掉电写了半行）就先补 `\n`，新记录绝不与残行黏成一条——journal 另落一条 `torn-gap` 标记把残行**封**成可识别的撕裂尾（§6.4） | Journal 模块（Win32 boot 库 `flushFileBuffers`，本机已验证存在）；`pm doctor` 对账 §6.4 |
 | I5 | 目的地已存在且内容不同 → **conflict，停该项，不覆盖，无例外**。vault DRIFT 的 supersede 与备份盘更新**不是覆盖**：先 Quarantine 移出旧文件、再 Copy 落新字节（§6.5），旧字节始终在隔离区可还原 | Plan 生成期检查 + Exec 执行期二次检查 + 落位 rename 的 no-replace（ReplaceIfExists=FALSE）语义三重防线 |
 | I6 | 断电 / 拔盘 / 进程被杀后，`pm doctor` 能检出半成品并安全恢复；恢复矩阵覆盖三种 Op 的全部协议步骤与掉电（journal 尾部丢失）模型 | §6.4 矩阵 + §13 两类故障注入 |
@@ -169,6 +169,7 @@ src/Pm/Exec.hs              -- ★安全内核：唯一**写入/落位/改名**�
 src/Pm/Removable.hs         -- 可移动介质瞬断保护（1.1.2，§6.4 末段）：盘在判据、IOException 三分、等盘/短停重试、扫描按 pass 续、执行按组续跑（内核之外的会话层；不写照片字节）
 src/Pm/Derived.hs           -- .pm/derived 派生件对账口（1.1.2 从 Convert 字节级拆出，解 Doctor→Convert→Cli 依赖环；Convert 再导出）；derivedRefs = 未完成计划项引用的派生件（审计 #31）
 src/Pm/Finding.hs           -- doctor 的发现行类型与渲染（Severity/Finding/renderFinding/repairRow；2026-09-26 从 Doctor 字节级拆出，Doctor 再导出；750 行预算）
+src/Pm/DoctorDeep.hs        -- doctor --deep：全库重读重 hash（deepVerify，2026-09-26 从 Doctor 搬出；750 行预算）+ 核对无误的验证时间记回快照（recordVerified，横切审计 #67）
 src/Pm/DoctorProbe.hs       -- doctor 的受信探针（.pm 内定点路径的受信 sha / 存在性、用户侧三态存在性；2026-09-26 审计 #35 时从 Doctor 字节级拆出；750 行预算）
 src/Pm/Sort.hs              -- 卡/收件目录 → 分段提议与归位计划（源扫描层在 Pm.SortSource，三十五轮拆出）
 src/Pm/Names.hs             -- 事件夹/文件名解析、规范化、rename 计划（目标唯一性校验）
@@ -258,7 +259,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、别名登记、同批目标唯一性校验） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
 | `pm dedupe [--apply]` | **精确重复的逐份裁决计划**（§8.1）：来源就是 `pm versions` 的非设计内精确重复组，每一份出一个 Quarantine 条目、**全部** `NEEDS-DECISION`——留哪一份 pm 判不出就不猜（I1），用 `pm resolve --item N --unskip` 逐份批准。**不**绑复合组（复合组语义是不可拆，而这里要求逐份裁决）；组的完整性由执行期屏障保证：某个 sha 在归档层的最后一份**活**副本不会被隔离掉 | apply 时 |
-| `pm doctor [--deep]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留与撕裂尾）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash（工作量只有被中断那场会话，有界）；**`--deep` 另外把 catalog 的全部条目重读重 hash 一遍**（`DEEP` / `DEEP-CORRUPT` 行）。没有轮转/抽样档位：要么默认那个有界窗口，要么 `--deep` 全库。P8-C2 起另对账 `.pm/derived` 派生件（`DERIVED-STALE` 已落位 / `DERIVED-ORPHAN` 源已不在库 / `DERIVED-TMP` 半成品 → Warn，`--repair` 删；`DERIVED-PENDING` Info——还有没做完的计划项引用的、计划读不全核不了的也归这一行、不删，审计 #31；枚举失败 `DERIVED-ENUM` Bad 不修）；1.2.0 起另校验 I7 拓扑（`I7` 行：相册 ⊆ 成片 ∪ inbox-origin，未解释的逐条 Warn 交人裁决，`--repair` 不碰；journal/快照有告警即整条不判） | 否 |
+| `pm doctor [--deep]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留与撕裂尾）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash（工作量只有被中断那场会话，有界）；**`--deep` 另外把 catalog 的全部条目重读重 hash 一遍**（`DEEP` / `DEEP-CORRUPT` 行）。没有轮转/抽样档位：要么默认那个有界窗口，要么 `--deep` 全库。P8-C2 起另对账 `.pm/derived` 派生件（`DERIVED-STALE` 已落位 / `DERIVED-ORPHAN` 源已不在库 / `DERIVED-TMP` 半成品 → Warn，`--repair` 删；`DERIVED-PENDING` Info——还有没做完的计划项引用的、计划读不全核不了的也归这一行、不删，审计 #31；枚举失败 `DERIVED-ENUM` Bad 不修）；1.2.0 起另校验 I7 拓扑（`I7` 行：相册 ⊆ 成片 ∪ inbox-origin，未解释的逐条 Warn 交人裁决，`--repair` 不碰；journal/快照有告警即整条不判）；`--deep` 核对无误的条目把验证时间记回快照（`DEEP-STAMP`：锁内重读快照，sha 与 (size, mtime) 仍一致才记、记读前时刻；锁被占 / root 不可写 / 快照回退到较旧一代只报 Warn 不记——横切审计 #67） | `--repair` / `--deep` 时仅 .pm/ |
 | `pm apply <planId> [--only 3,7-9]` | 执行（或部分执行）已存的计划；conflict 项只停该项、批次继续、末尾汇总。**P2.1/P2.2**：执行 root 按计划 `rootId` 重新发现绑定（Exec 拿锁后再验一次；无 rootId 的计划 CLI 层 fail-closed 拒绝，含 --apply 即时路径）；`--only` 自动扩到复合组闭包，**语法错误或序号超出 `0-N` 一律拒绝**（`--only 语法错误或序号超出计划范围（0-N）`，exit 2——不静默夹取，也不"照能认出的那几个跑"）；绑不上 root 时报文**逐槽位列出读不出身份的那些**（`缺席（尚未 init）` / `损坏: …` / `读不出: …`），而不是一句"均不符"宣称一次从未发生的 UUID 比对；clean 计划**每次执行前**逐项重验三副本（真实重 hash），不过的降级暂停——`pm apply` 与 `clean --apply` 即时路径无差别，无豁免 | 是 |
 | `pm resolve <planId> --item N [--unskip] [--keep src\|dst\|both]` | 裁决计划中的一项：缺省**跳过**该项，`--unskip` 恢复为待执行，`--keep` 裁决标 `NEEDS-DECISION` 的冲突项（both = 新名并存）。**P2.1**：`--keep` 只接受独立的 NEEDS-DECISION Copy（复合组成员不可单独裁决）；skip/unskip 扩到全组；`--keep src` 追加的 supersede 对共享组 id | 改计划 |
 | `pm trash list` / `pm trash empty` | 隔离区查看（manifest ∪ journal ∪ 实际目录并集，孤儿标 UNREGISTERED；manifest 有记录而 trash 无文件的标「不在 trash」——被清除、被 undo 移回，或隔离没落地，审计 #30）/ **唯一的最终清除入口**：逐项列出、二次确认，只 unlink 确认清单里逐项可见的条目，禁止整删目录树。**P2.1（评审 cx-3 终极屏障）**：reason 为 `clean-staging` 的条目在永久删除前按当前 catalog + 真实重 hash 再确认「Raw/成片 + 备份盘」各存一份同 sha 副本，确认不了 HELD 不删。**P5-B 起这道屏障一般化成一张表**（`barrierOf`）：`dedupe` 记录另走「归档三层还留着一份活副本吗」，与备份盘无关——一块没插的盘不该拖住与它无关的记录；无前缀的记录不受屏障管，仍需逐项确认。**清除过程中 unlink 失败即停**（占用/只读/句柄绑定不符）：打印 `✗ <路径>: <错误> —— 已清除 k/N 项，其余未动；解除占用/只读后重跑 pm trash empty`、exit 2——保守方向是少删不多删；manifest 不为失败的那批改写（清除成功的记录也照样保留为历史），重跑幂等。清除了条目（含中途失败前已清的）即在锁内补写一条 CleanShutdown：已清除载荷的旧 Done 移出 C4 复验窗口，下一次 doctor 不再误报「目标不存在」（审计 #37）；这条标记写不进 journal 时照常报清除结果、另报一行并 exit 2，不逃顶 | empty 时 |
@@ -449,8 +450,10 @@ undo：复位对（①+~r）互为净零，不产生可撤销项；正常完成�
 
 - `pm doctor --deep`（**唯一已实现**的全库复验）：重读重 hash catalog 的全部条目
   （`DEEP` / `DEEP-CORRUPT` 行），**没有轮转/抽样档位**；默认那次只复验上次
-  CleanShutdown 之后的 Done。`lastVerified` 随每次 hash 进 catalog，`pm status` 据此
-  显示最久未验证年龄。`--verify-media`（落位后 `FILE_FLAG_NO_BUFFERING` 绕缓存重读）
+  CleanShutdown 之后的 Done。`lastVerified` 随每次 hash 进 catalog（`--deep` 核对无误的条目在锁内把读前
+  时刻记回：重读快照，sha 与 (size, mtime) 仍一致才记；快照回退到较旧一代、锁被占、root 不可写都只报
+  `DEEP-STAMP` Warn 不记——横切审计 #67；此前 `--deep` 不回写，状态页的年龄深验多少次都只涨不降），
+  `pm status` 据此显示最久未验证年龄。`--verify-media`（落位后 `FILE_FLAG_NO_BUFFERING` 绕缓存重读）
   **尚未实现**——全仓无该选项无该实现，§12 为它单列的开销是设计预留。
 
 ### 6.7 并发防护
