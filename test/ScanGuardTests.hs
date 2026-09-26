@@ -282,6 +282,9 @@ caseScanPartialWalkKeepsUnknown =
     srCarried r3 @?= 0
     Map.size (catEntries (srCatalog r3)) @?= 2
 
+-- | 被拒（deny F）的文件：不入索引、带路径入错误桶。审计 #8 起遍历按属性判链接与目录（对对象
+-- 自身 ACL 免疫），被拒的文件不再在遍历层出错，而在随后的 stat——已在索引里的旧条目仍须原样
+-- 保留（查不出 ≠ 不存在），不得随这一轮快照落盘消失。
 caseScanDeniedProbe :: IO ()
 caseScanDeniedProbe =
   withSystemTempDirectory "pm-scan-deny" $ \dir -> do
@@ -291,9 +294,11 @@ caseScanDeniedProbe =
     let entries = catEntries (srCatalog res)
     assertBool "被拒文件不得入索引" (Map.notMember "bad.jpg" entries)
     assertBool "正常文件照常入索引" (Map.member "ok.jpg" entries)
-    assertBool
-      ("探针失败必须带路径入错误桶: " <> show (srErrors res))
-      (any (\(p, m) -> p == "bad.jpg" && "查不出" `isInfixOf` m) (srErrors res))
+    assertBool ("读不出必须带路径入错误桶: " <> show (srErrors res)) (any ((== "bad.jpg") . fst) (srErrors res))
+    full <- scanRoot (ScanOpts 1 False) Nothing "rid-t" dir
+    res2 <- withDenyAll (dir </> "bad.jpg") (scanRoot (ScanOpts 1 False) (Just (srCatalog full)) "rid-t" dir)
+    assertBool "被拒文件的旧条目须原样保留" (Map.lookup "bad.jpg" (catEntries (srCatalog res2)) == Map.lookup "bad.jpg" (catEntries (srCatalog full)))
+    srCarried res2 @?= 1
 
 -- 实验记录（三十九轮，全组合跑过）：目录级拒 (RD)/(RD,RA)/(RD,X) 下
 -- pathIsSymbolicLink 照常成功、全拒 (F) 下 doesDirectoryExist 先塌 False——

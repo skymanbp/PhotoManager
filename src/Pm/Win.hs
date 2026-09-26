@@ -33,6 +33,8 @@ module Pm.Win
   , NameKind (..)
   , probeName
   , probeIsDir
+  , fileAttrs
+  , isDirAttr
   , resolveUnder
   , whenPresent
   , openExclusiveBinary
@@ -201,22 +203,25 @@ probeName p = do
             Just tag ->
               if tag .&. ioReparseTagNameSurrogate /= 0 then NameSurrogate else NamePlain
 
--- | 上面错误码纪律的唯一实现（'probeName' / 'probeIsDir' 共用）：Right Nothing = 名字
--- 不在（只认 2 / 3）；Right (Just 属性)；Left 错误码 = 查不出。
-fileAttrs :: FilePath -> IO (Either Word32 (Maybe Word32))
+-- | 上面错误码纪律的唯一实现（'probeName' / 'probeIsDir'，以及遍历与读前闸——审计 #8——共用）：
+-- Right Nothing = 名字不在（只认 2 / 3）；Right (Just 属性)；Left = 查不出（带路径与错误码）。
+fileAttrs :: FilePath -> IO (Either String (Maybe Word32))
 fileAttrs p = withTString p $ \wp -> alloca $ \errp -> do
   a <- c_pmGetFileAttributesErr wp errp
   ec <- peek errp
-  pure (if a /= 0xFFFFFFFF then Right (Just a) else if ec == 2 || ec == 3 then Right Nothing else Left ec)
+  pure (if a /= 0xFFFFFFFF then Right (Just a) else if ec == 2 || ec == 3 then Right Nothing else Left (unknown ec))
+ where
+  unknown ec = p <> " 存在性查不出（ACL/介质错误？错误码 " <> show ec <> "）"
 
 -- | 读路径的三态「是不是目录」（2026-09-25 审计 #6）：@doesDirectoryExist@ 走 CreateFile，
 -- 对象自身的 ACL 拒绝（deny F）把它塌成 False，枚举里读不出的子目录就被当成「不是目录」
 -- 静默剔掉。这里读属性的 DIRECTORY 位——同 'probeName' 一个探针，对象自身 ACL 不影响它；
 -- junction / 目录 symlink 带该位，算目录（悬空时随后的枚举响亮失败）。Left = 查不出。
 probeIsDir :: FilePath -> IO (Either String (Maybe Bool))
-probeIsDir p = either unknown (Right . fmap (\a -> a .&. Win32File.fILE_ATTRIBUTE_DIRECTORY /= 0)) <$> fileAttrs p
- where
-  unknown ec = Left (p <> " 存在性查不出（ACL/介质错误？错误码 " <> show ec <> "）")
+probeIsDir p = fmap (fmap isDirAttr) <$> fileAttrs p
+
+isDirAttr :: Word32 -> Bool
+isDirAttr a = a .&. Win32File.fILE_ATTRIBUTE_DIRECTORY /= 0
 
 -- | 「名字在就做、不在就当没有、**查不出就说查不出**」（第一方自审 R1）。
 --

@@ -478,6 +478,7 @@ budgetFiles = do
         , ("gui" </> "src-tauri" </> "src", [".rs"])
         , ("scripts", [".py"])
         , ("cbits", [".c", ".h"])
+        , ("test" </> "cbits", [".c"])
         ]
   pure (map snd ms <> dirs <> ["README.md", "README.zh.md"])
  where

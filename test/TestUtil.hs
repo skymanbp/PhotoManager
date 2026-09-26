@@ -37,11 +37,14 @@ module TestUtil
   , withDenyList
   , withEnv
   , disableBackupPrivileges
+  , setForeignReparse
+  , setOffline
   ) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, bracket, bracket_, finally, throwIO, try)
 import Control.Monad (forM_, void, when)
+import Data.Bits ((.|.))
 import Data.Word (Word32)
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.Ptr (Ptr)
@@ -56,6 +59,8 @@ import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileE
 import System.FilePath (takeDirectory, takeFileName, (</>))
 import System.IO (IOMode (..), hClose, hFlush, hGetContents, hSetEncoding, openFile, stdout, utf8)
 import System.IO.Temp (withSystemTempDirectory)
+import System.Win32.File (getFileAttributes, setFileAttributes)
+import System.Win32.Types (LPTSTR, withTString)
 import Test.Tasty.HUnit
 
 import Pm.Catalog (saveCatalog)
@@ -122,6 +127,23 @@ disableBackupPrivileges = alloca $ \errp -> do
   ok <- c_pmDisableBackupPrivileges errp
   err <- peek errp
   pure (if ok /= 0 then Right () else Left err)
+
+-- | 审计 #8 夹具（test/cbits/pm_test.c，只链进测试套件）：给已有文件设第三方 reparse point，tag
+-- 由调用方给（第 29 位 = name-surrogate 位）。普通令牌对自己能写的文件就能设（2026-09-26 实测）；
+-- 删除走 removeFile 照常（同日实测），临时目录的收尾不受影响。
+foreign import ccall unsafe "pm_test_set_foreign_reparse"
+  c_pmTestSetForeignReparse :: LPTSTR -> Word32 -> Ptr Word32 -> IO Word32
+
+setForeignReparse :: FilePath -> Word32 -> IO ()
+setForeignReparse p tag = withTString p $ \wp -> alloca $ \errp -> do
+  ok <- c_pmTestSetForeignReparse wp tag errp
+  err <- peek errp
+  when (ok == 0) (assertFailure ("夹具：设第三方 reparse point 失败，错误码 " <> show err))
+
+-- | 审计 #8 夹具：标 FILE_ATTRIBUTE_OFFLINE（「内容不在本机」里用户态能设的那一位，同 attrib +O）。
+-- RECALL_ON_OPEN / RECALL_ON_DATA_ACCESS 只有内核态能设，由 'Pm.Scan.isCloudOnlyAttr' 的纯函数断言钉。
+setOffline :: FilePath -> IO ()
+setOffline p = getFileAttributes p >>= setFileAttributes p . (.|. 0x1000)
 
 -- | 'trashView' 三十五轮 Either 化（枚举 fail-closed）后的测试解包：正常
 -- fixture 里枚举失败即测试失败，各用例照旧拿 TrashView 断言。

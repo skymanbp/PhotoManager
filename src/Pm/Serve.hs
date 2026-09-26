@@ -92,6 +92,7 @@ import Pm.GitGuard (vaultIgnoreGuard)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), PlanExec (..), deletePlanAnyRoot, isValidPlanId, listPlans, planExecuted, planExecs, planStale, prunePlans, runTag)
 import Pm.Journal (readJournal)
 import Pm.Publish (publishCommands)
+import Pm.Scan (cloudOnlyNote)
 import Pm.ServeAi (routeAi)
 import Pm.ServeAlbum (planPost, routeAlbum)
 import Pm.ServeEnv
@@ -512,7 +513,8 @@ surveyJson sv =
     , "undated" .= ssUndated sv
     , "homelessSidecars" .= ssHomelessCars sv
     , "unknown" .= ssUnknown sv
-    , "errors" .= [object ["path" .= p, "why" .= w] | (p, w) <- ssErrors sv]
+    , "errors" .= [object ["path" .= p, "why" .= w] | (p, w) <- ssErrors sv, w /= cloudOnlyNote]
+    , "cloudOnly" .= [p | (p, w) <- ssErrors sv, w == cloudOnlyNote]
     , "notes" .= ssNotes sv
     , "segments"
         .= [ object

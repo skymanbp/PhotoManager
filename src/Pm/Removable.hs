@@ -212,7 +212,7 @@ scanRootRetry dw opts old0 rid root = go (0 :: Int) old0
         | not (armed dw) || n >= dwAttempts dw || clean res -> pure res
         | otherwise -> do
             present <- driveOk root
-            let issues = show (length (srErrors res)) <> " 处读错、" <> show (srCarried res) <> " 条落在未枚举子树"
+            let issues = show (length (srErrors res)) <> " 处读错、" <> show (srCarried res) <> " 条没核对（保留旧值）"
             ok <- recover dw root "扫描" (if present then Hiccup else Dropped) issues
             if ok then go (n + 1) (Just (srCatalog res)) else pure res
   clean res = null (srErrors res) && srCarried res == 0

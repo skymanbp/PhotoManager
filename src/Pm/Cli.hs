@@ -41,7 +41,7 @@ import Control.Exception (IOException, try)
 import Control.Monad (forM, forM_, unless, when)
 import Data.Char (toLower)
 import Data.Function (on)
-import Data.List (intercalate, nubBy)
+import Data.List (intercalate, nubBy, partition)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import Data.Time (getCurrentTime)
@@ -66,7 +66,7 @@ import Pm.Lock (withRootLock)
 import Pm.Op
 import Pm.Plan
 import Pm.Removable (driveWaitFor, execPlanRetry, withDriveRetry)
-import Pm.Scan (ScanResult (..), freshPending, freshnessSweep)
+import Pm.Scan (ScanResult (..), cloudOnlyNote, freshPending, freshnessSweep)
 import Pm.Types
 import Pm.Win (volumeFsType)
 
@@ -535,12 +535,19 @@ reportScanIssues result = do
     printf "⚠ %d 个文件在 hash 期间被修改（本轮未入索引，重跑 pm scan）:\n" (length (srVolatile result))
     mapM_ (putStrLn . ("    ~ " <>)) (take 10 (srVolatile result))
   when (srCarried result > 0) $
-    printf "⚠ %d 条落在本轮未能枚举的子树里，按「查不出」保留上次快照值（未核对；解除占用/权限后重跑 pm scan）\n" (srCarried result)
-  unless (null (srErrors result)) $ do
-    printf "⚠ %d 个条目有错误:\n" (length (srErrors result))
-    mapM_ (\(p, e) -> putStrLn ("    ! " <> p <> ": " <> e)) (take 20 (srErrors result))
-    when (length (srErrors result) > 20) $
-      printf "    …另有 %d 条\n" (length (srErrors result) - 20)
+    printf "⚠ %d 条本轮没核对（子树未能枚举 / 读不出 / 云端未下载），按「查不出」保留上次快照值（解除占用/权限、下载到本机后重跑 pm scan）\n" (srCarried result)
+  -- 审计 #8（用户裁定「不读，单列出来」）：云端未下载的单列，不混进「有错误」
+  let (cloud, errs) = partition ((== cloudOnlyNote) . snd) (srErrors result)
+  unless (null cloud) $ do
+    printf "☁ %d 个文件云端未下载，未读取（读就会触发下载）；设为「始终保留在此设备上」后重跑 pm scan:\n" (length cloud)
+    mapM_ (putStrLn . ("    ☁ " <>) . fst) (take 20 cloud)
+    when (length cloud > 20) $
+      printf "    …另有 %d 个\n" (length cloud - 20)
+  unless (null errs) $ do
+    printf "⚠ %d 个条目有错误:\n" (length errs)
+    mapM_ (\(p, e) -> putStrLn ("    ! " <> p <> ": " <> e)) (take 20 errs)
+    when (length errs > 20) $
+      printf "    …另有 %d 条\n" (length errs - 20)
 
 refreshBackupCache :: (String -> IO ()) -> Config -> FilePath -> Catalog -> BackupDiff -> IO ()
 refreshBackupCache sink cfg broot bakCat d = do

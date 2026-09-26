@@ -28,12 +28,12 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime, utcTimeToPOSIXSeconds)
-import System.Directory (doesDirectoryExist, getFileSize, getModificationTime, listDirectory, pathIsSymbolicLink)
+import System.Directory (doesDirectoryExist, getFileSize, getModificationTime, listDirectory)
 import System.FilePath ((</>))
 import System.IO.Error (isDoesNotExistError)
 import System.IO
 
-import Pm.Win (FileId, flushHandleToDisk, handleFileId, openBoundTo, openFreshBinary, resolveUnder)
+import Pm.Win (FileId, NameKind (..), flushHandleToDisk, handleFileId, openBoundTo, openFreshBinary, probeName, resolveUnder)
 
 chunkSize :: Int
 chunkSize = 1024 * 1024
@@ -234,11 +234,14 @@ dirFingerprint dir = do
       let relN = if null rel then n else rel </> n
           absN = dir </> relN
       -- P3b-6 复审 minor：symlink/junction 记为 l 条目、**不跟随**——指回祖先
-      -- 的 junction 会无限递归；Scan.listTree 对 reparse point 同策略。
-      isLink <- pathIsSymbolicLink absN
-      if isLink
-        then pure ["l\t" <> relN <> "\t-1\t0"]
-        else do
+      -- 的 junction 会无限递归；Scan.listTree 同策略。审计 #8：判据同遍历改按 name-surrogate
+      -- 位（'probeName'）——云占位 / Dedup / WOF 不改名字解析，照常记大小与 mtime（此前记 l，
+      -- 放在 OneDrive 上的事件夹指纹只剩名字）；读不出照旧抛出。
+      lk <- probeName absN
+      case lk of
+        NameSurrogate -> pure ["l\t" <> relN <> "\t-1\t0"]
+        ProbeUnknown -> ioError (userError (absN <> ": 链接属性查不出（ACL/介质错误？），目录指纹算不了"))
+        _ -> do
           isD <- doesDirectoryExist absN
           if isD
             then (("d\t" <> relN <> "\t-1\t0") :) <$> walk relN

@@ -62,6 +62,10 @@
   早已处理的三件事一件都没做：跳过 symlink/reparse point（源里指回自身的
   junction 会让递归无限下降，指向外部的会把源范围之外的照片纳入计划）、过长
   路径报错而非静默丢弃、点开头目录跳过。改为直接用 `listTree`。
+  审计 #8：「跳过」只针对链接（name-surrogate reparse point：junction / symlink /
+  挂载点）——此前按任何 reparse 属性判，OneDrive 云占位、Dedup、WOF 压缩的照片
+  整批被当链接跳过。云端未下载的照片与侧车不读（读就会触发下载），单列「云端
+  未下载」一格（GUI 整理页同），退出码按「没看过」算 1。
 
 第 26 轮门禁又收紧四处：
 
@@ -427,7 +431,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 454 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 456 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。

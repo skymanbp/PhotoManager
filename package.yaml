@@ -75,6 +75,8 @@ tests:
   pm-test:
     main: Spec.hs
     source-dirs: test
+    # 审计 #8：测试专用夹具（第三方 reparse point），只链进测试套件，pm.exe 不带它
+    c-sources: test/cbits/pm_test.c
     ghc-options:
     - -threaded
     dependencies:

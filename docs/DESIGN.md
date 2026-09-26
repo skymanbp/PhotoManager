@@ -235,7 +235,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | 命令 | 语义 | 写盘? |
 |---|---|---|
 | `pm init` | 交互式生成配置 + 各 root 的 `.pm/root-id.json`（含 FS 探测）；root 在 git 工作树内时按 I11 先补 `.gitignore` | 仅 .pm/ |
-| `pm scan [root]` | 全量/增量索引（首扫全量 hash，之后 stat-比对；变更集才重 hash）。**进不去的子树按「查不出」承载**：ACL/IO 错误挡住的目录，其下的旧 catalog 条目原样保留（不当作"文件已消失"删掉），`pm scan` 末尾单列 `⚠ N 条…按「查不出」保留上次快照值（未核对）` | 仅 .pm/ |
+| `pm scan [root]` | 全量/增量索引（首扫全量 hash，之后 stat-比对；变更集才重 hash）。**没核对的按「查不出」承载**：ACL/IO 错误挡住的目录，其下的旧 catalog 条目原样保留（不当作"文件已消失"删掉）；逐文件同理——stat 读不出、或云端未下载而没读的（审计 #8），旧条目同样保留。`pm scan` 末尾单列 `⚠ N 条本轮没核对…按「查不出」保留上次快照值`；云端未下载的另列 `☁ N 个文件云端未下载，未读取`（已索引、没改过的按 stat 复用，不必读） | 仅 .pm/ |
 | `pm status` | **总览仪表盘**：头行永远打印「索引时间（几分钟前）· 文件数」；各层规模、staging 待归档、备份盘滞后（未挂载则显示上次同步时间）、vault 差异、命名/版本问题计数、最久未验证字节年龄；**每个问题行末尾给出可直接复制的下一步命令** | 否 |
 | `pm sort <源> [--place\|--event --from --to]` | **散落新照片 → 暂存区事件夹**（§7）。不带参数=只读提议：读 EXIF 拍摄时间、按间隔给候选分段、打印每段该敲的命令；给齐地点与区间才生成拷贝计划 | apply 时 |
 | `pm import [--apply] [--also-album]` | To-Be-Sync'd 事件 → `Raw\年\` + `成片\` 归档计划；`--also-album`（P8-B）让成片里的 jpg 同源再拷一份进 `相册\`，相册项与成片项**同组**（成片没落位相册不执行）、返修项耦合成待裁决、非 jpg 只进成片（DESIGN-P8.md §19.2） | apply 时 |
@@ -600,6 +600,7 @@ REVIEW-LOG 第 28 轮。
 | `directory` rename/copy 的替换语义（静默覆盖） | Exec 禁用清单 + 一律 `Pm.Win.moveBoundNoReplace`（句柄形态 no-replace，§6.1/§6.2）；P1 测试覆盖目标已存在分支 |
 | 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C4（C3 行写明 doctor 不归属的边界）+ doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`）；会反复瞬断的盘由 `Pm.Removable` 内建等盘续跑（1.1.2；§6.4 末段，2026-09-02 实录：当日掉线 11 次、527 组更新落位并核过）+ `scripts/verify_backup_dst.py` 写后全文重读 |
 | 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤）；CJK 路径入 golden |
+| 库 / 整理源在 OneDrive 按需下载、Dedup、WOF 压缩卷上（这些对象也带 reparse 属性） | 「是不是链接」一律按 reparse tag 的 name-surrogate 位判——遍历、目录指纹、隔离区枚举、sort 源根说明（审计 #8；写路径 P3b-12 起已如此）：云占位 / Dedup / WOF 照常枚举，junction / symlink / 挂载点照旧不跟随。内容不在本机的文件（OFFLINE / RECALL_ON_OPEN / RECALL_ON_DATA_ACCESS）stat 照常核对、已索引没改过的照常复用；要读内容时（scan 的 hash、sort 的源清单）不读、单列「云端未下载」，旧条目按「查不出」保留（用户裁定「不读，单列出来」） |
 | 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode（main 起手按进程设，审计 #7）+ 只探 REMOVABLE/FIXED（§9） |
 | exFAT 备份盘（无元数据日志、rename 原子性弱） | 矩阵不依赖原子性；FS 类型/粒度入 root-id.json；mtime 只做同 root 缓存键（§3） |
 | Lightroom / 用户并发改文件 | Plan 前提复核 + 双 stat + 落位 no-replace 三重防线；杀毒/索引器的短暂占用按 Win32 同款预算重试（100ms×20，三十二轮 R1）；读口（sha256File/目录指纹/枚举）的 IOException 一律落 fail-closed 桶而非逃顶——vault 主循环入 UNSTABLE、Exec 逐项 OFailed、生成期整批拒绝、doctor 报「读取失败」行（三十四轮全仓 grep、三十五轮按 IO 读原语全集清点补漏——目录枚举口与 config.toml/`.gitignore` 控制文件读口；三十七轮链接属性探针查不出按「是链接」跳过不递归、不塌 False；执行期**写口**逃逸 = §6.4 进程死亡语义，journal 有 Intent、doctor 对账，登记为已设计行为） |

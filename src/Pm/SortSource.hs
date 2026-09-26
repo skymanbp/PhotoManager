@@ -21,19 +21,20 @@ import Control.Exception (IOException, try)
 import Control.Monad (forM)
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time (LocalTime)
-import System.Directory (canonicalizePath, doesDirectoryExist, makeAbsolute, pathIsSymbolicLink)
+import System.Directory (canonicalizePath, doesDirectoryExist, makeAbsolute)
 import System.FilePath (takeExtension, (</>))
-import System.IO.Error (isDoesNotExistError)
 import Text.Printf (printf)
 
 import Pm.Exif (readCaptureTime)
 import Pm.Hash (StatSnap, sha256File, statSnap)
 import Pm.Import (stemOf)
-import Pm.Scan (DotDirs (..), listTreeWith, reparseSkipNote)
+import Pm.Scan (DotDirs (..), listTreeWith, readHold, reparseSkipNote)
 import Pm.Types
+import Pm.Win (NameKind (..), probeName)
 
 -- ─── 扫描（IO） ─────────────────────────────────────────────────────────────
 
@@ -46,7 +47,7 @@ data SourceFiles = SourceFiles
   , sfUnknown :: [FilePath]
     -- ^ 扩展名不认识。不归位，但一定列出来——用户得知道卡上还剩什么。
   , sfErrors :: [(FilePath, String)]
-    -- ^ 遍历时就出问题的（reparse point、路径过长、读不到）。
+    -- ^ 遍历时就出问题的（链接不跟随、路径过长、读不到），以及云端未下载、没读的（审计 #8）。
   , sfNotes :: [String]
     -- ^ **诊断**，不是"没归位的文件"。混进 'sfErrors' 会让"未入计划 N 个"
     -- 多算（codex 二十七轮 #5：源根是 junction 时 left 多算 1）。
@@ -72,7 +73,7 @@ listSource dir = do
       -- 跳过且不报告），原样搬过来会让 @card\\.hidden\\a.ARW@ 连一条记录都不留
       -- 地消失（codex 二十六轮 #3）。
       (rels, errs) <- listTreeWith WalkDotDirs dir
-      -- 源根自身是不是 reparse point：'listTree' 只探子项，不探根。根由用户
+      -- 源根自身是不是链接（name surrogate）：'listTree' 只探子项，不探根。根由用户
       -- 显式指定（与 root 放在 junction 上一样是合法用法，见 'resolveUnder'
       -- 的说明），所以**不拒绝**，但必须告诉用户他实际在整理哪个目录
       -- （codex 二十六轮 #5）。
@@ -81,12 +82,13 @@ listSource dir = do
       -- 属性读瞬时失败时，说明行消失、用户以为整理的就是指定目录——
       -- 「查不出」就说查不出。「不存在」交给上层 doesDirectoryExist 的
       -- 判定，不在这里出声。
-      rootLinkE <- tryIO (pathIsSymbolicLink dir)
-      let rootLink = either (const False) id rootLinkE
+      -- 审计 #8：判据同遍历改按 name-surrogate 位（'probeName'）——OneDrive / Dedup 目录不是
+      -- junction，不该出「源根本身是 symlink/junction」的说明。
+      rootK <- probeName dir
+      let rootLink = rootK == NameSurrogate
           probeNotes =
-            [ "源根的链接属性查不出（" <> show e <> "）——若它其实是 junction/symlink，实际整理的目录可能与指定的不同"
-            | Left e <- [rootLinkE]
-            , not (isDoesNotExistError e)
+            [ "源根的链接属性查不出（ACL/介质错误？）——若它其实是 junction/symlink，实际整理的目录可能与指定的不同"
+            | rootK == ProbeUnknown
             ]
       real <-
         if rootLink
@@ -94,12 +96,18 @@ listSource dir = do
           else pure Nothing
       let abs' = map (dir </>) (sort rels)
           pick k = [p | p <- abs', classifyExt (takeExtension p) == k]
+      -- 审计 #8（用户裁定「不读，单列出来」）：要读内容的两类——照片读拍摄时间、侧车随照片
+      -- 拷走——读前过闸：云端未下载的不读（读就触发下载），单列进遍历错误。'foldHardErrors'
+      -- 照样算它们：没读过的照片，不能替它们担保「没有要归位的新照片」。
+      held <- catMaybes <$> forM (pick KindPhoto <> pick KindSidecar) (\p -> fmap ((,) p) <$> readHold p)
+      let heldSet = Set.fromList (map fst held)
+          keep = filter (`Set.notMember` heldSet)
       pure
         SourceFiles
-          { sfPhotos = pick KindPhoto
-          , sfSidecars = pick KindSidecar
+          { sfPhotos = keep (pick KindPhoto)
+          , sfSidecars = keep (pick KindSidecar)
           , sfUnknown = pick KindMeta
-          , sfErrors = [(dir </> r, e) | (r, e) <- errs]
+          , sfErrors = [(dir </> r, e) | (r, e) <- errs] <> held
           , sfNotes =
               probeNotes
                 <> [ "源根本身是 symlink/junction，实际整理的是 " <> fromMaybe "（解析失败）" real
@@ -200,7 +208,8 @@ withSource sink src onMissing k = do
 
 -- | 遍历错误里**真正的**失败（第一方自审工作流 F054）：源里有一棵子树没枚举
 -- 出来，「✓ 没有需要归位的新照片」/退出码 0 就是在替一个没看过的目录担保。
--- 'Pm.Scan.reparseSkipNote' 是设计内跳过，不是失败，排除后再判。
+-- 'Pm.Scan.reparseSkipNote' 是设计内跳过，不是失败，排除后再判；云端未下载
+-- （'Pm.Scan.cloudOnlyNote'，审计 #8）不排除——那些照片没读过。
 hardErrors :: [(FilePath, String)] -> [(FilePath, String)]
 hardErrors = filter ((/= reparseSkipNote) . snd)
 
@@ -209,7 +218,7 @@ hardErrors = filter ((/= reparseSkipNote) . snd)
 foldHardErrors :: (String -> IO ()) -> [(FilePath, String)] -> Int -> IO Int
 foldHardErrors sink errs code
   | code == 0 && not (null hard) = do
-      sink (printf "⚠ 源里有 %d 处未能枚举（见上「遍历时出错」）——不当作整卡都看过了，退出码 1" (length hard))
+      sink (printf "⚠ 源里有 %d 处未能枚举或没读（见上「遍历时出错」「云端未下载」）——不当作整卡都看过了，退出码 1" (length hard))
       pure 1
   | otherwise = pure code
  where

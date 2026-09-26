@@ -616,6 +616,7 @@
     bucket(left, "无主侧车", sv.homelessSidecars, "同目录同 stem 找不到主文件");
     bucket(left, "不认识的扩展名", sv.unknown, "不归位，但一定列出来");
     bucket(left, "遍历错误", sv.errors.map((e) => e.path + " — " + e.why), "");
+    bucket(left, "云端未下载", sv.cloudOnly, "未读取——读就会触发下载；设为「始终保留在此设备上」后重跑");
     for (const n of sv.notes) left.appendChild(el("div", "muted small", "· " + n));
   }
   const base = (p) => p.split(/[\\/]/).pop();

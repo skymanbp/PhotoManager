@@ -12,22 +12,24 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
-import Data.Time (getCurrentTime)
+import Data.Time (UTCTime (..), fromGregorian, getCurrentTime)
 import Network.HTTP.Types (hAuthorization, hContentType, hHost, hOrigin, methodPost, status500)
 import Network.Wai (Request (..), defaultRequest)
 import Network.Wai.Test (SRequest (..), SResponse (..), Session, runSession, setPath, srequest)
-import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesFileExist, listDirectory, removeFile)
+import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, listDirectory, removeFile, setModificationTime)
 import System.Environment (lookupEnv, setEnv)
-import System.FilePath ((</>))
+import System.FilePath (takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Pm.Cli (reportScanIssues)
 import Pm.Commands (TrashCmd (..), runTrash)
 import Pm.Config (Config (..), configFilePath, createRootInfo, loadConfig, readRootInfo, withConfigLock, writeConfig, writeRootInfo)
 import Pm.Doctor (Severity (..))
@@ -36,12 +38,16 @@ import Pm.Hash (sha256File)
 import Pm.Journal (JEntry (..), Sync (..), jAppend, journalPath, withJournal)
 import Pm.Op (Fingerprint (..), Op (..), OpIdSuffix (..), describeOp, opId, opPathsOk, trashSrcRel)
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), savePlan, validatePlan)
+import Pm.Scan (DotDirs (..), ScanOpts (..), ScanResult (..), cloudOnlyNote, freshnessSweep, isCloudOnlyAttr, listTreeCov, reparseSkipNote, scanRoot)
 import Pm.Serve (serveApp)
+import Pm.Sort (runSortSurvey)
+import Pm.SortSource (SourceFiles (..), listSource)
 import Pm.Trash (manifestPath, quarDirFor, trashDir)
-import Pm.Types (RootInfo (..), RootRole (..))
+import Pm.Types (Catalog (..), RootInfo (..), RootRole (..))
+import Pm.Win (NameKind (..), probeName)
 import ServeTests (fixture, liftIO', mkEnvA, mkEnvW, tok, withVault)
 import qualified ServeTests as ST
-import TestUtil (doctorRows, execOk, isClean, journalEntries, mkCopyOp, mkPlanIO, truncateJournalTo, withDenyAll, withEnv)
+import TestUtil (captureStdout, doctorRows, execOk, isClean, journalEntries, mkCopyOp, mkPlanIO, setForeignReparse, setOffline, truncateJournalTo, withDenyAll, withEnv)
 
 auditFixTests :: TestTree
 auditFixTests =
@@ -55,6 +61,8 @@ auditFixTests =
     , testCase "#34 doctor 在途 Copy 的 dst / Quarantine 的 victim 被 ACL 拒绝：不再塌成「无痕迹」C1 / 「两处都不在」Q?，按「在而读不出」报 C? Bad / Q2" caseDoctorDeniedUserSide
     , testCase "#58 测试里临时改环境变量须原样还原（有值写回、没有才删、异常同样还原）；test/ 里删环境变量只许在 TestUtil.withEnv" caseWithEnvRestores
     , testCase "#37 批次崩在隔离 Done 之后再 pm trash empty：清除后补写 CleanShutdown，下一次 doctor 不再把已清除的载荷误报成 C4「目标不存在」" caseTrashEmptyClosesWindow
+    , testCase "#8 遍历按 name-surrogate 位判链接：第三方非 surrogate 的 reparse 文件照常枚举（此前落进「链接跳过」不进索引），置上 surrogate 位的仍不跟随；源码里 pathIsSymbolicLink 只剩 Exec 的占用判定" caseWalkForeignReparse
+    , testCase "#8 云端未下载（OFFLINE 位）：scan / sort 不读、单列「云端未下载」；已索引没改过的按 stat 复用，改过的保留旧条目，新鲜度照常核对；属性位按 SDK 取值" caseCloudOnlyNotRead
     ]
 
 mkJunction :: FilePath -> FilePath -> IO ()
@@ -300,3 +308,78 @@ caseTrashEmptyClosesWindow = withSystemTempDirectory "pm-audit" $ \dir -> do
   code @?= 0
   rows <- doctorRows root
   assertBool ("已清除的隔离载荷不得再报 C4: " <> show rows) ("C4" `notElem` map fst rows)
+
+-- | #8（medium）：遍历此前用 pathIsSymbolicLink 判「链接」——它对**任何** reparse 属性答 True，
+-- OneDrive 云占位（含已下载的）、Dedup、WOF 压缩的文件整批落进「链接跳过」：不进索引、不进整理、
+-- 每次 scan 退出 1。改按 name-surrogate 位（probeName；P3b-12 早已这样判写路径）。夹具是第三方
+-- tag——本机造不出带过滤驱动的云 / Dedup 对象，但形态相同（没有 surrogate 位的 reparse point）；
+-- 同一 tag 置上 surrogate 位即「会重定向」，仍不跟随。类规则：源码里 pathIsSymbolicLink 只剩
+-- Exec 的位移槽「占用」判定（悬空链接也算占着——那是存在性，不是跟不跟随）。
+caseWalkForeignReparse :: Assertion
+caseWalkForeignReparse = withSystemTempDirectory "pm-audit" $ \dir -> do
+  forM_ ["plain.jpg", "tp.jpg", "ns.jpg"] $ \n -> BS.writeFile (dir </> n) "X"
+  setForeignReparse (dir </> "tp.jpg") 0x00000BEE
+  setForeignReparse (dir </> "ns.jpg") 0x20000BEE
+  probeName (dir </> "tp.jpg") >>= (@?= NamePlain)
+  probeName (dir </> "ns.jpg") >>= (@?= NameSurrogate)
+  (files, errs, uncovered) <- listTreeCov SkipDotDirs dir
+  sort files @?= ["plain.jpg", "tp.jpg"]
+  errs @?= [("ns.jpg", reparseSkipNote)]
+  uncovered @?= []
+  let walkHs d = do
+        es <- listDirectory d
+        concat <$> mapM (\e -> doesDirectoryExist (d </> e) >>= \isD -> if isD then walkHs (d </> e) else pure [d </> e | ".hs" `isSuffixOf` e]) es
+      codeRefs s = any (\l -> not ("--" `isPrefixOf` dropWhile (== ' ') l) && "pathIsSymbolicLink" `isInfixOf` l) (lines s)
+  hs <- (<>) <$> walkHs "src" <*> walkHs "app"
+  bad <- filterM (\f -> codeRefs . T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile f) hs
+  map takeFileName bad @?= ["Exec.hs"]
+
+-- | #8 用户裁定「不读，单列出来」：内容不在本机的文件（云端未下载）读它就是触发下载——整库扫描会
+-- 变成整库下载。要读内容的两处（scan 的 hash、sort 的源清单）读前不读、单列「云端未下载」；stat
+-- 只读元数据，新鲜度核对与 (size, mtime) 复用照常。夹具用 OFFLINE 位（用户态能设的那一位）。
+caseCloudOnlyNotRead :: Assertion
+caseCloudOnlyNotRead = withSystemTempDirectory "pm-audit" $ \dir -> do
+  -- 属性位按 SDK 取值（winnt.h:15317/15326/15327）进；目录 / 归档 / reparse / PINNED（已下载且钉住的云文件）不进
+  map isCloudOnlyAttr [0x1000, 0x40000, 0x400000] @?= [True, True, True]
+  map isCloudOnlyAttr [0x10, 0x20, 0x400, 0x80000] @?= [False, False, False, False]
+  let root = dir </> "lib"
+      at y = UTCTime (fromGregorian y 1 1) 0 -- 远离 racy 窗口：stat 复用判据才会命中
+  createDirectoryIfMissing True root
+  forM_ ["a.jpg", "b.jpg", "c.jpg"] $ \n -> BS.writeFile (root </> n) "ORIGINAL" >> setModificationTime (root </> n) (at 2020)
+  r1 <- scanRoot (ScanOpts 1 False) Nothing "rid" root
+  srHashed r1 @?= 3
+  -- b 没改、之后变成云端未下载；c 改过再变成云端未下载；d 新来、云端未下载
+  BS.writeFile (root </> "c.jpg") "CHANGED-CONTENT"
+  setModificationTime (root </> "c.jpg") (at 2021)
+  BS.writeFile (root </> "d.jpg") "NEW"
+  setModificationTime (root </> "d.jpg") (at 2020)
+  mapM_ (setOffline . (root </>)) ["b.jpg", "c.jpg", "d.jpg"]
+  r2 <- scanRoot (ScanOpts 1 False) (Just (srCatalog r1)) "rid" root
+  let e1 = catEntries (srCatalog r1)
+      e2 = catEntries (srCatalog r2)
+  srHashed r2 @?= 0 -- 一个都没读
+  srReused r2 @?= 2 -- a 与 b 按 stat 复用：b 不必读就核对得了
+  sort (srErrors r2) @?= [("c.jpg", cloudOnlyNote), ("d.jpg", cloudOnlyNote)]
+  Map.lookup "c.jpg" e2 @?= Map.lookup "c.jpg" e1 -- 改过而没读：上次快照值原样保留（查不出 ≠ 不存在）
+  Map.member "d.jpg" e2 @?= False
+  srCarried r2 @?= 1
+  -- stat 只读元数据、不触发下载：新鲜度核对照常（c 变更、d 新增），不记成读取错误
+  freshnessSweep root "" e2 >>= (@?= (1, 1, 0, 0))
+  (outScan, ()) <- captureStdout (reportScanIssues r2)
+  assertBool ("scan 报告应把云端未下载单列: " <> outScan) ("☁ 2 个文件云端未下载" `isInfixOf` outScan && not ("个条目有错误" `isInfixOf` outScan))
+  -- sort 的源清单：云端未下载的照片不读拍摄时间、单列一格；没读过的照片不替它担保 → 退出码 1
+  let src = dir </> "card"
+  createDirectoryIfMissing True src
+  BS.writeFile (src </> "p.jpg") "P"
+  BS.writeFile (src </> "q.jpg") "Q"
+  setOffline (src </> "q.jpg")
+  sf <- listSource src
+  map takeFileName (sfPhotos sf) @?= ["p.jpg"]
+  map (\(p, e) -> (takeFileName p, e)) (sfErrors sf) @?= [("q.jpg", cloudOnlyNote)]
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  (outS, codeS) <- captureStdout (runSortSurvey src 72 (mkCfg root))
+  codeS @?= 1
+  assertBool ("sort 清单应把云端未下载单列一格: " <> outS) ("云端未下载 1 个（" `isInfixOf` outS && not ("遍历时出错 1 个" `isInfixOf` outS))
+  js <- T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile ("gui" </> "ui" </> "app.js")
+  assertBool "GUI 整理页须单列 sv.cloudOnly" ("sv.cloudOnly" `isInfixOf` js)

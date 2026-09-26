@@ -28,13 +28,12 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time (UTCTime)
-import System.Directory (doesDirectoryExist, listDirectory, pathIsSymbolicLink)
+import System.Directory (doesDirectoryExist, listDirectory)
 import System.FilePath ((</>))
-import System.IO.Error (isDoesNotExistError)
 
 import Pm.Config (ensurePmSubdir, pmDir, pmSubTrash, readPmState, requirePmTrusted, withPmStateAppend)
 import Pm.Op (OpIdSuffix (..), opIdParts, relPathOk)
-import Pm.Win (flushHandleToDisk)
+import Pm.Win (NameKind (..), flushHandleToDisk, probeName)
 
 data TrashRecord = TrashRecord
   { trVictimRel :: FilePath -- original path relative to root
@@ -159,7 +158,8 @@ readManifest' root = do
 
 -- | Every regular file below .pm/trash/, relative to it (manifest excluded).
 --
--- P3b-10（七轮复审 major，实测）：**绝不跟随 reparse point**。探针证实
+-- P3b-10（七轮复审 major，实测）：**绝不跟随链接**（name-surrogate reparse point；
+-- 审计 #8 前是任何 reparse point）。探针证实
 -- @.pm\/trash\/link@（junction → 库外目录）下 @doesDirectoryExist@ 为 True、
 -- @listDirectory@ 穿透、@removeFile@ 会真的删掉库外文件——若递归进去，手编一条
 -- @link\\v.jpg@ 的 manifest 记录就能让 @pm trash empty@ 认为该"隔离文件在库
@@ -201,10 +201,10 @@ listTrashFiles root = do
         if isDir
           then go base relPath
           else pure [relPath | relPath /= "manifest.ndjson"]
-  -- 探测异常（非「不存在」）按「是链接」处理：不递归即可，保守不误删
-  linkish p = do
-    r <- try (pathIsSymbolicLink p) :: IO (Either IOException Bool)
-    pure (either (not . isDoesNotExistError) id r)
+  -- 审计 #8：「是链接」= name surrogate（同 'Pm.Scan.listTreeCov'）；查不出按链接处理——不递归
+  -- 即可，保守不误删。云占位 / Dedup 目录不改名字解析，照常递归（此前一律当链接不进，库在
+  -- OneDrive 上时隔离区整个列不出）。
+  linkish p = (`elem` [NameSurrogate, ProbeUnknown]) <$> probeName p
 
 -- | Union view: manifest ∪ on-disk files (review conf-10: orphans surface as
 -- UNREGISTERED instead of being invisible).

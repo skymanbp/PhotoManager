@@ -81,6 +81,7 @@ import Pm.Import (foldPath, stagingTop)
 import Pm.Names (canonProcessedEvent, canonRawEvent)
 import Pm.Op (Op (..), winNameOk)
 import Pm.Plan (ItemStatus (..), PlanItem (..))
+import Pm.Scan (cloudOnlyNote)
 import Pm.SortSource
 import Pm.Types
 import Pm.Win (probeIsDir, whenPresent)
@@ -293,8 +294,13 @@ reportAccounting sink ac = do
     (acUnknown ac)
   bucket
     "遍历时出错"
-    "reparse point / 路径过长 / 读不到"
-    [p <> "  — " <> e | (p, e) <- acErrors ac]
+    "链接不跟随 / 路径过长 / 读不到"
+    [p <> "  — " <> e | (p, e) <- acErrors ac, e /= cloudOnlyNote]
+  -- 审计 #8（用户裁定「不读，单列出来」）：云端未下载的单列一格，不混进「遍历时出错」
+  bucket
+    "云端未下载"
+    "未读取——读就会触发下载；设为「始终保留在此设备上」后重跑"
+    [p | (p, e) <- acErrors ac, e == cloudOnlyNote]
   pure total
  where
   total =
@@ -409,7 +415,7 @@ renderSortSurvey :: SortSurvey -> IO Int
 renderSortSurvey sv = do
   mapM_ (\n -> putStrLn ("· " <> n)) (ssNotes sv)
   printf
-    "pm sort · 源 %s → 暂存区 %s\\Raw\\\n  照片 %d 个：可定时 %d · 读不到拍摄时间 %d · 候选分段 %d（间隔 > %.0f 小时切一刀）\n  侧车 %d 个（跟随各自主文件，不单独分段）· 不认识的 %d 个 · 遍历错误 %d 个\n"
+    "pm sort · 源 %s → 暂存区 %s\\Raw\\\n  照片 %d 个：可定时 %d · 读不到拍摄时间 %d · 候选分段 %d（间隔 > %.0f 小时切一刀）\n  侧车 %d 个（跟随各自主文件，不单独分段）· 不认识的 %d 个 · 遍历错误 %d 个 · 云端未下载 %d 个\n"
     (ssSrcAbs sv)
     stagingTop
     (ssPhotoCount sv)
@@ -419,7 +425,8 @@ renderSortSurvey sv = do
     (ssGapHours sv)
     (ssSidecarCount sv)
     (length (ssUnknown sv))
-    (length (ssErrors sv))
+    (length [() | (_, e) <- ssErrors sv, e /= cloudOnlyNote])
+    (length [() | (_, e) <- ssErrors sv, e == cloudOnlyNote])
   forM_ (ssSegments sv) (printSegment (ssSrcAbs sv))
   _ <-
     reportAccounting

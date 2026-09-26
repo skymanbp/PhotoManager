@@ -18,18 +18,23 @@ module Pm.Scan
   , coversKey
   , maxPathLen
   , reparseSkipNote
+  , cloudOnlyNote
+  , isCloudOnlyAttr
+  , readHold
   ) where
 
 import Control.Concurrent.Async (replicateConcurrently_)
 import Control.Exception (IOException, try)
 import Control.Monad (forM)
+import Data.Bits ((.&.))
 import Data.IORef
 import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time (getCurrentTime)
-import System.Directory (doesDirectoryExist, listDirectory, pathIsSymbolicLink)
+import Data.Word (Word32)
+import System.Directory (doesDirectoryExist, listDirectory)
 import System.FilePath (pathSeparator, takeExtension, takeFileName, (</>))
 import System.IO (hPutStrLn, stderr)
 import System.IO.Error (isDoesNotExistError)
@@ -37,18 +42,38 @@ import Text.Printf (printf)
 
 import Pm.Hash
 import Pm.Types
-import Pm.Win (NameKind (..), probeName)
+import Pm.Win (NameKind (..), fileAttrs, isDirAttr, probeName)
 
 -- | Full-path length guard (DESIGN.md §14 长路径预检): refuse early and
 -- loudly instead of corrupting behaviour near MAX_PATH.
 maxPathLen :: Int
 maxPathLen = 240
 
--- | 遍历对 symlink\/reparse point 的**设计内**跳过——进错误表只是为了逐条交代
--- （SortGuardTests 钉住这一条），不是失败。'Pm.Sort.hardErrors' 按它排除后才
--- 折进退出码（第一方自审工作流 F054）；字面量只在这里定义一次。
+-- | 遍历对链接（name-surrogate reparse point：junction \/ symlink \/ 挂载点；审计 #8 前是
+-- 任何 reparse point）的**设计内**跳过——进错误表只是为了逐条交代（SortGuardTests 钉住
+-- 这一条），不是失败。'Pm.Sort.hardErrors' 按它排除后才折进退出码（第一方自审工作流
+-- F054）；字面量只在这里定义一次。
 reparseSkipNote :: String
-reparseSkipNote = "symlink/reparse point skipped"
+reparseSkipNote = "链接（junction / symlink / 挂载点）：不跟随"
+
+-- | 云端未下载（2026-09-25 审计 #8，用户裁定「不读，单列出来」）：内容不在本机的文件，读它
+-- 就是触发下载 \/ 回迁——整库扫描会变成整库下载。要读内容的两处（'scanRoot' 的 hash、sort 的
+-- 源清单）读前经 'readHold' 不读、单列这一句。stat 只读元数据、不触发下载，新鲜度核对与
+-- (size, mtime) 复用照常：已索引、没改过的云端文件不必读就核对得了。
+cloudOnlyNote :: String
+cloudOnlyNote = "云端未下载——未读取（读就会触发下载）；设为「始终保留在此设备上」后重跑"
+
+-- | 内容不在本机的属性位（Windows SDK 10.0.26100.0 @um\/winnt.h@:15317 \/ 15326 \/ 15327；后两个
+-- mingw 头里没有，故写数值）：OFFLINE 0x1000、RECALL_ON_OPEN 0x40000、RECALL_ON_DATA_ACCESS
+-- 0x400000。按文档（learn.microsoft.com「File Attribute Constants」）后两个 = 内容不在 \/ 不完整
+-- 在本机；完整在本机的云文件、Dedup \/ WOF 压缩文件不带这些位，照常读、照常进索引。
+isCloudOnlyAttr :: Word32 -> Bool
+isCloudOnlyAttr a = a .&. 0x00441000 /= 0
+
+-- | 读内容之前的闸（审计 #8）：Just 说明 = 这次不读——云端未下载，或属性查不出（不猜它不在
+-- 云上）；Nothing = 照常读（名字已不在也是 Nothing：交给随后的读响亮失败）。
+readHold :: FilePath -> IO (Maybe String)
+readHold p = either Just (\ma -> if maybe False isCloudOnlyAttr ma then Just cloudOnlyNote else Nothing) <$> fileAttrs p
 
 data ScanOpts = ScanOpts
   { soWorkers :: Int
@@ -68,8 +93,8 @@ data ScanResult = ScanResult
   , srVolatile :: [FilePath]
   , srErrors :: [(FilePath, String)]
   , srCarried :: Int
-    -- ^ 落在本轮**未枚举**子树里、按「查不出」原样保留的旧条目数
-    -- （第一方自审工作流 F040：此前它们从快照里消失并落盘）
+    -- ^ 本轮**没核对**、按「查不出」原样保留的旧条目数：落在未枚举子树里（第一方自审
+    -- 工作流 F040：此前它们从快照里消失并落盘），或 stat 查不出 \/ 读前闸拦下（审计 #8）
   }
 
 -- | 遍历时对**点开头的目录**的策略。
@@ -87,8 +112,10 @@ data DotDirs = SkipDotDirs | WalkDotDirs
   deriving (Show, Eq)
 
 -- | Relative paths of all regular files under root, with the library-root
--- policy ('SkipDotDirs'). Symlinks/reparse points are skipped and over-long
--- paths are reported as errors, not silently dropped.
+-- policy ('SkipDotDirs'). Links (name-surrogate reparse points: junction /
+-- symlink / mount point) are skipped, other reparse points (cloud placeholders,
+-- Dedup, WOF) are walked (audit #8), and over-long paths are reported as
+-- errors, not silently dropped.
 listTree :: FilePath -> IO ([FilePath], [(FilePath, String)])
 listTree = listTreeWith SkipDotDirs
 
@@ -131,49 +158,46 @@ listTreeCov dots root = go ""
           if length abs' >= maxPathLen
             then pure ([], [(relPath, "path too long (>=240 chars)")], [])
             else do
-              symRes <- try (pathIsSymbolicLink abs') :: IO (Either IOException Bool)
-              -- 三十七轮（GO 后按 quality-over-cost 收口）：探测异常（非「不存
-              -- 在」）按「是链接」处理——同 Trash.linkish / Exec.slotOccupied
-              -- 的既有纪律。旧写法塌成 False 的辩解（「真实错误会在下面的 stat
-              -- 再现」）只对普通文件成立：junction 的属性读瞬时失败后，递归会
-              -- **顺利**跟着链接下去，错误永不再现，库外文件被当库内条目索引。
-              -- 「不存在」（条目在遍历窗口内消失）仍走 stat 路径，在那里响亮
-              -- 入错。异常类型同步收窄 SomeException→IOException（Ctrl-C 不吞）。
-              case symRes of
-                Left e
-                  | not (isDoesNotExistError e) ->
-                      pure ([], [(relPath, "链接属性查不出（" <> show e <> "），按链接跳过、不递归")], [relPath])
-                _ -> do
-                  let isSym = either (const False) id symRes
-                  if isSym
-                    then pure ([], [(relPath, reparseSkipNote)], [])
-                    else do
-                      isDir <- doesDirectoryExist abs'
-                      if isDir
-                        then case dots of
-                          -- 'WalkDotDirs' 的唯一例外：pm 自己的状态目录。源恰好是
-                          -- 一个 pm 库根时，@.pm\\tmp@ 里是**半写入**的临时文件、
-                          -- @.pm\\trash@ 里是已隔离的文件——它们头部有合法 EXIF，
-                          -- 会被当成待归位的照片拷走（codex 二十七轮 #3）。
-                          --
-                          -- 判据是**内容**不是名字（codex 二十八轮 #3）：目录里有
-                          -- @root-id.json@ 才是 pm 状态目录——这正是 pm 自己认 root
-                          -- 的方式。按名字判两个方向都错：卡上一个普通的、名叫
-                          -- @.pm@ 的用户目录会被整个跳过（里面的照片一格都不进）；
-                          -- 而真状态目录被改名或经别名到达时判据根本不触发。
-                          -- 探针三态（第一方自审工作流 F041，R1 同类）：文件级 ACL
-                          -- 拒绝会让 doesFileExist 塌 False → 走进 .pm\\trash 把隔离
-                          -- 件当照片；'probeName' 对 ACL 免疫，查不出 = 不进入。
-                          WalkDotDirs -> do
-                            k <- probeName (abs' </> "root-id.json")
-                            case k of
-                              NameMissing -> go relPath
-                              ProbeUnknown -> pure ([], [(relPath, "root-id.json 存在性查不出（ACL/介质错误？），按 pm 状态目录处理、不进入")], [relPath])
-                              _ -> pure ([], [(relPath, "pm 状态目录（内含 root-id.json），源遍历不进入")], [])
-                          SkipDotDirs
-                            | take 1 (takeFileName name) == "." -> pure ([], [], [])
-                            | otherwise -> go relPath
-                        else pure ([relPath], [], [])
+              -- 审计 #8：「是不是链接」按 name-surrogate 位判（'probeName'；P3b-12 早已这样判写路径）。
+              -- 此前用 pathIsSymbolicLink——它对**任何** reparse 属性答 True：OneDrive 云占位（含已下载
+              -- 的）、Dedup、WOF 压缩的文件与目录整批落进「链接跳过」，不进索引也不进整理。它们不改
+              -- 名字解析，照常枚举（云端未下载的，由读内容的一方经 'readHold' 不读、单列）。三十七轮
+              -- 的纪律不变：链接属性查不出（非「不存在」）按链接处理、不递归、入未枚举覆盖——junction
+              -- 的属性读瞬时失败时，库外文件不得被当库内条目索引。目录位读属性（同一探针，对象自身
+              -- ACL 不影响；doesDirectoryExist 被拒时塌 False）；名字已不在的走文件路径，由随后的
+              -- stat 响亮入错。
+              lk <- probeName abs'
+              ea <- if lk == NamePlain then fileAttrs abs' else pure (Right Nothing)
+              let unreadable m = pure ([], [(relPath, m <> "，按链接跳过、不递归")], [relPath])
+              case (lk, ea) of
+                (NameSurrogate, _) -> pure ([], [(relPath, reparseSkipNote)], [])
+                (ProbeUnknown, _) -> unreadable "链接属性查不出（ACL/介质错误？）"
+                (_, Left m) -> unreadable m
+                (_, Right (Just a))
+                  | isDirAttr a -> case dots of
+                      -- 'WalkDotDirs' 的唯一例外：pm 自己的状态目录。源恰好是
+                      -- 一个 pm 库根时，@.pm\\tmp@ 里是**半写入**的临时文件、
+                      -- @.pm\\trash@ 里是已隔离的文件——它们头部有合法 EXIF，
+                      -- 会被当成待归位的照片拷走（codex 二十七轮 #3）。
+                      --
+                      -- 判据是**内容**不是名字（codex 二十八轮 #3）：目录里有
+                      -- @root-id.json@ 才是 pm 状态目录——这正是 pm 自己认 root
+                      -- 的方式。按名字判两个方向都错：卡上一个普通的、名叫
+                      -- @.pm@ 的用户目录会被整个跳过（里面的照片一格都不进）；
+                      -- 而真状态目录被改名或经别名到达时判据根本不触发。
+                      -- 探针三态（第一方自审工作流 F041，R1 同类）：文件级 ACL
+                      -- 拒绝会让 doesFileExist 塌 False → 走进 .pm\\trash 把隔离
+                      -- 件当照片；'probeName' 对 ACL 免疫，查不出 = 不进入。
+                      WalkDotDirs -> do
+                        k <- probeName (abs' </> "root-id.json")
+                        case k of
+                          NameMissing -> go relPath
+                          ProbeUnknown -> pure ([], [(relPath, "root-id.json 存在性查不出（ACL/介质错误？），按 pm 状态目录处理、不进入")], [relPath])
+                          _ -> pure ([], [(relPath, "pm 状态目录（内含 root-id.json），源遍历不进入")], [])
+                      SkipDotDirs
+                        | take 1 (takeFileName name) == "." -> pure ([], [], [])
+                        | otherwise -> go relPath
+                _ -> pure ([relPath], [], [])
         pure (concatMap (\(a, _, _) -> a) results, concatMap (\(_, b, _) -> b) results, concatMap (\(_, _, c) -> c) results)
 
 -- | Stat-only freshness comparison of a directory tree against a catalog
@@ -268,7 +292,7 @@ scanRoot opts oldCat rootId root = do
   let stats = [StatEntry rel s | (rel, Right s) <- statted]
       statErrs = [(rel, show e) | (rel, Left e) <- statted]
       oldEntries = maybe Map.empty catEntries oldCat
-      (reused, toHash) = foldl' split ([], []) stats
+      (reused, toHash0) = foldl' split ([], []) stats
       -- P3b-4 评审 #4（统一修）：复用判据走 statHitStable——(size,mtime)
       -- 相等之外还排除 racy 条目（hash 时刻与 mtime 同刻度窗口内；未来
       -- mtime 的窗口尚未到来，同样可信），与 Pm.Vault.shaViaCache 共用同一谓词。
@@ -278,6 +302,11 @@ scanRoot opts oldCat rootId root = do
             | statHitStable statNow (enSize e) (enMtimeNs e) (enLastVerified e) snap ->
                 (e : rs, hs)
           _ -> (rs, se : hs)
+  -- 审计 #8 读前闸：要 hash 的（新 / 改过 / racy）才读内容——云端未下载的不读（读就触发下载），
+  -- 单列进错误表；属性查不出的同样不读。已索引、没改过的上面已按 stat 复用，走不到这里。
+  holds <- forM toHash0 $ \se -> (,) se <$> readHold (root </> seRel se)
+  let toHash = [se | (se, Nothing) <- holds]
+      holdErrs = [(seRel se, m) | (se, Just m) <- holds]
       totalHashBytes = sum [ssSize (seSnap se) | se <- toHash]
   progress
     ( printf
@@ -344,7 +373,10 @@ scanRoot opts oldCat rootId root = do
   -- 原样保留上次快照值，而不是让它们从快照消失、随即无条件落盘、三代轮转把
   -- 完整快照顶掉——与 'freshnessSweep' 对同一情形的处置（错误口，不算消失）
   -- 同一纪律。本轮真枚举到的条目（reused/newEntries）左优先。
-  let unknown = Map.filterWithKey (\k _ -> coversKey uncovered k) oldEntries
+  -- 审计 #8 起同一纪律扩到逐文件：遍历按属性判（对象自身 ACL 不影响）之后，被拒的文件不再在
+  -- 遍历层出错，而在上面的 stat——stat 查不出（非「不存在」）与读前闸拦下的，本轮同样没核对。
+  let unchecked = Set.fromList ([rel | (rel, Left e) <- statted, not (isDoesNotExistError e)] <> map fst holdErrs)
+      unknown = Map.filterWithKey (\k _ -> Set.member k unchecked || coversKey uncovered k) oldEntries
       entries = entryMap (reused <> newEntries) `Map.union` unknown
   pure
     ScanResult
@@ -353,7 +385,7 @@ scanRoot opts oldCat rootId root = do
       , srHashed = length newEntries
       , srHashedBytes = sum (map enSize newEntries)
       , srVolatile = volatiles
-      , srErrors = walkErrs <> statErrs <> hashErrs
+      , srErrors = walkErrs <> statErrs <> holdErrs <> hashErrs
       , srCarried = Map.size unknown
       }
  where

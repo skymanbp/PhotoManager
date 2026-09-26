@@ -272,7 +272,7 @@ runBackupDiff go mworkers cfg broot info mainCat mwarns = do
       pure (max floorCode code)
 
 -- | 一轮备份的结论（纯，可钉；工作流 F056/F057）：主库侧快照回退告警、备份
--- 侧扫描问题（读取出错 / hash 期间被改 / 未能枚举的子树）都进结论与退出码
+-- 侧扫描问题（读取出错 / hash 期间被改 / 没核对而保留旧值的条目）都进结论与退出码
 -- 下限——「✓ 备份盘已与主库一致」只在**零降级且零差异**时说。返回
 -- （要打印的行, 退出码下限：0 = 干净，1 = 结论不完整）。
 backupVerdict :: [String] -> ScanResult -> BackupDiff -> ([String], Int)
@@ -282,7 +282,7 @@ backupVerdict mwarns result d = (ls, if null issues then 0 else 1)
     ["主库快照坏代已跳过，diff 基于较旧一代: " <> w | w <- mwarns]
       <> [show (length (srErrors result)) <> " 个备份盘条目读取出错" | not (null (srErrors result))]
       <> [show (length (srVolatile result)) <> " 个备份盘文件在 hash 期间被修改" | not (null (srVolatile result))]
-      <> [show (srCarried result) <> " 条备份盘条目落在未能枚举的子树里" | srCarried result > 0]
+      <> [show (srCarried result) <> " 条备份盘条目本轮没核对（未能枚举 / 读不出），保留上次快照值" | srCarried result > 0]
   noItems = null (bdAdd d) && null (bdUpdate d)
   ls
     | noItems && null issues = ["✓ 备份盘已与主库一致"]
