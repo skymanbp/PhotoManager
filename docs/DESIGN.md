@@ -156,27 +156,59 @@ Catalog   = snapshot (catalog.json, 原子替换写 + rename 前 fsync) + journa
 app/Main.hs                 -- 仅选项解析 + 分发；main 首行设置 stdout/stderr UTF-8（§14）
 src/Pm/Cli.hs               -- 计划执行公共路径：root-UUID 绑定、组闭包、clean 执行期复验（P2.1 拆分）
 src/Pm/Commands.hs          -- 各命令编排（P2.1 拆分；serve/GUI 复用同一路径）
+src/Pm/BackupCmd.hs         -- pm backup init / pm backup（P3b-6 从 Commands 拆出，经其再导出；写盘仍经 Cli → Exec）
 src/Pm/Apply.hs             -- undo/apply/resolve 命令族 + pickRoot（三十四轮从 Commands 拆出，经其再导出）
 src/Pm/Config.hs            -- TOML 配置（roots、别名、后缀表、portfolio photos.json 路径）
 src/Pm/ConfigTypes.hs       -- 配置记录本身：字段、TOML 解码/渲染、路径须绝对（2026-09-25 从 Config 字节级拆出，Config 再导出；750 行预算）
+src/Pm/ConfigEdit.hs        -- 配置编辑层：checkPatch / applyPatch / checkConfig 是 pm config set 与 POST /api/config 的唯一判定处（主库路径只读）
 src/Pm/Catalog.hs           -- snapshot + 内存索引
 src/Pm/Journal.hs           -- NDJSON append + 持久化屏障 + replay + 对账
+src/Pm/Lock.hs              -- 单实例锁 I10 的再导出（原语自三十一轮下沉到 Config.withRootLock，既有调用点不变）
 src/Pm/Scan.hs              -- 增量扫描（stat 比对 → 变更集 → 并行 hash，worker 数来自 config.toml）
 src/Pm/Hash.hs              -- crypton SHA-256 流式 + 目录指纹（FilePath 句柄；校验性读经 Pm.Win.openBoundTo 限域）
+src/Pm/Types.hs             -- 全模块共用的领域类型（§3）与小谓词：值域、subpath 形状、空白路径参数、showHuman
+src/Pm/Win.hs               -- 唯一直接调 Win32 的模块：无覆盖 rename、句柄绑定后验、FlushFileBuffers 屏障、三态名字探针、控制台 UTF-8（§6、§14）
+src/Pm/Exif.hs              -- 第一方只读 EXIF 拍摄时间（pm sort 的分段依据；解析失败 = Nothing，调用方单列不猜）
+src/Pm/GitGuard.hs          -- I11 守卫：root 在 git 工作树内时 .pm/ 必须被有效忽略（Exec 锁内无条件调用；pm 不执行 git）
 src/Pm/Diff.hs              -- 两个 Catalog → 六态差异（纯函数；只认 filename+sha，不看 mtime）
 src/Pm/Plan.hs              -- Diff/规则 → Plan（规则/校验为纯函数；计划文件的存/取/枚举 IO 同在此——listPlans 三十五轮自 Serve 迁入）
+src/Pm/Op.hs                -- 操作代数（§3）：Copy / Rename / Quarantine，没有 delete / overwrite 构造子（I2）；opId 语法与相对路径合法性
 src/Pm/Exec.hs              -- ★安全内核：唯一**写入/落位/改名**照片字节的模块（另两处只读的字节出口见下「关键结构性质 2」；pm 状态文件写口在 Config/Journal/Catalog/Plan/Trash，三十六轮收窄措辞；类型面在 Pm.ExecTypes，三十四轮拆出）
+src/Pm/ExecTypes.hs         -- Exec 的对外类型面（Checkpoint / ExecEnv / ItemOutcome）与结果折叠 updateCatalog（三十四轮拆出，经 Exec 再导出）
+src/Pm/Trash.hs             -- 隔离区 .pm/trash/<planId>/… + write-ahead manifest（I2；pm trash empty 只删这里逐项列出的条目）
+src/Pm/Undo.hs              -- 从 journal 生成反向计划（只有记了 Done 的可撤销；执行期照常核前置条件，变过的目标拒绝）
 src/Pm/Removable.hs         -- 可移动介质瞬断保护（1.1.2，§6.4 末段）：盘在判据、IOException 三分、等盘/短停重试、扫描按 pass 续、执行按组续跑（内核之外的会话层；不写照片字节）
+src/Pm/Backup.hs            -- 备份 root 发现（按 UUID 认盘，不认盘符）+ 主库侧备份缓存（拔盘时 pm status 照样能报，§9）
 src/Pm/Derived.hs           -- .pm/derived 派生件对账口（1.1.2 从 Convert 字节级拆出，解 Doctor→Convert→Cli 依赖环；Convert 再导出）；derivedRefs = 未完成计划项引用的派生件（审计 #31）
+src/Pm/Doctor.hs            -- 崩溃恢复对账（§6.4 C1–C5 / R1–R3 / Q1–Q2 + C4 复验窗口）：缺省只读，--repair 只做安全闭合、C5 只出计划
 src/Pm/Finding.hs           -- doctor 的发现行类型与渲染（Severity/Finding/renderFinding/repairRow；2026-09-26 从 Doctor 字节级拆出，Doctor 再导出；750 行预算）
 src/Pm/DoctorDeep.hs        -- doctor --deep：全库重读重 hash（deepVerify，2026-09-26 从 Doctor 搬出；750 行预算）+ 核对无误的验证时间记回快照（recordVerified，横切审计 #67）
 src/Pm/DoctorProbe.hs       -- doctor 的受信探针（.pm 内定点路径的受信 sha / 存在性、用户侧三态存在性；2026-09-26 审计 #35 时从 Doctor 字节级拆出；750 行预算）
 src/Pm/Sort.hs              -- 卡/收件目录 → 分段提议与归位计划（源扫描层在 Pm.SortSource，三十五轮拆出）
+src/Pm/SortSource.hs        -- pm sort 的源目录扫描与快照层（P6-H 从 Sort 拆出，经其再导出）
+src/Pm/Import.hs            -- pm import 计划器（§7，纯函数）+ 布局层名比较 sameComp / underLayers（折大小写）
+src/Pm/Clean.hs             -- pm clean staging 计划器：三副本确认才隔离，待修改\ 永不清
+src/Pm/Dedupe.hs            -- pm dedupe：归档层精确重复（同 sha）的隔离计划，每条 NEEDS-DECISION（判据取自 Versions）
 src/Pm/Names.hs             -- 事件夹/文件名解析、规范化、rename 计划（目标唯一性校验）
 src/Pm/Versions.hs          -- 版本组聚合报告
+src/Pm/Album.hs             -- 相册通道（DESIGN-P8 §19）：成片 → 相册 的判定与计划构造、候选、忽略清单
+src/Pm/Convert.hs           -- 非 jpg → jpg 派生（DESIGN-P8 §20）：Pillow 解码到 .pm/derived，再经计划落位
 src/Pm/Vault.hs             -- 相册↔vault 差异 + push/ingest 计划（无 git 调用；纯核心在 Pm.VaultCore，三十四轮拆出）
+src/Pm/VaultCore.hs         -- vault 六态 diff 的纯核心与 JSON 渲染（三十四轮拆出，经 Vault 再导出）
+src/Pm/VaultCmd.hs          -- vault 的决定层命令：暂不同步名单与照片记录的事务壳（CLI 与 serve 写端点同一套）
+src/Pm/VaultHold.hs         -- 「暂不同步」名单（主库 .pm/vault-holds.json；vault 仓零改动）
+src/Pm/VaultNote.hs         -- 照片记录（DESIGN-P8 §21；主库 .pm/vault-notes.json，/photo-publish 只读 pending）
+src/Pm/Ingest.hs            -- pm vault ingest：_inbox 成品 → 主库相册 + vault 类目，两份计划（DESIGN-COMMANDS §10.3）
+src/Pm/Publish.hs           -- 上线命令文本生成（pm 绝不执行 git，I9）与命令文本里的路径 / push 目标闸
 src/Pm/Status.hs            -- 仪表盘：statusReport（数据，ToJSON）+ renderStatus（终端）；serve 与 CLI 同源
 src/Pm/Serve.hs             -- wai/warp 127.0.0.1 JSON API（P4-1；供 GUI 桌面程序与 skill 消费，§11；传输守卫 Pm.ServeGuard、会话环境 Pm.ServeEnv、vault 端点 Pm.ServeVault 为 P7/P8-A 逐字拆出）
+src/Pm/ServeEnv.hs          -- serve 会话环境：配置快照、token、授权位、进程内互斥
+src/Pm/ServeGuard.hs        -- serve 传输守卫：token、Host/Origin 闸、常量时间鉴权、body 上限、loopback 绑定
+src/Pm/ServeVault.hs        -- serve 的 vault 端点
+src/Pm/ServeAlbum.hs        -- serve 的归档页端点：导入 / 相册 / 转换计划、忽略候选
+src/Pm/ServeAi.hs           -- serve 的 AI 建议端点（claude -p：cwd 是 pm 的空目录、不加载项目设置，横切审计 #81）
+src/Pm/Subprocess.hs        -- 外部进程统一壳（python / claude）：显式 UTF-8 管道、整体超时杀整棵进程树
+src/Pm/Ui.hs                -- pm ui：找到 pm-ui.exe，经 PM_EXE 交出自己的路径并等它退出（不启动 serve）
 gui/                        -- GUI 桌面程序（Rust/Tauri v2，P4-2；独立进程，只经 API 说话，§11）
 test/                       -- tasty: 单元 + QuickCheck + 双模故障注入 + 文档漂移哨兵（§13）
 ```

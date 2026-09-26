@@ -38,6 +38,7 @@ docDriftTests =
     , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链" caseGuiNoInlineStyle
     , testCase "750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）" caseLineBudget
     , testCase "审计 #19：本套件读到的非源码文件（行预算清单 + tauri.conf.json）全部登记在 package.yaml extra-source-files" caseExtraSourceFiles
+    , testCase "架构表（DESIGN §4）：src/Pm 每个模块各有一行、表里每行都有其文件（发布前第一方全量审）" caseDesignModuleMap
     , testCase "审计 #2：设置页数字项（并发数 / 掉线等待）留空点保存须拒绝并指向「恢复默认」，不得 Number(val( 直提成 0" caseGuiNumericSaveRefusesEmpty
     , testCase "审计 #1：整理页 AI 建议地点须在 await 之后按 sort 代号与概览对象守卫；请求在途时重扫不得放开按钮" caseGuiSortAiGenerationGuard
     , testCase "审计 #7：app/Main.hs 的 main 在进程起手设 SEM_FAILCRITICALERRORS（suppressCriticalErrorDialogs），不只备份发现那一条路" caseMainSuppressesCriticalDialogs
@@ -465,6 +466,21 @@ caseMainSuppressesCriticalDialogs = do
 -- 触顶文件（Serve.hs / app.js / DESIGN.md）时写成哨兵，CI 的 `stack test` 顺带
 -- 执行。手写的源码 / 测试 / 文档 / 页面 / 脚本全部 ≤ 750 行；生成物（Cargo.lock、
 -- .cabal）与第三方评审原件（docs/reviews/，证据不得修剪）不在清单里。
+-- | 架构表完整性（2026-09-26 发布前第一方全量审）：DESIGN §4 的模块表此前只给 55 个模块里的 23 个各留了一行，
+-- 另有 25 个一次都没出现（Doctor、Import、Op、Trash……）——历次拆分与新模块都没回填，表叫「架构」却看不出一半的
+-- 模块。机器核对两个方向：src/Pm 下每个模块（递归，同 'srcModules'）在 §4 第一个代码块里各有一行
+-- @src/Pm/<相对路径>@，表里每一行也都真有其文件。描述文字不核（那是人写的），只核登记。
+caseDesignModuleMap :: IO ()
+caseDesignModuleMap = do
+  d <- readUtf8 ("docs" </> "DESIGN.md")
+  mods <- srcModules
+  let sec = drop 1 (dropWhile (not . ("## 4. 架构" `isPrefixOf`)) (lines d))
+      block = takeWhile (not . ("```" `isPrefixOf`)) (drop 1 (dropWhile (not . ("```" `isPrefixOf`)) sec))
+      listed = sort [takeWhile (not . isSpace) r | l <- block, Just r <- [stripPrefix "src/Pm/" l]]
+      actual = sort [n | (n, p) <- mods, p /= "app" </> "Main.hs"]
+  assertBool "DESIGN §4 没找到模块表代码块" (not (null block))
+  assertEqual "DESIGN §4 模块表 = src/Pm 全部模块（每个一行，不多不少）" actual listed
+
 caseLineBudget :: IO ()
 caseLineBudget = do
   files <- budgetFiles
