@@ -58,6 +58,7 @@ cleanupTests =
     , testCase "#40 pm undo 一次隔离（从 trash 改名回原位）后索引补回那条——此前文件回到库里、索引静静地少它一条" caseUndoQuarantineReindexed
     , testCase "#45 计划校验对派生路径同守长路径上限：隔离的 trash 目标 / Copy 的 tmp 名越过上限 → validatePlan 与 execPlan 整份拒绝、victim 不动（此前执行时才以 Win32 错误逐项失败）" casePlanDerivedPathLength
     , testCase "#15 打包版 pm-ui 起不来（pm serve 没报端口 / 窗口建不起来）时退出前弹系统消息框、按 2 退出（无控制台时此前一声不响就没了）" caseUiStartupDialog
+    , testCase "#70 控制台输出代码页：stdout 或 stderr 任一是控制台就切 UTF-8（stdout 重定向时 stderr 的进度不再按 936 乱码）" caseConsoleCpEitherHandle
     , testCase "#26 备份发现按四态读：登记路径上 root-id.json 损坏 / 读不出 → 点名那块盘（不再说「未挂载，插上盘」）；pm apply 的 UUID 绑定同样点名；路径不在照旧「未挂载」" caseBackupMarkerBroken
     ]
 
@@ -377,3 +378,14 @@ caseUiStartupDialog = do
   assertBool "run() 的致命出口都走 fatal（不留 expect / unwrap / 裸 exit）" $
     "fatal(" `isInfixOf` runBody && not (any (`isInfixOf` runBody) [".expect(", ".unwrap()", "process::exit"])
   assertBool "消息框走 user32 的 MessageBoxW" ("fn MessageBoxW(" `isInfixOf` src && "#[link(name = \"user32\")]" `isInfixOf` src)
+
+-- | 横切审计 #70：控制台代码页是整个控制台的属性，此前只在 stdout 是控制台时切 UTF-8——@pm scan > log@ 时进度与
+-- 顶层报错仍经 stderr 上屏，按 936 解成乱码。本套件没有自己的控制台：源码哨兵钉住判定式；行为另有真机对照
+-- （新控制台里 stdout 重定向跑 pm，读输出代码页：修前 936、修后 65001，见 REVIEW-LOG）。
+caseConsoleCpEitherHandle :: Assertion
+caseConsoleCpEitherHandle = do
+  src <- readUtf8 ("src" </> "Pm" </> "Win.hs")
+  let body = takeWhile (not . all (`elem` [' ', '\r'])) (dropWhile (not . ("setupConsole = do" `isPrefixOf`)) (lines src))
+      has s = any (s `isInfixOf`) body
+  assertBool "任一句柄是控制台就切" (has "tty <- (||) <$> hIsTerminalDevice stdout <*> hIsTerminalDevice stderr")
+  assertBool "切的是输出代码页 65001、受 tty 守卫" (has "when tty $" && has "setConsoleOutputCP 65001")

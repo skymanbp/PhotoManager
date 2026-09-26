@@ -96,7 +96,8 @@ setupConsole :: IO ()
 setupConsole = do
   hSetEncoding stdout utf8
   hSetEncoding stderr utf8
-  tty <- hIsTerminalDevice stdout
+  -- 代码页是整个控制台的属性：stdout 重定向时进度与报错仍经 stderr 上屏——任一挂在控制台就切（横切审计 #70）
+  tty <- (||) <$> hIsTerminalDevice stdout <*> hIsTerminalDevice stderr
   when tty $
     Win32Console.setConsoleOutputCP 65001
       -- Swallowed because: only reachable on exotic console hosts where the
