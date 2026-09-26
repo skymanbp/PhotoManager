@@ -553,8 +553,11 @@ categoriesOf ops = filter (/= "") (nub [topOf (opDstRel op) | op <- ops, isCopy 
 -- 「可能被引用」报告（fail-closed）。
 -- 第一方自审 R1：存在性探测也三态化——@doesFileExist@ 把 ACL 拒绝塌成「不存
 -- 在」，正是上一段说的那个 fail-open 口子的另一半（三十四轮只堵了读取那半）。
+-- 横切审计 #71：**未配置**同样是「核对不了」，不是「未被引用」——此前答 @Right Nothing@，
+-- 照片记录因此报 pending（exit 0，/photo-publish 会据此重复上线）、RENAME 报「未被引用」。
+-- 配置了而文件不存在仍是「未被引用」（portfolio 还没有 photos.json）。
 photosJsonRef :: Maybe FilePath -> FilePath -> IO (Either String (Maybe Int))
-photosJsonRef Nothing _ = pure (Right Nothing)
+photosJsonRef Nothing _ = pure (Left "未配置 photos.json → pm config set --photos-json <路径>")
 photosJsonRef (Just fp) name = do
   r <- whenPresent fp (BS.readFile fp)
   pure $ case r of
@@ -593,7 +596,7 @@ runVaultPush runPlan mCat files cfg = do
                 eref <- photosJsonRef (cfgPhotosJson cfg) m
                 case eref of
                   Left e ->
-                    putStrLn ("  🔁 RENAME 源 '" <> n <> "' ≡ vault '" <> c </> m <> "' → photos.json 读取失败（" <> e <> "）：无法核对引用，按可能被引用处理（fail-closed），只报告")
+                    putStrLn ("  🔁 RENAME 源 '" <> n <> "' ≡ vault '" <> c </> m <> "' → photos.json 核对不了（" <> e <> "）：按可能被引用处理（fail-closed），只报告")
                   Right (Just line) ->
                     putStrLn ("  🔁 RENAME 源 '" <> n <> "' ≡ vault '" <> c </> m <> "' → BLOCKED(photos.json:" <> show line <> ")：改名会打断已上线 URL，只报告")
                   Right Nothing ->

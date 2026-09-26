@@ -278,11 +278,9 @@ noteStatuses cfg r = mapM one
                       Just c -> do
                         eref <- photosJsonRef (cfgPhotosJson cfg) n
                         pure $ case eref of
-                          Left e -> NoteStatus "unknown" (Just c) Nothing (Just ("photos.json 读取失败（" <> e <> "）：无法核对引用，按未知处理（fail-closed）"))
+                          Left e -> NoteStatus "unknown" (Just c) Nothing (Just ("photos.json 核对不了（" <> e <> "）：按未知处理（fail-closed）"))
                           Right (Just line) -> NoteStatus "published" (Just c) (Just line) Nothing
-                          Right Nothing ->
-                            NoteStatus "pending" (Just c) Nothing $
-                              if cfgPhotosJson cfg == Nothing then Just "未配置 photos.json，无法核对引用" else Nothing
+                          Right Nothing -> NoteStatus "pending" (Just c) Nothing Nothing
     pure (note, st)
 
 -- | @notes --json@ 与 @GET /api/vault/notes@ 同一渲染：每条 = 记录键 + status /

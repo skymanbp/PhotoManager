@@ -230,7 +230,7 @@ runConfigShow c = do
       ex <- doesDirectoryExist v
       putStrLn ("  vault     " <> v <> mark ex)
   case cfgPhotosJson c of
-    Nothing -> putStrLn "  photos.json（未设，只影响 RENAME 的引用检查）"
+    Nothing -> putStrLn "  photos.json（未设：RENAME 引用检查与照片记录的发布状态都核对不了，按未知处理）"
     Just j -> do
       ex <- doesFileExist j
       putStrLn ("  photos.json " <> j <> mark ex)

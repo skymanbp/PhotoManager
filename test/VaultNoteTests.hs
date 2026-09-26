@@ -21,7 +21,7 @@ import Test.Tasty.HUnit
 
 import Pm.Config (Config (..))
 import Pm.Serve (serveApp)
-import Pm.Vault (computeVault, runVaultPush)
+import Pm.Vault (computeVault, photosJsonRef, runVaultPush)
 import Pm.VaultCmd (NoteArgs (..), NoteStatus (..), noteStatuses, runVaultNote, runVaultNotes)
 import Pm.VaultNote (NoteFields (..), VaultNote (..), parseCoordinates, readNotes, validateNotes)
 import ServeTests (arrLen, decodeBody, field, getReq, liftIO', mkEnv, postReq, tok, withVaultWritable)
@@ -34,6 +34,7 @@ vaultNoteTests =
     [ testCase "P8-C 纯校验：坐标格式/越界、source、控制符/超长、类目、无字段 → 拒；同名两条/带路径名/坏 sha → 拒；合法通过并按名排序" casePureValidation
     , testCase "P8-C 生命周期：note → unsynced；push 后 pending；photos.json 引用后 published；读不出 → unknown；字节换了 stale；重记刷新；--clear 清掉；照片与 vault 零改动" caseLifecycle
     , testCase "P8-C 创建取盘上真实 sha（陈旧 catalog 命中 stat 仍不吃缓存）：记录立即生效、不判 stale" caseCreateFreshSha
+    , testCase "#71 未配置 photos.json：已在 vault 的记录答 unknown、exit 1（不是 pending）；引用检查的上游答「核对不了」" caseNotesUnconfigured
     , testCase "P8-C 跨进程事务：root lock 被占 → 拒绝且记录不被覆盖；取锁前预检：匿名主库零写入" caseTxnLock
     , testCase "P8-C serve GET/POST /api/vault/notes：只读 403 而 GET 仍可；坏坐标/非相册名/空请求 400 带 details；set 后 GET 列出 unsynced 且字段已规范化；clear 后 count 0" caseServeNotes
     ]
@@ -206,3 +207,19 @@ caseServeNotes = withVaultWritable "/api/vault/notes" "{\"set\":[{\"name\":\"a.j
   firstNote v = case field ["notes"] v of
     Just (Aeson.Array a) | (x : _) <- toList a -> Just x
     _ -> Nothing
+
+-- | 横切审计 #71：photosJsonRef 对**未配置**答「未被引用」，已在 vault 的记录因此报 pending、exit 0——
+-- DESIGN-P8 §21.2 说核对不了不许答 pending（/photo-publish 消费 pending，会重复上线）。
+caseNotesUnconfigured :: IO ()
+caseNotesUnconfigured = withSystemTempDirectory "pm-vault" $ \tmp -> do
+  let root = tmp </> "main"
+      vdir = tmp </> "vault"
+      cfg = (mkVaultCfg root vdir) {cfgPhotosJson = Nothing}
+  mkMain root
+  writeF (root </> "相册" </> "a.jpg") "AAA"
+  createDirectoryIfMissing True (vdir </> "landscape")
+  runVaultNote (NoteArgs False ["a.jpg"] fullFields) cfg >>= (@?= 0)
+  runVaultPush (execNow cfg) (Just "landscape") ["a.jpg"] cfg >>= (@?= 0)
+  statusOf cfg "a.jpg" >>= (@?= ("unknown", Just "landscape", Nothing))
+  runVaultNotes True cfg >>= (@?= 1)
+  photosJsonRef Nothing "a.jpg" >>= either (const (pure ())) (\r -> assertFailure ("未配置应答核对不了，实得 " <> show r))
