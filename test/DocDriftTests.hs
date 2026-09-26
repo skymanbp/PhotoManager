@@ -48,6 +48,7 @@ docDriftTests =
     , testCase "41 轮 GO-note #9 运行契约：cwd = 仓库根（本套件按根相对路径读仓库文件）" caseRepoRootCwd
     , testCase "41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托 REVIEW-LOG" caseReadmeSync
     , testCase "#75 #76 DESIGN §5 命令表 ↔ 真 CLI：写出的 --旗标都真有、位置参数与 CLI 相符（拿同一次构建的 pm.exe 逐段跑 --help）" caseDesignCliTable
+    , testCase "#72 README「从源码构建」：cp 的目标目录若被 .gitignore 忽略（新克隆里没有），块里之前得先 mkdir -p（同 CI）" caseReadmeBuildDirs
     , testCase "0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、每个 exe stanza 显式 other-modules" caseNoPathsModule
     ]
 
@@ -626,3 +627,20 @@ designPositionals real = go
   go [] = []
   skipValue (v : r) | null (flagNames v) = r
   skipValue r = r
+
+-- | 横切审计 #72：README「从源码构建」把 pm.exe 拷进 @gui/src-tauri/binaries/@——那个目录被 .gitignore 忽略、新克隆
+-- 里没有，cp 直接报「No such file or directory」；CI 的同一步先 @mkdir -p@。类级核：构建块里（第一个 @cd@ 之前）每条
+-- @cp@ 的目标目录，要么块里先 @mkdir -p@ 过，要么不是 .gitignore 里的目录条目（新克隆就有）。
+caseReadmeBuildDirs :: IO ()
+caseReadmeBuildDirs = do
+  ign <- readUtf8 ".gitignore"
+  let ignored d = (d <> "/") `elem` map (dropWhileEnd isSpace) (lines ign)
+  forM_ [("README.md", "## Build from source"), ("README.zh.md", "## 从源码构建")] $ \(f, h) -> do
+    s <- readUtf8 f
+    let block = takeWhile (not . ("```" `isPrefixOf`)) (drop 1 (dropWhile (not . ("```bash" `isPrefixOf`)) (dropWhile (/= h) (map (dropWhileEnd isSpace) (lines s)))))
+        steps = takeWhile (not . ("cd " `isPrefixOf`)) block
+        cps = [(i, takeDirectory (last ws)) | (i, l) <- zip [0 :: Int ..] steps, let ws = words l, take 1 ws == ["cp"]]
+    assertBool (f <> "：构建块里应有拷 sidecar 的 cp") (not (null cps))
+    forM_ cps $ \(i, d) ->
+      assertBool (f <> "：cp 的目标目录 " <> d <> " 被 .gitignore 忽略（新克隆里没有），之前得先 mkdir -p " <> d)
+        (not (ignored d) || ("mkdir -p " <> d) `elem` take i steps)

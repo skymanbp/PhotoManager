@@ -21,7 +21,7 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
 > 唯一的移出机制是带 manifest 的隔离区；每条写路径都过对抗评审门禁（**逐轮
 > 记录于 [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md)，收敛判定以其末节 verdict
 > 为准，不在这里手抄**），凡有可观测自动化落点的闸都配"删掉它就转红"的突变
-> 验证用例（503 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
+> 验证用例（504 例，GHC 警告 0）；没有落点的（GUI 无 harness、并发交错无确定
 > 性观察点）在 REVIEW-LOG 登记为残余，不冒充覆盖。
 
 **设计与不变量：[docs/DESIGN.md](docs/DESIGN.md)**（先读 §2 十一条不变量）。
@@ -278,7 +278,7 @@ pm · 索引 2026-08-26 12:53（0 分钟前）· 4633 文件 / 459.4 GiB
 | 增量扫描（4633 文件，复用 4633 / 待 hash 0，workers=16） | 1.58 s | `pm scan` 2026-09-02，1.1.1 上实测，[release-notes/v1.1.1](docs/release-notes/v1.1.1.md) |
 | hash 吞吐（122 个 ARW 共 14.0 GiB，workers=16） | 19.4 s | `pm scan` 2026-08-26——1.1.1 之前「未来 mtime 每次重 hash」的那批，修后不再发生 |
 | 首次全量 hash（480 GiB 级） | 约 10–25 min | 首次建库实录 |
-| 测试套件（503 例，整套序列化跑——进程级 stdout 重定向所需） | 10–90 s | `stack test` |
+| 测试套件（504 例，整套序列化跑——进程级 stdout 重定向所需） | 10–90 s | `stack test` |
 | GHC 警告 | 0 | `stack build` |
 | 对抗评审门禁 | 逐轮记录（NO-GO 逐条第一方核实 → 类级修 → 聚焦复核；收敛以末节 verdict 为准） | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | 突变验证 | 凡有可观测自动化落点的承重闸各配一个突变、配对用例转红（34–36 轮与 P7 各轮判别表全数通过；无落点者登记为残余） | REVIEW-LOG 各轮收敛证据 |
@@ -326,6 +326,8 @@ stack build --test --no-interleaved-output --no-dump-logs
 stack install                    # 把 pm 放进 %APPDATA%\local\bin
 
 # GUI + 安装包（Rust / Tauri v2；Windows 只支持 MSVC 目标）
+# binaries/ 被 .gitignore 忽略，新克隆里还没有这个目录
+mkdir -p gui/src-tauri/binaries
 cp "$APPDATA/local/bin/pm.exe" gui/src-tauri/binaries/pm-x86_64-pc-windows-msvc.exe
 cd gui/src-tauri
 # remap 掉 cargo registry 源码路径里的用户主目录，别把本机路径编进公开二进制
@@ -341,7 +343,7 @@ python ../../scripts/leakscan.py binaries/pm-x86_64-pc-windows-msvc.exe \
   "target/x86_64-pc-windows-msvc/release/bundle/nsis/pm-ui_${V}_x64-setup.exe"
 ```
 
-CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同一条链、同一套闸**：版本一致闸 → `stack test`（含 750 行闸与文档漂移哨兵）→ `pm --version` 闸 → sidecar → tauri build（remap）→ `scripts/leakscan.py` → zip + NSIS 安装包 + `sha256.txt` 同一 run 产出；推 tag `v<版本>` 后 release job 把**同一 run** 的产物挂到 Release，说明附每个资产的 SHA-256（上面「安装」节的承诺就是这里兑现的）。Release 里的二进制不是本机编的。
+CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同一条链**，外加上面本地链里没有的两道闸（版本一致、`pm --version`）：版本一致闸 → `stack test`（含 750 行闸与文档漂移哨兵）→ `pm --version` 闸 → sidecar → tauri build（remap）→ `scripts/leakscan.py` → zip + NSIS 安装包 + `sha256.txt` 同一 run 产出；推 tag `v<版本>` 后 release job 把**同一 run** 的产物挂到 Release，说明附每个资产的 SHA-256（上面「安装」节的承诺就是这里兑现的）。Release 里的二进制不是本机编的。
 
 ## 路线图与已知限制
 

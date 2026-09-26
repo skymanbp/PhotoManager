@@ -32,7 +32,7 @@ a whole (`pm undo`).
 > review gate (**recorded round by round in [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md);
 > the convergence verdict is whatever its last section says and is not copied
 > here**), and each gate with an observable automated anchor gets a "delete it and
-> exactly one test turns red" mutation case (503 tests, 0 GHC warnings); gates
+> exactly one test turns red" mutation case (504 tests, 0 GHC warnings); gates
 > without an anchor (the GUI has no harness; concurrent interleavings have no
 > deterministic observation point) are registered in REVIEW-LOG as residuals rather
 > than passed off as covered.
@@ -379,7 +379,7 @@ All measured on the real library (commands and sources reproducible, not estimat
 | Incremental scan (4633 files, 4633 reused / 0 to hash, workers=16) | 1.58 s | `pm scan` 2026-09-02 on 1.1.1, [release-notes/v1.1.1](docs/release-notes/v1.1.1.md) |
 | Hash throughput (14.0 GiB across 122 ARW, workers=16) | 19.4 s | `pm scan` 2026-08-26 — the pre-1.1.1 future-mtime re-hash, which no longer happens |
 | First full hash (480 GiB class) | ~10–25 min | first library build, recorded |
-| Test suite (503 tests, whole suite serialised — required by process-level stdout redirection) | 10–90 s | `stack test` |
+| Test suite (504 tests, whole suite serialised — required by process-level stdout redirection) | 10–90 s | `stack test` |
 | GHC warnings | 0 | `stack build` |
 | Adversarial review gate | recorded per round (NO-GO findings verified first-hand → class-level fix → focused re-review; convergence = the last section's verdict) | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | Mutation verification | one mutation per load-bearing gate with an observable automated anchor, its paired test turns red (all discrimination tables of rounds 34–36 and the P7 rounds pass; gates without an anchor registered as residuals) | REVIEW-LOG convergence evidence per round |
@@ -436,6 +436,8 @@ stack build --test --no-interleaved-output --no-dump-logs
 stack install                    # puts pm into %APPDATA%\local\bin
 
 # GUI + installer (Rust / Tauri v2; on Windows only the MSVC target is supported)
+# binaries/ is gitignored, so a fresh clone does not have it yet
+mkdir -p gui/src-tauri/binaries
 cp "$APPDATA/local/bin/pm.exe" gui/src-tauri/binaries/pm-x86_64-pc-windows-msvc.exe
 cd gui/src-tauri
 # remap the user home directory out of the cargo registry source paths — do not bake
@@ -453,8 +455,9 @@ python ../../scripts/leakscan.py binaries/pm-x86_64-pc-windows-msvc.exe \
   "target/x86_64-pc-windows-msvc/release/bundle/nsis/pm-ui_${V}_x64-setup.exe"
 ```
 
-CI (`.github/workflows/build.yml`) runs **the same chain with the same gates** on
-GitHub's windows-latest: version-consistency gate → `stack test` (including the 750-line
+CI (`.github/workflows/build.yml`) runs **the same chain** on GitHub's
+windows-latest, plus two gates the local chain above leaves out (version consistency,
+`pm --version`): version-consistency gate → `stack test` (including the 750-line
 budget gate and the documentation-drift sentinels) → `pm --version` gate → sidecar →
 tauri build (remapped) → `scripts/leakscan.py` → zip + NSIS installer + `sha256.txt`, all
 produced by one run; after pushing the tag `v<version>` the release job attaches the
