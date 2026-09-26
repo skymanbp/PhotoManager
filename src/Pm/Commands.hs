@@ -315,8 +315,9 @@ runTrash' cfg tc root = case tc of
             forM_ (tvRegistered tv) $ \(r, present) ->
               printf
                 "  %-8s %s  ← %s  (%s, plan %s)\n"
-                -- 「已移出」= 被 purge 或被复位/undo 移回原位（文件不在 trash）
-                (if present then "在库" :: String else "已移出")
+                -- 「不在 trash」：被 purge、被复位/undo 移回原位，或 manifest 预写了但隔离没落地（崩在移动前 /
+                -- 移动失败——manifest 只追加，那条留作历史）。审计 #30：此前一律标「已移出」，没进过 trash 的也算
+                (if present then "在库" :: String else "不在 trash")
                 (trTrashRel r)
                 (trVictimRel r)
                 (T.unpack (trReason r))

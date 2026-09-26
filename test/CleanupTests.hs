@@ -22,7 +22,9 @@ import Pm.BackupCmd (backupInitPreflight, runBackupRun)
 import Pm.Cli (GoOpts (..), bindExecRootWith, healLines, parseWorkers, parseYmd)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), repairDegraded, repairRow, runDoctor)
 import Pm.Exec (Checkpoint (..))
-import Pm.Commands (InitOpts (..), ScanCmd (..), runInit, runScanCmd)
+import Pm.Commands (InitOpts (..), ScanCmd (..), TrashCmd (..), runInit, runScanCmd, runTrash)
+import Pm.Hash (sha256File)
+import Pm.Op (Op (..))
 import Pm.Config (Config (..), loadConfig, writeConfig)
 import Pm.ConfigEdit (checkConfig, runConfigShow)
 import Pm.GitGuard (pmIgnoreGuard)
@@ -47,6 +49,7 @@ cleanupTests =
     , testCase "#65 #84 命令行参数：日期只收十位 YYYY-MM-DD（26-09-01 不再是公元 26 年）；空路径参数不再落到当前目录（init / backup init / sort）" caseCliArgs
     , testCase "#83 整理页重扫先清模型再请求：失败的重扫之后没有旧概览、AI 按钮不亮；AI 请求收尾按当前概览定按钮" caseSortRescanReset
     , testCase "#29 #38 --repair 做了什么进返回的 findings（REPAIR 行，不直接打 stdout）；执行自愈转发它们与 Bad 行，降级成只诊断时不再报「补记 N 条」" caseRepairFindings
+    , testCase "#30 隔离预写了 manifest 却没落地（崩在移动前）：pm trash list 标「不在 trash」，不再说「已移出」；victim 仍在原位" caseTrashListNeverLanded
     , testCase "#26 备份发现按四态读：登记路径上 root-id.json 损坏 / 读不出 → 点名那块盘（不再说「未挂载，插上盘」）；pm apply 的 UUID 绑定同样点名；路径不在照旧「未挂载」" caseBackupMarkerBroken
     ]
 
@@ -272,3 +275,18 @@ caseBackupMarkerBroken = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   bindExecRootWith (\_ -> pure ()) (cfgOf bad) plan "bk-26" >>= \r -> case r of
     Left m -> assertBool m ("备份盘 " `isInfixOf` m && "身份损坏" `isInfixOf` m)
     Right _ -> assertFailure "不该绑定"
+
+-- | #30：隔离先预写 manifest 再移动（§6.3 步 1）；崩在移动前（Q2）或移动失败，那条记录留在只追加的 manifest
+-- 里——pm trash list 此前标「已移出」（本义是被 purge / 被 undo 移回），一张从没进过 trash 的照片被说成移出过。
+caseTrashListNeverLanded :: Assertion
+caseTrashListNeverLanded = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True root
+  BS.writeFile (root </> "v.jpg") "VICTIM"
+  vsha <- sha256File (root </> "v.jpg")
+  plan <- mkPlanIO root [OpQuarantine "v.jpg" vsha "t"]
+  runCrash (injectAt CpQuarAfterManifest) plan
+  (out, code) <- captureStdout (runTrash (Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing) TrashList root)
+  code @?= 0
+  assertBool out ("v.jpg" `isInfixOf` out && "不在 trash" `isInfixOf` out && not ("已移出" `isInfixOf` out))
+  doesFileExist (root </> "v.jpg") >>= (@?= True)
