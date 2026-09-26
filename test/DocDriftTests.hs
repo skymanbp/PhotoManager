@@ -239,13 +239,27 @@ caseGuiNoInlineStyle = do
       -- <script …>：只允许 src= 外链且标签体为空
       scripts t = [take 40 s | s <- tails t, "<script" `isPrefixOf` lc s, let tag = takeWhile (/= '>') s, let body = takeWhile (/= '<') (drop 1 (dropWhile (/= '>') s)), not ("src=" `isInfixOf` lc tag) || any (not . isSpace) body]
       styleEls t = [take 12 s | s <- tails t, "<style" `isPrefixOf` lc s]
-      innerBad t = [take 30 s | s <- tails t, "innerHTML" `isPrefixOf` s, let r = dropWhile isSpace (drop 9 s), not (take 1 r == "=" && take 2 (dropWhile isSpace (drop 1 r)) == "\"\"")]
   assertEqual "index.html 内联样式属性" [] (attr "style" html)
   assertEqual "index.html on* 事件属性" [] (events html)
   assertEqual "index.html 内联/非外链 <script>" [] (scripts html)
   assertEqual "index.html/gui/ui 脚本 <style" [] (styleEls html <> styleEls js)
   assertEqual "gui/ui 脚本 setAttribute/HTML 注入口" [] [w | w <- ["setAttribute(", "insertAdjacentHTML", "outerHTML", "document.write", "cssText"], w `isInfixOf` js]
-  assertEqual "gui/ui 脚本 innerHTML 只允许赋空串" [] (innerBad js)
+  assertEqual "gui/ui 脚本 innerHTML 只允许赋空串" [] (innerHtmlBad js)
+  -- 审计 #59：判据本身的正反例——不改真文件也看得见它放什么、拦什么
+  assertEqual "判据：清空放行" [] (innerHtmlBad "a.innerHTML = \"\"; b.innerHTML=\"\" ;")
+  assertEqual "判据：拼接 / 链式调用 / 非空串一律拦" 3 (length (innerHtmlBad "a.innerHTML = \"\" + x; b.innerHTML = \"\".concat(x); c.innerHTML = \"<b>\";"))
+
+-- | gui/ui 脚本里 innerHTML 的违规出现（F090 前提：只许赋空串）。每次出现都须是 @= ""@ 且紧跟
+-- 语句结束的 @;@——审计 #59：此前只看等号后头两个字符，@el.innerHTML = "" + expr@ 也算「赋空串」
+-- 放行，服务端文本就能当 HTML 注进去。读取、比较、拼接一律算违规（保守）。
+innerHtmlBad :: String -> [String]
+innerHtmlBad t = [take 30 s | s <- tails t, "innerHTML" `isPrefixOf` s, not (emptyAssign (drop 9 s))]
+ where
+  emptyAssign s = case dropWhile isSpace s of
+    '=' : r -> case dropWhile isSpace r of
+      '"' : '"' : r' -> take 1 (dropWhile isSpace r') == ";"
+      _ -> False
+    _ -> False
 
 -- | P7-J 删掉的三个名字不得回潮：opRelPaths（无调用者的导出）、isPng
 -- （与 push 门分叉的第二份谓词）、stemKey（Import/Sort 双份局部配对键）；
