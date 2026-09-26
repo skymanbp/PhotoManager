@@ -7,7 +7,9 @@
 module AuditFixTests (auditFixTests) where
 
 import Control.Exception (finally)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist)
+import Data.List (isSuffixOf)
+import Data.Time (getCurrentTime)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.Environment (lookupEnv, setEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -15,13 +17,15 @@ import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Config (Config (..), configFilePath, loadConfig, withConfigLock, writeConfig)
+import Pm.Config (Config (..), configFilePath, createRootInfo, loadConfig, readRootInfo, withConfigLock, writeConfig)
+import Pm.Types (RootInfo (..), RootRole (..))
 
 auditFixTests :: TestTree
 auditFixTests =
   testGroup
     "2026-09-25 全量 debug 审计修复钉针"
     [ testCase "#4 配置路径途经 junction（同 SUBST / 8.3 短名）：configFilePath 解析到真名，写 / 锁 / 读三者同形，不再被句柄后验误拒" caseConfigPathJunction
+    , testCase "#5 root 是 junction：createRootInfo 落到真名下、不抛、无 .tmp 残留；已有身份仍 Left 不覆盖且不留 .tmp" caseRootIdJunctionRoot
     ]
 
 mkJunction :: FilePath -> FilePath -> IO ()
@@ -56,3 +60,28 @@ caseConfigPathJunction = withSystemTempDirectory "pm-cfgjunc" $ \tmp -> do
     ml <- withConfigLock (pure ())
     ml @?= Just ()
     loadConfig >>= either (assertFailure . ("配置应可读回: " <>)) (\c -> cfgMainPath c @?= mainP)
+
+-- | #5（medium）：'createRootInfo' 此前从调用方原样字符串拼落位目标与 tmp——root 是
+-- junction / SUBST / 8.3 短名时（runInit 只 makeAbsolute、vault.path 原样；DESIGN §14 与
+-- resolveUnder 文档都说 junction root 合法），'moveBoundNoReplace' 的句柄先验对不上
+-- GetFinalPathNameByHandle 的规范形，失败臂的 'deleteBoundAt' 同样对不上并**抛出**：
+-- 异常逃出 pm init / 首次 vault push，且每次尝试泄漏一个 @root-id.json.<hex>.tmp@。
+-- 改为经受信解析器取 canonical 形态；失败臂删 tmp 包 try、原因并进报文。
+caseRootIdJunctionRoot :: IO ()
+caseRootIdJunctionRoot = withSystemTempDirectory "pm-rootjunc" $ \tmp -> do
+  let real = tmp </> "real"
+      link = tmp </> "link"
+      leftovers = filter (".tmp" `isSuffixOf`) <$> listDirectory (real </> ".pm")
+  createDirectoryIfMissing True real
+  mkJunction link real
+  now <- getCurrentTime
+  r1 <- createRootInfo link (RootInfo "j" RoleMain now Nothing)
+  r1 @?= Right ()
+  doesFileExist (real </> ".pm" </> "root-id.json") >>= (@?= True)
+  leftovers >>= (@?= [])
+  fmap riId <$> readRootInfo link >>= (@?= Just "j")
+  -- 目标已存在（并发创建 / readRootState 之后有人放了文件）：仍 Left、不覆盖、不抛、不留 tmp
+  r2 <- createRootInfo link (RootInfo "x" RoleMain now Nothing)
+  either (const (pure ())) (const (assertFailure "已有身份不得被覆盖")) r2
+  fmap riId <$> readRootInfo real >>= (@?= Just "j")
+  leftovers >>= (@?= [])

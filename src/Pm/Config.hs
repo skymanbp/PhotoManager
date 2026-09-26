@@ -497,21 +497,34 @@ createRootInfo root info = do
 createRootInfo' :: FilePath -> RootInfo -> IO (Either String ())
 createRootInfo' root info = do
   createDirectoryIfMissing True (pmDir root)
-  bytes <- getRandomBytes 4
-  let final = rootInfoPath root
-      tmp = final <> "." <> concatMap (printf "%02x") (BS.unpack bytes) <> ".tmp"
-  -- 独占创建（P3b-11，八轮复审 major）：pm 自建 tmp 一律不覆盖既有名字，
-  -- 预置的 hardlink 会被 CREATE_NEW 拒绝而不是被写穿到库外。
-  bracket (openFreshBinary tmp) hClose $ \h -> do
-    BSL.hPut h (Aeson.encode info)
-    flushHandleToDisk h
-  r <- try (moveBoundNoReplace tmp final) :: IO (Either IOException ())
-  case r of
-    Right () -> pure (Right ())
-    Left e -> do
-      -- §6.1 脚注：pm 自建、从未落位的 tmp 是唯一允许 unlink 的东西
-      deleteBoundAt tmp
-      pure (Left (final <> " 已存在或不可创建（不覆盖既有身份）: " <> show e))
+  -- 2026-09-25 审计 #5：落位目标与 tmp 从受信解析器取（canonical 形态），不再用调用方
+  -- 原样字符串拼 'rootInfoPath'——root 是 junction / SUBST / 8.3 短名时（runInit 只
+  -- makeAbsolute、vault.path 原样；DESIGN §14 与 'resolveUnder' 文档都说 junction root
+  -- 合法），'moveBoundNoReplace' 的句柄先验对不上 GetFinalPathNameByHandle 的规范形，
+  -- 失败臂的 'deleteBoundAt' 同样对不上并抛出：异常逃出 pm init / 首次 vault push，
+  -- 且每次尝试泄漏一个 @root-id.json.<hex>.tmp@。这是 @.pm@ 写口里唯一按原样 root 拼
+  -- 路径的一处，与 'writePmState' / 'writeCacheFile' 收成同一形态。
+  m <- resolveUnder root (".pm" </> "root-id.json")
+  case m of
+    Nothing -> pure (Left (untrustedMsg (rootInfoPath root)))
+    Just final -> do
+      bytes <- getRandomBytes 4
+      let tmp = final <> "." <> concatMap (printf "%02x") (BS.unpack bytes) <> ".tmp"
+      -- 独占创建（P3b-11，八轮复审 major）：pm 自建 tmp 一律不覆盖既有名字，
+      -- 预置的 hardlink 会被 CREATE_NEW 拒绝而不是被写穿到库外。
+      bracket (openFreshBinary tmp) hClose $ \h -> do
+        BSL.hPut h (Aeson.encode info)
+        flushHandleToDisk h
+      r <- try (moveBoundNoReplace tmp final) :: IO (Either IOException ())
+      case r of
+        Right () -> pure (Right ())
+        Left e -> do
+          -- §6.1 脚注：pm 自建、从未落位的 tmp 是唯一允许 unlink 的东西。清不掉也不抛
+          -- （拒绝已经成立，残留只是垃圾，人工核查即可）：原因并进报文（#5）。
+          dE <- try (deleteBoundAt tmp) :: IO (Either IOException ())
+          pure . Left $
+            final <> " 已存在或不可创建（不覆盖既有身份）: " <> show e
+              <> either (\d -> "；残留 " <> tmp <> " 清除失败: " <> show d) (const "") dE
 
 -- | 建 @.pm@ 的**子目录**（plans \/ trash）：先逐级限域，再在返回的路径上
 -- mkdir（第一方自审 R5）。顺序反过来——先 mkdir 再 resolveUnder——在 @.pm@
