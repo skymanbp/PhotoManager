@@ -28,6 +28,7 @@ import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Pm.Commands (TrashCmd (..), runTrash)
 import Pm.Config (Config (..), configFilePath, createRootInfo, loadConfig, readRootInfo, withConfigLock, writeConfig, writeRootInfo)
 import Pm.Doctor (Severity (..))
 import Pm.Exec (defaultExecEnv, execPlan)
@@ -40,7 +41,7 @@ import Pm.Trash (manifestPath, quarDirFor, trashDir)
 import Pm.Types (RootInfo (..), RootRole (..))
 import ServeTests (fixture, liftIO', mkEnvA, mkEnvW, tok, withVault)
 import qualified ServeTests as ST
-import TestUtil (doctorRows, mkCopyOp, mkPlanIO, withDenyAll, withEnv)
+import TestUtil (doctorRows, execOk, isClean, journalEntries, mkCopyOp, mkPlanIO, truncateJournalTo, withDenyAll, withEnv)
 
 auditFixTests :: TestTree
 auditFixTests =
@@ -53,6 +54,7 @@ auditFixTests =
     , testCase "#43 trash 例外只放隔离载荷（≥ 4 级）：trash 根 / manifest / 整个隔离目录作 rename 源，validatePlan 与 execPlan 都拒、manifest 不动；生成形态照旧放行" caseTrashSrcShape
     , testCase "#34 doctor 在途 Copy 的 dst / Quarantine 的 victim 被 ACL 拒绝：不再塌成「无痕迹」C1 / 「两处都不在」Q?，按「在而读不出」报 C? Bad / Q2" caseDoctorDeniedUserSide
     , testCase "#58 测试里临时改环境变量须原样还原（有值写回、没有才删、异常同样还原）；test/ 里删环境变量只许在 TestUtil.withEnv" caseWithEnvRestores
+    , testCase "#37 批次崩在隔离 Done 之后再 pm trash empty：清除后补写 CleanShutdown，下一次 doctor 不再把已清除的载荷误报成 C4「目标不存在」" caseTrashEmptyClosesWindow
     ]
 
 mkJunction :: FilePath -> FilePath -> IO ()
@@ -279,3 +281,22 @@ caseWithEnvRestores = do
   ts <- filter (\f -> ".hs" `isSuffixOf` f && f /= "TestUtil.hs") <$> listDirectory "test"
   bad <- filterM (\f -> codeRefs . T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile ("test" </> f)) ts
   bad @?= []
+
+-- | #37（low）：C4 的复验窗口 =「上次 CleanShutdown 之后的全部 Done」，而 CleanShutdown 此前只由
+-- execPlan 收尾写。批次崩在隔离 Done 之后（或 doctor --repair 补记的 Q-DONE-LOST Done）再
+-- pm trash empty，下一次 doctor 把刚清掉的载荷报成 C4 Bad「Done 记录的目标不存在……重新生成
+-- 计划」、exit 1，直到别的计划跑一次。用户裁定：trash empty 清除后在锁内补写一条。
+caseTrashEmptyClosesWindow :: Assertion
+caseTrashEmptyClosesWindow = withSystemTempDirectory "pm-audit" $ \dir -> do
+  let root = dir </> "root"
+  createDirectoryIfMissing True root
+  BS.writeFile (root </> "v.jpg") "VICTIM"
+  vsha <- sha256File (root </> "v.jpg")
+  plan <- mkPlanIO root [OpQuarantine "v.jpg" vsha "t"]
+  _ <- execOk plan
+  -- 崩在 Done 之后、CleanShutdown 之前
+  journalEntries root >>= truncateJournalTo root . filter (not . isClean)
+  code <- runTrash (mkCfg root) (TrashEmpty True) root
+  code @?= 0
+  rows <- doctorRows root
+  assertBool ("已清除的隔离载荷不得再报 C4: " <> show rows) ("C4" `notElem` map fst rows)

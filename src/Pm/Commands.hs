@@ -35,7 +35,7 @@ module Pm.Commands
   ) where
 
 import Control.Exception (IOException, try)
-import Control.Monad (forM, forM_, unless)
+import Control.Monad (forM, forM_, unless, when)
 import Data.Function (on)
 import Data.List (intercalate, nubBy)
 import Data.Maybe (fromMaybe)
@@ -61,6 +61,7 @@ import Pm.Hash (ContentProbe (..), probeConfined)
 import Pm.Import
 import Pm.Plan
 import Pm.Scan
+import Pm.Journal (JEntry (..), Sync (..), jAppend, withJournal)
 import Pm.Trash
 import Pm.Types
 import Pm.Win (deleteBoundAt, probeName, resolveUnder, volumeFsType)
@@ -396,6 +397,12 @@ trashEmptyLocked' cfg root yes tv = do
               -- 不清「清完」和「删到第 k 个死掉」。逐项 try、首个失败即停（保守：
               -- 少删不多删）、报已清除 k/N、exit 2（DESIGN §5：IO 失败 = 2）。
               done <- purgeLoop (0 :: Int) purgeable
+              -- 2026-09-25 审计 #37：C4 的复验窗口 =「上次 CleanShutdown 之后的全部 Done」，此前只有
+              -- execPlan 收尾写它——崩在隔离 Done 之后的批次（或 doctor --repair 补记的 Done）再清空
+              -- 隔离区，下一次 doctor 就把刚清掉的载荷报成 C4「目标不存在」，直到别的计划跑一次。
+              -- 清掉了东西就在锁内补写一条（同 execPlan：锁内、无在途批次，这条标记是真话）。
+              when (either (\(k, _, _) -> k) id done > 0) $
+                withJournal root $ \j -> getCurrentTime >>= jAppend j Barrier . JCleanShutdown
               case done of
                 Right n -> do
                   putStrLn ("✓ 已清除 " <> show n <> " 项（manifest 记录保留为历史）")
