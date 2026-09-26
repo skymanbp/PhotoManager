@@ -10,7 +10,7 @@ module CleanupTests (cleanupTests) where
 import Control.Monad (forM_)
 import qualified Data.ByteString as BS
 import Data.List (isInfixOf)
-import Data.Time (fromGregorian)
+import Data.Time (UTCTime (..), defaultTimeLocale, formatTime, fromGregorian, getTimeZone, utcToLocalTime)
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -26,10 +26,10 @@ import Pm.ConfigEdit (checkConfig, runConfigShow)
 import Pm.GitGuard (pmIgnoreGuard)
 import Pm.Catalog (saveCatalog)
 import Pm.SortSource (withSourceQ)
-import Pm.Status (IndexSummary (..), StatusOpts (..), StatusReport (..), renderStatus, statusReport)
+import Pm.Status (IndexSummary (..), StatusOpts (..), StatusReport (..), localStamp, renderStatus, statusReport)
 import Pm.VaultHold (validateKeyed)
 import Pm.Types (RootRole (..), blankPathArg, showHuman, subpathOk)
-import TestUtil (captureStdout, mkMain, readUtf8, scanQuiet, withEnv, writeF)
+import TestUtil (captureStdout, grepSrc, mkMain, readUtf8, scanQuiet, withEnv, writeF)
 
 cleanupTests :: TestTree
 cleanupTests =
@@ -41,6 +41,7 @@ cleanupTests =
     , testCase "#14 #27 配置写口：并发数 / 掉线等待越界与非盘内相对的备份 subpath 由 checkConfig 统一拒（pm init --workers 0 不再写进配置）；发现侧对手编 subpath 说清原因" caseConfigSink
     , testCase "#54 pm status 的暂存事件按 import 的同一套布局：Raw\\<年>\\<事件> 报事件不报年份；import 认不出的形状记「(无法识别)」、待修改不计" caseStagingEventLayout
     , testCase "#69 给人看的名字不经 show：pm status 的暂存事件、记录校验的坏名字照原样显示中文（此前是 \\26477 这类转义）" caseHumanText
+    , testCase "#68 历史时刻按当时的时区偏移换算（冬 / 夏两个时刻各用各的）；src 不再用 getCurrentTimeZone 换算历史时刻" caseHistoricalOffset
     , testCase "#65 #84 命令行参数：日期只收十位 YYYY-MM-DD（26-09-01 不再是公元 26 年）；空路径参数不再落到当前目录（init / backup init / sort）" caseCliArgs
     ]
 
@@ -180,3 +181,15 @@ caseHumanText = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   case validateKeyed "暂不同步名单" fst snd [("旧/杭州.jpg", "x")] of
     Left m -> assertBool m ("\"旧/杭州.jpg\"" `isInfixOf` m)
     Right () -> assertFailure "非平铺名应拒"
+
+-- | #68：renderStatus 此前取一次 getCurrentTimeZone 套到扫描 / 备份 / vault 三个历史时刻上。本机（有夏令时的
+-- 时区）冬夏两个时刻至少有一个会差一小时；CI 的 runner 若是 UTC 无夏令时，行为断言退化为恒真，由源码哨兵兜住。
+caseHistoricalOffset :: Assertion
+caseHistoricalOffset = do
+  let winter = UTCTime (fromGregorian 2026 1 15) 3600
+      summer = UTCTime (fromGregorian 2026 7 15) 3600
+      expect t = (\tz -> formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz t)) <$> getTimeZone t
+  forM_ [winter, summer] $ \t -> do
+    want <- expect t
+    localStamp t >>= (@?= want)
+  grepSrc ("getCurrentTimeZone" `isInfixOf`) >>= (@?= [])

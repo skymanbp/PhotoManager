@@ -18,6 +18,7 @@ module Pm.Status
   , statusReport
   , renderStatus
   , runStatus
+  , localStamp
   ) where
 
 import Data.Aeson (ToJSON (..), object, (.=))
@@ -198,8 +199,7 @@ renderStatus opts r = do
           putStrLn "  → 运行 pm scan（首次全量约 10-25 分钟）"
       | otherwise -> putStrLn ("主库索引读不出（见上）: " <> srRoot r <> " → 排除原因后重试，或 pm scan 重建")
     Just i -> do
-      tz <- getCurrentTimeZone
-      let stamp = formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz (isScannedAt i))
+      stamp <- localStamp (isScannedAt i)
       printf
         "pm · 索引 %s（%d 分钟前）· %d 文件 / %.1f GiB\n"
         stamp
@@ -229,8 +229,8 @@ renderStatus opts r = do
         CacheBad m -> putStrLn ("  ⚠ 备份盘   缓存不可信: " <> m)
         CacheAbsent -> putStrLn "  备份盘     未登记/未同步 → 插盘后 pm backup init <镜像路径>，再 pm backup"
         CacheOk m -> do
-          let bstamp = formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz (bmAt m))
-              lag = bmAdd m + bmUpdate m
+          bstamp <- localStamp (bmAt m)
+          let lag = bmAdd m + bmUpdate m
           if lag == 0
             then printf "  备份盘     上次同步 %s · 当时无滞后（EXTRA %d）\n" bstamp (bmExtra m)
             else printf "  ⚠ 备份盘   上次同步 %s · 当时落后 %d 项 → 插盘后 pm backup\n" bstamp lag
@@ -239,9 +239,9 @@ renderStatus opts r = do
         Just (CacheBad m) -> putStrLn ("  ⚠ vault    缓存不可信: " <> m)
         Just CacheAbsent -> putStrLn "  vault      未比对过 → pm vault status"
         Just (CacheOk v) -> do
-          let vstamp = formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz (vmAt v))
-              -- HELD 是用户已经做过的决定，不该永远显示成待办（P4-7）
-              vlag = vmNew v - vmHeld v + vmMissing v + vmRenamed v + vmDrift v
+          vstamp <- localStamp (vmAt v)
+          -- HELD 是用户已经做过的决定，不该永远显示成待办（P4-7）
+          let vlag = vmNew v - vmHeld v + vmMissing v + vmRenamed v + vmDrift v
           -- unstable 不是差异但状态未知（P3b-4 #5）：同样要 ⚠ 提示重跑
           if vlag == 0 && vmUnstable v == 0
             then printf "  vault      上次比对 %s · 无差异（dup %d · unpushable %d）\n" vstamp (vmDuplicate v) (vmUnpushable v)
@@ -280,3 +280,11 @@ topComponent rel = case splitDirectories rel of
 
 gib :: Integer -> Double
 gib b = fromIntegral b / (1024 * 1024 * 1024)
+
+-- | 历史时刻的本地时间戳：用**该时刻**在本机时区规则下的偏移（横切审计 #68）。此前取一次
+-- @getCurrentTimeZone@ 套到所有历史时刻上——跨夏令时切换后，扫描 \/ 备份 \/ vault 的时间差一小时，
+-- 近午夜还差一天；GUI 的 @toLocaleString@ 按历史偏移，两面对不上。
+localStamp :: UTCTime -> IO String
+localStamp t = do
+  tz <- getTimeZone t
+  pure (formatTime defaultTimeLocale "%F %R" (utcToLocalTime tz t))
