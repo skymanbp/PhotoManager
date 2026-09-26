@@ -244,7 +244,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 |---|---|---|
 | `pm init --main PATH [--vault PATH] [--photos-json PATH] [--workers N] [--force]` | **非交互**：写配置 + **主库**的 `.pm/root-id.json`（含 FS 探测；已有则沿用）；vault 只登记路径——它的 root 标识由首次 `pm vault push` 建，备份盘的由 `pm backup init` 建；主库在 git 工作树内而 `.gitignore` 未覆盖 `.pm/` 时按 I11 **拒绝**并点名那份 `.gitignore`（pm 不改写它，用户补上后重跑）；已有配置须 `--force` 才覆盖（备份盘登记等 init 没有旗标的设置保留，root 身份不覆盖） | 仅 .pm/ |
 | `pm scan [--workers N] [--quiet]` | **只索引主库**（备份盘的索引由 `pm backup` 顺带刷新）；全量/增量索引（首扫全量 hash，之后 stat-比对；变更集才重 hash）。**没核对的按「查不出」承载**：ACL/IO 错误挡住的目录，其下的旧 catalog 条目原样保留（不当作"文件已消失"删掉）；逐文件同理——stat 读不出、或云端未下载而没读的（审计 #8）、hash 时读不出的（被占的共享冲突 / 介质读错，审计 #46；读的时候文件已不在的才算消失），旧条目同样保留。`pm scan` 末尾单列 `⚠ N 条本轮没核对…按「查不出」保留上次快照值`；云端未下载的另列 `☁ N 个文件云端未下载，未读取`（已索引、没改过的按 stat 复用，不必读） | 仅 .pm/ |
-| `pm status` | **总览仪表盘**：头行永远打印「索引时间（几分钟前）· 文件数」；各层规模、staging 待归档、备份盘滞后（未挂载则显示上次同步时间）、vault 差异、命名/版本问题计数、最久未验证字节年龄；**每个问题行末尾给出可直接复制的下一步命令** | 否 |
+| `pm status` | **总览仪表盘**：头行永远打印「索引时间（几分钟前）· 文件数」；各层规模、最久未验证字节年龄、staging 待归档、备份盘滞后（读上次同步留下的缓存，不插盘也能看）、vault 差异、索引新鲜度（`--cached` 跳过）；暂存 / 备份盘 / vault / 新鲜度这几类问题行末尾给出可直接复制的下一步命令 | 否 |
 | `pm sort <源> [--place\|--event --from --to]` | **散落新照片 → 暂存区事件夹**（§7）。源为空串拒（空串被 `makeAbsolute` 答成当前目录；init `--main` / backup init 同，横切审计 #84）。不带参数=只读提议：读 EXIF 拍摄时间、按间隔给候选分段、打印每段该敲的命令（源路径过 `Pm.Publish.quotePathArg` 渲染，横切审计 #79）；给齐地点与区间才生成拷贝计划 | apply 时 |
 | `pm import [--apply] [--also-album]` | To-Be-Sync'd 事件 → `Raw\年\` + `成片\` 归档计划；`--also-album`（P8-B）让成片里的 jpg 同源再拷一份进 `相册\`，相册项与成片项**同组**（成片没落位相册不执行）、返修项耦合成待裁决、非 jpg 只进成片（DESIGN-P8.md §19.2） | apply 时 |
 | `pm album add <事件夹>/<文件名>… [--apply]` / `pm album candidates` | 成片 → 相册（P8-B，DESIGN-P8.md §19.3/19.4）：只收 jpg，相册同名同 sha 幂等跳过、同名异容 NEEDS-DECISION（I5）、同批撞名整批拒绝；`candidates` 只读列出还没进相册的成片 jpg 与成片/相册下的非 jpg | apply 时 / 否 |
@@ -277,19 +277,22 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 备份盘（未登记 / 未挂载 / 登记路径上身份读不出 / 多卷身份冲突）同样 2（审计 #28；此前 1）。
 
 `pm status` 终端 mock（**既没有 `--no-color` 也没有 `--json`**：输出全程是无 ANSI
-转义的纯文本，去色开关无对象；结构化等价物是 `GET /api/status` 的 `StatusReport`）：
+转义的纯文本，去色开关无对象；结构化等价物是 `GET /api/status` 的 `StatusReport`。行形照 `Pm.Status.renderStatus`
+的格式串，数字与事件名是示意；横切审计 #77 前这里画过渲染器从来没有的「命名 … → pm names」行）：
 
 ```
 pm · 索引 2026-08-22 21:03（4 分钟前）· 4635 文件 / 459.3 GiB
 ──────────────────────────────────────────────────────────
-  Raw       4110 文件  429.7 GiB   ✓ 已索引
-  成片       190 文件    4.9 GiB   ✓ 已索引
-  相册        94 文件    2.5 GiB   ✓ 已索引
-  暂存        241 文件   22.2 GiB   ⚠ 5 个事件未归档      → pm import
-  备份盘     未挂载（上次同步 2026-07-30，当时落后 241 文件） → 插盘后 pm backup
-  vault      79/94 已分发            ⚠ 15 NEW             → pm vault status
-  命名       9 个事件夹不合规范                            → pm names
-  验证       最久未验证字节 34 天                          → pm doctor
+  Raw             4110 文件    429.7 GiB
+  To-Be-Sync'd     241 文件     22.2 GiB
+  成片               190 文件      4.9 GiB
+  相册                94 文件      2.5 GiB
+  验证        最久未验证字节 34 天前
+  ⚠ 暂存区 5 个事件未归档: ["26-08-A","26-08-B","26-08-C","26-08-D","26-08-E"]
+      → pm import
+  ⚠ 备份盘   上次同步 2026-07-30 18:12 · 当时落后 241 项 → 插盘后 pm backup
+  ⚠ vault    上次比对 2026-08-22 20:58 · 差异 15（NEW 15 / MISS 0 / REN 0 / DRIFT 0 / 不稳定 0）→ pm vault status
+  ✓ 索引与磁盘一致
 ```
 
 计划输出统一形态：`序号 | 操作 | 源 → 目标 | 大小 | 状态(OK/CONFLICT/HELD/NEEDS-DECISION)`，

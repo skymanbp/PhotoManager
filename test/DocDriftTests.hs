@@ -50,6 +50,7 @@ docDriftTests =
     , testCase "#75 #76 DESIGN §5 命令表 ↔ 真 CLI：写出的 --旗标都真有、位置参数与 CLI 相符（拿同一次构建的 pm.exe 逐段跑 --help）" caseDesignCliTable
     , testCase "#72 README「从源码构建」：cp 的目标目录若被 .gitignore 忽略（新克隆里没有），块里之前得先 mkdir -p（同 CI）" caseReadmeBuildDirs
     , testCase "#78 --writable 级写端点个数从源码清点（Serve*.hs 的 POST 路由去掉 apply / suggest）：DESIGN §14、DESIGN-GUI、两份 README、help 五处都说这个数，DESIGN-GUI 逐个列到" caseWritableEndpointCount
+    , testCase "#77 DESIGN §5.1 的 pm status mock：每个「→ 下一步」都是渲染器真有的提示；提到「命名」行，渲染器就得真有" caseStatusMockHints
     , testCase "0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、每个 exe stanza 显式 other-modules" caseNoPathsModule
     ]
 
@@ -690,3 +691,18 @@ postRoute l = case stripPrefix "(\"POST\", [" (dropWhile isSpace l) of
   commas s = case break (== ',') s of
     (a, []) -> [a]
     (a, _ : r) -> a : commas r
+
+-- | 横切审计 #77：DESIGN §5.1 的 pm status 终端 mock 是手画的，画了渲染器从来没有的「命名 9 个事件夹不合规范 → pm names」
+-- 与「验证 … → pm doctor」，§5 的状态行也承诺了「命名/版本问题计数」（用户裁定：删承诺、不补功能）。类级核：mock 里每个
+-- 「→ 下一步」都得是 'Pm.Status' 源码里真有的字面；mock 或 §5 状态行提到「命名」时，渲染器也得真有这一行。
+caseStatusMockHints :: IO ()
+caseStatusMockHints = do
+  design <- readUtf8 ("docs" </> "DESIGN.md")
+  st <- readUtf8 ("src" </> "Pm" </> "Status.hs")
+  let ls = map (dropWhileEnd isSpace) (lines design)
+      mock = takeWhile (/= "```") (drop 1 (dropWhile (/= "```") (dropWhile (not . ("`pm status` 终端 mock" `isPrefixOf`)) ls)))
+      hints = [dropWhileEnd isSpace h | l <- mock, Just h <- [breakOn "→ " l]]
+      statusRow = concat [l | l <- ls, "| `pm status` |" `isPrefixOf` l]
+  assertBool "应找到 §5.1 的 pm status mock 且带下一步提示" (length mock >= 5 && not (null hints))
+  forM_ hints $ \h -> assertBool ("mock 的「→ " <> h <> "」在 Pm.Status 的渲染器里没有") (h `isInfixOf` st)
+  assertBool "§5 状态行或 mock 提到「命名」行，渲染器就得真有" (not (any ("命名" `isInfixOf`) (statusRow : mock)) || "命名" `isInfixOf` st)
