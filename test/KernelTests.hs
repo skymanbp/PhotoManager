@@ -547,10 +547,14 @@ injectionTests =
           createDirectoryIfMissing True (trashDir root </> T.unpack tpid)
           writeFile (trashDir root </> T.unpack tpid </> "v.jpg") "WRONG"
           now <- getCurrentTime
+          -- 审计 #12：须有 root-id——否则 --repair 在 requireWritable 处被拒（I11），applyRepairs
+          -- 根本不跑，下面「不盲补」的断言恒真；再断言修复轮没有 I10/I11 拒绝行，闸门改动不能再悄悄架空它
+          writeRootInfo root (RootInfo "m" RoleMain now Nothing)
           withJournal root $ \j -> jAppend j Barrier (JIntent (tpOid 0) (OpQuarantine "v.jpg" "beefbeef" "t") now)
           rows <- doctorRows root
           assertBool ("expected Bad Q-DONE-LOST in " <> show rows) (("Q-DONE-LOST", Bad) `elem` rows)
-          _ <- runDoctor root (DoctorOpts False True)
+          (rfs, _) <- runDoctor root (DoctorOpts False True)
+          assertBool ("--repair 须真跑到 applyRepairs: " <> show (map fRow rfs)) (all (`notElem` map fRow rfs) ["I10", "I11"])
           es <- journalEntries root
           filter isDone es @?= []
     , testCase "torn tail: 末行半截 JSON → TORN warning" $
