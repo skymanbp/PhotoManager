@@ -47,6 +47,7 @@ import System.FilePath ((</>))
 import Text.Printf (printf)
 
 import Pm.Album (AlbumReport (..), withAlbumForImport)
+import Pm.VaultCore (convertibleExt)
 import Pm.Apply
 import Pm.Backup
 import Pm.BackupCmd (BackupCmd (..), backupInitPreflight, runBackupInit, runBackupRun)
@@ -563,8 +564,9 @@ runImportTo sink go alsoAlbum cfg = do
             sink ("  ⚠ 无法识别的暂存布局（不猜，不入计划）: " <> p)
           forM_ (irDupTarget rep) $ \(s, d) ->
             sink ("  ✗ 目标重复（连同侧车整组拒绝）: " <> s <> " → " <> d)
+          -- 审计 #24：只有 pm convert 收的（'convertibleExt'）才指向它——侧车 / 元数据 / 错放的 RAW 它一律拒收
           forM_ (arNotJpg arep) $ \p ->
-            sink ("  · 非 jpg 只进成片，不入相册: " <> p <> "（要进相册 → pm convert）")
+            sink ("  · 非 jpg 只进成片，不入相册: " <> p <> if convertibleExt p then "（要进相册 → pm convert）" else "（pm convert 不收这类文件）")
           forM_ (arDupName arep) $ \(s, d) ->
             sink ("  ✗ 相册目标重复（同名只能进一份，两条都不入相册）: " <> s <> " → " <> d)
           forM_ (arAlready arep) $ \(s, d) ->

@@ -248,7 +248,7 @@ runAlbumAddTo sink go args cfg
                     [r <> " 不在索引里（路径拼错？或先 pm scan）" | (r, Nothing) <- looked]
                       <> [enPath e <> " 不是照片条目" | e <- entries, enKind e /= KindPhoto]
                       <> escaped
-                      <> [p <> " 不是 jpg/jpeg（相册只收 JPEG）→ pm convert " <> p | p <- arNotJpg rep]
+                      <> [p <> " 不是 jpg/jpeg（相册只收 JPEG）" <> if convertibleExt p then "→ pm convert " <> p else "，pm convert 也不收这类文件" | p <- arNotJpg rep]
                       <> [s <> " 与本批另一文件同名（相册平铺，同名只能进一份；NTFS 不分大小写）" | (s, _) <- arDupName rep]
               if not (null errs)
                 then mapM_ (sink . ("  ✗ " <>)) errs >> pure (2, Nothing)

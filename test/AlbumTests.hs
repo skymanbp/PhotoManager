@@ -40,6 +40,7 @@ albumTests =
     , testCase "pm album ignore 端到端：写 .pm/album-ignore.json、candidates 不再列、unignore 恢复、照片零改动" caseIgnoreE2E
     , testCase "pm album add 端到端：落位同 sha → 重跑幂等（无计划 exit 0）→ 非 jpg/缺索引/撞名 整批拒绝 exit 2" caseAddE2E
     , testCase "I7 组语义端到端：成片项执行期 I5 冲突 → 同组相册项不执行；正常项两层都落位" caseImportGroupE2E
+    , testCase "#24 非 jpg 的下一步只对 pm convert 收的文件指向它：tif 指、侧车 / 错放的 RAW 不指（import --also-album 与 album add 两处）" caseConvertHint
     ]
 
 one :: (Show a) => String -> [a] -> IO a
@@ -287,3 +288,23 @@ caseImportGroupE2E = withAlbumRoot $ \root cfg -> do
   sy <- sha256File (root </> "相册" </> "y.jpg")
   sy0 <- sha256File (root </> "To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> "y.jpg")
   sy @?= sy0
+
+-- | #24：import --also-album 此前对每个进成片的非 jpg 都说「要进相册 → pm convert」，album add 对非 jpg 一律
+-- 「→ pm convert <p>」——侧车（.xmp）、元数据、错放在 Processed 下的 RAW 照着敲，convert 一律拒收。
+caseConvertHint :: IO ()
+caseConvertHint = withAlbumRoot $ \root cfg -> do
+  let stage f = root </> "To-Be-Sync'd" </> "Processed" </> "26-06-R66" </> f
+  mapM_ (\(f, b) -> writeF (stage f) b) [("t.tif", "TIF"), ("t.xmp", "XMP"), ("r.arw", "RAW")]
+  writeF (root </> "成片" </> "26-07-X" </> "p.tif") "PTIF"
+  writeF (root </> "成片" </> "26-07-X" </> "p.xmp") "PXMP"
+  index root
+  ref <- newIORef []
+  _ <- runImportTo (\l -> modifyIORef' ref (l :)) (GoOpts False False) True cfg
+  out <- reverse <$> readIORef ref
+  let lineOf f = concat [l | l <- out, "非 jpg 只进成片" `isInfixOf` l, f `isInfixOf` l]
+  assertBool (unlines out) ("→ pm convert" `isInfixOf` lineOf "t.tif")
+  mapM_ (\f -> assertBool (f <> ": " <> lineOf f) (not (null (lineOf f)) && not ("→ pm convert" `isInfixOf` lineOf f))) ["t.xmp", "r.arw"]
+  (_, _, oTif) <- runAdd cfg ["26-07-X/p.tif"]
+  assertBool oTif ("→ pm convert" `isInfixOf` oTif)
+  (_, _, oXmp) <- runAdd cfg ["26-07-X/p.xmp"]
+  assertBool oXmp ("不是照片条目" `isInfixOf` oXmp && not ("→ pm convert" `isInfixOf` oXmp))
