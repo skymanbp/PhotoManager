@@ -57,6 +57,7 @@ cleanupTests =
     , testCase "#35 在途 Copy 的 dst 后来被另一份计划正当落成新内容：doctor 报 C5-SUPERSEDED Info（不再是 C5 Bad、exit 0），--repair 不给那份文件出隔离计划" caseC5Superseded
     , testCase "#40 pm undo 一次隔离（从 trash 改名回原位）后索引补回那条——此前文件回到库里、索引静静地少它一条" caseUndoQuarantineReindexed
     , testCase "#45 计划校验对派生路径同守长路径上限：隔离的 trash 目标 / Copy 的 tmp 名越过上限 → validatePlan 与 execPlan 整份拒绝、victim 不动（此前执行时才以 Win32 错误逐项失败）" casePlanDerivedPathLength
+    , testCase "#15 打包版 pm-ui 起不来（pm serve 没报端口 / 窗口建不起来）时退出前弹系统消息框、按 2 退出（无控制台时此前一声不响就没了）" caseUiStartupDialog
     , testCase "#26 备份发现按四态读：登记路径上 root-id.json 损坏 / 读不出 → 点名那块盘（不再说「未挂载，插上盘」）；pm apply 的 UUID 绑定同样点名；路径不在照旧「未挂载」" caseBackupMarkerBroken
     ]
 
@@ -221,13 +222,15 @@ caseSortRescanReset = do
   assertBool "sortScan 须在请求之前清掉 lastSurvey / segInputs 并关掉 AI 按钮" ("lastSurvey = null; segInputs.clear(); $(\"#btn-sort-ai\").disabled = true;" `isInfixOf` beforeReq)
   assertBool "AI 收尾不得无条件放开按钮" (not ("btn.disabled = false" `isInfixOf` aiBody))
   assertBool "AI 收尾按当前概览定按钮" ("btn.disabled = !lastSurvey || !lastSurvey.segments.length" `isInfixOf` aiBody)
+
+-- | 源码哨兵的切段：按 @pat@ 首次出现处切成前后两段（找不到则整段在前、后段为空）。
+breakOn :: String -> String -> (String, String)
+breakOn pat s = go "" s
  where
-  breakOn pat s = go "" s
-   where
-    go acc r@(c : cs)
-      | pat `isPrefixOf` r = (reverse acc, r)
-      | otherwise = go (c : acc) cs
-    go acc [] = (reverse acc, [])
+  go acc r@(c : cs)
+    | pat `isPrefixOf` r = (reverse acc, r)
+    | otherwise = go (c : acc) cs
+  go acc [] = (reverse acc, [])
 
 -- | #38：applyRepairs 此前逐条 putStrLn、不进 findings——@pm ui@ 下 stdout 是空设备，GUI 发起的执行自愈看不到它
 -- 生成了 C5 隔离计划或删了什么。#29：自愈按诊断行合成「补记 Done N 条」，降级成只诊断（I10 / I11）时那个数是假的。
@@ -360,3 +363,17 @@ casePlanDerivedPathLength = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   readFile (root </> victim) >>= (@?= "V")
   opC <- mkCopyOp (dir </> "s.jpg") "S" dst
   mkPlanIO root [opC] >>= tooLong "Copy（tmp 名）" . validatePlan
+
+-- | #15：打包版 pm-ui（windows_subsystem = "windows"）从开始菜单启动时没有控制台——pm serve 起不来时 run() 只
+-- eprintln 就 exit(2)，窗口建不起来时 expect 崩溃退出（101），用户都什么也看不见。致命出口收进一个 fatal：
+-- stderr + 系统消息框，再按 2 退出。本仓不建 Tauri：源码哨兵 + 本机 cargo check 与弹框实跑（REVIEW-LOG）。
+caseUiStartupDialog :: Assertion
+caseUiStartupDialog = do
+  src <- readUtf8 ("gui" </> "src-tauri" </> "src" </> "lib.rs")
+  let (fatalBody, _) = breakOn "\n}" (snd (breakOn "fn fatal(" src))
+      (beforeExit, _) = breakOn "std::process::exit(2)" fatalBody
+      runBody = snd (breakOn "pub fn run()" src)
+  assertBool "fatal 退出前要弹消息框" ("show_error(" `isInfixOf` beforeExit && "std::process::exit(2)" `isInfixOf` fatalBody)
+  assertBool "run() 的致命出口都走 fatal（不留 expect / unwrap / 裸 exit）" $
+    "fatal(" `isInfixOf` runBody && not (any (`isInfixOf` runBody) [".expect(", ".unwrap()", "process::exit"])
+  assertBool "消息框走 user32 的 MessageBoxW" ("fn MessageBoxW(" `isInfixOf` src && "#[link(name = \"user32\")]" `isInfixOf` src)

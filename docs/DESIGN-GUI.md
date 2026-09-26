@@ -178,7 +178,9 @@
   --exit-on-stdin-eof --writable --allow-apply`（接一条从不写的 stdin 管道；授权开关见上 P7 条）、
   把 announce 的 port/token 经 Tauri command `api_info` 交给页面、退出时 kill 子进程。GUI 异常死亡（崩溃、
   被 taskkill 不带 /T）时 Windows 关闭管道，serve 读到 EOF 自行退出——冒烟实测
-  500 ms 内监听消失、零残留。Rust 工具链用 `x86_64-pc-windows-msvc`（Tauri 在
+  500 ms 内监听消失、零残留。起不来时（serve 没报端口——还没 `pm init`、回环端口绑不上，serve 把原因打在
+  stdout 第一行；或窗口建不起来）Rust 侧的致命出口只有一个 `fatal`：stderr 一行 + 系统消息框（原因原话），再按
+  2 退出（`pm ui` 原样转交；此前窗口建不起来是 panic 的 101）。打包版没有控制台，只打 stderr 等于一声不响就没了（审计 #15）。Rust 工具链用 `x86_64-pc-windows-msvc`（Tauri 在
   Windows 只支持 MSVC；本机默认 gnu 工具链链接 cdylib 会 "export ordinal too
   large"，桌面端 crate-type 只留 rlib）。
 - **P4-6 收口（codex 二十轮）**：六条 minor 的逐条处置属于评审史，已移入

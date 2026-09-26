@@ -93,6 +93,39 @@ fn spawn_serve() -> Result<(ApiInfo, Child), String> {
     Ok((ApiInfo { port, token }, child))
 }
 
+/// Audit #15: the packaged build is `windows_subsystem = "windows"`, so a
+/// Start-menu launch has no console and anything on stderr goes nowhere —
+/// when `pm serve` could not start (no config yet, loopback bind refused) or
+/// the window could not be built, the app used to vanish without a word.
+/// Every fatal exit of `run()` goes through here: stderr for a terminal
+/// launch via `pm ui`, a system message box for everyone else, then exit 2
+/// (pm's "error" code, which `pm ui` passes through; a panic's 101 was outside
+/// that contract). `pm serve` prints its own error as the first stdout line,
+/// which the "not JSON" error from `spawn_serve` carries verbatim.
+fn fatal(msg: &str) -> ! {
+    eprintln!("pm-ui: {msg}");
+    show_error(&format!("pm-ui 没能启动：{msg}"));
+    std::process::exit(2);
+}
+
+#[cfg(windows)]
+fn show_error(msg: &str) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(hwnd: *mut core::ffi::c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    }
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (text, caption) = (wide(msg), wide("pm-ui"));
+    // SAFETY: both buffers are NUL-terminated UTF-16 that outlive the call;
+    // a null owner window is allowed. 0x10 = MB_OK | MB_ICONERROR.
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x10);
+    }
+}
+
+#[cfg(not(windows))]
+fn show_error(_msg: &str) {}
+
 fn kill_serve(app: &tauri::AppHandle) {
     if let Some(mut c) = app.state::<ServeChild>().0.lock().unwrap().take() {
         let _ = c.kill();
@@ -102,19 +135,13 @@ fn kill_serve(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let (info, child) = match spawn_serve() {
-        Ok(x) => x,
-        Err(e) => {
-            eprintln!("pm-ui: {e}");
-            std::process::exit(2);
-        }
-    };
+    let (info, child) = spawn_serve().unwrap_or_else(|e| fatal(&e));
     tauri::Builder::default()
         .manage(info)
         .manage(ServeChild(Mutex::new(Some(child))))
         .invoke_handler(tauri::generate_handler![api_info])
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
+        .unwrap_or_else(|e| fatal(&format!("窗口建不起来：{e}")))
         .run(|app, event| {
             if let RunEvent::Exit = event {
                 kill_serve(app);
