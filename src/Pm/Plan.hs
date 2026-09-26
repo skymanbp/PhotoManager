@@ -10,6 +10,8 @@ module Pm.Plan
   , newPlanId
   , isValidPlanId
   , validatePlan
+  , tmpDirFor
+  , tmpNameFor
   , planPath
   , savePlan
   , loadPlan
@@ -50,12 +52,14 @@ import Control.Exception (IOException, bracket, try)
 import Control.Monad (filterM, forM, forM_, when)
 import Data.Maybe (fromMaybe)
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
-import System.FilePath (dropExtension, takeDrive, takeExtension, (</>))
+import System.FilePath (dropExtension, takeDrive, takeExtension, takeFileName, (</>))
 import System.IO (hClose)
 import Text.Printf (printf)
 
-import Pm.Config (Config (..), ensurePmSubdir, pmDir, pmSubPlans, readPmState, requirePmTrusted, untrustedMsg)
+import Pm.Config (Config (..), ensurePmSubdir, pmDir, pmSubPlans, pmSubTmp, readPmState, requirePmTrusted, untrustedMsg)
 import Pm.Journal (JEntry (..), readJournal)
+import Pm.Scan (maxPathLen)
+import Pm.Trash (quarTrashRel, trashDir)
 import Pm.Types (showHuman)
 import Pm.Win (NameKind (..), deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary, probeName, resolveUnder, whenPresent)
 import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
@@ -153,9 +157,30 @@ validatePlan p
   | length ixs /= Set.size (Set.fromList ixs) = Left "计划条目序号重复（piIx 不唯一）"
   | (bad : _) <- [piIx it | it <- plItems p, not (opPathsOk (piOp it))] =
       Left ("计划条目 " <> show bad <> " 含非法相对路径（绝对/盘符/':'/'.'/'..'/分隔符开头/.pm 内部）")
+  -- 审计 #45：计划要用到的每条路径（落位目标、Copy 的 tmp、隔离的 trash 目标）同守 scan 的上限——派生路径比源
+  -- 长 30 多个字符，过了 scan 闸的源也会在这里越过 MAX_PATH，执行时才以 Win32 错误逐项失败
+  | (ix, q) : _ <- [(piIx it, q) | it <- plItems p, q <- itemPaths it, length q >= maxPathLen] =
+      Left
+        ( "计划条目 " <> show ix <> " 要用到的路径过长（" <> show (length q) <> " 字符 ≥ " <> show maxPathLen
+            <> "，Windows 路径上限）: " <> q <> " —— 把照片挪到更短的路径下、pm scan 后重新生成计划"
+        )
   | otherwise = Right ()
  where
   ixs = map piIx (plItems p)
+  root = plRootPath p
+  itemPaths it = case piOp it of
+    OpCopy _ dst _ _ _ -> [root </> dst, tmpDirFor root (plId p) </> tmpNameFor (piIx it) dst]
+    OpRename _ new _ -> [root </> new]
+    OpQuarantine victim _ _ -> maybe [] (\rel -> [trashDir root </> rel]) (quarTrashRel (opId (plId p) (piIx it)) victim)
+
+-- 子目录名取自 'Pm.Config' 的单一真源，'requirePmTrusted' 校验的就是这一条。
+tmpDirFor :: FilePath -> Text -> FilePath
+tmpDirFor root pid = pmDir root </> pmSubTmp </> T.unpack pid
+
+-- | tmp 名是**确定性**的（崩溃重跑要能算出同名，doctor 才能把孤儿 tmp 与在途
+-- tmp 分开）——因此可预测，因此写入必须独占创建（'Pm.Win.openFreshBinary'）。
+tmpNameFor :: Int -> FilePath -> FilePath
+tmpNameFor ix dstRel = show ix <> "-" <> takeFileName dstRel
 
 plansDir :: FilePath -> FilePath
 plansDir root = pmDir root </> pmSubPlans

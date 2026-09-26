@@ -116,11 +116,11 @@ caseConfigLockCensus = do
 -- 的已有七处（clean \/ undo \/ supersede-resolve \/ dedupe \/ doctor C5 \/ diff 的备份盘
 -- 更新 \/ 执行期回滚位移）。这里钉住**引用**模块集合（构造与匹配不作词法区分：
 -- 新模块一碰 OpQuarantine 就转红，逼着回答「它是不是新产地」），并要求 I2 行
--- 逐一点名每个产地。
+-- 逐一点名每个产地。Plan.hs（审计 #45）只匹配不构造：'validatePlan' 量隔离的 trash 目标有多长，不是产地。
 caseQuarantineCensus :: IO ()
 caseQuarantineCensus = do
   refs <- refModules "OpQuarantine" ["Op.hs"]
-  refs @?= ["Apply.hs", "Clean.hs", "Cli.hs", "Dedupe.hs", "Diff.hs", "Doctor.hs", "Exec.hs", "ExecTypes.hs", "Undo.hs"]
+  refs @?= ["Apply.hs", "Clean.hs", "Cli.hs", "Dedupe.hs", "Diff.hs", "Doctor.hs", "Exec.hs", "ExecTypes.hs", "Plan.hs", "Undo.hs"]
   design <- readUtf8 ("docs" </> "DESIGN.md")
   let i2 = maybe "" (takeWhile (/= '\n')) (breakOn "| I2 |" design)
   assertBool "DESIGN §2 应有 I2 行" (not (null i2))

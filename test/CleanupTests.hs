@@ -22,7 +22,9 @@ import Pm.Backup (discoverAmongStates, discoverBackupRoot, discoverBackupRoots)
 import Pm.BackupCmd (backupInitPreflight, runBackupRun)
 import Pm.Cli (GoOpts (..), bindExecRootWith, healLines, parseWorkers, parseYmd)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), repairDegraded, repairRow, runDoctor)
-import Pm.Exec (Checkpoint (..))
+import Pm.Exec (Checkpoint (..), defaultExecEnv, execPlan)
+import Pm.Plan (validatePlan)
+import Pm.Scan (maxPathLen)
 import Pm.Commands (InitOpts (..), ScanCmd (..), TrashCmd (..), runInit, runScanCmd, runTrash)
 import Pm.Hash (sha256File)
 import Pm.Op (Op (..))
@@ -54,6 +56,7 @@ cleanupTests =
     , testCase "#30 隔离预写了 manifest 却没落地（崩在移动前）：pm trash list 标「不在 trash」，不再说「已移出」；victim 仍在原位" caseTrashListNeverLanded
     , testCase "#35 在途 Copy 的 dst 后来被另一份计划正当落成新内容：doctor 报 C5-SUPERSEDED Info（不再是 C5 Bad、exit 0），--repair 不给那份文件出隔离计划" caseC5Superseded
     , testCase "#40 pm undo 一次隔离（从 trash 改名回原位）后索引补回那条——此前文件回到库里、索引静静地少它一条" caseUndoQuarantineReindexed
+    , testCase "#45 计划校验对派生路径同守长路径上限：隔离的 trash 目标 / Copy 的 tmp 名越过上限 → validatePlan 与 execPlan 整份拒绝、victim 不动（此前执行时才以 Win32 错误逐项失败）" casePlanDerivedPathLength
     , testCase "#26 备份发现按四态读：登记路径上 root-id.json 损坏 / 读不出 → 点名那块盘（不再说「未挂载，插上盘」）；pm apply 的 UUID 绑定同样点名；路径不在照旧「未挂载」" caseBackupMarkerBroken
     ]
 
@@ -337,3 +340,23 @@ caseUndoQuarantineReindexed = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   _ <- execNow cfg up
   readFile (root </> v) >>= (@?= "BACK")
   entryOf >>= (@?= Just (sha, 4))
+
+-- | #45：scan 的长路径闸（≥ maxPathLen 字符）只看源路径；隔离的 trash 目标（+34 字符）与 Copy 的 tmp 名更长，
+-- 过了闸的源执行时才以 Win32 错误逐项失败（「rename 失败（Win32 错误码 …，183=目标已存在）」）。
+casePlanDerivedPathLength :: Assertion
+casePlanDerivedPathLength = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  let root = dir </> "root"
+      room = maxPathLen - length (root </> "相册") - 1 - 5 -- 源路径离上限还差 5 个字符
+      victim = "相册" </> (replicate (room - 4) 'v' <> ".jpg")
+      dst = "相册" </> (replicate (room - 4) 'd' <> ".jpg")
+      tooLong what = either (\m -> assertBool m ("路径过长" `isInfixOf` m)) (const (assertFailure (what <> " 应以「路径过长」拒绝")))
+  createDirectoryIfMissing True (root </> "相册")
+  assertBool "夹具：源路径本身过得了 scan 的闸" (length (root </> victim) < maxPathLen && length (root </> dst) < maxPathLen)
+  writeF (root </> victim) "V"
+  sha <- sha256File (root </> victim)
+  pq <- mkPlanIO root [OpQuarantine victim sha "t"]
+  tooLong "隔离（trash 目标）" (validatePlan pq)
+  execPlan defaultExecEnv pq >>= tooLong "execPlan"
+  readFile (root </> victim) >>= (@?= "V")
+  opC <- mkCopyOp (dir </> "s.jpg") "S" dst
+  mkPlanIO root [opC] >>= tooLong "Copy（tmp 名）" . validatePlan

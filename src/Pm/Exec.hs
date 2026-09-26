@@ -45,7 +45,7 @@ import System.Directory
   )
 -- isRelative 不再引入：P3b-8 六轮复审——execItem 的路径自查改用 Pm.Op.opPathsOk
 -- （isRelative 对 "\\evil"/"c:evil" 都答 True，而 </> 对二者是整体替换）。
-import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.FilePath (takeDirectory, (</>))
 import System.IO.Error (isDoesNotExistError)
 
 import Pm.Config (pmDir, pmSubTmp, readRootInfo, requirePmTrusted)
@@ -62,15 +62,6 @@ import Pm.Types
 -- resolveUnder（基准自身也可能被劫持），pathAtOrUnder 负责 .pm 语义排除。
 import Pm.Win (deleteBoundAt, moveBoundNoReplace, normPath, pathAtOrUnder, resolveUnder)
 
-
--- 子目录名取自 'Pm.Config' 的单一真源，'requirePmTrusted' 校验的就是这一条。
-tmpDirFor :: FilePath -> Text -> FilePath
-tmpDirFor root pid = pmDir root </> pmSubTmp </> T.unpack pid
-
--- | tmp 名是**确定性**的（崩溃重跑要能算出同名，doctor 才能把孤儿 tmp 与在途
--- tmp 分开）——因此可预测，因此写入必须独占创建（'Pm.Win.openFreshBinary'）。
-tmpNameFor :: Int -> FilePath -> FilePath
-tmpNameFor ix dstRel = show ix <> "-" <> takeFileName dstRel
 
 -- | Execute a plan's pending items under the root's exclusive lock.
 -- Left = lock busy \/ root 身份不符. A checkpoint exception (test crash)

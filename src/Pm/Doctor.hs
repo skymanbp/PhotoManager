@@ -33,7 +33,7 @@ import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
 import Pm.Derived (DerivedState (..), derivedRefs, scanDerived)
 import Pm.DoctorProbe
 import Pm.Finding
-import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
+import Pm.Exec (dirFingerprint)
 import Pm.Hash (sha256File)
 import Pm.Import (foldPath)
 import Pm.Journal

@@ -219,7 +219,9 @@ Haskell 侧无图像解码依赖。
 > file-io/os-string——评审 conf-12 已核实 Windows 上 FilePath API 同走 WCHAR、
 > 正确性等价（file-io 增益主要是长路径），且 temporary/tasty-golden/warp 等
 > 测试与服务生态均为 FilePath。长路径由「完整路径 ≥240 字符即计划期报错」
-> 预检兜底（§14）。resolver = **lts-24.46**（本地 global project 同款，
+> 预检兜底（§14）：scan 挡源路径，`validatePlan` 对计划要用到的每条路径（落位目标、
+> Copy 的 tmp 名、隔离的 trash 目标——派生路径比源长 30 多个字符）同守这条上限，
+> 超了整份计划拒绝、一个字节不动（审计 #45；此前执行时才以 Win32 错误 206 逐项失败）。resolver = **lts-24.46**（本地 global project 同款，
 > GHC 9.10.3 即由它安装）。
 
 ---
@@ -615,7 +617,7 @@ REVIEW-LOG 第 28 轮。
 | **Windows 输出编码（ACP=936）**：GHC 默认 CP936，emoji/勾号直接崩进程、重定向输出 GBK 字节（本机已实测复现） | main 首行 `hSetEncoding stdout/stderr utf8`；`--json` 走 ByteString 直写绕开编码器与 CRLF；console 场景 `SetConsoleOutputCP(65001)`；§13 编码回归测试（**尚未实现**，见 §13） |
 | `directory` rename/copy 的替换语义（静默覆盖） | Exec 禁用清单 + 一律 `Pm.Win.moveBoundNoReplace`（句柄形态 no-replace，§6.1/§6.2）；P1 测试覆盖目标已存在分支 |
 | 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C4（C3 行写明 doctor 不归属的边界）+ doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`）；会反复瞬断的盘由 `Pm.Removable` 内建等盘续跑（1.1.2；§6.4 末段，2026-09-02 实录：当日掉线 11 次、527 组更新落位并核过）+ `scripts/verify_backup_dst.py` 写后全文重读 |
-| 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤）；CJK 路径入 golden |
+| 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤；源路径在 scan、派生路径在 `validatePlan`，审计 #45）；CJK 路径入 golden |
 | 库 / 整理源在 OneDrive 按需下载、Dedup、WOF 压缩卷上（这些对象也带 reparse 属性） | 「是不是链接」一律按 reparse tag 的 name-surrogate 位判——遍历、目录指纹、隔离区枚举、sort 源根说明（审计 #8；写路径 P3b-12 起已如此）：云占位 / Dedup / WOF 照常枚举，junction / symlink / 挂载点照旧不跟随。内容不在本机的文件（OFFLINE / RECALL_ON_OPEN / RECALL_ON_DATA_ACCESS）stat 照常核对、已索引没改过的照常复用；要读内容时（scan 的 hash、sort 的源清单）不读、单列「云端未下载」，旧条目按「查不出」保留（用户裁定「不读，单列出来」） |
 | 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode（main 起手按进程设，审计 #7）+ 只探 REMOVABLE/FIXED（§9） |
 | exFAT 备份盘（无元数据日志、rename 原子性弱） | 矩阵不依赖原子性；FS 类型/粒度入 root-id.json；mtime 只做同 root 缓存键（§3） |
