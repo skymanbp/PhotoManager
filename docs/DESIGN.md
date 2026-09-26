@@ -154,6 +154,7 @@ src/Pm/Cli.hs               -- 计划执行公共路径：root-UUID 绑定、组
 src/Pm/Commands.hs          -- 各命令编排（P2.1 拆分；serve/GUI 复用同一路径）
 src/Pm/Apply.hs             -- undo/apply/resolve 命令族 + pickRoot（三十四轮从 Commands 拆出，经其再导出）
 src/Pm/Config.hs            -- TOML 配置（roots、别名、后缀表、portfolio photos.json 路径）
+src/Pm/ConfigTypes.hs       -- 配置记录本身：字段、TOML 解码/渲染、路径须绝对（2026-09-25 从 Config 字节级拆出，Config 再导出；750 行预算）
 src/Pm/Catalog.hs           -- snapshot + 内存索引
 src/Pm/Journal.hs           -- NDJSON append + 持久化屏障 + replay + 对账
 src/Pm/Scan.hs              -- 增量扫描（stat 比对 → 变更集 → 并行 hash，worker 数来自 config.toml）
