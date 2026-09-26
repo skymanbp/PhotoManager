@@ -96,7 +96,7 @@
     "suggested_fix": "Replace the boolean probe with a three-state one that only reports gone on a definite not-found. For example, use `Pm.Win.probeName src` and count only `NameMissing` as gone (`NamePlain`/`NameSurrogate`/`ProbeUnknown` → not gone). Alternatively, `try (getSymbolicLinkMetadata src)` with `Left e | isDoesNotExistError e` → gone, any other Left → not gone. Keep the volume check (`doesDirectoryExist (takeDrive src)`) as is: its swallowing errs toward vol=False, which is already conservative.",
     "fix_risk": "probeName uses lstat semantics and does not follow links. A dangling symlink/junction at the source would read as present (not gone), so the draft stays listed as 未执行, which is the conservative direction. probeName may also map path-not-found (ERROR_PATH_NOT_FOUND, 3) differently from file-not-found (2): if it classes 3 as ProbeUnknown, drafts whose whole card folder was wiped (DCIM/100MSDCF removed) would stop being judged stale, regressing the 1.1.3 behaviour and caseStale's 全缺 segment. Check the error-code mapping (Win.hs:187-196) and rerun PlanExecTests caseStale."
    },
-   "fixed_by": "6da5614"
+   "fixed_by": "3e45602"
   },
   {
    "id": 65,
@@ -113,7 +113,8 @@
     "corrected_summary": "The CLI date reader for `pm sort --from/--to` (app/Main.hs:335, `maybeReader (readMaybe :: String -> Maybe Day)`) accepts a year of any width. A hand-typed `26-09-01`, in the YY-MM form the project's event names use, is read as 0026-09-01 instead of being rejected with an error that points at YYYY-MM-DD. With both bounds short, every photo falls out of range and the user sees '该区间内没有可定时的照片' with the whole card listed as out of range. With one bound short, the range is silently widened and the copy plan picks up unrelated earlier photos. It is copy-only and confirmation-gated, so no data is lost; the survey's printed commands and the GUI both use full 4-digit years and are not affected.",
     "suggested_fix": "Make dayReader strict. Parse with `parseTimeM False defaultTimeLocale \"%Y-%m-%d\"` and also require the input to match `\\d{4}-\\d{2}-\\d{2}` (length 10, digits at the expected positions). parseTimeM's %Y alone still accepts other year widths. Return a readerError that names the YYYY-MM-DD format. Optionally, reject from > to in the CmdSort dispatch with exit 2.",
     "fix_risk": "Minimal. The change only narrows accepted CLI input. Survey output and the documented examples already use 10-character YYYY-MM-DD, so copy-paste keeps working. Anyone who relied on typing years outside 4 digits (none are meaningful here) would now get an argument error. The GUI/serve path is untouched."
-   }
+   },
+   "fixed_by": "7270fc3"
   },
   {
    "id": 66,
@@ -130,7 +131,8 @@
     "corrected_summary": "loadConfigState (src/Pm/Config.hs:169-171) passes the result of decodeUtf8' straight to toml-reader's TOML.decode. That parser rejects a leading U+FEFF at 1:1. A hand-edited config.toml saved with a UTF-8 BOM (PowerShell 5.1 Set-Content/Out-File -Encoding UTF8, Notepad 'UTF-8 with BOM') therefore becomes CfgUnreadable. Every withCfg command, including serve/ui and `pm config set`, then prints a raw parser error that names neither the file nor the BOM, and exits 2. The only in-tool recovery, `pm init --force`, rebuilds the config and loses the backup registration, publish paths and push targets. The failure is fail-closed with no data loss, so this is a diagnostic/usability defect of the same class as #41, at a separate site.",
     "suggested_fix": "In loadConfigState, after decodeUtf8' succeeds, drop one leading BOM before parsing: `Right txt0 -> let txt = fromMaybe txt0 (T.stripPrefix \"\\xFEFF\" txt0) in case TOML.decode txt of ...`. Optionally prefix the TOML error message with the config file path. Add a test that writes BS.pack [0xEF,0xBB,0xBF] <> a rendered config to a PM_CONFIG path and asserts loadConfig returns Right. writeConfig keeps writing BOM-less UTF-8, so the render/parse round trip is unchanged.",
     "fix_risk": "Minimal. Only a single leading U+FEFF is removed, and U+FEFF at position 0 is never valid TOML, so no file that currently parses changes meaning. writeConfig then rewrites the file without the BOM on the next config txn, which is harmless. No other reader of config.toml exists besides loadConfigState."
-   }
+   },
+   "fixed_by": "55b7493"
   },
   {
    "id": 67,
@@ -147,7 +149,8 @@
     "corrected_summary": "DESIGN I3b/§6.6 says lastVerified is written to the catalog on every hash and that `pm status` reports the age of the oldest unverified bytes. But `pm doctor --deep`, the documented only full-library re-verification, re-hashes every entry (Doctor.hs:647-675) and never persists lastVerified. Scan also keeps the old lastVerified for unchanged files, which it reuses by stat. So '最久未验证字节 N 天前' in `pm status` and the GUI (`oldestVerifiedDays`) is really the age since each unchanged file was first hashed. It keeps growing even right after a clean `--deep` run, and the user cannot tell recently verified media from media that was never re-read.",
     "suggested_fix": "Either (a) DOC ONLY: reword DESIGN.md:95/:436 (and the :285 mock) so the status line measures the time since the file was last hashed at scan or write time, and say that `--deep` does not refresh it. Or (b) CODE: in runDoctor', only on the locked writable path and only when doDeep, collect the entries whose re-hash matched enSha. For each, check that the pre- and post-hash stat still equal the entry's (size, mtimeNs), and set enLastVerified to the time taken before the hash started. Then save the catalog once, under the existing root lock, after the DEEP-DONE tally. Skip the write on the lock-less read-only fallback and when the catalog came from a fallback generation (CatLoaded with warnings).",
     "fix_risk": "Option (b) makes doctor a catalog writer for the first time. Each --deep run then rotates a snapshot generation, which can push an older good generation out of the three-generation ring. It must hold the root lock so it cannot race a concurrent scan's save, and it must not run on the no-lock read-only path. A stamp taken after the hash, or taken on an entry whose stat changed, would widen the statHitStable racy window and let Scan reuse a stale sha; hence the pre-hash timestamp and the stat equality check. Changing lastVerified also shifts the histogram that scripts/verify_backup_entries.py --verified-on selects on, as used in REVIEW-LOG.md:597 to find entries hashed only at write time. Option (a) carries no code risk."
-   }
+   },
+   "fixed_by": "9f07447"
   },
   {
    "id": 68,
@@ -164,7 +167,8 @@
     "corrected_summary": "renderStatus converts the stored UTC scan, backup and vault timestamps to local time using the offset in force now (getCurrentTimeZone), not the offset in force at each timestamp. Any stamp recorded on the other side of a DST transition therefore displays one hour off, and can fall on the wrong calendar date near midnight. The GUI shows the correct historical local time, so the two disagree.",
     "suggested_fix": "Convert each timestamp with its own zone: e.g. `local t = (\\z -> utcToLocalTime z t) <$> getTimeZone t` and use it for isScannedAt, bmAt and vmAt, or use `utcToLocalZonedTime` and format with \"%F %R\".",
     "fix_risk": "Minimal. It only changes the displayed stamp strings. getTimeZone takes an IO action per timestamp (three calls). Nothing parses these strings, although a test that pins the exact stamp output would need updating."
-   }
+   },
+   "fixed_by": "fc8ad39"
   },
   {
    "id": 69,
@@ -181,7 +185,8 @@
     "corrected_summary": "pm status prints the list of unarchived staging events with Haskell `show` on [String], which renders every non-ASCII character as a numeric escape. A CJK event folder such as 26-08-杭州 appears as \"26-08-\\26477\\24030\", so the user cannot recognise or copy it. The GUI/JSON path shows the real name. VaultHold.validateKeyed (VaultHold.hs:100) has the same `show` pattern in an error message.",
     "suggested_fix": "Render the names without Show escaping, e.g. `intercalate \", \" stagingEvents` (or keep list brackets with manual quoting: `\"[\" <> intercalate \", \" (map (\\e -> \"\\\"\" <> e <> \"\\\"\") stagingEvents) <> \"]\"`). Apply the same change at VaultHold.hs:100: `\"「\" <> b <> \"」\"` in place of `show b`.",
     "fix_risk": "Minimal. The output format changes slightly if the brackets are dropped; README.md:326 shows the list-literal form and would need updating to match. Any test or script that parses this line would be affected, but none was found by grep (the GUI uses JSON)."
-   }
+   },
+   "fixed_by": "fc75ed3"
   },
   {
    "id": 70,
@@ -198,7 +203,8 @@
     "corrected_summary": "setupConsole (Win.hs:95-105) sets stdout and stderr to UTF-8 but calls SetConsoleOutputCP(65001) only when stdout is a console. When stdout is redirected (`pm scan > scan.log`, `pm backup > log`) and stderr is still the CP-936 console, the UTF-8 bytes of Scan's progress lines (Scan.hs:321-323, 378) and of the top-level `pm: <exception>` line (Cli.hs:85) are decoded as GBK and show up garbled. This is cosmetic only: redirected output and exit codes are unaffected.",
     "suggested_fix": "In setupConsole, compute `tty <- (||) <$> hIsTerminalDevice stdout <*> hIsTerminalDevice stderr` (either handle is a console) before calling setConsoleOutputCP 65001, keeping the existing IOException catch.",
     "fix_risk": "Minimal. It also switches the console CP when only stderr is a console, which is the intended display fix. As today, pm does not restore the previous CP on exit, so a CP change now also happens in the stdout-redirected case, which can affect later legacy programs in the same cmd window. That behaviour already exists in the plain interactive case."
-   }
+   },
+   "fixed_by": "e06d47b"
   },
   {
    "id": 71,
@@ -216,7 +222,7 @@
     "suggested_fix": "In noteStatuses, split the `Right Nothing` case on configuration. When `cfgPhotosJson cfg == Nothing`, return `NoteStatus \"unknown\" (Just c) Nothing (Just \"未配置 photos.json：无法核对引用，按未知处理（fail-closed）→ pm config set --photos-json …\")`, and keep `pending` for the configured-but-absent-file case. Leave photosJsonRef unchanged, because push's RENAME check relies on it. Add a VaultNoteTests case with cfgPhotosJson = Nothing that expects status unknown and runVaultNotes exit 1. Reword ConfigEdit.hs:233 and the Main.hs/GUI help, which currently say photos.json only affects RENAME, and mention 未配置 in the §21.2 `unknown` definition.",
     "fix_risk": "Users who never configure photos-json will get exit 1 from `pm vault notes` and attention counts in GUI/API for every in-vault note. Any script or GUI badge that treats exit 1 or attention>0 as a problem will now show one until the key is set. The existing VaultNoteTests assertion at :118 is unaffected because photos-json is configured there. No write paths change."
    },
-   "fixed_by": "f0138ec"
+   "fixed_by": "4872c1d"
   },
   {
    "id": 72,
@@ -233,7 +239,8 @@
     "corrected_summary": "The 'Build from source' steps in README.md:439 and README.zh.md:329 copy pm.exe into gui/src-tauri/binaries/ without creating that directory first. The directory is gitignored (.gitignore:21) and has no tracked files, so a fresh clone does not have it and the `cp` fails with 'No such file or directory'. The CI chain, which the README says is the same, runs `mkdir -p gui/src-tauri/binaries` first (build.yml:94).",
     "suggested_fix": "Add `mkdir -p gui/src-tauri/binaries` before the `cp` line in README.md (around line 439) and in README.zh.md (around line 329), matching build.yml:94.",
     "fix_risk": "Negligible: it is a documentation-only change, and `mkdir -p` does nothing if the directory already exists. Any documentation-drift sentinel tests that pin README text may need their expected snippets updated."
-   }
+   },
+   "fixed_by": "836608b"
   },
   {
    "id": 73,
@@ -250,7 +257,8 @@
     "corrected_summary": "Any command-line usage error (missing required option, unknown or extra positional, missing subcommand, unreadable value) exits 1, the default infoFailureCode of optparse-applicative, because parserInfo sets no failureCode and exitBoundary (#61) only wraps `run cmd`, after parsing. DESIGN §5.1 and README reserve 1 for 'differences / plan pending' and 2 for errors, so a scripted caller cannot tell an invocation that did nothing from a saved plan that is waiting.",
     "suggested_fix": "In app/Main.hs parserInfo, add `<> failureCode 2` to the InfoMod: `(fullDesc <> header \"…\" <> failureCode 2)`. Optionally add a sentence to DESIGN §5.1 saying that a command-line usage error = 2.",
     "fix_risk": "Minimal. `--help` and `--version` go through helper/infoOption, which exit with ExitSuccess and are unaffected. Any external script or test that expects exit 1 from a bad invocation would change. grep of test/ and scripts/ should check for assertions on a parse-failure code (the #13 DocDrift test checks doc text only)."
-   }
+   },
+   "fixed_by": "3cfa752"
   },
   {
    "id": 74,
@@ -267,7 +275,8 @@
     "corrected_summary": "`pm init --help` says --workers defaults to the number of physical cores ('默认=物理核数'). The default actually comes from GHC.Conc.getNumProcessors in runScanCmd (src/Pm/Commands.hs:250-251), which counts logical processors: 16 on this 8-core / 16-thread machine. The documented default is wrong by 2x on SMT CPUs.",
     "suggested_fix": "Change the help text at app/Main.hs:274 to '（默认=逻辑处理器数）' or '默认=CPU 线程数'. Optionally use the same wording on the other surfaces (Main.hs:245, ConfigEdit.hs:243, gui/ui/index.html:174) so they all name the same unit.",
     "fix_risk": "None functionally. If a DocDrift test pins the help string it would need updating (grep test/ for '物理核数')."
-   }
+   },
+   "fixed_by": "7270fc3"
   },
   {
    "id": 75,
@@ -284,7 +293,8 @@
     "corrected_summary": "The DESIGN §5 `pm init` row does not match the code. init is flag-driven and non-interactive (--main is required). It creates only the main root's .pm/root-id.json: the vault identity comes on the first `pm vault push` and the backup identity from `pm backup init`. On an uncovered .gitignore it refuses with an I11 message telling the user to fix the file; pm never edits .gitignore.",
     "suggested_fix": "Rewrite DESIGN.md:241 as follows: `pm init --main PATH [--vault PATH] [--photos-json PATH] [--workers N] [--force]` writes the config and creates the main root's `.pm/root-id.json` (with FS probe). The vault identity is created on the first `pm vault push` and the backup identity by `pm backup init`. If the root is in a git worktree whose .gitignore does not cover `.pm/`, init refuses per I11 and the user fixes .gitignore first.",
     "fix_risk": "Doc-only. Check DocDriftTests for pinned table text, and keep DESIGN.md:103 (I11 row) consistent."
-   }
+   },
+   "fixed_by": "ae52690"
   },
   {
    "id": 76,
@@ -301,7 +311,8 @@
     "corrected_summary": "DESIGN §5 lists `pm scan [root]`, but scanP accepts no positional argument (only --workers/--quiet) and runScanCmd always scans cfgMainPath. `pm scan <path>` fails with an optparse \"Invalid argument\" error, exit 1. The `pm init` half of this item duplicates index 1.",
     "suggested_fix": "Change DESIGN.md:242 `pm scan [root]` to `pm scan [--workers N] [--quiet]`, state that it indexes the main root only, and note that the backup root is (re)indexed by `pm backup`.",
     "fix_risk": "Doc-only. DocDriftTests may cross-check the command table against the parser, so rerun that group."
-   }
+   },
+   "fixed_by": "ae52690"
   },
   {
    "id": 77,
@@ -318,7 +329,8 @@
     "corrected_summary": "pm status (and GET /api/status, which shares its source) computes and renders no naming/version problem count and no `→ pm names` hint. The verification row also has no `→ pm doctor` next-step command, although DESIGN §5 and the §5.1 mock promise both.",
     "suggested_fix": "The minimal change is to fix the doc: drop \"命名/版本问题计数\" from DESIGN.md:243, remove the `命名 … → pm names` mock line, and make the 验证 row match the real output (DESIGN.md:284-285). Actually implementing the row would mean running the Names classifier over the catalog in statusReport, which is a feature, not a fix.",
     "fix_risk": "The doc fix is low risk; check DocDriftTests for pinned mock text. Implementing the row would change the StatusReport JSON consumed by the GUI and sync_photos-compatible `--json`, and could alter status exit codes."
-   }
+   },
+   "fixed_by": "41d957d"
   },
   {
    "id": 78,
@@ -335,7 +347,8 @@
     "corrected_summary": "docs/DESIGN.md:622 (§14 threat-model row for local processes hitting `pm serve`) still says `--writable` opens nine plan-generating write endpoints and lists only those nine. That row was written at P8-D and never updated when 1.1.0 raised the count to twelve. It omits POST /api/album/ignore (writes .pm/album-ignore.json), POST /api/plan/delete and POST /api/plans/prune (delete files under .pm/plans), which are the only writable-level endpoints that delete anything. It contradicts DESIGN-GUI §11, DESIGN-COMMANDS:584, README/README.zh and the `--writable` help, which all say twelve. This is doc drift only; code behaviour is correct.",
     "suggested_fix": "In docs/DESIGN.md:622 change 九个生成计划类写端点 to 十二个写端点 and add the three missing entries to the list: 忽略/取消候选（写主库 `.pm/album-ignore.json`）and 删除/清理计划文件（只删 `.pm/plans`，journal 不动）. Keep the 照片零改动 clause. Optionally reword 生成计划类, since delete and prune do not generate plans.",
     "fix_risk": "None for code. This is a doc-only edit. Any doc-drift test or sentinel that greps DESIGN.md for the endpoint count should be checked, though none was found for this row."
-   }
+   },
+   "fixed_by": "c3ae0e7"
   },
   {
    "id": 79,
@@ -352,7 +365,8 @@
     "corrected_summary": "The per-segment command printed by `pm sort` survey (Sort.hs:459-463) wraps absSrc in double quotes as-is. makeAbsolute keeps a trailing separator (probe: \"E:\\\\\" and \"E:\" both give \"E:\\\\\", and \"E:/DCIM/\" gives \"E:\\\\DCIM\\\\\"). So for a card root or any source typed with a trailing slash, the line reads `pm sort \"E:\\\" ...` and the closing quote is escaped. From cmd.exe, GHC's getArgs gets one argument, `E:\" --place X --from ... --to ...` (confirmed with a compiled probe), and pm exits 2 with 源目录不存在. In Git Bash the quote never closes. The photo-place skill copies this template verbatim, so the command users are told to paste does not work.",
     "suggested_fix": "When printing the path inside quotes in printSegment, double a trailing backslash: `quoted p = if hasTrailingPathSeparator p then p <> \"\\\\\" else p`. `\"E:\\\\\"` parses as `E:\\` under both the CommandLineToArgvW rules and bash, and normalise inside makeAbsolute absorbs an extra separator under PowerShell. dropTrailingPathSeparator alone does not help, because filepath keeps the separator on a drive root.",
     "fix_risk": "Very low. It changes only printed text. Any test that asserts the exact survey output for a trailing-separator source would need updating, and the GUI survey (JSON ssSrcAbs) is unaffected."
-   }
+   },
+   "fixed_by": "bad8cdc"
   },
   {
    "id": 80,
@@ -369,7 +383,8 @@
     "corrected_summary": "When the vault path is missing, computeVault (Vault.hs:257) and pickRoot SelVault (Apply.hs:84) tell the user to run `pm init --main <主库> --vault <展示集路径>`. These messages appear only when a config already exists, so init refuses without --force. With --force it rebuilds the config and silently resets [portfolio] photos-json and [main] workers unless they are passed again. The correct advice is `pm config set --vault <目录>`, which Ingest.hs:69 and ConfigEdit.hs:228 already give. The GUI shows the same text through ServeVault's 404 path.",
     "suggested_fix": "Replace the advice in Vault.hs:257 and Apply.hs:84 with `配置无 vault 路径 → pm config set --vault <展示集目录>`, matching Ingest.hs:69 and ConfigEdit.hs:228.",
     "fix_risk": "Minimal. Only the message string changes. A test or GUI string that matches the old text literally would need updating, so grep test/ and gui/ui/ for 'pm init --main <主库> --vault'."
-   }
+   },
+   "fixed_by": "a94b8cd"
   },
   {
    "id": 81,
@@ -387,7 +402,7 @@
     "suggested_fix": "In runClaude, stop using the photo directory as claude's cwd and stop loading project config. Run with cwd = a pm-owned empty directory (e.g. a fresh temp dir), grant read access to the photo folder or library with `--add-dir <dir>`, and add `--setting-sources user --strict-mcp-config` (or `--safe-mode`, which also disables CLAUDE.md, hooks and MCP) to the argv at ServeAi.hs:282. Apply it to both place and classify. Re-run the same zero-cost dead-API-URL probe to confirm that a .claude/settings.json in the --add-dir directory is not loaded, and that Read of images there still produces `permission_denials: []`. Update DESIGN-P8 §22.2, the ServeAi.hs header and index.html:206 to describe the real boundary.",
     "fix_risk": "Moving cwd out of the photo dir could make Read of images need permission, and in -p mode that means a denial and empty answers. This is why --add-dir must be verified with a live Read. `--safe-mode` or `--setting-sources user` also drops any user project config the user deliberately relied on (unlikely here). Tests use test/fixtures/fake-claude.cmd, which ignores argv, so the suite should be unaffected unless a test anchors the exact argv or cwd."
    },
-   "fixed_by": "f11643b"
+   "fixed_by": "0eb0aef"
   },
   {
    "id": 82,
@@ -404,7 +419,8 @@
     "corrected_summary": "pm convert's embedded Pillow script turns non-RGB/L sources (CMYK TIFF/PSD, and LA/PA with a Gray profile) into RGB with Pillow's naive, non-colour-managed convert(). It then embeds the source's ICC profile, captured before the conversion, unchanged. The derived JPEG holds wrong RGB values and is tagged with a CMYK (or GRAY) profile that does not match its RGB data, and pm reports success.",
     "suggested_fix": "In pillowScript, when the source mode is not RGB/L and it has an icc_profile, use PIL.ImageCms.profileToProfile(im, ImageCmsProfile(BytesIO(icc)), ImageCms.createProfile('sRGB'), outputMode='RGB') and embed an sRGB profile, not the source profile. More generally, embed info['icc_profile'] only when the profile's colour space matches the output mode (RGB for RGB, GRAY for L). If ImageCms cannot handle the profile, fail closed with a non-zero exit, or drop the profile and say so, rather than embed a mismatched one. For LA/PA with a Gray profile, composite to L and keep the Gray profile, or drop it.",
     "fix_risk": "Low to moderate. Output pixels change for CMYK/profiled sources, so an existing derived .jpg would not match on --redo, and a new sha means NEEDS-DECISION for already-landed copies. ImageCms needs Pillow's littleCMS build; the standard wheels include it, but a missing ImageCms must be handled explicitly. RGB/L sources are unchanged if the fix is gated on the mode/colour-space mismatch."
-   }
+   },
+   "fixed_by": "eb0733b"
   },
   {
    "id": 83,
@@ -421,7 +437,8 @@
     "corrected_summary": "When a re-scan on the 整理 page fails (non-ok survey or a thrown fetch), sortScan clears the segment cards but leaves lastSurvey, segInputs and the enabled state of #btn-sort-ai from the previous successful scan. The finally in sortAiPlaces also re-enables the button unconditionally. A later click on 「AI 建议地点」 passes every guard, because its generation is captured after the failed scan. It runs a paid claude -p on the previous source, writes into input elements already removed from the DOM, and reports 「AI 建议已到：预填 N 段」 with a cost line while no segments are shown. No plan can be generated from it, so the harm is limited to a wasted call and a misleading banner.",
     "suggested_fix": "In sortScan, right after `const gen = stamp(\"sort\")`, reset the stale survey state: `lastSurvey = null; segInputs.clear(); $(\"#btn-sort-ai\").disabled = true;` (renderSurvey re-enables it on success, subject to aiBusy). In the sortAiPlaces finally, replace `btn.disabled = false` with `btn.disabled = !(lastSurvey && lastSurvey.segments.length)`.",
     "fix_risk": "Low. With lastSurvey = null set at scan start, the in-flight guard `lastSurvey !== survey` still discards late replies, so fix #1 keeps working, and its DocDrift sentinel text in sortAiPlaces and renderSurvey stays unchanged. The one behaviour change is that the AI button stays disabled during a scan and after a failed one, until the next successful scan."
-   }
+   },
+   "fixed_by": "22eefc9"
   },
   {
    "id": 84,
@@ -438,7 +455,8 @@
     "corrected_summary": "`pm init --main \"\"` is accepted. makeAbsolute \"\" returns the process cwd, and that directory passes doesDirectoryExist and initPreflight. pm then writes main.path = <cwd> to config.toml and creates <cwd>\\.pm\\root-id.json (RoleMain), and the success output never shows which path it used. An empty --vault is rejected by contrast, because doesDirectoryExist \"\" is False. No data is lost; the result is a misconfigured main library, and a following `pm scan` indexes the wrong tree.",
     "suggested_fix": "In runInit, reject the input before calling makeAbsolute when `all isSpace (ioMain o)`. Return 2 with a message such as \"--main 为空\". Also print the resolved mainPath in the success line. Apply the same null check to the path argument in backupInitPreflight (BackupCmd.hs:52).",
     "fix_risk": "Minimal. Only the empty or whitespace-only string is refused. `--main .` and relative paths keep working, and no existing test or script should depend on passing \"\"."
-   }
+   },
+   "fixed_by": "7270fc3"
   }
  ],
  "refuted": [
