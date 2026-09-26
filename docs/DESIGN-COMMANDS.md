@@ -448,7 +448,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 494 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 495 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -612,6 +612,6 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 
 | 命令/入口 | 变化 | 出处 |
 |---|---|---|
-| `pm doctor` | 多一类 **I7 行**（`Pm.Doctor.i7Findings`）：按 I7 校验 **相册 ⊆ 成片 ∪ inbox-origin**。已解释两条，都以**内容**为准——① 索引里有同 sha 的成片；② journal 里有一条 Copy 记录，dst 恰是这条相册路径、sha 与盘上现字节相同、src 在**库外**（`pathAtOrUnder` 三态，只有明确的 `Just False` 算库外；`_inbox` 的源后来被移进 `_done` 不影响判定——证据是记录不是源文件）。两条都不成立 → 逐条 **Warn** 列给人（同 Q1：只报告、不处置，I1 不猜来源），退出码随之为 1。收尾一条 Info 汇总「N 张 = 成片副本 x · inbox 来源 y · 未解释 z」。相册层只判照片（`KindPhoto`）；相册层为空的 root（vault root、空库）一行不打（备份盘是主库的镜像，同样按本判据对账它自己那份） | DESIGN §2 I7 |
+| `pm doctor` | 多一类 **I7 行**（`Pm.Doctor.i7Findings`）：按 I7 校验 **相册 ⊆ 成片 ∪ inbox-origin**。已解释两条，都以**内容**为准——① 索引里有同 sha 的成片；② journal 里有一条 Copy 记录，dst 恰是这条相册路径、sha 与盘上现字节相同、src 在**库外**（`pathAtOrUnder` 三态，只有明确的 `Just False` 算库外；`_inbox` 的源后来被移进 `_done` 不影响判定——证据是记录不是源文件）。两条都不成立 → 逐条 **Warn** 列给人（同 Q1：只报告、不处置，I1 不猜来源），退出码随之为 1。收尾一条 Info 汇总「N 张 = 成片副本 x · inbox 来源 y · 未解释 z」。相册层只判照片（`KindPhoto`）；相册层为空的 root（vault root、空库）一行不打（备份盘是主库的镜像，同样按本判据对账它自己那份——但 src 在备份 root 外的 Copy 记录是 `pm backup` 从主库拷来的，汇总里记「主库镜像（来源在主库判定）」而不是 inbox 来源；手拷进去、没有任何记录的仍逐条 Warn，审计 #33） | DESIGN §2 I7 |
 | `pm doctor --repair` | **与 I7 无关**：`applyRepairs` 只认 C2 / R2 / Q-DONE-LOST / C5 四种 fRow 且要求 detail 以 oid 开头，I7 行进不了任何修复推导。相册文件永远由人处置 | — |
 | `pm doctor`（fail-closed） | journal 有告警（撕裂尾 / 中段损坏）或快照是坏代回退时**整条判据不判**，只打一行 Info 说明。判据里有一条否定式（「journal 里没有别的来源记录」），折叠不全时会把正常照片报成违例——核不了 ≠ 已覆盖 | 同 1.1.3 `planStale` 的纪律 |

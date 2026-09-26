@@ -259,11 +259,14 @@ i7Findings root entries cat
   | null album = pure []
   | otherwise = do
       judged <- forM noTwin $ \e -> (,) e <$> fromInbox e
+      -- 审计 #33：备份盘上的相册文件是 pm backup 从主库拷来的（src 都在备份 root 外）——那是主库镜像，
+      -- 不是 inbox 来源；来源成不成立由主库的 I7 行判，这里分开计数（此前全算成 inbox，像是核过了）
+      mirror <- maybe False ((== RoleBackup) . riRole) <$> readRootInfo root
       let unexplained = [e | (e, False) <- judged]
           tally =
             "相册 ⊆ 成片 ∪ inbox-origin: " <> show (length album) <> " 张 = 成片副本 "
               <> show (length album - length noTwin)
-              <> " · inbox 来源 "
+              <> (if mirror then " · 主库镜像（来源在主库判定）" else " · inbox 来源 ")
               <> show (length judged - length unexplained)
               <> " · 未解释 "
               <> show (length unexplained)

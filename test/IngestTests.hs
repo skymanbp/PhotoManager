@@ -57,6 +57,7 @@ ingestTests =
     , testCase "I7 消费侧端到端：ingest 落下的相册照片（成片没有）→ doctor 判「已解释」，源随后被移进 _done 也不改判" caseI7Inbox
     , testCase "I7 消费侧：成片有同 sha 副本 = 已解释；两条都不成立 → I7 Warn 逐条列出、exit 1，--repair 不碰它" caseI7Twin
     , testCase "I7 判据三处判别：src 在库内 / sha 与盘面不符 → 不算来源；journal 有告警 → 整条不判（fail-closed）" caseI7Discriminate
+    , testCase "#33 备份盘上 src 在库外的拷贝记录是主库镜像：汇总记「主库镜像（来源在主库判定）」、不再算 inbox 来源；手拷进去没有记录的仍 Warn" caseI7BackupMirror
     ]
 
 -- | REVIEW-LOG 曾登记「crossCat 的 ProbeUnknown 分支需 ACL 夹具」——不需要：
@@ -407,3 +408,20 @@ caseIngestMainStopped = withIngestEnv $ \cfg inbox -> do
   assertBool out2 ("主库（相册）那份执行中断" `isInfixOf` out2 && "pm apply " `isInfixOf` out2 && not ("pm resolve" `isInfixOf` out2))
   -- vault 那份不执行（桩只收到主库那一份）
   length <$> gotP >>= (@?= 1)
+
+-- | #33：备份盘上的相册文件都是 pm backup 从主库拷来的，Copy 记录的 src 都在备份 root 外——此前一律算成
+-- 「inbox 来源」，汇总报「inbox 来源 N · 未解释 0」，像是主库的 I7 在备份盘上也核过了。
+caseI7BackupMirror :: IO ()
+caseI7BackupMirror = withSystemTempDirectory "pm-i7" $ \tmp -> do
+  let root = tmp </> "bk"
+  createDirectoryIfMissing True root
+  writeRootInfo root (RootInfo "bk" RoleBackup t0 Nothing)
+  writeF (root </> "相册" </> "m.jpg") "MIRRORED"
+  writeF (root </> "相册" </> "hand.jpg") "HAND-COPIED"
+  sha <- sha256File (root </> "相册" </> "m.jpg")
+  plantCopyIntent root (tmp </> "main" </> "相册" </> "m.jpg") ("相册" </> "m.jpg") sha
+  scanQuiet "bk" root >>= saveCatalog root
+  (fs, _) <- runDoctor root (DoctorOpts False False)
+  let (info, warns) = i7Summary [f | f <- fs, fRow f == "I7"]
+  assertBool info ("主库镜像（来源在主库判定）1" `elemSubstr` info && not ("inbox 来源" `elemSubstr` info) && "未解释 1" `elemSubstr` info)
+  map (takeFileName . last . words) warns @?= ["hand.jpg"]
