@@ -32,7 +32,7 @@ import System.FilePath (joinPath, makeRelative, splitDirectories, (</>))
 
 import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog)
 import Pm.Config (pmDir, pmSubTmp, pmSubTrash, readRootInfo, requireWritable)
-import Pm.Derived (DerivedState (..), scanDerived)
+import Pm.Derived (DerivedState (..), derivedRefs, scanDerived)
 import Pm.Finding
 import Pm.Exec (dirFingerprint, tmpDirFor, tmpNameFor)
 import Pm.Hash (sha256File, sha256Handle)
@@ -209,7 +209,12 @@ runDoctor' dw root opts = do
   -- P8-C2：派生件（.pm/derived，DESIGN-P8 §20.2）对账——已落位 / 源已不在库 /
   -- 半成品是 pm 自建状态，与孤儿 tmp 同一条删除线；派生了还没 apply 的只报 Info。
   -- 枚举失败 → DERIVED-ENUM Bad（不在任何修复推导里），删除清单按空处理。
-  ederived <- scanDerived root (fst (catalogMaybe lc))
+  -- 审计 #31：还没做完的计划项仍引用的派生件不删（'derivedRefs'）；有计划读不出 = 核不了 → 本轮不删
+  (plansNow, planErrs) <- listPlans root
+  let refs = case planErrs of
+        [] -> Right (derivedRefs plansNow (planExecs entries))
+        (n, e) : more -> Left (n <> ": " <> e <> if null more then "" else " 等 " <> show (1 + length more) <> " 份")
+  ederived <- scanDerived root (fst (catalogMaybe lc)) refs
   let (derivedDel, derivedFindings) = case ederived of
         Left e -> ([], [Finding "DERIVED-ENUM" Bad ("派生目录枚举失败——本轮核不了: " <> e) "解除占用后重跑 pm doctor"])
         Right xs -> ([f | (f, s) <- xs, s `elem` [DerivedStale, DerivedOrphan, DerivedTmp]], map derivedFinding xs)
@@ -296,6 +301,7 @@ derivedFinding (f, s) = case s of
   DerivedTmp -> Finding "DERIVED-TMP" Warn ("派生半成品（转换中断）: " <> f) repairNote
   DerivedPending -> Finding "DERIVED-PENDING" Info ("已派生、尚未 apply 落位: " <> f) ""
   DerivedUnjudged -> Finding "DERIVED-PENDING" Info ("派生件状态未判（无索引）: " <> f) "pm scan 后重跑"
+  DerivedKept why -> Finding "DERIVED-PENDING" Info (why <> ": " <> f) ""
  where
   repairNote = "--repair 将删除（pm 自建派生件，原 tif/png 原地不动）"
 

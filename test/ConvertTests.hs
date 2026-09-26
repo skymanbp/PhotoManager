@@ -23,11 +23,11 @@ import Pm.Catalog (saveCatalog)
 import Pm.Cli (GoOpts (..))
 import Pm.Config (Config (..))
 import Pm.Convert
-import Pm.Doctor (DoctorOpts (..), Severity (..), runDoctor)
+import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), runDoctor)
 import Pm.Hash (sha256File)
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, savePlan)
 import Pm.Op (Op (..))
-import TestUtil (doctorRows, mkMain, scanQuiet, withEnv, writeF)
+import TestUtil (doctorRows, execOk, mkCopyOp, mkMain, mkPlanIO, scanQuiet, withEnv, writeF)
 
 convertTests :: TestTree
 convertTests =
@@ -37,6 +37,7 @@ convertTests =
     , testCase "端到端：16 位 tif→L≈117、RGBA→白底、RGB 原样；--also-album 同组（成片项组头）；复用派生件 / --redo 重派生；I7 成片待裁决 → 相册项不执行；坏源不出计划；源字节不动" caseE2E
     , testCase "#82 色彩配置：非 RGB/L 源带 ICC → 按色彩管理转 sRGB、嵌 sRGB（此前原样嵌源配置）；配置与数据对不上 → 转换失败；灰度 + alpha → L" caseIccProfiles
     , testCase "doctor：DERIVED-STALE/ORPHAN/TMP Warn、PENDING Info；--repair 只删前三种、留 pending" caseDoctorDerived
+    , testCase "#31 --repair 不删还有没做完的计划项引用的派生件（成片项已落位、相册项待裁决）；只剩已完成的项引用 → 照常删；计划读不出 → 本轮不删" caseDerivedStillReferenced
     , testCase "派生件写纪律：tmp 名被库外 hardlink 占住 → 清掉重建、库外字节不动；终名是 symlink / 库外 hardlink → 拒绝不复用；同 sha 同名两源 → 先拒；派生调用 PM_CONVERT_TIMEOUT 到点 → 终止、点名变量、pm 自建的 .tmp 已清" caseDerivedGuards
     ]
 
@@ -345,3 +346,38 @@ caseDoctorDerived = withLib $ \root _ -> do
   kept @?= [shaX </> "x.jpg"]
   rows' <- doctorRows root
   [r | r@(n, _) <- rows', "DERIVED" `isInfixOf` n] @?= [("DERIVED-PENDING", Info)]
+
+-- | #31：--also-album 的成片 / 相册两项共用一份派生件；成片那份落位、索引记下它的 sha 后，doctor 按 sha 判
+-- DERIVED-STALE，--repair（手动，或瞬断续跑前的自愈）把它删掉——相册项还待裁决，之后 apply 它「源 stat 失败」。
+caseDerivedStillReferenced :: IO ()
+caseDerivedStillReferenced = withLib $ \root _ -> do
+  writeF (root </> "成片" </> "E3" </> "y.png") "SRC"
+  shaSrc <- T.unpack <$> sha256File (root </> "成片" </> "E3" </> "y.png")
+  let der = root </> ".pm" </> "derived" </> shaSrc </> "y.jpg"
+      repair = () <$ runDoctor root (DoctorOpts False True)
+      derivedRow = do
+        (fs, _) <- runDoctor root (DoctorOpts False False)
+        pure [(fRow f, fDetail f) | f <- fs, "DERIVED" `isInfixOf` fRow f]
+  op0 <- mkCopyOp der "DER" ("成片" </> "E3" </> "y.jpg")
+  let toAlbum o = case o of
+        OpCopy s _ sha sz mt -> OpCopy s ("相册" </> "y.jpg") sha sz mt
+        _ -> o
+  plan0 <- mkPlanIO root [op0, toAlbum op0]
+  let plan = plan0 {plItems = [it {piStatus = if piIx it == 1 then StNeedsDecision "相册已有同名但内容不同（I5）" else piStatus it} | it <- plItems plan0]}
+  _ <- savePlan plan
+  _ <- execOk plan -- 只有成片项 PENDING：它落位，相册项不动
+  scanQuiet "main-rid" root >>= saveCatalog root -- 索引记下落位件的 sha → 派生件按 sha 是 STALE
+  repair
+  doesFileExist der >>= (@?= True)
+  rows <- derivedRow
+  assertBool (show rows) (case rows of [("DERIVED-PENDING", d)] -> T.unpack (plId plan) `isInfixOf` d; _ -> False)
+  -- 有计划读不出：核不了谁还引用它 → 本轮不删（这里相册项也已不在，按 sha 本该删）
+  _ <- savePlan plan {plItems = take 1 (plItems plan)}
+  writeF (root </> ".pm" </> "plans" </> "20260101-000000-abcdef.json") "{"
+  repair
+  doesFileExist der >>= (@?= True)
+  derivedRow >>= \rs -> assertBool (show rs) (any (("计划读不全" `isInfixOf`) . snd) rs)
+  -- 计划都读得出、引用它的只剩已完成的成片项 → 照常按 STALE 删
+  removeFile (root </> ".pm" </> "plans" </> "20260101-000000-abcdef.json")
+  repair
+  doesFileExist der >>= (@?= False)

@@ -199,7 +199,11 @@ tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换�
 `DERIVED-STALE`；② `<sha>` 目录名不再是 catalog 里任何条目的 sha（源已不在库里）→
 `DERIVED-ORPHAN`；③ `.tmp` 半成品 → `DERIVED-TMP`（as-built 加的第三种 Warn）；
 ④ 其余 → Info `DERIVED-PENDING`（派生了还没 apply；无索引时同行标「未判」）；枚举
-失败 → `DERIVED-ENUM` Bad，不推导任何删除。`--repair` 只删 ①②③（`deleteBoundAt`，
+失败 → `DERIVED-ENUM` Bad，不推导任何删除。①② 在删之前再核一道**计划引用**（审计 #31）：
+还有没做完的计划项（计划文件里任何状态、journal 里没有它的 Done）以它为源的，改报 Info
+`DERIVED-PENDING`「计划 <id> 还有没做完的项引用它」、不删——`--also-album` 的成片 / 相册两项
+共用一份派生件，成片那份落位后它按 sha 是 ①，相册项还待裁决；有计划读不出 = 核不了，同样
+本轮不删。`--repair` 只删 ①②③（`deleteBoundAt`，
 与「清自建 tmp」同一条删除线，doctor `--repair` 的 help 文本一并改；`caseByteExitCensus`
 的模块集合加 `Convert.hs`——它删的是 `--redo` 的旧派生件与失败半成品）。派生目录是
 pm 自己的状态区，不是照片：这与 I2 的关系登记在 §25。
