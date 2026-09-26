@@ -8,15 +8,19 @@
 -- 文本版）。
 module DocDriftTests (docDriftTests) where
 
+import Control.Monad (forM_)
 import qualified Data.ByteString as BS
-import Data.Char (isAlpha, isDigit, isSpace, toLower)
+import Data.Char (isAlpha, isAsciiLower, isDigit, isSpace, toLower)
 import Data.List (dropWhileEnd, intercalate, isInfixOf, isPrefixOf, isSuffixOf, nub, sort, stripPrefix, tails)
 import Data.Maybe (mapMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text.Encoding.Error as TEE
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
-import System.FilePath (takeFileName, (</>))
+import System.Environment (getExecutablePath)
+import System.Exit (ExitCode (..))
+import System.FilePath (takeDirectory, takeFileName, (</>))
+import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, waitForProcess)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -43,6 +47,7 @@ docDriftTests =
     , testCase "命名同步：DESIGN-COMMANDS 讲的是 freshStagingCatalog（F025 收尾）" caseFreshGateName
     , testCase "41 轮 GO-note #9 运行契约：cwd = 仓库根（本套件按根相对路径读仓库文件）" caseRepoRootCwd
     , testCase "41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托 REVIEW-LOG" caseReadmeSync
+    , testCase "#75 #76 DESIGN §5 命令表 ↔ 真 CLI：写出的 --旗标都真有、位置参数与 CLI 相符（拿同一次构建的 pm.exe 逐段跑 --help）" caseDesignCliTable
     , testCase "0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、每个 exe stanza 显式 other-modules" caseNoPathsModule
     ]
 
@@ -512,3 +517,112 @@ countsBefore suf = go
         let (ds, r) = span isDigit xs
          in if suf `isPrefixOf` r then read ds : go r else go r
     | otherwise = go (drop 1 xs)
+
+-- | 横切审计 #75 #76：DESIGN §5 命令表的签名列是手抄的 CLI 提要，此前没有哨兵——@pm scan [root]@（CLI 不收位置
+-- 参数）、「交互式」的 @pm init@、「启动 serve」的 @pm ui@ 从设计期一直挂到 1.2.0。这里拿与本套件同一次构建的
+-- pm.exe（@build\/pm\/pm.exe@，与 @build\/pm-test\/@ 同级）逐段跑 @--help@ 核：写出来的 --旗标都要真有；写了位置参数
+-- 的，CLI 得收位置参数；CLI 必填的位置参数，表里也得写。描述列的语义机器核不了，只钉这次抓到的几处。
+caseDesignCliTable :: IO ()
+caseDesignCliTable = do
+  design <- readUtf8 ("docs" </> "DESIGN.md")
+  self <- getExecutablePath
+  let pm = takeDirectory (takeDirectory self) </> "pm" </> "pm.exe"
+      sec = takeWhile (not . ("### 5.1" `isPrefixOf`)) (dropWhile (not . ("## 5." `isPrefixOf`)) (lines design))
+      rows = [l | l <- sec, "| `pm " `isPrefixOf` l]
+      segs = [s | r <- rows, s <- ticks (firstCell r), "pm " `isPrefixOf` s]
+  built <- doesFileExist pm
+  assertBool ("找不到与本套件同一次构建的 pm.exe: " <> pm) built
+  assertBool ("§5 命令表应有 20 段以上 `pm …`，实得 " <> show (length segs)) (length segs >= 20)
+  forM_ segs $ \seg -> do
+    let (path, rest) = span (all isAsciiLower) (drop 1 (qwords seg))
+    (code, out) <- helpText pm path
+    assertEqual (seg <> "：pm " <> unwords path <> " --help 应成功") ExitSuccess code
+    let (flags, poss) = cliShape (length path) out
+        required = [m | (m, True) <- poss]
+        placeholders = designPositionals flags rest
+    forM_ (concatMap flagNames rest) $ \f -> assertBool (seg <> "：CLI 没有 " <> f) (f `elem` map fst flags)
+    assertBool (seg <> "：表里写了位置参数 " <> show placeholders <> "，CLI 不收") (null placeholders || not (null poss))
+    assertBool (seg <> "：CLI 必填位置参数 " <> show required <> "，表里没写") (null required || not (null placeholders))
+  let row k = concat [l | l <- rows, ("| `pm " <> k) `isPrefixOf` l]
+  assertBool "pm init 非交互、只建主库标识、不改写 .gitignore" (not (any (`isInfixOf` row "init") ["交互式", "各 root", "先补 `.gitignore`"]))
+  assertBool "pm ui 不启动 serve（GUI 自己起）" (not ("启动 serve 并拉起" `isInfixOf` row "ui") && "**不**启动 serve" `isInfixOf` row "ui")
+
+-- | 跑 @pm <path> --help@：stdout 按 UTF-8 解（测试进程在 GBK locale 下）、去 CR；stderr 直通测试日志（--help 不写它）。
+helpText :: FilePath -> [String] -> IO (ExitCode, String)
+helpText pm path = do
+  (_, mo, _, ph) <- createProcess (proc pm (path <> ["--help"])) {std_out = CreatePipe}
+  out <- maybe (pure BS.empty) BS.hGetContents mo
+  code <- waitForProcess ph
+  pure (code, filter (/= '\r') (T.unpack (TE.decodeUtf8With TEE.lenientDecode out)))
+
+-- | 一条 --help 的形状：旗标（名，带不带值）与位置参数（metavar，必填否）。旗标带不带值以「Available options:」段
+-- 为准（每项只取选项列，两个空格处断开）；没写 help 的旗标 / 位置参数进不了那一段（@pm apply@ 的 PLAN-ID 就是），
+-- 所以 usage 行（去掉「Usage: pm.exe」与命令路径）再走一遍补齐——那里带方括号的可省。子命令占位 COMMAND 不算。
+cliShape :: Int -> String -> ([(String, Bool)], [(String, Bool)])
+cliShape depth out = (optFlags <> [u | u@(f, _) <- uFlags, f `notElem` map fst optFlags], poss)
+ where
+  ls = lines out
+  sect = takeWhile (any (not . isSpace)) (drop 1 (dropWhile (/= "Available options:") ls))
+  cols = [optCol (drop 2 e) | e <- sect, "  " `isPrefixOf` e, not ("   " `isPrefixOf` e)]
+  optCol (' ' : ' ' : _) = ""
+  optCol (c : r) = c : optCol r
+  optCol [] = ""
+  optFlags = [(f, length (words c) > 1) | c <- cols, "-" `isPrefixOf` c, f <- flagNames c]
+  usage = drop (2 + depth) (words (unwords (takeWhile (any (not . isSpace)) (dropWhile (not . ("Usage:" `isPrefixOf`)) ls))))
+  (uFlags, poss) = walk usage
+  walk (t : r)
+    | fs@(_ : _) <- flagNames t =
+        let arg = maybe (not ("]" `isSuffixOf` t) && startsValue r) id (lookup (last fs) optFlags)
+            (more, ps) = walk (if arg then drop 1 r else r)
+         in ([(f, arg) | f <- fs] <> more, ps)
+    | core t `elem` ["", "|", "COMMAND"] = walk r
+    | otherwise = fmap ((core t, not ("[" `isPrefixOf` t)) :) (walk r)
+  walk [] = ([], [])
+  startsValue (v : _) = null (flagNames v)
+  startsValue [] = False
+  core = dropWhileEnd (`elem` "])") . dropWhile (`elem` "[(")
+
+-- | 表格首列：到第一个未转义的 @|@ 为止，@\\|@ 还原成 @|@。
+firstCell :: String -> String
+firstCell = go . drop 1
+ where
+  go ('\\' : '|' : r) = '|' : go r
+  go ('|' : _) = []
+  go (c : r) = c : go r
+  go [] = []
+
+-- | 反引号围起的各段。
+ticks :: String -> [String]
+ticks s = case break (== '`') s of
+  (_, _ : r) | (t, _ : r') <- break (== '`') r -> t : ticks r'
+  _ -> []
+
+-- | 按空白切词，双引号里的空白不切（@--coordinates "lat, lng"@）。
+qwords :: String -> [String]
+qwords s = case dropWhile isSpace s of
+  "" -> []
+  s' -> let (w, r) = word False s' in w : qwords r
+ where
+  word q (c : r)
+    | c == '"' = let (w, r') = word (not q) r in (c : w, r')
+    | isSpace c && not q = ("", c : r)
+    | otherwise = let (w, r') = word q r in (c : w, r')
+  word _ [] = ("", "")
+
+-- | 一个词里出现的 --旗标名（@[--place|--event@ 得两个）。
+flagNames :: String -> [String]
+flagNames ('-' : '-' : r) = let (n, r') = span (\c -> isAsciiLower c || c == '-') r in ("--" <> n) : flagNames r'
+flagNames (_ : r) = flagNames r
+flagNames [] = []
+
+-- | 表里的位置参数占位：既不是旗标、也不是紧跟在带值旗标后的那个值（带不带值以 CLI 的 --help 为准）。
+designPositionals :: [(String, Bool)] -> [String] -> [String]
+designPositionals real = go
+ where
+  go (w : r)
+    | fs@(_ : _) <- flagNames w = go (if lookup (last fs) real == Just True then skipValue r else r)
+    | all (`elem` "/…|") w = go r
+    | otherwise = w : go r
+  go [] = []
+  skipValue (v : r) | null (flagNames v) = r
+  skipValue r = r
