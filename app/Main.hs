@@ -32,7 +32,7 @@ import Pm.Vault (runVaultPush, runVaultStatus)
 import Pm.VaultCmd (NoteArgs (..), runVaultHold, runVaultNote, runVaultNotes)
 import Pm.VaultNote (NoteFields (..))
 import Pm.Versions (runVersions)
-import Pm.Win (setupConsole)
+import Pm.Win (setupConsole, suppressCriticalErrorDialogs)
 
 data Cmd
   = CmdInit InitOpts
@@ -92,6 +92,10 @@ withSel bku vlt act = case rootSel bku vlt of
 main :: IO ()
 main = do
   setupConsole
+  -- 错误模式是进程级的（2026-09-25 审计 #7）：起手设一次 SEM_FAILCRITICALERRORS，读卡器
+  -- 空槽只让探针返回错误码、不弹「请插入磁盘」框——此前只有备份发现懒设，计划页的失效
+  -- 判定（planStale）探计划源所在的卷时会弹框并阻塞。pm ui 拉起的 pm serve 也走这里。
+  suppressCriticalErrorDialogs
   cmd <- execParser parserInfo
   code <- run cmd
   if code == 0 then exitSuccess else exitWith (ExitFailure code)

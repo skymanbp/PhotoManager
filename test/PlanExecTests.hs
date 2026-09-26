@@ -153,7 +153,8 @@ caseStale = withSystemTempDirectory "pm-planstale" $ \tmp -> do
   planStale pDraft (pe [0]) >>= (@?= False)
   -- 仅跳过项：没有待办 → 不失效
   planStale pSkipOnly Nothing >>= (@?= False)
-  -- 源所在的卷不在（拔掉的相机卡）：不失效
+  -- 源所在的卷不在（拔掉的相机卡）：不失效。读卡器**空槽**（盘符在、介质不在）造不出来；
+  -- 那种情形的弹框由 main 起手的进程级 SEM_FAILCRITICALERRORS 兜（审计 #7，DocDrift 钉接线）
   absent <- filterM (\c -> fmap not (doesDirectoryExist (c : ":\\"))) ['Z', 'Y' .. 'H']
   case absent of
     (c : _) -> planStale (Plan pidA "import" root (Just "main-rid") t0 [item 0 (OpCopy (c : ":\\card\\gone.jpg") "Raw/g.jpg" "gg" 1 0) StPending]) Nothing >>= (@?= False)

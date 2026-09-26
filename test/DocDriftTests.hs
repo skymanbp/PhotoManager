@@ -35,6 +35,7 @@ docDriftTests =
     , testCase "750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）" caseLineBudget
     , testCase "审计 #2：设置页数字项（并发数 / 掉线等待）留空点保存须拒绝并指向「恢复默认」，不得 Number(val( 直提成 0" caseGuiNumericSaveRefusesEmpty
     , testCase "审计 #1：整理页 AI 建议地点须在 await 之后按 sort 代号与概览对象守卫；请求在途时重扫不得放开按钮" caseGuiSortAiGenerationGuard
+    , testCase "审计 #7：app/Main.hs 的 main 在进程起手设 SEM_FAILCRITICALERRORS（suppressCriticalErrorDialogs），不只备份发现那一条路" caseMainSuppressesCriticalDialogs
     , testCase "死名清扫：opRelPaths / isPng / stemKey / jpegExt 不再出现在 src/app" caseNoDeadNames
     , testCase "Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记" caseHaddockMarkerHygiene
     , testCase "讹传清扫：被否证的机制解释（F048 列表脊、46 轮 openBoundTo 共享模式）不再出现在 src/app/test" caseFolkloreNotInTests
@@ -422,6 +423,18 @@ caseGuiSortAiGenerationGuard = do
     (\g -> assertBool ("sortAiPlaces 的 await 之后须守卫 " <> g) (g `isInfixOf` afterAwait))
     ["stale(\"sort\", gen)", "lastSurvey !== survey"]
   assertBool "renderSurvey 不得在 AI 请求在途时放开「AI 建议地点」按钮" ("disabled = aiBusy ||" `isInfixOf` js)
+
+-- | 2026-09-25 审计 #7（medium）：SEM_FAILCRITICALERRORS 此前只由备份发现
+-- （'Pm.Backup.discoverBackupRoots'）懒设——'Pm.Plan.planStale' 探计划源所在的卷时进程
+-- 未设，读卡器空槽会弹系统「请插入磁盘」框并阻塞 pm plan list / prune 与 GET /api/plans。
+-- 错误模式是进程级的：main 起手设一次（Microsoft 建议的做法），所有子命令（含 pm ui
+-- 拉起的 pm serve）与今后任何探盘路径一并覆盖。无法在测试里造出「空槽」，钉接线本身。
+caseMainSuppressesCriticalDialogs :: IO ()
+caseMainSuppressesCriticalDialogs = do
+  m <- readUtf8 ("app" </> "Main.hs")
+  let body = takeWhile (not . ("run ::" `isPrefixOf`)) (drop 1 (dropWhile (not . ("main = do" `isPrefixOf`)) (lines m)))
+  assertBool "app/Main.hs 应有 main = do" (not (null body))
+  assertBool ("main 须调用 suppressCriticalErrorDialogs（非注释行）: " <> show body) (any (\l -> not (isCommentLine l) && "suppressCriticalErrorDialogs" `isInfixOf` l) body)
 
 -- | 750 行硬预算（DESIGN §16）：此前只是评审期约定、零自动化——P8-A 拆分三个
 -- 触顶文件（Serve.hs / app.js / DESIGN.md）时写成哨兵，CI 的 `stack test` 顺带

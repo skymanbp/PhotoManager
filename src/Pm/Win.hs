@@ -566,7 +566,10 @@ foreign import WINDOWS_CCONV unsafe "windows.h GetVolumeInformationW"
     LPTSTR -> LPTSTR -> Word32 -> Ptr Word32 -> Ptr Word32 -> Ptr Word32 -> LPTSTR -> Word32 -> IO Word32
 
 -- | SEM_FAILCRITICALERRORS: probing an empty card-reader slot must fail with
--- an error code, not pop a system "请插入磁盘" dialog (DESIGN.md §9).
+-- an error code, not pop a system "请插入磁盘" dialog (DESIGN.md §9). The mode is
+-- process-wide: app/Main.hs sets it once at startup (2026-09-25 audit #7 — plan
+-- staleness probes removable volumes too); the call in backup discovery stays for
+-- library callers such as the test suite.
 suppressCriticalErrorDialogs :: IO ()
 suppressCriticalErrorDialogs = () <$ c_SetErrorMode 0x0001
 

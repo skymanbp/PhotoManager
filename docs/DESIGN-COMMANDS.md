@@ -268,7 +268,8 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 ## 9. 备份同步（`pm backup`）
 
 - 备份 root 识别：`getLogicalDrives` 枚举 + `SetErrorMode(SEM_FAILCRITICALERRORS)`
-  抑制「请插入磁盘」系统对话框 + 只探 REMOVABLE/FIXED 卷找 `.pm/root-id.json`
+  抑制「请插入磁盘」系统对话框（2026-09-25 审计 #7 起在 `main` 起手按进程设一次——
+  计划页失效判定探计划源所在的卷也要它）+ 只探 REMOVABLE/FIXED 卷找 `.pm/root-id.json`
   （role=Backup，UUID 与配置登记值相符才认）；找不到 → 提示插盘，绝不猜。
   （P2 落锤：GetDriveTypeW/SetErrorMode/GetVolumeInformationW 均无 Win32 包
   绑定，已在 Pm.Win 自行 foreign import。）
@@ -426,7 +427,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 445 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 446 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。

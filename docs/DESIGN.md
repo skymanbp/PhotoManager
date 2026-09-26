@@ -599,7 +599,7 @@ REVIEW-LOG 第 28 轮。
 | `directory` rename/copy 的替换语义（静默覆盖） | Exec 禁用清单 + 一律 `Pm.Win.moveBoundNoReplace`（句柄形态 no-replace，§6.1/§6.2）；P1 测试覆盖目标已存在分支 |
 | 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C3/C4 + doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`）；会反复瞬断的盘由 `Pm.Removable` 内建等盘续跑（1.1.2；§6.4 末段，2026-09-02 实录：当日掉线 11 次、527 组更新落位并核过）+ `scripts/verify_backup_dst.py` 写后全文重读 |
 | 长路径 (>260) / Unicode 路径 | file-io（long paths）或 FilePath 方案 + ≥240 预检（P0 落锤）；CJK 路径入 golden |
-| 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode + 只探 REMOVABLE/FIXED（§9） |
+| 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode（main 起手按进程设，审计 #7）+ 只探 REMOVABLE/FIXED（§9） |
 | exFAT 备份盘（无元数据日志、rename 原子性弱） | 矩阵不依赖原子性；FS 类型/粒度入 root-id.json；mtime 只做同 root 缓存键（§3） |
 | Lightroom / 用户并发改文件 | Plan 前提复核 + 双 stat + 落位 no-replace 三重防线；杀毒/索引器的短暂占用按 Win32 同款预算重试（100ms×20，三十二轮 R1）；读口（sha256File/目录指纹/枚举）的 IOException 一律落 fail-closed 桶而非逃顶——vault 主循环入 UNSTABLE、Exec 逐项 OFailed、生成期整批拒绝、doctor 报「读取失败」行（三十四轮全仓 grep、三十五轮按 IO 读原语全集清点补漏——目录枚举口与 config.toml/`.gitignore` 控制文件读口；三十七轮链接属性探针查不出按「是链接」跳过不递归、不塌 False；执行期**写口**逃逸 = §6.4 进程死亡语义，journal 有 Intent、doctor 对账，登记为已设计行为） |
 | catalog 损坏 | journal 重建 + 快照 3 份轮换 + doctor 校验 |
