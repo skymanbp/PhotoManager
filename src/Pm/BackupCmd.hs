@@ -189,7 +189,9 @@ runBackupRun' :: GoOpts -> Maybe Int -> Config -> IO Int
 runBackupRun' go mworkers cfg = do
   eroot <- discoverBackupRoot cfg
   case eroot of
-    Left msg -> putStrLn msg >> pure 1
+    -- 审计 #28：未登记 / 未挂载 / 多卷身份冲突都是「什么也没跑」的错误，按 §5.1 是 2（此前 1 =「有待办」，
+    -- 脚本分不清「盘没插」与「计划已存待执行」；undo / doctor / trash --backup 的同一 Left 本就是 2，F031）
+    Left msg -> putStrLn msg >> pure 2
     Right broot -> do
       -- P3b-7 复审新 major：备份 root 也是 .pm 写入口（catalog/计划/trash），
       -- requireRole 内含 I11 守卫（备份盘被 git init 过也会被拒）。

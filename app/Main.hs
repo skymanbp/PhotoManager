@@ -175,7 +175,8 @@ parserInfo :: ParserInfo Cmd
 parserInfo =
   info
     (helper <*> versionOpt <*> (commands <|> pure (CmdStatus (StatusOpts False))))
-    (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）")
+    -- 横切审计 #73：命令行用法错误（缺参数、未知选项、多余位置参数）按 §5.1 退 2（optparse 缺省是 1 =「有待办」）
+    (fullDesc <> header "pm — 照片库管理器（零参数 = pm status；写盘一律两段式 计划→apply）" <> failureCode 2)
  where
   versionOpt =
     -- 版本号取自 package.yaml（Cabal 注入的 CPP 宏），不再手抄一份：
