@@ -67,7 +67,11 @@ jobs:
         with:
           enable-stack: true
           stack-no-global: true
-          stack-version: "latest"
+          # 钉 3.9.3（2026-09-26，用户裁定）：「latest」在 2026-09-25 解析成 3.11.1，编出的 pm.exe
+          # 带进构建机路径（工作区、用户目录下 AppData 各 1 处），下面的 leakscan 判红；同一源码
+          # 3.9.3 编的 0 命中。升级前先在本机隔离装新版编 pm.exe、跑 scripts/leakscan.py 确认 0 命中，
+          # 再改这里（与 DESIGN §1 的开发环境同版本）。
+          stack-version: "3.9.3"
       - name: cache stack
         uses: actions/cache@v4
         with:
