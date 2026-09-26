@@ -49,6 +49,7 @@ docDriftTests =
     , testCase "41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托 REVIEW-LOG" caseReadmeSync
     , testCase "#75 #76 DESIGN §5 命令表 ↔ 真 CLI：写出的 --旗标都真有、位置参数与 CLI 相符（拿同一次构建的 pm.exe 逐段跑 --help）" caseDesignCliTable
     , testCase "#72 README「从源码构建」：cp 的目标目录若被 .gitignore 忽略（新克隆里没有），块里之前得先 mkdir -p（同 CI）" caseReadmeBuildDirs
+    , testCase "#78 --writable 级写端点个数从源码清点（Serve*.hs 的 POST 路由去掉 apply / suggest）：DESIGN §14、DESIGN-GUI、两份 README、help 五处都说这个数，DESIGN-GUI 逐个列到" caseWritableEndpointCount
     , testCase "0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、每个 exe stanza 显式 other-modules" caseNoPathsModule
     ]
 
@@ -644,3 +645,48 @@ caseReadmeBuildDirs = do
     forM_ cps $ \(i, d) ->
       assertBool (f <> "：cp 的目标目录 " <> d <> " 被 .gitignore 忽略（新克隆里没有），之前得先 mkdir -p " <> d)
         (not (ignored d) || ("mkdir -p " <> d) `elem` take i steps)
+
+-- | 横切审计 #78：--writable 级写端点的个数在五处现行文字里各抄一遍（DESIGN §14 风险行、DESIGN-GUI §11、两份 README、
+-- @--writable@ 的 help），1.1.0 从九个加到十二个时 §14 那行漏改，也漏列了写端点里仅有的删除。改成从源码清点：
+-- @src/Pm/Serve*.hs@ 里以 @("POST", [@ 起头的路由去掉两个不归 --writable 管的（@/api/apply@ 归 --allow-apply，
+-- @/api/suggest@ 是只读级），剩下的个数就是真值——五处都得说这个数，DESIGN-GUI 的端点清单还得逐个列到。
+caseWritableEndpointCount :: IO ()
+caseWritableEndpointCount = do
+  fs <- filter (\f -> "Serve" `isPrefixOf` f && ".hs" `isSuffixOf` f) <$> listDirectory ("src" </> "Pm")
+  srcs <- mapM (\f -> readUtf8 ("src" </> "Pm" </> f)) fs
+  let routes = nub [r | s <- srcs, l <- lines s, Just r <- [postRoute l]]
+      writable = filter (`notElem` ["/api/apply", "/api/suggest"]) routes
+      n = length writable
+  assertBool ("清点应认出 /api/apply 与 /api/suggest（解析在工作）: " <> show routes) (all (`elem` routes) ["/api/apply", "/api/suggest"])
+  (z, e) <- case (drop (n - 1) zhNums, drop (n - 1) enNums) of
+    (z : _, e : _) | n >= 1 -> pure (z, e)
+    _ -> assertFailure ("写端点 " <> show n <> " 个，超出本哨兵的数词表——扩表") >> pure ("", "")
+  design <- readUtf8 ("docs" </> "DESIGN.md")
+  gui <- readUtf8 ("docs" </> "DESIGN-GUI.md")
+  readme <- readUtf8 "README.md"
+  zhReadme <- readUtf8 "README.zh.md"
+  mainHs <- readUtf8 ("app" </> "Main.hs")
+  let risk = concat [l | l <- lines design, "| 本机其它进程打 `pm serve`" `isPrefixOf` l]
+  forM_
+    [ ("DESIGN §14 风险行", ("`--writable` 开" <> z <> "个写端点") `isInfixOf` risk)
+    , ("DESIGN-GUI §11", ("共**" <> z <> "个** `--writable`") `isInfixOf` gui)
+    , ("README.md", (e <> " write endpoints") `isInfixOf` readme)
+    , ("README.zh.md", ("`--writable` 开" <> z <> "个写端点") `isInfixOf` zhReadme)
+    , ("app/Main.hs 的 --writable help", ("允许" <> z <> "个 POST 写端点") `isInfixOf` mainHs)
+    ]
+    $ \(what, ok) -> assertBool (what <> " 应说 --writable 级写端点 " <> show n <> " 个（源码清点）") ok
+  forM_ writable $ \r -> assertBool ("DESIGN-GUI 的写端点清单应列到 POST " <> r) (("POST " <> r) `isInfixOf` gui)
+ where
+  zhNums = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九"]
+  enNums = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+
+-- | 路由模式行 @("POST", ["api", "album", "ignore"])@ → @/api/album/ignore@；只认去掉缩进后以它起头的行（注释行不算）。
+postRoute :: String -> Maybe String
+postRoute l = case stripPrefix "(\"POST\", [" (dropWhile isSpace l) of
+  Nothing -> Nothing
+  Just rest -> Just ("/" <> intercalate "/" [filter (/= '"') (trim x) | x <- commas (takeWhile (/= ']') rest)])
+ where
+  trim = dropWhileEnd isSpace . dropWhile isSpace
+  commas s = case break (== ',') s of
+    (a, []) -> [a]
+    (a, _ : r) -> a : commas r
