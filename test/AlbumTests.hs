@@ -6,7 +6,7 @@
 module AlbumTests (albumTests) where
 
 import Data.IORef (modifyIORef', newIORef, readIORef)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, sort)
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import System.Directory (doesFileExist)
@@ -25,7 +25,7 @@ import Pm.Import (importPlanItems, planImport)
 import Pm.Op
 import Pm.Plan
 import Pm.Types
-import TestUtil (mkCat, mkE, scanQuiet, t0, writeF)
+import TestUtil (captureStdout, mkCat, mkE, readUtf8, scanQuiet, t0, writeF)
 
 albumTests :: TestTree
 albumTests =
@@ -35,6 +35,7 @@ albumTests =
     , testCase "parseProcessedRel：只收 <事件夹>/<文件名>；绝对、盘符、..、成片 前缀、单级、.pm 一律拒" caseParse
     , testCase "--also-album（纯）：成片项与相册项同组、返修 → 相册项待裁决不分组、Raw 无相册项、非 jpg 交代" caseImportAlbumPure
     , testCase "albumCandidates：成片 jpg 未进相册的按事件夹分组、同名异容标记、非 jpg 单列、RAW 不列" caseCandidates
+    , testCase "#25 候选准入与 pm album add 同一个解析：成片根下的 jpg、事件夹叫「成片」的不进候选，单列带理由（CLI 与归档页）" caseCandidatesUnaddable
     , testCase "忽略过滤（纯）：按 sha 压出候选进 acIgnored（含冲突位）；splitIgnores 分生效/失效" caseIgnoreFilterPure
     , testCase "ignoreRequest（纯）：非候选/不在索引/重复内容/同时忽略又取消/未知取消 全部拒绝；按 sha/当前路径/存档路径三种取消" caseIgnoreRequestPure
     , testCase "pm album ignore 端到端：写 .pm/album-ignore.json、candidates 不再列、unignore 恢复、照片零改动" caseIgnoreE2E
@@ -308,3 +309,24 @@ caseConvertHint = withAlbumRoot $ \root cfg -> do
   assertBool oTif ("→ pm convert" `isInfixOf` oTif)
   (_, _, oXmp) <- runAdd cfg ["26-07-X/p.xmp"]
   assertBool oXmp ("不是照片条目" `isInfixOf` oXmp && not ("→ pm convert" `isInfixOf` oXmp))
+
+-- | #25：成片根下不在事件夹里的 jpg（及事件夹名就叫「成片」的）此前被列成候选、事件夹名取
+-- 文件名，给出的 rel 喂回 pm album add / ignore / add-plan 都被 'parseProcessedRel' 拒（exit 2 / 400）。
+caseCandidatesUnaddable :: IO ()
+caseCandidatesUnaddable = do
+  let a = mkE ("成片" </> "E1" </> "a.jpg") "s1"
+      stray = mkE ("成片" </> "stray.jpg") "s2"
+      nested = mkE ("成片" </> "成片" </> "x.jpg") "s3"
+      ac = albumCandidates Set.empty (mkCat [a, stray, nested])
+  acEvents ac @?= [("E1", [(a, False)])]
+  sort (map (enPath . fst) (acUnaddable ac)) @?= sort [enPath stray, enPath nested]
+  mapM_ (\(e, why) -> parseProcessedRel (candidateRel e) @?= Left why) (acUnaddable ac)
+  withAlbumRoot $ \root cfg -> do
+    writeF (root </> "成片" </> "E1" </> "a.jpg") "AAA"
+    writeF (root </> "成片" </> "stray.jpg") "STRAY"
+    index root
+    (out, code) <- captureStdout (runAlbumCandidates cfg)
+    code @?= 0
+    assertBool out ("不能直接加入 1 张" `isInfixOf` out && "stray.jpg：至少要" `isInfixOf` out && not ("[stray.jpg]" `isInfixOf` out))
+  js <- readUtf8 ("gui" </> "ui" </> "archive.js")
+  assertBool "归档页应单列 unaddable" ("c.unaddable" `isInfixOf` js)

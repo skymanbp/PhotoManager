@@ -111,6 +111,8 @@ caseImportPlan = withLib $ \root cfg -> do
 caseCandidatesAndAddPlan :: IO ()
 caseCandidatesAndAddPlan = withLib $ \root cfg -> do
   writeF (root </> "成片" </> "E1" </> "a.jpg") "AAA"
+  -- 审计 #25：成片根下不在事件夹里的 jpg 不进 events（此前成了一个名叫 stray.jpg 的事件夹），单列 unaddable
+  writeF (root </> "成片" </> "stray.jpg") "STRAY"
   writeF (root </> "成片" </> "E1" </> "t.tif") "TIF"
   index root
   envR <- mkEnv cfg
@@ -139,6 +141,9 @@ caseCandidatesAndAddPlan = withLib $ \root cfg -> do
           field ["path"] x @?= Just (Aeson.String (T.pack ("成片" </> "E1" </> "t.tif")))
           field ["layer"] x @?= Just (Aeson.String "成片")
         other -> assertFailure ("nonJpg: " <> show other)
+      case field ["unaddable"] v of
+        Just (Aeson.Array xs) -> map (field ["path"]) (toList xs) @?= [Just (Aeson.String (T.pack ("成片" </> "stray.jpg")))]
+        other -> assertFailure ("unaddable: " <> show other)
     postReq "/api/album/add-plan" "{\"paths\":[\"E1/a.jpg\"]}" >>= assertStatus 403
   doesDirectoryExist (root </> ".pm" </> "plans") >>= (@?= False)
   envW <- mkEnvW cfg

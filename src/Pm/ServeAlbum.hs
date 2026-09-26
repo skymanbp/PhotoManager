@@ -20,9 +20,9 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import Network.HTTP.Types
 import Network.Wai
-import System.FilePath (joinPath, splitDirectories, takeFileName)
+import System.FilePath (splitDirectories, takeFileName)
 
-import Pm.Album (AlbumCandidates (..), AlbumIgnore (..), IgnoreFail (..), albumCandidates, readIgnores, runAlbumAddTo, runAlbumIgnoreTo, splitIgnores)
+import Pm.Album (AlbumCandidates (..), AlbumIgnore (..), IgnoreFail (..), albumCandidates, candidateRel, readIgnores, runAlbumAddTo, runAlbumIgnoreTo, splitIgnores)
 import Pm.Catalog (catalogOr, loadCatalog)
 import Pm.Cli (GoOpts (..))
 import Pm.Commands (runImportTo)
@@ -118,7 +118,8 @@ planPost env req jsonR err what check
 -- aeson，线上形状是 API 的事）。@rel@ 就是 @pm album add@ \/ add-plan 要的参数，
 -- @path@ 是 @pm convert@ \/ convert/plan 要的库内相对路径——页面原样回传，不再拼。
 -- @ignored@ 是被忽略清单压掉的候选（取消用 sha）；@ignoreStale@ 是已失效的
--- 忽略记录（对象不再是候选——只提示，清理是用户的决定）。
+-- 忽略记录（对象不再是候选——只提示，清理是用户的决定）。@unaddable@ 是
+-- @pm album add@ 收不了的成片 jpg（审计 #25：带它的拒绝理由，页面不给卡片）。
 candidatesJson :: AlbumCandidates -> [AlbumIgnore] -> [String] -> Aeson.Value
 candidatesJson ac staleIgs warns =
   object
@@ -127,7 +128,7 @@ candidatesJson ac staleIgs warns =
               [ "event" .= ev
               , "photos"
                   .= [ object
-                        [ "rel" .= joinPath (drop 1 (splitDirectories (enPath e)))
+                        [ "rel" .= candidateRel e
                         , "path" .= enPath e
                         , "name" .= takeFileName (enPath e)
                         , "sha" .= enSha e
@@ -159,6 +160,7 @@ candidatesJson ac staleIgs warns =
               ]
            | (e, conflict) <- acIgnored ac
            ]
+    , "unaddable" .= [object ["path" .= enPath e, "name" .= takeFileName (enPath e), "why" .= why] | (e, why) <- acUnaddable ac]
     , "ignoreStale" .= [object ["sha" .= aiSha x, "path" .= aiPath x] | x <- staleIgs]
     , "warnings" .= warns
     ]

@@ -126,7 +126,10 @@ ingest 的 `badExt` 改用 `pushableExt`；`caseNoDeadNames` 把 `jpegExt` 列�
 且相册无同名同 sha 的条目（按事件夹分组；同名异 sha 标 `conflict`），另列
 `nonJpg`：成片与相册下 `KindPhoto ∧ ¬pushableExt` 的条目（`renderExts` 里的
 tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换对象）。CLI 侧
-`pm album candidates` 同源同形（只读，不另起一套口径）。
+`pm album candidates` 同源同形（只读，不另起一套口径）。候选的准入与 `pm album add`
+是同一个解析 `parseProcessedRel`：它收不了的（成片根下不在事件夹里、事件夹名就叫
+「成片」）不进候选，另列 `unaddable` 带拒绝理由（审计 #25：此前事件夹名取了文件名，
+给出的 `rel` 喂回 add / ignore / add-plan 一律被拒）。
 
 ---
 

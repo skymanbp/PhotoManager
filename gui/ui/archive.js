@@ -44,7 +44,9 @@ window.pmArchive = function (u) {
       if (stale("archive", gen)) return;
       const total = c.events.reduce((n, ev) => n + ev.photos.length, 0);
       const nIg = (c.ignored || []).length;
-      $("#album-cand-meta").textContent = (total ? `${total} 张成片 jpg 还没进相册（${c.events.length} 个事件夹）` : "成片里的 jpg 都已在相册里") + (nIg ? ` · 已忽略 ${nIg} 张` : "");
+      // 审计 #25：pm album add 收不了的（成片根下不在事件夹里…）单列——不给卡片，也别说「都已在相册里」
+      const unaddable = c.unaddable || [];
+      $("#album-cand-meta").textContent = (total ? `${total} 张成片 jpg 还没进相册（${c.events.length} 个事件夹）` : unaddable.length ? "没有可直接加入的候选" : "成片里的 jpg 都已在相册里") + (nIg ? ` · 已忽略 ${nIg} 张` : "") + (unaddable.length ? ` · ${unaddable.length} 张不能直接加入` : "");
       const cards = [];
       for (const ev of c.events) {
         const h = el("div", "grid-head");
@@ -76,7 +78,8 @@ window.pmArchive = function (u) {
           grid.appendChild(card); cards.push([p, ph]);
         }
       }
-      if (!total) grid.appendChild(el("div", "muted", "没有候选：成片里的 jpg 都已在相册（或主库还没有成片）。"));
+      if (unaddable.length) grid.appendChild(el("div", "muted", "⚠ 这些成片 jpg 不能直接加入相册（先移进一个事件夹，再 pm scan）：" + unaddable.map((u) => u.path).join("、")));
+      if (!total && !unaddable.length) grid.appendChild(el("div", "muted", "没有候选：成片里的 jpg 都已在相册（或主库还没有成片）。"));
       renderIgnored(c.ignored || [], c.ignoreStale || []);
       renderConvert(c.nonJpg);
       // 索引里损坏跳过的快照行：与 CLI 一样说出来，不吞——写在专用行，不占结果横幅

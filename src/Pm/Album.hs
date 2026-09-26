@@ -27,6 +27,7 @@ module Pm.Album
   , parseProcessedRel
   , AlbumCandidates (..)
   , albumCandidates
+  , candidateRel
   , runAlbumAdd
   , runAlbumAddTo
   , runAlbumCandidates
@@ -46,6 +47,7 @@ module Pm.Album
 
 import Control.Monad (forM, forM_)
 import Data.Aeson (FromJSON (..), ToJSON (..), object, withObject, (.:), (.=))
+import Data.Either (partitionEithers)
 import Data.List (nub, partition, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -191,21 +193,24 @@ parseProcessedRel s
 -- 栏与 convert 的准入是**同一个**谓词 'convertibleExt'（步 9 簇 C：此前这里
 -- 是 @not pushableExt@，把 RAW 也列进去，页面勾上一张 RAW 整批被 convert 拒）。
 -- 忽略清单是候选的**上游过滤**（CLI 与 GUI 同一谓词，不各自过滤）：被压掉的
--- 进 'acIgnored'（含冲突位），随时可取消。
+-- 进 'acIgnored'（含冲突位），随时可取消。候选的准入与 @pm album add@ 是**同一个**
+-- 解析 'parseProcessedRel'（审计 #25）：它收不了的（成片根下不在事件夹里、事件夹
+-- 名就叫「成片」）进 'acUnaddable' 带它的拒绝理由，不给一条敲不通的 @rel@。
 data AlbumCandidates = AlbumCandidates
   { acEvents :: [(FilePath, [(Entry, Bool)])]
   , acNonJpg :: [Entry]
   , acIgnored :: [(Entry, Bool)]
+  , acUnaddable :: [(Entry, String)]
   }
   deriving (Show, Eq)
 
 albumCandidates :: Set.Set Text -> Catalog -> AlbumCandidates
-albumCandidates ignoredShas cat = AlbumCandidates events nonJpg suppressed
+albumCandidates ignoredShas cat = AlbumCandidates events nonJpg suppressed unaddable
  where
   photos = [e | e <- Map.elems (catEntries cat), enKind e == KindPhoto]
   top e = take 1 (splitDirectories (enPath e))
   albumByFold = Map.fromList [(foldPath (takeFileName (enPath e)), e) | e <- photos, top e == [albumTop]]
-  cand =
+  cand0 =
     [ (e, conflict)
     | e <- photos
     , top e == [processedTop]
@@ -214,11 +219,17 @@ albumCandidates ignoredShas cat = AlbumCandidates events nonJpg suppressed
     , maybe True ((/= enSha e) . enSha) m
     , let conflict = maybe False (const True) m
     ]
+  (cand, unaddable) = partitionEithers [either (Right . (,) e) (const (Left c)) (parseProcessedRel (candidateRel e)) | c@(e, _) <- cand0]
   (suppressed0, live) = partition (\(e, _) -> enSha e `Set.member` ignoredShas) cand
   suppressed = sortOn (enPath . fst) suppressed0
   eventOf e = case splitDirectories (enPath e) of (_ : ev : _) -> ev; _ -> ""
   events = sortOn fst (Map.toList (Map.fromListWith (flip (<>)) [(eventOf e, [c]) | c@(e, _) <- live]))
   nonJpg = [e | e <- photos, top e `elem` [[processedTop], [albumTop]], convertibleExt (enPath e)]
+
+-- | 候选的 @rel@：相对成片层的 @\<事件夹\>\/\<文件名\>@——@pm album add@ \/ ignore \/ add-plan
+-- 收的参数形。准入与页面拿到的 @rel@ 都经它（审计 #25：此前页面那份是 serve 另拼的）。
+candidateRel :: Entry -> FilePath
+candidateRel = joinPath . drop 1 . splitDirectories . enPath
 
 -- ─── IO：pm album add / candidates ──────────────────────────────────────────
 
@@ -291,11 +302,14 @@ runAlbumCandidates cfg = do
           let ac = albumCandidates (Set.fromList (map aiSha igs)) cat
               (_, staleIgs) = splitIgnores ac igs
               n = sum (map (length . snd) (acEvents ac))
-          putStrLn ("成片 → 相册 候选 " <> show n <> " 张（" <> show (length (acEvents ac)) <> " 个事件夹）· 非 jpg " <> show (length (acNonJpg ac)) <> " 个 · 已忽略 " <> show (length (acIgnored ac)) <> " 张")
+          putStrLn ("成片 → 相册 候选 " <> show n <> " 张（" <> show (length (acEvents ac)) <> " 个事件夹）· 非 jpg " <> show (length (acNonJpg ac)) <> " 个 · 已忽略 " <> show (length (acIgnored ac)) <> " 张"
+            <> (if null (acUnaddable ac) then "" else " · 不能直接加入 " <> show (length (acUnaddable ac)) <> " 张"))
           forM_ (acEvents ac) $ \(ev, xs) -> do
             putStrLn ("  [" <> ev <> "]")
             forM_ xs $ \(e, conflict) ->
               putStrLn ("      " <> takeFileName (enPath e) <> (if conflict then "  ⚠ 相册有同名不同内容" else ""))
+          forM_ (take 1 (acUnaddable ac)) $ \_ -> putStrLn "  不能直接加入相册（pm album add 收不了——先移进一个事件夹，再 pm scan）："
+          forM_ (acUnaddable ac) $ \(_, why) -> putStrLn ("      " <> why)
           forM_ (take 1 (acNonJpg ac)) $ \_ -> putStrLn "  非 jpg（相册只收 JPEG → pm convert <路径…>）："
           forM_ (acNonJpg ac) $ \e -> putStrLn ("      " <> enPath e)
           forM_ (take 1 (acIgnored ac)) $ \_ -> putStrLn "  已忽略（pm album unignore <路径|sha> 恢复）："
