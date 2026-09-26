@@ -27,6 +27,7 @@ module Pm.Publish
   , cmdPath
   , renderCmdPath
   , pathArgOk
+  , quotePathArg
   , pushTarget
   , pushTargetOk
   ) where
@@ -78,6 +79,13 @@ cmdPath p
 -- | 便捷谓词（测试与入口校验用）。
 pathArgOk :: FilePath -> Bool
 pathArgOk = isRight . cmdPath
+
+-- | 打印给用户粘贴的命令里的一个路径参数（带引号，与上线命令同一白名单 \/ 渲染 'cmdPath'）。
+-- 横切审计 #79：@pm sort@ 的分段命令此前原样套引号——@pm sort E:\\@ 印出 @"E:\\"@，cmd（argv 规则）
+-- 与 bash 都把 @\\"@ 读成转义引号，粘贴即坏；这里渲染成 @"E:/"@、无尾随分隔符。嵌不进 → Left 原因，
+-- 调用方给占位符，不印一条会坏的命令。
+quotePathArg :: FilePath -> Either String String
+quotePathArg p = q . renderCmdPath <$> cmdPath p
 
 -- | push 目标语法：@<remote> [<refspec>]@，最多两段、单个空格分隔；每段以
 -- ASCII 字母数字**开头**（永远不会是选项 @-x@、强推 @+ref@ 或删远端分支的

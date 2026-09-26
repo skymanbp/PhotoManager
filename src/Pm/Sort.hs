@@ -81,6 +81,7 @@ import Pm.Import (foldPath, stagingTop)
 import Pm.Names (canonProcessedEvent, canonRawEvent)
 import Pm.Op (Op (..), winNameOk)
 import Pm.Plan (ItemStatus (..), PlanItem (..))
+import Pm.Publish (quotePathArg)
 import Pm.Scan (cloudOnlyNote)
 import Pm.SortSource
 import Pm.Types
@@ -456,11 +457,9 @@ printSegment absSrc g = do
   printf "      首 %s   尾 %s\n" (takeFileName (sgFirstFile g)) (takeFileName (sgLastFile g))
   forM_ (sgSameMonthEvents g) $ \ev ->
     putStrLn ("      ↺ 已有同年月事件 " <> ev <> " —— 要并入就把下面的 --place 换成 --event " <> ev)
-  printf
-    "      → pm sort \"%s\" --place <地点> --from %s --to %s\n"
-    absSrc
-    (show (sgFrom g))
-    (show (sgTo g))
+  -- 横切审计 #79：源路径走命令文本的同一生成点（'Pm.Publish.quotePathArg'），嵌不进给占位 + 原因
+  printf "      → pm sort %s --place <地点> --from %s --to %s\n" (either (const "<源目录>") id (quotePathArg absSrc)) (show (sgFrom g)) (show (sgTo g))
+  either (\why -> putStrLn ("        （源路径嵌不进命令：" <> why <> "——<源目录> 请自己填并加引号）")) (const (pure ())) (quotePathArg absSrc)
 
 -- | 暂存区与归档层里已有的事件夹名（用来提议复用，避免又造出跨夹重复）。
 --

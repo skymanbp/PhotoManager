@@ -31,7 +31,7 @@ module SortTests
 import Control.Monad (forM_)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import qualified Data.ByteString as BS
-import Data.List (sort)
+import Data.List (isInfixOf, sort)
 import qualified Data.Text as T
 import Data.Time (Day, LocalTime (..), TimeOfDay (..), fromGregorian)
 import Data.Word (Word8)
@@ -48,6 +48,7 @@ import Pm.Exif (parseCaptureTime, parseExifDateTime)
 import Pm.Hash (StatSnap (..))
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, planPath)
+import Pm.Publish (quotePathArg)
 import Pm.Sort
   ( SortPick (..)
   , SortSegment (..)
@@ -59,12 +60,13 @@ import Pm.Sort
   , pickFiles
   , resolveEvent
   , runSortPlan
+  , runSortSurvey
   , segmentBy
   , snapshotWith
   , surveySort
   )
 import Pm.Types (FileKind (..), RootRole (..), classifyExt, rawExts)
-import TestUtil (ensureTestRoot, scanQuiet, withDenyAll)
+import TestUtil (captureStdout, ensureTestRoot, scanQuiet, withDenyAll)
 
 sortTests :: TestTree
 sortTests =
@@ -90,6 +92,7 @@ sortTests =
     , testCase "EXIF：IFD 偏移必须 ≥ 8；声明「没有 IFD」的文件不得返回时间" caseExifIfdOffset
     , testCase "classifyExt：相机原生 raw 与 classifyExt 必须同一份清单" caseRawExts
     , testCase "审计 #10：Raw\\ 下的普通文件（desktop.ini / Thumbs.db）不是年份夹——概览照常出、同年月事件照常提议" caseSurveyRawStrayFile
+    , testCase "#79 分段命令里的源路径走命令文本同一生成点：E:\\ 与带尾随分隔符的路径渲染成 \"E:/…\"，不再印出 \\\" 这种粘贴即坏的引号" caseSurveyCmdQuoting
     ]
 
 -- ─── pm sort 纯核心 ────────────────────────────────────────────────────────
@@ -612,3 +615,12 @@ caseRawExts = do
   classifyExt ".txt" @?= KindMeta
   classifyExt ".zip" @?= KindMeta
 
+
+-- | #79：printSegment 此前原样套引号——pm sort E:\ 印出 "E:\"，cmd 与 bash 都把 \" 读成转义引号。
+caseSurveyCmdQuoting :: IO ()
+caseSurveyCmdQuoting = withLib $ \src _ cfg -> do
+  quotePathArg "E:\\" @?= Right "\"E:/\""
+  quotePathArg "E:\\DCIM\\" @?= Right "\"E:/DCIM\""
+  either (const (pure ())) (\s -> assertFailure ("白名单外字符应拒: " <> s)) (quotePathArg "D:\\a%b")
+  (out, _) <- captureStdout (runSortSurvey (src <> "\\") 72 cfg)
+  assertBool out ("→ pm sort \"" `isInfixOf` out && not ("\\\" --place" `isInfixOf` out) && not ("<源目录>" `isInfixOf` out))
