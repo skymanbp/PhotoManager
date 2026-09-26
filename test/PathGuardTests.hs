@@ -742,4 +742,8 @@ caseExecTmpSecondCheck = withSystemTempDirectory "pm-guard" $ \dir -> do
   doesFileExist hostage >>= (@?= True)
   readFile hostage >>= (@?= "OUTSIDE-HOSTAGE")
   removeDirectoryLink pdir
+  -- 审计 #39：Intent 之后的中止臂须写终态 JFailed——悬空 Intent 会让 doctor 报假 C1「中断」
+  es <- journalEntries root
+  assertBool ("该项须有 JFailed: " <> show es) (or [o == opId pid 0 | JFailed o _ _ <- es])
+  doctorRows root >>= \rows -> assertBool ("doctor 不得报 C1: " <> show rows) ("C1" `notElem` map fst rows)
 

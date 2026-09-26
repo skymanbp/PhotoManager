@@ -490,7 +490,14 @@ execCopy' env root j oid ix op dstAbs = do
                   -- @tdir </> tname@——否则校验与使用仍是两次独立解析。
                   mTmp2 <- confinedTmp root pid' tname
                   case mTmp2 of
-                    Nothing -> pure escapeOutcome
+                    Nothing -> do
+                      -- 2026-09-25 审计 #39：Intent 之后唯一不写终态的中止臂——Intent 悬空，doctor
+                      -- 对一场正常结束的会话报假 C1「写 tmp 前中断」，计划执行态既非完成也非失败。
+                      -- 与 execCopyTmp / execCopyLand 的中止臂同形：先 JFailed 再返回（§6.1 步 7.5：
+                      -- 「Intent 无终态」只留给进程死亡）。tmp 尚未创建，无需清理。
+                      tf <- getCurrentTime
+                      jAppend j Barrier (JFailed oid "tmp 落位点建目录后二次限域失败（junction/别名？）" tf)
+                      pure escapeOutcome
                     Just tmpAbs -> execCopyTmp env j oid op tmpAbs dstAbs
 
 -- P3b-17（十四轮 #2）：@dstAbs@ 由 'execCopy' 的 'confinedUserPath' 解析后
