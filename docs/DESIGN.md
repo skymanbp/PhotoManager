@@ -403,7 +403,9 @@ Q-DONE-LOST 补上，再按「组内每项都 DONE/同内容 SKIP」或「组内
 可见（它拿到锁就是常规 I10 竞争）。写入后的**字节核验**仍是另一件事：走
 `scripts/verify_backup_dst.py`（按计划 sha 全文重读）/ `verify_backup_entries.py`
 （按备份 catalog 条目挑，如 `--verified-on <日期>`）或 `--deep`；两支脚本共用
-`scripts/backup_verify.py` 的 `Drive`（同一「root-id.json 可读 = 盘在」判据）。
+`scripts/backup_verify.py` 的 `Drive`（同一「root-id.json 可读 = 盘在」判据）。盘在 `--drive-wait`
+内没回来退出码 3；中途放弃时已核出的结果照写 `--out`、未读的记进 bad 供 `--retry`，隔离件的
+「不在」也只在盘在时算（审计 #20 #23）。
 「已归档，冗余」标签**不由 Done 驱动**——它是当前 catalog
 的 sha 集合判据（快照级提示，不是删除授权），据实更正见 DESIGN-COMMANDS §7。
 **撕裂尾（掉电写了半行）不是损坏**：追加前先查末字节，不是换行就先补 `\n`

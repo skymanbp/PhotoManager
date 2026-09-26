@@ -5,6 +5,9 @@
   run/finish   把一组目标从备份盘全文重读核 sha，盘瞬断就等它回来、从被打断的那条接着读
                （verify_backup_dst.py 按计划目标、verify_backup_entries.py 按 catalog 条目）。
 目标 = {"id": 可回查的键, "path": 盘上相对路径, "size": 期望字节数, "sha256": 期望 sha}；bad 记录 = {"id", "path", "why"}。
+退出码（finish）：0 全部一致；1 有 bad（含掉线次数超限的 STOP，未读的记「not verified (stopped)」）；3 盘没在
+  --drive-wait 内回来——启动时直接退；中途则已核出的结果照写 --out、未读的记「not verified (drive did not return)」
+  供 --retry（审计 #20：此前中途也直接退出，整轮结果连同 --out 一起丢掉）。
 """
 import collections
 import hashlib
@@ -27,6 +30,10 @@ class DriveGone(Exception):
     pass
 
 
+class DriveTimeout(Exception):
+    """run() 中途等盘超时（审计 #20）：由 run() 按 STOP 同一收尾，不在内核里直接退出。"""
+
+
 class Drive:
     def __init__(self, root, wait_s, cooldown_s):
         self.rootid = os.path.join(root, ".pm", "root-id.json")
@@ -39,15 +46,19 @@ class Drive:
         except OSError:
             return False
 
-    def ensure(self):
-        """盘在就立刻返回 False；不在就等到它回来（每 5 s 探一次，超过 wait_s 退出码 3）、冷却 cooldown_s 后返回 True。"""
+    def ensure(self, fatal=True):
+        """盘在就立刻返回 False；不在就等到它回来（每 5 s 探一次）、冷却 cooldown_s 后返回 True。
+        超过 wait_s：fatal（启动时，还没有结果可丢）退出码 3；否则抛 DriveTimeout 交 run() 收尾。"""
         if self.ok():
             return False
         t0 = time.time()
         print(f"{ts()} drive NOT readable ({self.rootid}); waiting up to {self.wait_s}s ...")
         while not self.ok():
             if time.time() - t0 > self.wait_s:
-                print(f"{ts()} GIVE UP: drive did not come back within {self.wait_s}s"); sys.exit(3)
+                print(f"{ts()} GIVE UP: drive did not come back within {self.wait_s}s")
+                if fatal:
+                    sys.exit(3)
+                raise DriveTimeout(self.rootid)
             time.sleep(5)
         self.waits += 1
         print(f"{ts()} drive back after {time.time() - t0:.0f}s; cooling {self.cooldown_s}s")
@@ -102,6 +113,7 @@ def run(a, drive, targets, label):
     print(f"{label} to verify: {len(targets)}  bytes={sum(t['size'] for t in targets) / 2**30:.2f} GiB")
     limiter = make_limiter(a.max_mbps)
     ok = sha_bad = size_bad = missing = err = drops = hiccups = n = total = 0
+    gave_up = False
     bad, attempts, queue, t0 = [], collections.Counter(), collections.deque(targets), time.time()
     while queue:
         t = queue.popleft()
@@ -135,7 +147,12 @@ def run(a, drive, targets, label):
             else:
                 queue.appendleft(t)
             if absent:
-                drive.ensure()
+                try:
+                    drive.ensure(fatal=False)
+                except DriveTimeout:
+                    # 审计 #20：与 STOP 同一收尾——已核出的照留；没读到的（被打断的这条已在队首或已记 read error）记进 bad
+                    bad.extend({"id": q["id"], "path": q["path"], "why": "not verified (drive did not return)"} for q in queue)
+                    queue.clear(); gave_up = True; break
             else:
                 time.sleep(a.cooldown)
             continue
@@ -150,7 +167,7 @@ def run(a, drive, targets, label):
     print(f"RESULT {label}={len(targets)} ok={ok} sha_bad={sha_bad} size_bad={size_bad} missing={missing} read_err={err} "
           f"drops={drops} hiccups={hiccups} bytes={total / 2**30:.2f} GiB in {dt:.0f}s ({total / max(dt, 1) / 2**20:.0f} MB/s)")
     return {label: len(targets), "ok": ok, "sha_bad": sha_bad, "size_bad": size_bad, "missing": missing,
-            "read_err": err, "drops": drops, "hiccups": hiccups, "bytes": total, "seconds": dt, "bad": bad}
+            "read_err": err, "drops": drops, "hiccups": hiccups, "bytes": total, "seconds": dt, "bad": bad, "gave_up": gave_up}
 
 
 def finish(a, res):
@@ -158,4 +175,4 @@ def finish(a, res):
         print("  BAD", b)
     if a.out:
         json.dump(res, open(a.out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    sys.exit(0 if not res["bad"] else 1)
+    sys.exit(3 if res.get("gave_up") else 0 if not res["bad"] else 1)

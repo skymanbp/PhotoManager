@@ -3,6 +3,7 @@
 用法: python verify_backup_dst.py --plan <id> --root <备份盘 root> [--out result.json] [--retry 上次结果.json] [--skip-trash]
       公共选项（--drive-wait / --cooldown / --max-drops / --attempts / --max-mbps）见 backup_verify.add_common_args。
 --skip-trash：`pm trash --backup empty` 之后隔离件本来就该不在，跳过那一查。
+退出码见 backup_verify（0 一致 / 1 有 bad / 3 盘没回来，结果照写 --out）。
 """
 import argparse
 import json
@@ -25,12 +26,22 @@ def main():
                for it in plan["items"] if it["op"].get("t") == "copy"]
     res = bv.run(a, drive, bv.apply_retry(a, targets), "copies")
     if not a.skip_trash:
-        # 隔离件只做存在性（rename 是元数据操作，不重读）：本计划 trash 目录下每个 victim 都应在
+        # 隔离件只做存在性（rename 是元数据操作，不重读）：本计划 trash 目录下每个 victim 都应在。
+        # 审计 #23：「不在」只在盘在时算（同 run() 的 missing 判据）——盘掉了（含 run() 等盘超时 / STOP 收尾之后）记「没核」，不报 0/N
         quars = [it for it in plan["items"] if it["op"].get("t") == "quarantine"]
-        present = sum(1 for it in quars if os.path.isfile(os.path.join(a.root, ".pm", "trash", a.plan, it["op"]["victim"])))
-        print(f"TRASH victims present {present}/{len(quars)}")
-        if present != len(quars):
-            res["bad"].append({"why": f"trash victims present {present}/{len(quars)}"})
+        present = 0
+        for it in quars:
+            if os.path.isfile(os.path.join(a.root, ".pm", "trash", a.plan, it["op"]["victim"])):
+                present += 1
+            elif not drive.ok():
+                present = None; break
+        if present is None:
+            print("TRASH victims not verified (drive absent)")
+            res["bad"].append({"why": "trash victims not verified (drive absent)"})
+        else:
+            print(f"TRASH victims present {present}/{len(quars)}")
+            if present != len(quars):
+                res["bad"].append({"why": f"trash victims present {present}/{len(quars)}"})
     bv.finish(a, res)
 
 
