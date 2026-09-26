@@ -89,7 +89,7 @@ import Pm.ConfigEdit (checkPatch, configTxn)
 import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
 import Pm.Exec (outcomeLabel)
 import Pm.GitGuard (vaultIgnoreGuard)
-import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), PlanExec (..), deletePlanAnyRoot, isValidPlanId, listPlans, planExecuted, planRows, prunePlans, runTag)
+import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), PlanExec (..), PlanDelErr (..), deletePlanAnyRoot, isValidPlanId, listPlans, planExecuted, planRows, prunePlans, runTag)
 import Pm.Publish (publishCommands)
 import Pm.Scan (cloudOnlyNote)
 import Pm.ServeAi (routeAi)
@@ -430,7 +430,11 @@ routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
     | otherwise -> withJsonBody req err $ \(PlanIdReq pid) -> do
         r <- deletePlanAnyRoot cfg pid
         case r of
-          Left m -> err status404 m
+          -- 审计 #44：「没有」才 404；有但删不成（或查不出）是 409，id 不合格是 400——带真原因
+          Left (PlanNotFound m) -> err status404 m
+          Left (PlanNotDeleted m)
+            | not (isValidPlanId pid) -> err status400 m
+            | otherwise -> err status409 m
           Right label -> jsonR status200 [] (object ["ok" .= True, "root" .= label])
   ("POST", ["api", "plans", "prune"])
     | not (seWritable env) -> err status403 "serve 以只读启动（无 --writable），拒绝清理计划"

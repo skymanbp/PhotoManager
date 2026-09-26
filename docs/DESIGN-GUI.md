@@ -63,7 +63,8 @@
   `runAlbumIgnoreTo`，requireMain 预检 + 主库 root lock 事务，照片零改动）、
   `POST /api/plan/delete {planId}` 与 `POST /api/plans/prune`（同批裁定：删除/一键清理
   计划文件——与 CLI `pm plan rm` / `pm plan prune` 共用 `deletePlanAnyRoot` /
-  `prunePlans`，只删可再生成的 `.pm/plans` 文件，journal/undo/doctor 不受影响；
+  `prunePlans`，只删可再生成的 `.pm/plans` 文件，journal/undo/doctor 不受影响；delete 的状态码按
+  `Pm.Plan.PlanDelErr` 分：各根都没有 404、有但删不成（或存在性查不出）409、id 不合格 400，都带真原因（审计 #44）；
   prune 的「已执行」判据 `planExecuted` 保守：待执行项全部 Done 且无待裁决残余，
   草稿与带裁决残余的计划不动；1.1.3 起**失效草稿**（`planStale`：从未执行且每条待办的源
   都已不在盘上而卷还在）也一并清，journal 有告警的根整根不删）；执行是第 ③ 级 `POST /api/apply`

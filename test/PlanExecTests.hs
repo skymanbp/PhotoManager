@@ -27,8 +27,8 @@ import Pm.Op
 import Pm.Plan
 import Pm.Serve (serveApp)
 import Pm.Types (RootInfo (..), RootRole (..))
-import ServeTests (decodeBody, field, getReq, liftIO', mkEnv, tok)
-import TestUtil (mkMain, t0)
+import ServeTests (decodeBody, field, getReq, liftIO', mkEnv, mkEnvW, postReq, tok)
+import TestUtil (mkMain, t0, withDenyAll)
 
 planExecTests :: TestTree
 planExecTests =
@@ -39,6 +39,7 @@ planExecTests =
     , testCase "deletePlan 守卫（坏 id/缺席/真删）；prunePlans 只清已执行、活草稿不动、journal 不动" caseDeleteAndPrune
     , testCase "planStale：源全没了才失效（源还在/卷不在/有 Done/仅跳过都不算）；prunePlans 清失效草稿、活草稿不动" caseStale
     , testCase "#64 planStale：源的存在性查不出（非法名 → 错误码 123）按「源还在」计，草稿不失效、prune 不删" caseStaleProbeUnknown
+    , testCase "#44 删计划：主库的真失败（ACL 拒删）不再被 vault 的「计划不存在」盖住；CLI 同源，API 409 / 404 / 400 分开" casePlanDeleteRealError
     , testCase "#47 #48 计划列表逐根：vault 的 journal 有告警不连累主库的失效判定（CLI 与 GET /api/plans 同一份）；journal 被本进程占用说「稍后重试」不说「人工核查」" casePlanRowsPerRoot
     ]
 
@@ -218,3 +219,30 @@ casePlanRowsPerRoot = withSystemTempDirectory "pm-planrows" $ \tmp -> do
       other -> assertFailure ("plans: " <> show other)
   (_, busy) <- withJournal root (\_ -> readJournal root)
   assertBool (show busy) (any ("正被本进程的另一操作占用" `isInfixOf`) busy && not (any ("人工核查" `isInfixOf`) busy))
+
+-- | #44：deletePlanAnyRoot 此前只留最后一个根的原因——主库删不掉的真失败被 vault 的「计划不存在」盖住。
+casePlanDeleteRealError :: IO ()
+casePlanDeleteRealError = withSystemTempDirectory "pm-plandel" $ \tmp -> do
+  let root = tmp </> "lib"
+      vdir = tmp </> "vault"
+      cfg = Config root (Just vdir) Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+      p = Plan pidA "names" root (Just "main-rid") t0 [PlanItem 0 (OpQuarantine "Raw/x.jpg" "xx" "dup") StPending Nothing]
+  mkMain root
+  writeRootInfo vdir (RootInfo "vault-rid" RoleVault t0 Nothing)
+  _ <- savePlan p
+  r <- withDenyAll (planPath root pidA) (deletePlanAnyRoot cfg pidA)
+  case r of
+    Left (PlanNotDeleted m) -> assertBool m ("主库：" `isInfixOf` m && not ("计划不存在" `isInfixOf` m))
+    other -> assertFailure ("主库的真失败应上报: " <> show other)
+  doesFileExist (planPath root pidA) >>= (@?= True)
+  deletePlanAnyRoot cfg "20260831-235959-ffffff" >>= \r2 -> case r2 of
+    Left (PlanNotFound m) -> assertBool m ("计划不存在" `isInfixOf` m)
+    other -> assertFailure ("两根都没有应是 PlanNotFound: " <> show other)
+  envW <- mkEnvW cfg
+  withDenyAll (planPath root pidA) $
+    flip runSession (serveApp envW) $ postReq "/api/plan/delete" "{\"planId\":\"20260831-120000-abc123\"}" >>= assertStatus 409
+  flip runSession (serveApp envW) $ do
+    postReq "/api/plan/delete" "{\"planId\":\"20260831-235959-ffffff\"}" >>= assertStatus 404
+    postReq "/api/plan/delete" "{\"planId\":\"..\\\\evil\"}" >>= assertStatus 400
+    postReq "/api/plan/delete" "{\"planId\":\"20260831-120000-abc123\"}" >>= assertStatus 200
+  doesFileExist (planPath root pidA) >>= (@?= False)

@@ -26,6 +26,7 @@ module Pm.Plan
   , planStale
   , runTag
   , deletePlan
+  , PlanDelErr (..)
   , deletePlanAnyRoot
   , prunePlans
   , planRows
@@ -39,7 +40,7 @@ import Crypto.Random (getRandomBytes)
 import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import Data.List (nub, sort, sortOn)
+import Data.List (intercalate, nub, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -401,40 +402,59 @@ planStale p mr
 -- id 格式 → 可信闸 → 完整路径受信解析 → 句柄式删除（'deleteBoundAt'，
 -- symlink\/hardlink 同 'savePlan' 删旧的口径）。
 deletePlan :: FilePath -> Text -> IO (Either String ())
-deletePlan root pid
+deletePlan root pid = either (Left . delErrMsg) Right <$> deletePlanAt root pid
+
+-- | 删不成的两类（审计 #44）：这个根**没有**这份（'PlanNotFound'）/ 有或查不出、但**删不成**
+-- （'PlanNotDeleted'：id 不合格、.pm 不可信、存在性查不出、句柄删不掉）。
+data PlanDelErr = PlanNotFound String | PlanNotDeleted String
+  deriving (Show, Eq)
+
+delErrMsg :: PlanDelErr -> String
+delErrMsg (PlanNotFound m) = m
+delErrMsg (PlanNotDeleted m) = m
+
+deletePlanAt :: FilePath -> Text -> IO (Either PlanDelErr ())
+deletePlanAt root pid
   | not (isValidPlanId pid) =
-      pure (Left ("计划 id 不符合生成格式（" <> T.unpack pid <> "，应为 YYYYMMDD-HHMMSS-hex6），拒绝删除"))
+      pure (Left (PlanNotDeleted ("计划 id 不符合生成格式（" <> T.unpack pid <> "，应为 YYYYMMDD-HHMMSS-hex6），拒绝删除")))
   | otherwise = do
       tr <- requirePmTrusted root
       case tr of
-        Left m -> pure (Left m)
+        Left m -> pure (Left (PlanNotDeleted m))
         Right () -> do
           m <- resolveUnder root (".pm" </> pmSubPlans </> (T.unpack pid <> ".json"))
           case m of
-            Nothing -> pure (Left (untrustedMsg (planPath root pid)))
+            Nothing -> pure (Left (PlanNotDeleted (untrustedMsg (planPath root pid))))
             Just fp -> do
-              ex <- doesFileExist fp
-              if not ex
-                then pure (Left ("计划不存在: " <> fp))
-                else do
+              -- 三态探针：只有「名字不存在」算没有；查不出（ACL / 介质）不当没有（此前 doesFileExist 吞错）
+              k <- probeName fp
+              case k of
+                NameMissing -> pure (Left (PlanNotFound ("计划不存在: " <> fp)))
+                ProbeUnknown -> pure (Left (PlanNotDeleted ("计划文件的存在性查不出: " <> fp)))
+                _ -> do
                   r <- try (deleteBoundAt fp) :: IO (Either IOException ())
-                  pure (either (\e -> Left ("删除失败: " <> show e)) Right r)
+                  pure (either (\e -> Left (PlanNotDeleted ("删除失败: " <> show e))) Right r)
 
 -- | 计划所在的根：主库 + （配置了的）vault——与 @GET \/api\/plans@ 同一口径。
 -- 备份盘上的计划（kind backup）存在盘上自己的 @.pm@ 下，不插盘看不见。
 planRoots :: Config -> [(String, FilePath)]
 planRoots cfg = ("主库", cfgMainPath cfg) : maybe [] (\v -> [("vault", v)]) (cfgVaultPath cfg)
 
--- | 在主库\/vault 里找到并删除一份计划；都没有 → Left（最后一个根的原因）。
-deletePlanAnyRoot :: Config -> Text -> IO (Either String String)
-deletePlanAnyRoot cfg pid = go (planRoots cfg)
+-- | 在主库\/vault 里找到并删除一份计划。审计 #44：此前只留最后一个根的原因——主库的真失败
+-- （句柄删不掉、.pm 不可信……）被 vault 的「计划不存在」盖住，`pm plan rm` 与 GUI 都报不存在。
+-- 现在逐根：删成即止；各根都没删成时，有真失败报真失败（带根名），全是「没有」才报没有。
+deletePlanAnyRoot :: Config -> Text -> IO (Either PlanDelErr String)
+deletePlanAnyRoot cfg pid = go (planRoots cfg) [] []
  where
-  go [] = pure (Left "主库/vault 都没有这份计划")
-  go ((label, root) : rest) = do
-    r <- deletePlan root pid
+  go [] fails absents
+    | not (null fails) = pure (Left (PlanNotDeleted (intercalate "；" fails)))
+    | otherwise = pure (Left (PlanNotFound (if null absents then "主库/vault 都没有这份计划" else intercalate "；" absents)))
+  go ((label, root) : rest) fails absents = do
+    r <- deletePlanAt root pid
     case r of
       Right () -> pure (Right label)
-      Left m -> if null rest then pure (Left m) else go rest
+      Left (PlanNotFound m) -> go rest fails (absents <> [m])
+      Left (PlanNotDeleted m) -> go rest (fails <> [label <> "：" <> m]) absents
 
 -- | 一个根的计划读出：计划、装不出来的（名, 因）、该根 journal 折叠的执行态、该根 journal 的告警。
 -- 'planRows'（@pm plan list@ 与 @GET \/api\/plans@）与 'prunePlans' 共用——**逐根**：某根 journal
@@ -504,7 +524,7 @@ runPlanRm ids cfg
       codes <- forM (nub ids) $ \i -> do
         r <- deletePlanAnyRoot cfg (T.pack i)
         case r of
-          Left m -> putStrLn ("  ✗ " <> i <> ": " <> m) >> pure 2
+          Left e -> putStrLn ("  ✗ " <> i <> ": " <> delErrMsg e) >> pure 2
           Right label -> putStrLn ("  ✓ 已删除计划 " <> i <> "（" <> label <> "；journal/undo 不受影响，需要可重新生成）") >> pure 0
       pure (maximum (0 : codes))
 
