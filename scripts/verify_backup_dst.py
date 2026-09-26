@@ -22,13 +22,18 @@ def main():
     drive = bv.Drive(a.root, a.drive_wait, a.cooldown)
     drive.ensure()
     plan = json.load(open(os.path.join(a.root, ".pm", "plans", a.plan + ".json"), encoding="utf-8"))
+    # 审计 #22：只核 Exec 真会执行的条目——`pm resolve` 跳过（skipped）与待裁决（needs-decision）的不执行，
+    # 目标本来就不在，此前被报成 missing / sha 不符 / 隔离件缺，且每次 --retry 复发
+    pend = [it for it in plan["items"] if it["status"]["s"] == "pending"]
+    if len(pend) != len(plan["items"]):
+        print(f"skip {len(plan['items']) - len(pend)} items not pending (skipped / needs-decision: never executed)")
     targets = [{"id": it["ix"], "path": it["op"]["dst"], "size": it["op"]["size"], "sha256": it["op"]["sha256"]}
-               for it in plan["items"] if it["op"].get("t") == "copy"]
+               for it in pend if it["op"].get("t") == "copy"]
     res = bv.run(a, drive, bv.apply_retry(a, targets), "copies")
     if not a.skip_trash:
         # 隔离件只做存在性（rename 是元数据操作，不重读）：本计划 trash 目录下每个 victim 都应在。
         # 审计 #23：「不在」只在盘在时算（同 run() 的 missing 判据）——盘掉了（含 run() 等盘超时 / STOP 收尾之后）记「没核」，不报 0/N
-        quars = [it for it in plan["items"] if it["op"].get("t") == "quarantine"]
+        quars = [it for it in pend if it["op"].get("t") == "quarantine"]
         present = 0
         for it in quars:
             if os.path.isfile(os.path.join(a.root, ".pm", "trash", a.plan, it["op"]["victim"])):

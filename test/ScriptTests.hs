@@ -9,6 +9,7 @@ module ScriptTests (scriptTests) where
 
 import Data.Aeson (FromJSON (..), decode, encode, withObject, (.:), (.:?))
 import qualified Data.ByteString.Lazy as BSL
+import Data.List (isInfixOf)
 import qualified Data.Text as T
 import Data.Time (UTCTime (..), fromGregorian)
 import System.Directory (createDirectoryIfMissing, doesFileExist, makeAbsolute)
@@ -30,6 +31,7 @@ scriptTests =
   testGroup
     "scripts/ 辅助脚本"
     [ testCase "#20 #23 核验途中盘没回来：已核出的结果照写 --out、没读到的记进 bad、退出码 3；隔离件的「不在」只在盘在时算，盘不在记「没核」而不是 0/N" caseDriveGaveUp
+    , testCase "#22 verify_backup_dst 只核 pending 条目：pm resolve 跳过 / 待裁决的 copy 与隔离件 Exec 不执行，不再被报成缺失" casePendingOnly
     ]
 
 -- | 跑 python（参数原样）；stdout 与 stderr 合写进 @dir\/py.log@，返回 (退出码, 日志)。
@@ -111,3 +113,27 @@ caseDriveGaveUp = withSystemTempDirectory "pm-script" $ \dir -> do
   -- 已核出的 sha 不符照留；被打断的 b.jpg 记「没读到」供 --retry；隔离件盘不在记「没核」，不报 0/1
   res @?= Res [(Just "a.jpg", "sha ba7816bf8f01 != 000000000000"), (Just "b.jpg", "not verified (drive did not return)"), (Nothing, "trash victims not verified (drive absent)")] (Just True)
   assertEqual ("退出码（盘没回来 = 3）\n" <> log') 3 code
+
+-- | #22：@pm resolve@ 跳过的条目 Exec 不执行（ONotExecuted），脚本此前照样要求 copy 目标在盘上、victim 在
+-- trash 里——报 missing 与 1\/2，且每次 --retry 复发。夹具：pending 与 skipped 的 copy \/ 隔离件各一，外加一条待裁决的 copy。
+casePendingOnly :: Assertion
+casePendingOnly = withSystemTempDirectory "pm-script" $ \dir -> do
+  let root = dir </> "E"
+      out = dir </> "result.json"
+  mkBackupRoot
+    root
+    [ (copyTo "a.jpg" shaAbc, StPending)
+    , (copyTo "skipped.jpg" shaAbc, StSkippedByUser)
+    , (copyTo "undecided.jpg" shaAbc, StNeedsDecision "dst exists")
+    , (OpQuarantine "q.jpg" shaAbc "superseded", StPending)
+    , (OpQuarantine "kept.jpg" shaAbc "superseded", StSkippedByUser)
+    ]
+  writeF (root </> "a.jpg") "abc"
+  writeF (root </> ".pm" </> "trash" </> T.unpack planId </> "q.jpg") "abc"
+  scripts <- makeAbsolute "scripts"
+  (code, log') <- runPy dir [scripts </> "verify_backup_dst.py", "--plan", T.unpack planId, "--root", root, "--out", out]
+  res <- readRes out log'
+  res @?= Res [] (Just False)
+  assertBool ("须交代跳过了几条\n" <> log') ("skip 3 items not pending" `isInfixOf` log')
+  assertBool ("隔离件只数 pending 的那一条\n" <> log') ("TRASH victims present 1/1" `isInfixOf` log')
+  assertEqual ("退出码（只核 pending：全部一致 = 0）\n" <> log') 0 code
