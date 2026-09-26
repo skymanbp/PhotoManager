@@ -7,7 +7,9 @@
 -- 「2026-09-26 横切审计补跑与遗留清理」节。
 module CleanupTests (cleanupTests) where
 
+import qualified Data.ByteString as BS
 import Data.List (isInfixOf)
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
@@ -15,8 +17,10 @@ import Test.Tasty.HUnit
 
 import Pm.BackupCmd (runBackupRun)
 import Pm.Cli (GoOpts (..))
-import Pm.Config (Config (..))
-import TestUtil (captureStdout, mkMain, readUtf8)
+import Pm.Config (Config (..), loadConfig, writeConfig)
+import Pm.GitGuard (pmIgnoreGuard)
+import Pm.Types (RootRole (..))
+import TestUtil (captureStdout, mkMain, readUtf8, withEnv)
 
 cleanupTests :: TestTree
 cleanupTests =
@@ -24,6 +28,7 @@ cleanupTests =
     "2026-09-26 遗留清理"
     [ testCase "#16 #18 GUI：索引读不出 ≠ 尚未索引（状态页 / 归档页带原因）；候选读不出 ≠ 没有非 jpg（按未知渲染、清掉上一轮残留）" caseGuiUnknownNotAbsent
     , testCase "#28 #73 §5.1「2 = 错误」：pm backup 找不到备份盘退 2（不是 1）；命令行用法错误退 2（parserInfo 设 failureCode 2）" caseErrorExitCodes
+    , testCase "#41 #66 开头的 UTF-8 BOM：config.toml 照常载入（此前每条命令起不来）；.gitignore 首行 .pm/ 照常算覆盖；中间的 BOM 不认" caseLeadingBom
     ]
 
 -- | #16 / #18 的 GUI 形状（本仓不跑浏览器：源码哨兵 + node --check）。
@@ -49,3 +54,26 @@ caseErrorExitCodes = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   code @?= 2
   m <- readUtf8 ("app" </> "Main.hs")
   assertBool "parserInfo 须设 failureCode 2" ("<> failureCode 2)" `isInfixOf` m)
+
+-- | #66：toml-reader 在 1:1 拒收 U+FEFF，带 BOM 的 config.toml 让每条 pm 命令（含 GUI）起不来。
+-- #41：.gitignore 带 BOM 时首行 @.pm/@ 被读成「U+FEFF.pm/」，I11 报「缺 .pm/ 行」——git 本身认它。
+caseLeadingBom :: Assertion
+caseLeadingBom = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  let cfgPath = dir </> "config.toml"
+      root = dir </> "main"
+      cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+      bom = BS.pack [0xEF, 0xBB, 0xBF]
+  createDirectoryIfMissing True root
+  withEnv [("PM_CONFIG", cfgPath)] $ do
+    _ <- writeConfig cfg
+    raw <- BS.readFile cfgPath
+    BS.writeFile cfgPath (bom <> raw)
+    r <- loadConfig
+    either (\m -> assertFailure ("带 BOM 的 config.toml 应照常载入: " <> m)) (\c -> cfgMainPath c @?= root) r
+  let g = dir </> "repo"
+  createDirectoryIfMissing True (g </> ".git")
+  BS.writeFile (g </> ".gitignore") (bom <> ".pm/\r\n")
+  pmIgnoreGuard RoleVault g >>= (@?= Right ())
+  BS.writeFile (g </> ".gitignore") ("_site/\n" <> bom <> ".pm/\n")
+  r2 <- pmIgnoreGuard RoleVault g
+  either (const (pure ())) (const (assertFailure "中间的 BOM 不认（git 也只跳开头那一个）")) r2

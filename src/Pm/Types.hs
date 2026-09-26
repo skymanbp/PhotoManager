@@ -13,6 +13,7 @@ module Pm.Types
   , albumTop
   , processedTop
   , entryMap
+  , stripBom
   ) where
 
 import Data.Aeson
@@ -20,6 +21,7 @@ import Data.Char (toLower)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Time (UTCTime)
 
 data RootRole = RoleMain | RoleBackup | RoleVault
@@ -185,3 +187,10 @@ instance FromJSON Catalog where
 
 entryMap :: [Entry] -> Map FilePath Entry
 entryMap es = Map.fromList [(enPath e, e) | e <- es]
+
+-- | 去掉文本开头的**一个** UTF-8 BOM（U+FEFF）。用户手编、pm 解析的文本文件（config.toml、.gitignore）
+-- 被 PowerShell 5.1 的 @Set-Content -Encoding UTF8@ 或记事本「UTF-8 with BOM」存过就带它（横切审计 #66 /
+-- 审计 #41：此前 config.toml 带 BOM 让每条 pm 命令起不来，.gitignore 带 BOM 让首行 @.pm/@ 不算数）。
+-- 只认开头一个，与 git 的 skip_utf8_bom 同口径；中间的 U+FEFF 原样保留。
+stripBom :: Text -> Text
+stripBom t = maybe t id (T.stripPrefix "\xFEFF" t)

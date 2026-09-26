@@ -32,7 +32,7 @@ import qualified Data.Text.Encoding as TE
 import System.Directory (canonicalizePath, doesFileExist)
 import System.FilePath (takeDirectory, (</>))
 
-import Pm.Types (RootRole (..))
+import Pm.Types (RootRole (..), stripBom)
 import Pm.Win (NameKind (..), probeName)
 
 -- | 存在性探测的三态收口表（纯函数，用例穷举全部构造子）。为 @.git@ 而生
@@ -98,7 +98,8 @@ pmIgnoreGuard role dir0 = do
                   -- `T.strip` 两头都剥、`isSpace` 连 TAB/NBSP 也剥，都把 git 不认的行当成
                   -- 覆盖放行。只做两件事：去一个尾随 CR（CRLF 行尾），再去尾随空格。
                   let norm l = T.dropWhileEnd (== ' ') (fromMaybe l (T.stripSuffix "\r" l))
-                      ls = map norm (T.lines (TE.decodeUtf8Lenient raw))
+                      -- 审计 #41：git 跳过文件开头的一个 BOM（dir.c skip_utf8_bom），这里同口径
+                      ls = map norm (T.lines (stripBom (TE.decodeUtf8Lenient raw)))
                       hasRule = ".pm/" `elem` ls
                       risky l =
                         let f = T.toLower l

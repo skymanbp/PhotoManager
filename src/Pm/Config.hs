@@ -168,8 +168,9 @@ loadConfigState = do
         Left e -> pure (CfgUnreadable ("配置读取失败（被占/被挪？）: " <> show e <> " —— 解除占用后重试"))
         Right raw -> case TE.decodeUtf8' raw of
           Left e -> pure (CfgUnreadable ("配置不是 UTF-8: " <> show e))
-          Right txt -> case TOML.decode txt of
-            Left e -> pure (CfgUnreadable (T.unpack (TOML.renderTOMLError e)))
+          -- 横切审计 #66：开头的 BOM 先剥掉（toml-reader 在 1:1 拒收 U+FEFF）；解析错误带上文件路径
+          Right txt -> case TOML.decode (stripBom txt) of
+            Left e -> pure (CfgUnreadable ("配置解析失败（" <> fp <> "）: " <> T.unpack (TOML.renderTOMLError e)))
             Right c -> pure (either CfgUnreadable CfgOk (checkAbsolute c))
 
 -- | 写配置。P4-8 起 GUI 也能改配置，半写的 config.toml 会让**每一条** pm
