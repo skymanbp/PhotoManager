@@ -7,9 +7,20 @@
 module AuditFixTests (auditFixTests) where
 
 import Control.Exception (finally)
-import Data.List (isSuffixOf)
+import Control.Monad (when)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
+import Data.List (isInfixOf, isSuffixOf)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.Text.Encoding.Error as TEE
 import Data.Time (getCurrentTime)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, listDirectory)
+import Network.HTTP.Types (hAuthorization, hContentType, hHost, hOrigin, methodPost, status500)
+import Network.Wai (Request (..), defaultRequest)
+import Network.Wai.Test (SRequest (..), SResponse (..), Session, runSession, setPath, srequest)
+import System.Directory (canonicalizePath, createDirectory, createDirectoryIfMissing, doesFileExist, listDirectory, removeFile)
 import System.Environment (lookupEnv, setEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
@@ -17,8 +28,13 @@ import System.Process (readCreateProcess, shell)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Config (Config (..), configFilePath, createRootInfo, loadConfig, readRootInfo, withConfigLock, writeConfig)
+import Pm.Config (Config (..), configFilePath, createRootInfo, loadConfig, readRootInfo, withConfigLock, writeConfig, writeRootInfo)
+import Pm.Plan (Plan (..), savePlan)
+import Pm.Serve (serveApp)
 import Pm.Types (RootInfo (..), RootRole (..))
+import ServeTests (fixture, liftIO', mkEnvA, mkEnvW, tok, withVault)
+import qualified ServeTests as ST
+import TestUtil (mkCopyOp, mkPlanIO)
 
 auditFixTests :: TestTree
 auditFixTests =
@@ -26,6 +42,8 @@ auditFixTests =
     "2026-09-25 全量 debug 审计修复钉针"
     [ testCase "#4 配置路径途经 junction（同 SUBST / 8.3 短名）：configFilePath 解析到真名，写 / 锁 / 读三者同形，不再被句柄后验误拒" caseConfigPathJunction
     , testCase "#5 root 是 junction：createRootInfo 落到真名下、不抛、无 .tmp 残留；已有身份仍 Left 不覆盖且不留 .tmp" caseRootIdJunctionRoot
+    , testCase "#9 POST /api/apply 执行链抛异常 → 500 JSON（interrupted + planId + log，带 CORS），不再是 warp 裸 500；GUI 认 interrupted" caseServeApplyInterrupted
+    , testCase "#9 serveApp 最后一道异常边界：recordPost（hold）写链抛异常 → 500 JSON 带 CORS，主库记录文件零写入" caseServeBoundaryRecordPost
     ]
 
 mkJunction :: FilePath -> FilePath -> IO ()
@@ -85,3 +103,85 @@ caseRootIdJunctionRoot = withSystemTempDirectory "pm-rootjunc" $ \tmp -> do
   either (const (pure ())) (const (assertFailure "已有身份不得被覆盖")) r2
   fmap riId <$> readRootInfo real >>= (@?= Just "j")
   leftovers >>= (@?= [])
+
+-- | #9 夹具：让 root 锁的**打开**确定性地抛非 EBUSY 的 IOException——@.pm/lock@ 被一个
+-- 目录占名（openBinaryFile 打不开目录：PermissionDenied，'Pm.Config.withRootLock' 只把
+-- isAlreadyInUseError 折成「锁被占」，其余原样重抛；瞬断保护按确定性错误原样重抛）。
+squatLock :: FilePath -> IO ()
+squatLock root = do
+  let lk = root </> ".pm" </> "lock"
+  ex <- doesFileExist lk
+  when ex (removeFile lk)
+  createDirectory lk
+
+-- | 带 Origin 的 POST（'ServeTests.postReq' 不带 Origin，看不见 CORS 头）。
+postWithOrigin :: BS.ByteString -> BSL.ByteString -> Session SResponse
+postWithOrigin path body =
+  srequest $
+    SRequest
+      ( setPath
+          defaultRequest
+            { requestMethod = methodPost
+            , requestHeaderHost = Just "127.0.0.1:4321"
+            , requestHeaders = [(hHost, "127.0.0.1:4321"), (hOrigin, "http://tauri.localhost"), (hAuthorization, "Bearer " <> tok), (hContentType, "application/json")]
+            }
+          path
+      )
+      body
+
+-- | 500 响应必须是 JSON 对象且带 CORS 头——warp 的裸 500（text/plain、无 CORS）在
+-- 跨源的 Tauri 页面里只会变成「Failed to fetch」。
+json500 :: SResponse -> IO (KM.KeyMap Aeson.Value)
+json500 r = do
+  simpleStatus r @?= status500
+  lookup "Access-Control-Allow-Origin" (simpleHeaders r) @?= Just "http://tauri.localhost"
+  case Aeson.decode (simpleBody r) of
+    Just (Aeson.Object o) -> pure o
+    other -> assertFailure ("500 响应须是 JSON 对象: " <> show other)
+
+-- | #9（medium）：POST /api/apply 的执行链此前没有异常边界——内核按设计原样重抛的
+-- IOException（root 锁打不开、瞬断保护判为确定性错误、索引回写失败……）逃到 warp，
+-- 页面只看到「Failed to fetch」或「没有执行」，而项可能已经落位并记了 Done。修后：
+-- 500 + JSON（interrupted、planId、至此的 log），页面据 interrupted 说「执行中断」。
+caseServeApplyInterrupted :: IO ()
+caseServeApplyInterrupted = withSystemTempDirectory "pm-apply-int" $ \root -> do
+  now <- getCurrentTime
+  writeRootInfo root (RootInfo "m" RoleMain now Nothing)
+  op <- mkCopyOp (root </> "src" </> "a.jpg") "AAA" ("成片" </> "a.jpg")
+  plan <- mkPlanIO root [op]
+  _ <- savePlan plan
+  squatLock root
+  env <- mkEnvA (ST.mkCfg root)
+  flip runSession (serveApp env) $ do
+    r <- postWithOrigin "/api/apply" (Aeson.encode (Aeson.object ["planId" Aeson..= plId plan]))
+    liftIO' $ do
+      o <- json500 r
+      KM.lookup "interrupted" o @?= Just (Aeson.Bool True)
+      KM.lookup "planId" o @?= Just (Aeson.String (plId plan))
+      case KM.lookup "error" o of
+        Just (Aeson.String e) -> assertBool ("error 应说执行中断: " <> T.unpack e) ("执行中断" `T.isInfixOf` e)
+        other -> assertFailure ("error 应为字符串: " <> show other)
+      case KM.lookup "log" o of
+        Just (Aeson.Array _) -> pure ()
+        other -> assertFailure ("log 应为数组: " <> show other)
+  doesFileExist (root </> "成片" </> "a.jpg") >>= (@?= False)
+  -- 按 UTF-8 读（本机 locale 是 GBK，裸 readFile 会在中文注释上解码失败；同 DocDriftTests.readUtf8）
+  js <- T.unpack . TE.decodeUtf8With TEE.lenientDecode <$> BS.readFile ("gui" </> "ui" </> "app.js")
+  assertBool "GUI 的 applyPlan 须按 interrupted 分支（不再一律说「没有执行」）" ("j.interrupted" `isInfixOf` js)
+
+-- | #9 的类：凡 handler 没有自带 try 的端点（recordPost 的 hold / notes，以及今后新增的），
+-- 抛出的 IOException 由 serveApp 的最后一道边界接住，答 500 JSON（带 CORS）。
+caseServeBoundaryRecordPost :: IO ()
+caseServeBoundaryRecordPost = withSystemTempDirectory "pm-serve-bound" $ \dir -> do
+  let root = dir </> "root"
+      vdir = dir </> "vault"
+  (cfg0, _, _, _) <- fixture root
+  cfg <- withVault vdir cfg0
+  squatLock root
+  env <- mkEnvW cfg
+  flip runSession (serveApp env) $ do
+    r <- postWithOrigin "/api/vault/hold" "{\"hold\":[\"a.jpg\"]}"
+    liftIO' $ do
+      o <- json500 r
+      assertBool ("应带 error: " <> show o) (KM.member "error" o)
+  doesFileExist (root </> ".pm" </> "vault-holds.json") >>= (@?= False)

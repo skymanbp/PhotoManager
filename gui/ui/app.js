@@ -368,21 +368,29 @@
     try {
       const r = await post("/api/apply", { planId: id });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok) {
+      if (!r.ok && !j.interrupted) {
         out.className = "banner bad";
         out.textContent = "没有执行：" + (j.error || ("HTTP " + r.status));
         return;
       }
-      const counts = new Map();
-      for (const it of j.items || []) counts.set(it.outcome, (counts.get(it.outcome) || 0) + 1);
-      const summary = [...counts.entries()].map(([k, v]) => `${k} ×${v}`).join(" · ");
       const logTail = (j.log || []).slice(-8).join("\n");
-      out.className = "banner " + (j.code === 0 ? "ok" : "warn");
-      out.textContent =
-        (j.code === 0 ? `✓ 执行完成：${j.planId}` : `执行结束（退出码 ${j.code}）：${j.planId}——有未完成/待裁决项，见逐项结果`) +
-        (summary ? `\n逐项：${summary}` : "") +
-        (logTail ? `\n${logTail}` : "") +
-        "\n回滚：终端 pm undo。";
+      if (j.interrupted) {
+        // 执行链中途抛异常（2026-09-25 审计 #9，服务端 500 + interrupted）：可能已有项落位
+        // 并记了 Done——不能说「没有执行」；执行态可能已变，照常刷新计划列表（下方）。
+        out.className = "banner bad";
+        out.textContent = "执行中断（可能已有项落位）：" + (j.error || ("HTTP " + r.status)) +
+          (logTail ? `\n${logTail}` : "") + "\n→ 排除原因后重跑同一计划（已落位的项自动跳过），或终端 pm doctor 核查。";
+      } else {
+        const counts = new Map();
+        for (const it of j.items || []) counts.set(it.outcome, (counts.get(it.outcome) || 0) + 1);
+        const summary = [...counts.entries()].map(([k, v]) => `${k} ×${v}`).join(" · ");
+        out.className = "banner " + (j.code === 0 ? "ok" : "warn");
+        out.textContent =
+          (j.code === 0 ? `✓ 执行完成：${j.planId}` : `执行结束（退出码 ${j.code}）：${j.planId}——有未完成/待裁决项，见逐项结果`) +
+          (summary ? `\n逐项：${summary}` : "") +
+          (logTail ? `\n${logTail}` : "") +
+          "\n回滚：终端 pm undo。";
+      }
       done = true;
     } catch (e) {
       out.className = "banner bad"; out.textContent = "请求失败：" + e.message;

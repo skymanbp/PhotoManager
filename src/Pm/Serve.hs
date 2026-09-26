@@ -54,8 +54,8 @@ import Control.Applicative ((<|>))
 import Control.Concurrent.Async (race)
 import Control.Monad (when)
 import Control.Concurrent.MVar (withMVar)
-import Data.IORef (modifyIORef', newIORef, readIORef)
-import Control.Exception (IOException, bracket, try)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import Control.Exception (IOException, bracket, catch, throwIO, try)
 
 import Pm.ServeGuard
 import Data.Aeson (ToJSON (..), Value, encode, object, (.=))
@@ -168,8 +168,14 @@ runServe cfg o = case soPort o of
 --   readBodyCapped/muteStdout/waitStdinEof/bindLoopback，P7 拆出，逐字搬移。）
 
 serveApp :: ServeEnv -> Application
-serveApp env req respond = do
-  let hdrs = requestHeaders req
+serveApp env req respond0 = do
+  -- 2026-09-25 审计 #9：最后一道异常边界。handler 抛出的 IOException 此前逃到 warp 的
+  -- 裸 500（text/plain、无 CORS 头），跨源的 Tauri 页面只看到「Failed to fetch」。
+  -- 下面接住并答 500 JSON（带 CORS）；已开始应答的（发送途中出错）不二次应答，原样
+  -- 重抛给 warp。需要带上下文（log、planId）的端点仍各自 try（apply、planPost）。
+  sent <- newIORef False
+  let respond x = writeIORef sent True >> respond0 x
+      hdrs = requestHeaders req
       origin = lookup hOrigin hdrs
       corsHdrs = case origin of
         Just o | allowedOrigin o ->
@@ -189,7 +195,10 @@ serveApp env req respond = do
       | requestMethod req == methodOptions ->
           respond (responseLBS status204 corsHdrs "")
       | not (authorized (seToken env) hdrs) -> err status401 "缺少或错误的 Bearer token"
-      | otherwise -> route env req jsonR err corsHdrs respond
+      | otherwise ->
+          route env req jsonR err corsHdrs respond `catch` \(ex :: IOException) -> do
+            done <- readIORef sent
+            if done then throwIO ex else err status500 ("请求处理中断（" <> show ex <> "）——pm serve 仍在运行，排除原因后重试")
 
 route :: ServeEnv -> Request -> Reply -> (Status -> String -> IO ResponseReceived) -> ResponseHeaders -> (Response -> IO ResponseReceived) -> IO ResponseReceived
 route env req jsonR err corsHdrs respond = do
@@ -328,17 +337,28 @@ routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
     | otherwise -> withJsonBody req err $ \(ApplyReq pid only) -> withMVar (seApplyLock env) $ \_ -> do
         logRef <- newIORef []
         let sink l = modifyIORef' logRef (l :)
-        prep <- prepareApply cfg sink pid only
-        case prep of
-          Left m -> err status409 m
-          Right (plan, added) -> do
-            -- 屏障不在这里调：它随 cfg 装进 ExecEnv，由内核在 root 锁内
-            -- 跑（二十九轮 critical）。seApplyLock 只是**进程内**互斥，
-            -- 挡不住第二个 pm；跨进程那一半现在由 I10 锁负责。屏障的
-            -- 降级理由、收尾 git 步骤、备份缓存告警同走这个 sink（F022/C106）。
-            (code, results) <- executePlanNowWith cfg sink plan
-            afterApply cfg sink plan results
-            logs <- reverse <$> readIORef logRef
+        -- 2026-09-25 审计 #9：执行链的异常边界（同 'Pm.ServeAlbum.planPost' 的形态）。内核按
+        -- 设计原样重抛的 IOException（root 锁打不开、瞬断保护判为确定性错误、索引回写失败……）
+        -- 此前逃到 warp 的裸 500，页面只说「没有执行」，而项可能已落位并记了 Done。现在答
+        -- 500 + interrupted + 至此的 log，页面据此说「执行中断」并照常刷新计划列表。
+        r <- try $ do
+          prep <- prepareApply cfg sink pid only
+          case prep of
+            Left m -> pure (Left m)
+            Right (plan, added) -> do
+              -- 屏障不在这里调：它随 cfg 装进 ExecEnv，由内核在 root 锁内
+              -- 跑（二十九轮 critical）。seApplyLock 只是**进程内**互斥，
+              -- 挡不住第二个 pm；跨进程那一半现在由 I10 锁负责。屏障的
+              -- 降级理由、收尾 git 步骤、备份缓存告警同走这个 sink（F022/C106）。
+              (code, results) <- executePlanNowWith cfg sink plan
+              afterApply cfg sink plan results
+              pure (Right (plan, added, code, results))
+        logs <- reverse <$> readIORef logRef
+        case r of
+          Left (ex :: IOException) ->
+            jsonR status500 [] (object ["error" .= ("执行中断: " <> show ex), "interrupted" .= True, "planId" .= pid, "log" .= logs])
+          Right (Left m) -> err status409 m
+          Right (Right (plan, added, code, results)) ->
             jsonR
               status200
               []
