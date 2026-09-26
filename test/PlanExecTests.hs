@@ -33,6 +33,7 @@ planExecTests =
     , testCase "planExecuted/runTag：草稿≠已执行、部分执行、待裁决残余不算已执行、全 Done 才算、失败注记" caseExecuted
     , testCase "deletePlan 守卫（坏 id/缺席/真删）；prunePlans 只清已执行、活草稿不动、journal 不动" caseDeleteAndPrune
     , testCase "planStale：源全没了才失效（源还在/卷不在/有 Done/仅跳过都不算）；prunePlans 清失效草稿、活草稿不动" caseStale
+    , testCase "#64 planStale：源的存在性查不出（非法名 → 错误码 123）按「源还在」计，草稿不失效、prune 不删" caseStaleProbeUnknown
     ]
 
 pidA, pidB :: Text
@@ -167,3 +168,21 @@ caseStale = withSystemTempDirectory "pm-planstale" $ \tmp -> do
   map (\(lbl, p) -> (lbl, plId p)) deleted @?= [("主库", pidA)]
   doesFileExist (planPath root pidA) >>= (@?= False)
   doesFileExist (planPath root pidB) >>= (@?= True)
+
+-- | 横切审计 #64：planStale 此前用 doesPathExist，它把一切 IOError 吞成 False，外面的 try 形同虚设——
+-- 源探不出（ACL 拒绝、介质读错、断网）被判「已不在」，prune 删掉这份草稿。非法名是「查不出」的
+-- 确定性注入（GetFileAttributes 错误码 123 → ProbeUnknown；同 ScanGuardTests 的注入口径）。
+caseStaleProbeUnknown :: IO ()
+caseStaleProbeUnknown = withSystemTempDirectory "pm-planstale" $ \tmp -> do
+  let root = tmp </> "lib"
+      card = tmp </> "card"
+      cfg = Config root Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+      pUnknown = Plan pidA "import" root (Just "main-rid") t0 [PlanItem 0 (OpCopy (card </> "a<b.jpg") "Raw/a.jpg" "aa" 1 0) StPending Nothing]
+  mkMain root
+  createDirectoryIfMissing True card
+  planStale pUnknown Nothing >>= (@?= False)
+  _ <- savePlan pUnknown
+  (deleted, errs) <- prunePlans cfg
+  errs @?= []
+  map (plId . snd) deleted @?= []
+  doesFileExist (planPath root pidA) >>= (@?= True)

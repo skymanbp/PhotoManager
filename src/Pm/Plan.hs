@@ -47,14 +47,14 @@ import Data.Time (UTCTime, defaultTimeLocale, formatTime, getCurrentTime)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (filterM, forM, forM_, when)
 import Data.Maybe (fromMaybe)
-import System.Directory (doesDirectoryExist, doesFileExist, doesPathExist, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (dropExtension, takeDrive, takeExtension, (</>))
 import System.IO (hClose)
 import Text.Printf (printf)
 
 import Pm.Config (Config (..), ensurePmSubdir, pmDir, pmSubPlans, readPmState, requirePmTrusted, untrustedMsg)
 import Pm.Journal (JEntry (..), readJournal)
-import Pm.Win (deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary, resolveUnder, whenPresent)
+import Pm.Win (NameKind (..), deleteBoundAt, flushHandleToDisk, moveBoundNoReplace, openFreshBinary, probeName, resolveUnder, whenPresent)
 import Pm.Op -- 含 isValidPlanId（P3b-8 起定义于 Pm.Op，本模块再导出）
 
 data ItemStatus
@@ -377,8 +377,11 @@ runTag stale p mr
 -- 卡已清、旧夹名已改，它们再也执行不成，却按「草稿不动」的保守判据永远留在列表里）：
 -- 从未执行（journal 无一条 Done）、有待办条目（待执行或待裁决；跳过项是用户裁决，
 -- 不看），且**每一条**待办的源都已不在盘上而源所在的卷还在。卷不在（相机卡拔了）
--- 不算失效：插回去照样能跑。判定要探盘，故在 IO；探测抛出一律按「源还在」计
--- （fail-closed：判不出就不判失效，prune 不会因此多删）。
+-- 不算失效：插回去照样能跑。判定要探盘，故在 IO；探测查不出一律按「源还在」计
+-- （fail-closed：判不出就不判失效，prune 不会因此多删）。横切审计 #64：此前用
+-- @doesPathExist@——它把一切 IOError 吞成 False，外面的 @try@ 形同虚设，探不出的源（ACL
+-- 拒绝、介质读错、断网、非法名）被判「已不在」，整份草稿会被 prune 删掉。现在用三态的
+-- 'probeName'：只有 'NameMissing'（Win32 错误 2 \/ 3）算不在，'ProbeUnknown' 算在。
 planStale :: Plan -> Maybe PlanExec -> IO Bool
 planStale p mr
   | maybe False (not . Set.null . peDone) mr = pure False
@@ -388,7 +391,7 @@ planStale p mr
   todo = [piOp it | it <- plItems p, piStatus it /= StSkippedByUser]
   sourceGone op = do
     let src = opSource (plRootPath p) op
-    r <- try (do ex <- doesPathExist src; vol <- doesDirectoryExist (takeDrive src); pure (not ex && vol)) :: IO (Either IOException Bool)
+    r <- try (do k <- probeName src; vol <- doesDirectoryExist (takeDrive src); pure (k == NameMissing && vol)) :: IO (Either IOException Bool)
     pure (either (const False) id r)
   allM f = foldr (\x k -> f x >>= \b -> if b then k else pure False) (pure True)
 

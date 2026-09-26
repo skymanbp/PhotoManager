@@ -436,7 +436,7 @@ hash **前后各 stat 一次**（卡仍在写入时算出的 sha 是撕裂的，
 - **P3b-4 … P3b-12 的逐轮评审收口**（2026-08-24，codex 一~九轮）已移入
   [`docs/REVIEW-LOG-1.md`](REVIEW-LOG-1.md) §「P3b 逐轮收口」——那里是评审史的家，
   本文件是设计文档（同 P3b-8 把 §16 拆出去的先例；DESIGN.md 触及 750 行预算）。
-  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 461 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
+  当前实现对应 **1.2.0（doctor 的 I7 判定侧）/ pm 1.2.0 / 462 测试**（P3b-13~18 与 P4 详情见 REVIEW-LOG；
   门禁轮次与收敛判定见 [`REVIEW-LOG.md`](REVIEW-LOG.md) 末节 verdict，不在此手抄；
   发布前第一方全量自审（P7-I 簇修 R1–R8、P7-J ultracode 全量审 14 簇类级修）
   及其后各轮门禁收口的行为面变化见 §11）。
@@ -588,7 +588,7 @@ P7-I 之后的第二次第一方全量自审（ultracode 多代理工作流，10
 
 | 命令/入口 | 变化 | 出处 |
 |---|---|---|
-| `pm plan [list]` | 执行态多一种 **已失效（源已不在）**：`Pm.Plan.planStale`——从未执行（journal 无一条 Done）、有待办（待执行或待裁决；跳过项不看）、且每一条待办的源（拷贝的绝对源 / 改名旧路径 / 隔离 victim，`opSource`）都已不在盘上而源所在的卷还在。卷不在（相机卡拔了）不算；探测抛出按「源在」计；journal 有告警的根不判（折叠不全时「从未执行」不可信）。措辞 `runTag` 多一个首参（stale），CLI 与 GUI 同一句 | DESIGN-GUI §11 |
+| `pm plan [list]` | 执行态多一种 **已失效（源已不在）**：`Pm.Plan.planStale`——从未执行（journal 无一条 Done）、有待办（待执行或待裁决；跳过项不看）、且每一条待办的源（拷贝的绝对源 / 改名旧路径 / 隔离 victim，`opSource`）都已不在盘上而源所在的卷还在。卷不在（相机卡拔了）不算；存在性查不出（ACL / 介质错误 / 非法名：三态探针 `probeName` 答 ProbeUnknown）按「源在」计，只有「名字不存在」（Win32 错误 2 / 3）算不在（横切审计 #64：此前 `doesPathExist` 把查不出吞成「不在」）；journal 有告警的根不判（折叠不全时「从未执行」不可信）。措辞 `runTag` 多一个首参（stale），CLI 与 GUI 同一句 | DESIGN-GUI §11 |
 | `pm plan prune` | 清理范围 = **已执行**（`planExecuted`，判据不变）∪ **失效草稿**（`planStale`）；journal 有告警的根一份不删（此前告警只是附注、仍按折叠结果清已执行；失效判据依赖「无 Done」，告警下不可信，整根跳过）。还能执行的草稿与带裁决残余的计划照旧不动 | — |
 | `pm serve` | `GET /api/plans` 每项加 `stale`（布尔）与 `state`（`runTag` 原句，GUI 原样显示——此前 GUI 自己拼「部分 m/n」，把「已执行（余 8 项待裁决）」显示成了「部分 8/8」）；路由集合不变 | DESIGN-GUI §11 |
 | `pm ui` 计划页 | 列表与明细改**上下整宽堆叠**（`.split` 单栏；列表在 `.tbl-scroll` 里 ≤ 42 vh 自滚、表头钉住）：此前两栏各半，9 列 nowrap 的列表比半栏宽而 `.table` 的 `overflow:hidden` 让它对栏宽的最小贡献算 0，多出的尾列被后画的明细盖住，明细里路径逐字折行、待裁决徽标（整句 why）碎成多行。明细：路径列 `td.path` 任意断行、状态列 `td.stc` 只放三词徽标、待裁决原因另起一行灰字 `.why`；失效草稿明细顶上一条黄横幅说明并**不渲染「执行」**（终端 `pm apply` 仍可强跑）；页头按钮改名「清理已执行/失效」 | DESIGN-GUI §11 |
