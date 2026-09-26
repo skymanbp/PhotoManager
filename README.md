@@ -538,6 +538,19 @@ binaries in a Release are not built on the author's machine.
   a journal or snapshot that reads with warnings suspends the whole judgement (the
   criterion contains a negative — "no other origin record in the journal" — and cannot be
   trusted on an incomplete fold).
+- ~~Full debug audit + five cross-cutting lenses~~ ✅ 1.2.1 (2026-09-26; owner ruling "clear
+  every leftover, close the project out, then release"): 84 verified findings fixed — 59 from
+  the 2026-09-25 full debug audit plus 25 from the exception-handling, encoding & time, CLI &
+  doc drift, security and partial-function lenses — clustered by root cause, each fix pinned
+  by a test or sentinel that runs on Windows. The one critical (cross-cut #81): the AI
+  suggestion buttons ran `claude -p` with the photo folder as its working directory, so a
+  `.claude/settings.json` hook planted on a memory card could run commands as you; claude now
+  runs in an empty directory of pm's own and reads photos only through `--add-dir`.
+  `pm convert` colour-manages CMYK / LAB sources to sRGB (#82; re-derive earlier ones with
+  `pm convert --redo <path…>`); existence probes are three-state, so "can't tell" (ACL denied,
+  media error) is no longer reported as "missing"; usage errors and an unfound backup drive
+  exit 2. Photos and on-disk formats are unchanged. Details:
+  [release notes](docs/release-notes/v1.2.1.md).
 
 **Known limitations**:
 
