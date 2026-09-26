@@ -9,6 +9,7 @@ module Pm.Backup
   ( discoverBackupRoot
   , discoverBackupRoots
   , discoverAmong
+  , discoverAmongStates
   , BackupCacheMeta (..)
   , writeBackupCache
   , readBackupCacheMeta
@@ -22,23 +23,36 @@ import qualified Data.Text as T
 import Data.Time (UTCTime)
 import System.FilePath ((</>))
 
-import Pm.Config (Config (..), SideCacheWrite (..), pmSubBackupCache, readRootInfo, readSideCache, writeSideCache)
+import Pm.Config (Config (..), RootIdState (..), SideCacheWrite (..), pmSubBackupCache, readRootState, readSideCache, writeSideCache)
 import Pm.Types
-import Pm.Win (listCandidateDrives, suppressCriticalErrorDialogs)
+import Pm.Win (NameKind (..), listCandidateDrives, probeName, suppressCriticalErrorDialogs)
 
 -- | 在给定候选路径里找带该 UUID 的备份 root，返回**全部**命中（P3b-5 复审
 -- #6：两块盘同时挂载且带同一 UUID——整盘克隆——只返回首命中会把身份歧义
 -- 藏起来）。候选列表可注入，便于 fixture 测试。
 discoverAmong :: Text -> [FilePath] -> IO [FilePath]
-discoverAmong bid cands = do
-  hits <- forM cands $ \c -> do
-    minfo <- readRootInfo c
-    pure [c | Just i <- [minfo], riRole i == RoleBackup, riId i == bid]
-  pure (concat hits)
+discoverAmong bid cands = fst <$> discoverAmongStates bid cands
+
+-- | 'discoverAmong' 按四态读（'readRootState'，审计 #26）：命中之外，交出「路径在、root-id.json 也在，
+-- 但损坏 \/ 读不出」的候选及原因——此前经 'readRootInfo' 的 Maybe 一并塌成「不命中」，零命中时报
+-- 「未挂载，插上盘」。缺标识、别的 root 的标识、路径根本不在（空读卡器槽也落在这）的照旧不算。
+discoverAmongStates :: Text -> [FilePath] -> IO ([FilePath], [(FilePath, String)])
+discoverAmongStates bid cands = do
+  rs <- forM cands $ \c -> do
+    st <- readRootState c
+    case st of
+      RootPresent i -> pure ([c | riRole i == RoleBackup, riId i == bid], [])
+      RootAbsent -> pure ([], [])
+      RootCorrupt m -> pure ([], [(c, "身份损坏: " <> m)])
+      RootUntrusted m -> do
+        -- 读不出也可能只是这个卷上根本没有这条路径、或卷没就绪——那不是「身份坏了」，不报
+        k <- probeName c
+        pure ([], [(c, "身份读不出: " <> m) | k `elem` [NamePlain, NameSurrogate]])
+  pure (concatMap fst rs, concatMap snd rs)
 
 -- | Probe present REMOVABLE\/FIXED volumes for the registered backup root.
--- Right (探过的卷数, 全部命中路径)；Left = 未登记。
-discoverBackupRoots :: Config -> IO (Either String (Int, [FilePath]))
+-- Right (探过的卷数, 全部命中路径, 标识在但损坏 \/ 读不出的候选及原因)；Left = 未登记。
+discoverBackupRoots :: Config -> IO (Either String (Int, [FilePath], [(FilePath, String)]))
 discoverBackupRoots cfg = case (cfgBackupId cfg, cfgBackupSubpath cfg) of
   -- 审计 #27：手编成绝对 / 带前导分隔符的 subpath 会让每个卷都「命中」同一路径——在这里说清楚，
   -- 而不是报一句「多卷身份冲突（整盘克隆）」
@@ -48,26 +62,32 @@ discoverBackupRoots cfg = case (cfgBackupId cfg, cfgBackupSubpath cfg) of
   (Just bid, Just sub) -> do
     suppressCriticalErrorDialogs
     drives <- listCandidateDrives
-    hits <- discoverAmong bid [(c : ":\\") </> sub | (c, _) <- drives]
-    pure (Right (length drives, hits))
+    (hits, broken) <- discoverAmongStates bid [(c : ":\\") </> sub | (c, _) <- drives]
+    pure (Right (length drives, hits, broken))
   _ ->
     pure (Left "备份 root 未登记 → 插上备份盘后运行 pm backup init <盘上镜像路径>")
 
--- | 恰一命中才是可用的备份 root；零命中 = 未挂载，多命中 = 身份冲突，
--- 都拒绝（不猜哪块盘是对的）。
+-- | 恰一命中才是可用的备份 root；零命中 = 未挂载（登记路径上有标识损坏 \/ 读不出的，
+-- 点名它们——审计 #26），多命中 = 身份冲突，都拒绝（不猜哪块盘是对的）。
 discoverBackupRoot :: Config -> IO (Either String FilePath)
 discoverBackupRoot cfg = do
   er <- discoverBackupRoots cfg
   pure $ case er of
     Left m -> Left m
-    Right (_, [p]) -> Right p
-    Right (n, []) ->
+    Right (_, [p], _) -> Right p
+    Right (_, [], broken@(_ : _)) ->
+      Left
+        ( "找不到可用的备份 root：按登记的盘内路径找到的 root-id.json 损坏或读不出（"
+            <> intercalate "；" [p <> " " <> w | (p, w) <- broken]
+            <> "）——不是没插盘；人工核查修复（pm 不改写它）后重试"
+        )
+    Right (n, [], []) ->
       Left
         ( "备份盘未挂载（在 " <> show n <> " 个卷上都找不到 root "
             <> maybe "?" (T.unpack . T.take 8) (cfgBackupId cfg) <> "… 的 "
             <> maybe "?" id (cfgBackupSubpath cfg) <> "\\.pm\\root-id.json）→ 插上备份盘后重试"
         )
-    Right (_, ps) ->
+    Right (_, ps, _) ->
       Left
         ( "多个卷同时匹配备份 root（" <> intercalate "、" ps
             <> "），身份冲突（同一标识被整盘克隆），拒绝——拔掉多余的盘或修正 root-id.json"

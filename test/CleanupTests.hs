@@ -12,14 +12,14 @@ import qualified Data.ByteString as BS
 import Data.List (isInfixOf, isPrefixOf)
 import Data.Time (UTCTime (..), defaultTimeLocale, formatTime, fromGregorian, getTimeZone, utcToLocalTime)
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
-import System.FilePath ((</>))
+import System.FilePath (splitDrive, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
-import Pm.Backup (discoverBackupRoots)
+import Pm.Backup (discoverAmongStates, discoverBackupRoot, discoverBackupRoots)
 import Pm.BackupCmd (backupInitPreflight, runBackupRun)
-import Pm.Cli (GoOpts (..), healLines, parseWorkers, parseYmd)
+import Pm.Cli (GoOpts (..), bindExecRootWith, healLines, parseWorkers, parseYmd)
 import Pm.Doctor (DoctorOpts (..), Finding (..), Severity (..), repairDegraded, repairRow, runDoctor)
 import Pm.Exec (Checkpoint (..))
 import Pm.Commands (InitOpts (..), ScanCmd (..), runInit, runScanCmd)
@@ -47,6 +47,7 @@ cleanupTests =
     , testCase "#65 #84 命令行参数：日期只收十位 YYYY-MM-DD（26-09-01 不再是公元 26 年）；空路径参数不再落到当前目录（init / backup init / sort）" caseCliArgs
     , testCase "#83 整理页重扫先清模型再请求：失败的重扫之后没有旧概览、AI 按钮不亮；AI 请求收尾按当前概览定按钮" caseSortRescanReset
     , testCase "#29 #38 --repair 做了什么进返回的 findings（REPAIR 行，不直接打 stdout）；执行自愈转发它们与 Bad 行，降级成只诊断时不再报「补记 N 条」" caseRepairFindings
+    , testCase "#26 备份发现按四态读：登记路径上 root-id.json 损坏 / 读不出 → 点名那块盘（不再说「未挂载，插上盘」）；pm apply 的 UUID 绑定同样点名；路径不在照旧「未挂载」" caseBackupMarkerBroken
     ]
 
 -- | #16 / #18 的 GUI 形状（本仓不跑浏览器：源码哨兵 + node --check）。
@@ -247,3 +248,27 @@ caseRepairFindings = withSystemTempDirectory "pm-cleanup" $ \dir -> do
   assertBool "Cli 的 heal 须把 repairDegraded 交回续跑" ("pure (repairDegraded fs)" `isInfixOf` cli)
   hits <- grepSrc ("补记 Done %d 条" `isInfixOf`)
   hits @?= []
+
+-- | #26：发现侧此前经 readRootInfo 的 Maybe 读标识，登记路径上 root-id.json 损坏 / 读不出（.pm 不是目录、
+-- 是 junction、ACL 挡住）与「这个卷上没有」一样算不命中——插着的盘被报成「备份盘未挂载 → 插上备份盘后重试」，
+-- pm apply 的 UUID 绑定报「均不符」。备份路径按真实盘符发现：subpath 取临时目录去掉盘符的那段。
+caseBackupMarkerBroken :: Assertion
+caseBackupMarkerBroken = withSystemTempDirectory "pm-cleanup" $ \dir -> do
+  let cfg0 = Config (dir </> "main") Nothing Nothing Nothing Nothing Nothing (Just 0) Nothing Nothing Nothing
+      cfgOf p = cfg0 {cfgBackupId = Just "bk-26", cfgBackupSubpath = Just (snd (splitDrive p))}
+      bad = dir </> "bk"
+      opaque = dir </> "bk2"
+      refused r k = either k (\p -> assertFailure ("不该命中: " <> p)) r
+  writeF (bad </> ".pm" </> "root-id.json") "{not json"
+  writeF (opaque </> ".pm") "not a dir"
+  discoverBackupRoot (cfgOf bad) >>= \r -> refused r $ \m ->
+    assertBool m ("身份损坏" `isInfixOf` m && "不是没插盘" `isInfixOf` m && not ("插上备份盘" `isInfixOf` m))
+  discoverBackupRoot (cfgOf opaque) >>= \r -> refused r $ \m -> assertBool m ("身份读不出" `isInfixOf` m && "不是没插盘" `isInfixOf` m)
+  -- 探名答不上来的候选（卷没就绪 / 空读卡器槽是 ERROR_NOT_READY；这里用非法名 ERROR_INVALID_NAME 同形注入）：
+  -- 四态是「读不出」（可信闸把它说成 junction/别名），但说不上「这块盘的身份坏了」——不点名
+  discoverAmongStates "bk-26" [dir </> "a<b"] >>= (@?= ([], []))
+  discoverBackupRoot (cfgOf (dir </> "none")) >>= \r -> refused r $ \m -> assertBool m ("备份盘未挂载" `isInfixOf` m && "插上备份盘" `isInfixOf` m)
+  plan <- mkPlanIO (dir </> "main") []
+  bindExecRootWith (\_ -> pure ()) (cfgOf bad) plan "bk-26" >>= \r -> case r of
+    Left m -> assertBool m ("备份盘 " `isInfixOf` m && "身份损坏" `isInfixOf` m)
+    Right _ -> assertFailure "不该绑定"

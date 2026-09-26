@@ -70,7 +70,7 @@ checkConfig c = do
     (Just _, Just _) -> do
       er <- discoverBackupRoots c
       case er of
-        Right (_, bs) -> concat <$> mapM bkOne bs
+        Right (_, bs, _) -> concat <$> mapM bkOne bs
         Left _ -> pure []
     _ -> pure []
   let absErr = either (: []) (const []) (checkAbsolute c)

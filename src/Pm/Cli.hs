@@ -366,13 +366,17 @@ bindExecRootWith sink cfg plan rid = do
   eBack <- discoverBackupRoots cfg
   backSts <- case eBack of
     Left _ -> pure []
-    Right (_, ps) -> forM ps $ \bp -> (,) bp <$> readRootState bp
-  let slots =
+    Right (_, ps, _) -> forM ps $ \bp -> (,) bp <$> readRootState bp
+  let backBroken = either (const []) (\(_, _, b) -> b) eBack
+      slots =
         [(mroot, "主库" :: String, RoleMain, stMain)]
           <> [(vp, "vault", RoleVault, st) | (Just vp, Just st) <- [(cfgVaultPath cfg, stVault)]]
           <> [(bp, "备份盘", RoleBackup, st) | (bp, st) <- backSts]
       cands0 = [(p, l) | (p, l, role, RootPresent i) <- slots, riId i == rid, riRole i == role]
-      unreadable = [l <> " " <> p <> " 身份" <> why st | (p, l, _, st) <- slots, not (isPresent st)]
+      unreadable =
+        [l <> " " <> p <> " 身份" <> why st | (p, l, _, st) <- slots, not (isPresent st)]
+          -- 审计 #26：标识在但损坏 / 读不出的备份候选也点名（此前发现侧把它们塌成「不命中」）
+          <> ["备份盘 " <> p <> " " <> w | (p, w) <- backBroken]
       isPresent RootPresent {} = True
       isPresent _ = False
       why RootAbsent = "缺席（尚未 init）"
