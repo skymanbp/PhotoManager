@@ -7,15 +7,17 @@
 </head>
 <body>
   <aside class="side">
-    <div class="brand"><span class="logo">pm</span><span class="sub">照片库管理器</span></div>
+    <div class="brand"><span class="logo">pm</span><span class="sub">照片库</span></div>
+    <!-- 1.3.0 瘦身（用户 2026-09-26「傻瓜式 / 一键式，按 ADHD 用户设计」）：图标改成数字 = 数字键 1–7，
+         每页一句副标题 + 一个主按钮，长说明一律收进「说明」折叠区；元素 id 与按钮名一个不改（脚本与文档同名）。 -->
     <nav>
-      <button data-tab="status" class="active"><span class="ic">◉</span>状态</button>
-      <button data-tab="sort"><span class="ic">▦</span>整理新照片</button>
-      <button data-tab="archive"><span class="ic">▣</span>归档</button>
-      <button data-tab="vault"><span class="ic">◈</span>分类推送</button>
-      <button data-tab="plans"><span class="ic">▤</span>计划</button>
-      <button data-tab="config"><span class="ic">⚙</span>设置</button>
-      <button data-tab="help"><span class="ic">?</span>上手</button>
+      <button data-tab="status" class="active"><span class="ic">1</span>状态</button>
+      <button data-tab="sort"><span class="ic">2</span>整理新照片</button>
+      <button data-tab="archive"><span class="ic">3</span>归档</button>
+      <button data-tab="vault"><span class="ic">4</span>分类推送</button>
+      <button data-tab="plans"><span class="ic">5</span>计划</button>
+      <button data-tab="config"><span class="ic">6</span>设置</button>
+      <button data-tab="help"><span class="ic">7</span>上手</button>
     </nav>
     <div class="side-foot">
       <div id="conn" class="conn">连接中…</div>
@@ -29,48 +31,52 @@
       <header class="page-head">
         <h1>状态</h1>
         <div class="actions">
+          <button id="btn-scan" class="btn primary">扫描</button>
           <button id="btn-fresh" class="btn">核对新鲜度</button>
           <button id="btn-reload" class="btn ghost">刷新</button>
         </div>
       </header>
       <div id="status-banner" class="banner hidden"></div>
+      <div id="scan-result" class="banner hidden"></div>
+
+      <div class="card wide focus">
+        <div class="k">现在该做什么</div>
+        <ul id="next-steps" class="steps"></ul>
+      </div>
 
       <h2 class="sec">照片库 <span id="index-meta" class="muted small"></span></h2>
       <div id="layer-cards" class="cards"></div>
       <div id="fresh-line" class="line muted"></div>
 
-      <h2 class="sec">vault 展示集同步 <span class="muted small">相册 ↔ 档案仓库（个人主页用）</span></h2>
+      <h2 class="sec">展示集（vault）</h2>
       <div id="vault-card" class="card wide">
-        <div class="card-head"><span id="vault-chip" class="chip">…</span><span id="vault-summary" class="muted"></span><button id="btn-publish-copy" class="btn ghost">复制上线命令</button></div>
+        <div class="card-head"><span id="vault-chip" class="chip">…</span><span id="vault-summary" class="muted"></span><span class="actions"><button id="btn-publish-copy" class="btn">复制上线命令</button><button id="btn-terminal" class="btn">打开命令行</button></span></div>
         <div id="vault-pills" class="pills"></div>
         <div id="vault-lists" class="lists"></div>
         <div id="publish-note" class="line muted small hidden"></div>
       </div>
 
-      <h2 class="sec">备份硬盘同步</h2>
+      <h2 class="sec">备份硬盘</h2>
       <div id="backup-card" class="card wide">
         <div class="card-head"><span id="backup-chip" class="chip">…</span><span id="backup-summary" class="muted"></span></div>
         <div id="backup-detail" class="line"></div>
       </div>
-
-      <h2 class="sec">下一步</h2>
-      <ul id="next-steps" class="steps"></ul>
     </section>
 
     <!-- ── 整理新照片 ── -->
     <section id="tab-sort" class="tab">
       <header class="page-head">
-        <h1>整理新照片 <span class="muted small">相机卡 / 下载目录 → 暂存区事件夹（源目录只读，绝不改动）</span></h1>
+        <h1>整理新照片 <span class="muted small">相机卡 → 暂存区</span></h1>
         <div class="actions">
           <button id="btn-sort-ai" class="btn" disabled>AI 建议地点</button>
           <button id="btn-sort-scan" class="btn primary">扫描并分段</button>
         </div>
       </header>
       <div class="row sort-src">
-        <input id="sort-src" type="text" spellcheck="false" placeholder="源目录，例如 E:\DCIM 或 D:\Downloads\相机卡">
-        <label class="muted small">间隔阈值<input id="sort-gap" type="number" min="1" max="720" value="72" step="1"> 小时</label>
+        <input id="sort-src" type="text" spellcheck="false" placeholder="相机卡或下载目录，例如 E:\DCIM">
+        <label class="muted small">间隔<input id="sort-gap" type="number" min="1" max="720" value="72" step="1"> 小时</label>
       </div>
-      <p class="muted small">分段<strong>只是提议</strong>：时间切不开首尾相接的两趟旅程，边界以你给的日期为准。地点也只能你来给——相机没有 GPS，pm 不猜（不变量 I1）。「AI 建议地点」会把每段首/中/尾至多 5 张 jpg 交给<strong>你自己账号下的 Claude</strong>（<code>claude -p</code>，只读模式，每次有费用）看图猜地点：只<strong>预填</strong>进地点格、把握低的填成 <code>&lt;地点?&gt;</code>，不自动生成计划。</p>
+      <details class="help"><summary>说明</summary><p>源目录只读，绝不改动。分段只是提议：边界以你填的日期为准；地点要你填——相机没有 GPS，pm 不猜。「AI 建议地点」把每段首/中/尾至多 5 张 jpg 交给<strong>你自己账号下的 Claude</strong>（<code>claude -p</code> 只读模式，每次有费用），只<strong>预填</strong>地点格，把握低的填成 <code>&lt;地点?&gt;</code>。这一页只生成计划，执行在「计划」页。</p></details>
       <div id="sort-result" class="banner hidden"></div>
       <div id="sort-summary" class="line muted"></div>
       <div id="sort-segments" class="segs"></div>
@@ -80,35 +86,34 @@
     <!-- ── 归档（P8-D 第三页）── -->
     <section id="tab-archive" class="tab">
       <header class="page-head">
-        <h1>归档 <span class="muted small">暂存区 → Raw/成片 → 相册；非 jpg 先派生 jpg。三张卡都只生成计划，执行在「计划」页</span></h1>
+        <h1>归档 <span class="muted small">暂存区 → Raw / 成片 → 相册</span></h1>
         <div class="actions"><button id="btn-archive-reload" class="btn ghost">刷新</button></div>
       </header>
+      <details class="help"><summary>说明</summary><p>三张卡都只生成计划、不动照片，执行在「计划」页。①「扫描并归档」先扫描索引（= 终端 <code>pm scan</code>），再按暂存区事件夹出计划（= 终端 <code>pm import</code>）；勾「同时导入相册」会把成片里的 jpg 再拷一份进相册（与成片项同组）。②相册只收 jpg；相册已有同名不同内容的进计划待裁决，不覆盖；「忽略」按内容记住、随时取消。③tif / png / psd / heic 用本机 python + Pillow 派生一份 jpg（写进主库 <code>.pm\derived</code>，原文件不动），再由计划落到成片同事件夹或相册。</p></details>
       <div id="archive-result" class="banner hidden"></div>
       <div id="archive-warnings" class="muted small"></div>
 
-      <h2 class="sec">1 · 暂存区归档 <span class="muted small">To-Be-Sync'd 事件夹 → Raw\年\事件-Raw + 成片\事件（与终端 pm import 同一条计划路径）</span></h2>
+      <h2 class="sec">1 · 暂存区 → Raw / 成片</h2>
       <div class="card wide">
         <div id="archive-staging" class="line"></div>
         <div class="row check">
-          <label class="muted small"><input id="import-also-album" type="checkbox"> 同时导入相册（成片里的 jpg 再拷一份进相册；与成片项同组——成片没落位相册不执行）</label>
-          <button id="btn-import-plan" class="btn primary">生成归档计划</button>
+          <button id="btn-import-plan" class="btn primary big">扫描并归档</button>
+          <label class="muted small"><input id="import-also-album" type="checkbox"> 同时导入相册</label>
         </div>
       </div>
 
       <h2 class="sec">2 · 成片 → 相册 <span id="album-cand-meta" class="muted small"></span></h2>
       <div class="row check">
+        <button id="btn-album-add" class="btn primary" disabled>加入相册</button>
         <span id="album-progress" class="muted">已选 0</span>
-        <button id="btn-album-add" class="btn primary" disabled>加入相册（生成计划）</button>
-        <span class="muted small">相册是平铺的收藏层、只收 jpg；相册已有同名不同内容的会进计划待裁决，不覆盖。每张卡的「忽略」按内容 sha 把它压出候选（只是主库 .pm 里的本地决定，随时取消）。</span>
       </div>
       <div id="album-grid" class="grid"></div>
       <details id="album-ignored" class="hidden"><summary id="album-ignored-sum" class="muted small"></summary><ul id="album-ignored-list" class="steps"></ul></details>
 
-      <h2 class="sec">3 · 非 jpg 转换 <span id="convert-meta" class="muted small"></span></h2>
-      <p class="muted small">tif / png / psd / heic 等已渲染位图 → 用本机 python + Pillow 派生一份 jpg（写进主库 <code>.pm\derived</code>，<strong>原文件原地不动</strong>），再由计划落到成片同事件夹（可勾选同时进相册）或相册。点按钮时转换就发生（第一段，pm 自建状态）；落位仍要到「计划」页执行（第二段，才动照片层）。</p>
+      <h2 class="sec">3 · 非 jpg 转成 jpg <span id="convert-meta" class="muted small"></span></h2>
       <div class="row check">
-        <label class="muted small"><input id="convert-also-album" type="checkbox"> 同时进相册（成片里的源）</label>
-        <button id="btn-convert" class="btn primary" disabled>转换并生成计划</button>
+        <button id="btn-convert" class="btn primary" disabled>转换</button>
+        <label class="muted small"><input id="convert-also-album" type="checkbox"> 同时进相册</label>
       </div>
       <ul id="convert-list" class="steps"></ul>
     </section>
@@ -116,7 +121,7 @@
     <!-- ── 分类推送 ── -->
     <section id="tab-vault" class="tab">
       <header class="page-head">
-        <h1>分类推送 <span class="muted small">相册里还没进 vault 的照片（NEW）——也可以决定「暂不同步」；每张卡下面三格是照片记录（地点 / 坐标 / 标题）</span></h1>
+        <h1>分类推送 <span class="muted small">相册 → 展示集</span></h1>
         <div class="actions">
           <span id="assign-progress" class="muted">…</span>
           <button id="btn-vault-ai" class="btn">AI 建议分类/地点</button>
@@ -125,15 +130,15 @@
           <button id="btn-plan" class="btn primary" disabled>保存决定并生成推送计划</button>
         </div>
       </header>
-      <p class="muted small">「AI 建议分类/地点」把至多 20 张交给<strong>你自己账号下的 Claude</strong>（<code>claude -p</code>，只读模式，每次有费用）看图：类目只在按钮上描边、地点/坐标/标题只<strong>预填</strong>空着的格——都不算已定，类目仍要你点，记录随「保存决定并生成推送计划」写进主库 <code>.pm\vault-notes.json</code>（photos.json 不在 pm 写域）。</p>
+      <details class="help"><summary>说明</summary><p>这里列的是相册里展示集（vault）还没有的照片。每张卡选一个类目（landscape / portrait / urban）或「暂不同步」；下面三格是照片记录（地点 / 坐标 / 标题）。「AI 建议分类/地点」把至多 20 张交给<strong>你自己账号下的 Claude</strong>（<code>claude -p</code> 只读模式，每次有费用）：类目只在按钮上描边、三格只填空着的——都要你确认。「保存决定并生成推送计划」三件事一起做：记「暂不同步」、写照片记录、出推送计划；只写主库 <code>.pm</code> 与计划文件，不碰照片。</p></details>
       <div id="plan-result" class="banner hidden"></div>
       <div id="vault-grid" class="grid"></div>
     </section>
 
     <!-- ── 计划 ── -->
     <section id="tab-plans" class="tab">
-      <header class="page-head"><h1>计划</h1><div class="actions"><button id="btn-plans-prune" class="btn ghost">清理已执行/失效</button><button id="btn-plans-reload" class="btn ghost">刷新</button></div></header>
-      <p class="muted small">凡是<strong>动照片字节</strong>的写盘都是两段式：先生成计划，再执行；执行后可 <code>pm undo</code> 回滚。执行可以在这里点「执行这个计划」（要点两次确认），也可以在终端 <code>pm apply &lt;id&gt;</code>——两条路走的是同一套装载/复验/日志。执行态从 journal 折叠而来（计划文件本身不回写）；从未执行、而每条待办的源都已不在盘上的草稿标「已失效」（被后来的计划搬走/改名了，再执行只会逐项 CONFLICT）。计划文件可删（<code>pm plan rm</code> 同源）——「清理已执行/失效」一键清已执行的与已失效的，删的只是可再生成的文件，journal/undo 不受影响。（「暂不同步」与「忽略候选」是例外：不碰照片，只在主库 <code>.pm</code> 里记一条决定，直接写、随时可撤。）</p>
+      <header class="page-head"><h1>计划 <span class="muted small">先生成，再执行；执行后可撤销</span></h1><div class="actions"><button id="btn-plans-prune" class="btn ghost">清理已执行/失效</button><button id="btn-plans-reload" class="btn ghost">刷新</button></div></header>
+      <details class="help"><summary>说明</summary><p>凡是<strong>动照片</strong>的写盘都是两段式：先生成计划，再在这里点「执行这个计划」（要点两次确认），或在终端 <code>pm apply &lt;id&gt;</code>——同一套校验与日志，事后 <code>pm undo</code> 回滚。执行态从日志折叠而来（计划文件本身不回写）；「已失效」= 从未执行、而每条待办的源都已不在盘上的草稿。「删除」与「清理已执行/失效」只删可再生成的计划文件，日志与 undo 不受影响。</p></details>
       <div id="apply-result" class="banner hidden"></div>
       <div class="split">
         <div class="tbl-scroll"><table id="plan-table" class="table"><thead><tr><th>类型</th><th>计划 id</th><th>生成时间</th><th>项</th><th>待执行</th><th>跳过</th><th>待裁决</th><th>执行态</th><th></th></tr></thead><tbody></tbody></table></div>
@@ -144,7 +149,7 @@
     <!-- ── 设置 ── -->
     <section id="tab-config" class="tab">
       <header class="page-head">
-        <h1>设置 <span class="muted small">路径与并发；改完立刻生效，不用重启</span></h1>
+        <h1>设置 <span class="muted small">改完立刻生效</span></h1>
         <div class="actions"><button id="btn-config-reload" class="btn ghost">刷新</button></div>
       </header>
       <div id="config-result" class="banner hidden"></div>
@@ -154,60 +159,69 @@
         <div class="cfg">
           <div class="k">主库（只读）</div>
           <div id="cfg-main" class="v mono"></div>
-          <div class="s">主库是所有身份的锚点（root 标识、日志、索引都挂在它下面）。改它等于换一个库，一台机器设一次——在终端 <code>pm init --main &lt;路径&gt;</code>。</div>
+          <div class="s">换主库 = 换一个库，一台机器设一次：终端 <code>pm init --main &lt;路径&gt;</code>。</div>
         </div>
 
         <div class="cfg">
-          <div class="k">vault 展示集目录</div>
+          <div class="k">展示集（vault）目录</div>
           <div class="row"><input id="cfg-vault" type="text" spellcheck="false" placeholder="粘贴目录路径，如 D:\\…\\摄影作品"><button id="btn-cfg-vault" class="btn">保存</button><button id="btn-cfg-vault-clear" class="btn ghost">清空</button></div>
           <div id="cfg-vault-note" class="s"></div>
-        </div>
-
-        <div class="cfg">
-          <div class="k">photos.json（可选；配置了下面的 portfolio 仓路径则必填）</div>
-          <div class="row"><input id="cfg-photos" type="text" spellcheck="false" placeholder="portfolio 的 photos.json 路径"><button id="btn-cfg-photos" class="btn">保存</button><button id="btn-cfg-photos-clear" class="btn ghost">清空</button></div>
-          <div class="s">两个用途：RENAME 的<strong>只读</strong>引用检查（被它引用的文件名不会被改名，会打断已上线的图片链接）；以及上线命令里 portfolio 仓<strong>唯一</strong>会 add 的文件——它必须在 portfolio 仓内。</div>
-        </div>
-
-        <div class="cfg">
-          <div class="k">并发数</div>
-          <div class="row"><input id="cfg-workers" type="number" min="1" max="64" placeholder="默认 = 逻辑处理器数"><button id="btn-cfg-workers" class="btn">保存</button><button id="btn-cfg-workers-clear" class="btn ghost">恢复默认</button></div>
-          <div class="s"><strong>扫描</strong>的并行度，1..64。备份盘不读它——那边默认单线程防 HDD 寻道抖动，要改用终端 <code>pm backup --workers N</code>。</div>
-        </div>
-
-        <div class="cfg">
-          <div class="k">上线命令（「状态」页的复制入口用）</div>
-          <div class="row"><input id="cfg-portfolio-dir" type="text" spellcheck="false" placeholder="portfolio 仓的本地路径（可选）"><button id="btn-cfg-portfolio-dir" class="btn">保存</button><button id="btn-cfg-portfolio-dir-clear" class="btn ghost">清空</button></div>
-          <div class="row"><input id="cfg-vault-push" type="text" spellcheck="false" placeholder="展示集仓 push 目标，如 origin main（留空 = git push）"><button id="btn-cfg-vault-push" class="btn">保存</button><button id="btn-cfg-vault-push-clear" class="btn ghost">清空</button></div>
-          <div class="row"><input id="cfg-portfolio-push" type="text" spellcheck="false" placeholder="portfolio 仓 push 目标（留空 = git push）"><button id="btn-cfg-portfolio-push" class="btn">保存</button><button id="btn-cfg-portfolio-push-clear" class="btn ghost">清空</button></div>
-          <div class="s">「复制上线命令」按 vault 目录 + 这三项生成两仓的 git 提交/推送命令：展示集仓只显式 add landscape / portrait / urban 三个类目，portfolio 仓只 add 上面的 photos.json（所以填了 portfolio 仓路径就必须同时设 photos.json，否则拒绝生成——永不整仓 add）。路径只接受盘符绝对路径且只含字母数字、空格与 -_.()'+,=@~#&，push 目标形如 <code>origin main</code>。pm 从不替你执行 git（不变量 I9）——复制后自己粘进终端，看清再回车。</div>
         </div>
 
         <div class="cfg">
           <div class="k">备份硬盘</div>
           <div id="cfg-backup" class="v"></div>
           <div class="row"><input id="cfg-backup-path" type="text" spellcheck="false" placeholder="盘上的镜像路径，如 E:\\Photography"><button id="btn-cfg-backup" class="btn">登记这块盘</button></div>
-          <div class="s">登记会在<strong>那块盘上</strong>建立备份 root 标识（已经是备份 root 就沿用），并按 UUID + 盘内相对路径记住它——以后换盘符也认得出。照片不动。</div>
-          <div class="row"><input id="cfg-drive-wait" type="number" min="0" max="86400" placeholder="默认 1800 秒"><button id="btn-cfg-drive-wait" class="btn">保存</button><button id="btn-cfg-drive-wait-clear" class="btn ghost">恢复默认</button></div>
-          <div class="s"><strong>掉线等待</strong>：备份 / 检查途中 USB 盘瞬断时，最多等它回来多少秒，然后从中断处接着跑（已落好的文件不重做）。0 = 关闭，出错就停。</div>
+          <div class="s">在那块盘上建备份标识（已有就沿用），按 UUID 认盘，换盘符也认得。照片不动。</div>
         </div>
       </div>
+
+      <details class="help adv"><summary>高级设置</summary>
+      <div class="card-row">
+        <div class="cfg">
+          <div class="k">photos.json（可选；填了下面的 portfolio 仓路径就必填）</div>
+          <div class="row"><input id="cfg-photos" type="text" spellcheck="false" placeholder="portfolio 的 photos.json 路径"><button id="btn-cfg-photos" class="btn">保存</button><button id="btn-cfg-photos-clear" class="btn ghost">清空</button></div>
+          <div class="s">改名计划会<strong>只读</strong>查它：被它引用的文件名不改（会打断线上图片链接）；也是上线命令里 portfolio 仓<strong>唯一</strong>会 add 的文件——必须在 portfolio 仓内。</div>
+        </div>
+
+        <div class="cfg">
+          <div class="k">并发数</div>
+          <div class="row"><input id="cfg-workers" type="number" min="1" max="64" placeholder="默认 = 逻辑处理器数"><button id="btn-cfg-workers" class="btn">保存</button><button id="btn-cfg-workers-clear" class="btn ghost">恢复默认</button></div>
+          <div class="s">只影响<strong>扫描</strong>（1..64）。备份盘默认单线程防 HDD 寻道抖动，要改用终端 <code>pm backup --workers N</code>。</div>
+        </div>
+
+        <div class="cfg">
+          <div class="k">上线命令（「状态」页「复制上线命令」用）</div>
+          <div class="row"><input id="cfg-portfolio-dir" type="text" spellcheck="false" placeholder="portfolio 仓的本地路径（可选）"><button id="btn-cfg-portfolio-dir" class="btn">保存</button><button id="btn-cfg-portfolio-dir-clear" class="btn ghost">清空</button></div>
+          <div class="row"><input id="cfg-vault-push" type="text" spellcheck="false" placeholder="展示集仓 push 目标，如 origin main（留空 = git push）"><button id="btn-cfg-vault-push" class="btn">保存</button><button id="btn-cfg-vault-push-clear" class="btn ghost">清空</button></div>
+          <div class="row"><input id="cfg-portfolio-push" type="text" spellcheck="false" placeholder="portfolio 仓 push 目标（留空 = git push）"><button id="btn-cfg-portfolio-push" class="btn">保存</button><button id="btn-cfg-portfolio-push-clear" class="btn ghost">清空</button></div>
+          <div class="s">按 vault 目录 + 这三项生成两仓的 git 提交/推送命令：展示集仓只显式 add landscape / portrait / urban 三个类目，portfolio 仓只 add 上面的 photos.json（所以填了 portfolio 仓路径就必须同时设 photos.json，否则拒绝生成——永不整仓 add）。路径只接受盘符绝对路径且只含字母数字、空格与 -_.()'+,=@~#&，push 目标形如 <code>origin main</code>。pm 从不替你执行 git——复制后粘进命令行，看清再回车。</div>
+        </div>
+
+        <div class="cfg">
+          <div class="k">备份盘掉线等待</div>
+          <div class="row"><input id="cfg-drive-wait" type="number" min="0" max="86400" placeholder="默认 1800 秒"><button id="btn-cfg-drive-wait" class="btn">保存</button><button id="btn-cfg-drive-wait-clear" class="btn ghost">恢复默认</button></div>
+          <div class="s">备份 / 检查途中 USB 盘瞬断时，最多等它回来多少秒，然后从中断处接着跑（已落好的文件不重做）。0 = 关闭，出错就停。</div>
+        </div>
+      </div>
+      </details>
     </section>
 
     <!-- ── 上手 ── -->
     <section id="tab-help" class="tab">
       <header class="page-head"><h1>四步上手</h1></header>
       <ol class="howto">
-        <li><b>看状态</b>：左侧「状态」一眼看清三件事——Raw / 成片 / 相册各多少、相册与 vault 差哪些、备份盘上次什么时候同步。</li>
-        <li><b>整理与归档</b>：「整理新照片」把相机卡按拍摄时间分段进暂存区；「归档」把暂存区事件夹归入 Raw/成片（可同时导入相册）、把成片 jpg 挑进相册、把 tif/png 派生成 jpg。每一步都只生成计划。</li>
-        <li><b>分类推送</b>：「分类推送」里给每张 NEW 照片选 landscape / portrait / urban（可先点「AI 建议分类/地点」预填），点「保存决定并生成推送计划」。这一步只写计划文件与主库 <code>.pm</code> 里的记录，不碰照片。</li>
-        <li><b>执行</b>：到「计划」页点「执行这个计划」（点两次确认），或在终端跑 <code>pm apply &lt;id&gt;</code>——同一套校验写入 + 日志，随时 <code>pm undo</code>。之后按提示做 git 提交，或用「状态」页的「复制上线命令」（pm 从不替你执行 git）。</li>
+        <li><b>看状态</b>（按 1）：「现在该做什么」列出待办，点它就跳到对应页。索引旧了点「扫描」（= 终端 <code>pm scan</code>，几秒；首次全量 10–25 分钟）。</li>
+        <li><b>整理 → 归档</b>（按 2、3）：「整理新照片」把相机卡按拍摄时间分段进暂存区；「归档」页点「扫描并归档」，暂存区事件夹归入 Raw / 成片（可同时进相册）。每一步都只生成计划。</li>
+        <li><b>分类推送</b>（按 4）：给每张新照片选类目（可先「AI 建议分类/地点」预填），点「保存决定并生成推送计划」。</li>
+        <li><b>执行</b>（按 5）：在「计划」页点「执行这个计划」，点两次确认；事后可 <code>pm undo</code>。要上线：回「状态」页点「复制上线命令」，再点「打开命令行」，粘贴、看清、回车——pm 从不替你执行 git。</li>
       </ol>
-      <p class="muted">安全模型：GUI 是独立进程，从不直接触碰照片文件；一切经 <code>pm serve</code> 的本机 API。pm 没有删除与覆盖原语——唯一的移出机制是带清单的隔离区。AI 只出建议：跑在你自己账号的 <code>claude -p</code> 只读模式下，构造上写不了任何东西。</p>
+      <details class="help"><summary>安全模型</summary><p>GUI 是独立进程，从不直接触碰照片文件；一切经 <code>pm serve</code> 的本机 API。pm 没有删除与覆盖原语——唯一的移出机制是带清单的隔离区。AI 只出建议：跑在你自己账号的 <code>claude -p</code> 只读模式下，构造上写不了任何东西。「打开命令行」只是开一个窗口（pm 已在 PATH），里面敲什么由你定。</p></details>
     </section>
   </main>
   <script src="vault.js"></script>
   <script src="archive.js"></script>
+  <script src="actions.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

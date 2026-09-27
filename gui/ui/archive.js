@@ -1,13 +1,16 @@
 // pm-ui「归档」页（P8-D，DESIGN-P8 §23.2）：三张卡——暂存区归档 / 成片 → 相册 /
 // 非 jpg 转换。外链脚本、无内联；由 app.js 用共享工具构造：
-//   window.pmArchive({ $, el, mib, get, getJson, post, stamp, stale, bodyLines, shrink, loadPlans })
+//   window.pmArchive({ $, el, mib, get, getJson, post, stamp, stale, bodyLines, shrink, loadPlans, scan, goPlans })
 //     → { loadArchive, busy }
 // 端点：/api/status（暂存摘要，只读）、/api/album/candidates（只读）、
 // /api/import/plan、/api/album/add-plan、/api/convert/plan（都只生成计划文件——转换的
 // 第一段会写主库 .pm/derived 的派生件，那是 pm 自建状态，原文件不动）。执行仍在
 // 「计划」页 / 终端 pm apply。页面永不直接碰照片，一切经 pm serve。
+// 1.3.0（用户 2026-09-26 实机：点「生成归档计划」得到「暂存区与索引不一致 → 先 pm scan」，
+// GUI 里却没处扫）：第一张卡改成「扫描并归档」——先 scan（actions.js，POST /api/scan，= 终端
+// pm scan）再出计划；两步都是与终端同一条路，只是替用户把「先 pm scan」这句提示做了。
 window.pmArchive = function (u) {
-  const { $, el, mib, get, getJson, post, stamp, stale, bodyLines, shrink, loadPlans } = u;
+  const { $, el, mib, get, getJson, post, stamp, stale, bodyLines, shrink, loadPlans, scan, goPlans } = u;
   let thumbUrls = [];
   let busyFlag = false;
   const picked = new Set(); // 成片 → 相册：勾选的 <事件夹>/<文件名>（候选给的 rel，原样回传）
@@ -27,8 +30,8 @@ window.pmArchive = function (u) {
       if (stale("archive", gen)) return;
       const i = s.index, st = $("#archive-staging");
       // 审计 #16：索引读不出（warnings 带原因）≠ 尚未索引
-      if (!i) st.textContent = (s.warnings || []).length ? "主库索引读不出：" + s.warnings.join("；") + "——排除原因后重试" : "主库尚未索引——先在终端 pm scan。";
-      else if (!i.stagingEvents.length) st.textContent = "暂存区没有待归档的事件夹。";
+      if (!i) st.textContent = (s.warnings || []).length ? "主库索引读不出：" + s.warnings.join("；") + "——排除原因后重试" : "主库尚未索引——点「扫描并归档」会先扫描（首次全量约 10–25 分钟）。";
+      else if (!i.stagingEvents.length) st.textContent = "暂存区没有待归档的事件夹。（刚放进去的要先扫描才看得见——点「扫描并归档」即可。）";
       else st.textContent = `暂存区 ${i.stagingEvents.length} 个事件夹 · ${i.stagingFiles} 文件（其中 ${i.stagingArchived} 已在归档层有同内容副本）：` + i.stagingEvents.slice(0, 12).join("、") + (i.stagingEvents.length > 12 ? " …" : "");
       const grid = $("#album-grid"); grid.innerHTML = "";
       for (const x of thumbUrls) URL.revokeObjectURL(x); thumbUrls = [];
@@ -78,13 +81,13 @@ window.pmArchive = function (u) {
           grid.appendChild(card); cards.push([p, ph]);
         }
       }
-      if (unaddable.length) grid.appendChild(el("div", "muted", "⚠ 这些成片 jpg 不能直接加入相册（先移进一个事件夹，再 pm scan）：" + unaddable.map((u) => u.path).join("、")));
+      if (unaddable.length) grid.appendChild(el("div", "muted", "⚠ 这些成片 jpg 不能直接加入相册（先移进一个事件夹，再到「状态」页点「扫描」）：" + unaddable.map((u) => u.path).join("、")));
       if (!total && !unaddable.length) grid.appendChild(el("div", "muted", "没有候选：成片里的 jpg 都已在相册（或主库还没有成片）。"));
       renderIgnored(c.ignored || [], c.ignoreStale || []);
       renderConvert(c.nonJpg);
       // 索引里损坏跳过的快照行：与 CLI 一样说出来，不吞——写在专用行，不占结果横幅
       // （门禁 F3：占横幅会在 planCall 收尾的 loadArchive 里把刚出的计划 id 抹掉）
-      $("#archive-warnings").textContent = (c.warnings || []).length ? "⚠ 索引快照损坏已跳过（候选可能不全，先在终端 pm scan）：" + c.warnings.join("；") : "";
+      $("#archive-warnings").textContent = (c.warnings || []).length ? "⚠ 索引快照损坏已跳过（候选可能不全，先到「状态」页点「扫描」）：" + c.warnings.join("；") : "";
       updateButtons();
       for (const [p, ph] of cards) {
         if (stale("archive", gen)) return;
@@ -160,7 +163,7 @@ window.pmArchive = function (u) {
       const body = await r.json().catch(() => ({}));
       if (!r.ok) { note("bad", what + "失败：" + (body.error || ("HTTP " + r.status)) + bodyLines(body)); return; }
       const log = (body.log || []).join("\n");
-      if (body.planId) note("ok", `${what}：计划已生成 ${body.planId}——只写了计划文件，照片未动。\n下一步到「计划」页查看明细并执行（或在终端 pm apply ${body.planId}）` + (log ? "\n" + log : ""));
+      if (body.planId) { note("ok", `${what}：计划已生成 ${body.planId}——只写了计划文件，照片未动。\n下一步到「计划」页查看明细并执行（或在终端 pm apply ${body.planId}）` + (log ? "\n" + log : "")); goPlans($("#archive-result")); }
       else note(body.code === 0 ? "ok" : "warn", (body.code === 0 ? what + "：无需计划（全部已落位）。" : what + "：没有生成计划——看下面的交代。") + "\n" + (log || `退出码 ${body.code}`));
       await loadPlans().catch(() => {});
     } catch (e) { note("bad", "请求失败：" + e.message); }
@@ -168,7 +171,14 @@ window.pmArchive = function (u) {
     // 刷新失败不改判：计划已经生成，把它作为附注接在文案后面
     try { await loadArchive(); } catch (e) { $("#archive-result").textContent += "\n（页面刷新失败：" + e.message + "，按 3 重进本页）"; }
   }
-  $("#btn-import-plan").onclick = () => planCall("/api/import/plan", { alsoAlbum: $("#import-also-album").checked }, "暂存区归档");
+  // 扫描并归档（1.3.0）：先扫描（结果先落在本页横幅），扫成了才出计划；扫描期间三个按钮都灰。
+  async function scanThenImport() {
+    busyFlag = true; updateButtons();
+    let ok = false;
+    try { ok = await scan($("#archive-result")); } finally { busyFlag = false; updateButtons(); }
+    if (ok) await planCall("/api/import/plan", { alsoAlbum: $("#import-also-album").checked }, "暂存区归档");
+  }
+  $("#btn-import-plan").onclick = () => scanThenImport().catch((e) => note("bad", "请求失败：" + e.message));
   $("#btn-album-add").onclick = () => planCall("/api/album/add-plan", { paths: [...picked] }, "成片 → 相册");
   $("#btn-convert").onclick = () => planCall("/api/convert/plan", { paths: [...convPicked], alsoAlbum: $("#convert-also-album").checked }, "转换");
   $("#btn-archive-reload").onclick = () => loadArchive().catch((e) => note("bad", "读取失败：" + e.message));

@@ -36,6 +36,7 @@ module Pm.Cli
   , withFreshStagingCatalog
   , freshStagingCatalog
   , reportScanIssues
+  , reportScanIssuesTo
   , refreshBackupCache
   , exitBoundary
   , parseYmd
@@ -596,24 +597,29 @@ freshStagingCatalog sink root = do
       pure (either Left (const (Right cat)) fr)
 
 reportScanIssues :: ScanResult -> IO ()
-reportScanIssues result = do
+reportScanIssues = reportScanIssuesTo putStrLn
+
+-- | 打印口由调用方给（工作流 F051 的 sink 纪律）：1.3.0 的 @POST \/api\/scan@ 把这些
+-- 交代行收进 JSON（GUI 拉起的 serve 已静音 stdout）；CLI 仍是 'reportScanIssues'。
+reportScanIssuesTo :: (String -> IO ()) -> ScanResult -> IO ()
+reportScanIssuesTo sink result = do
   unless (null (srVolatile result)) $ do
-    printf "⚠ %d 个文件在 hash 期间被修改（本轮未入索引，重跑 pm scan）:\n" (length (srVolatile result))
-    mapM_ (putStrLn . ("    ~ " <>)) (take 10 (srVolatile result))
+    sink (printf "⚠ %d 个文件在 hash 期间被修改（本轮未入索引，重跑 pm scan）:" (length (srVolatile result)))
+    mapM_ (sink . ("    ~ " <>)) (take 10 (srVolatile result))
   when (srCarried result > 0) $
-    printf "⚠ %d 条本轮没核对（子树未能枚举 / 读不出 / 云端未下载），按「查不出」保留上次快照值（解除占用/权限、下载到本机后重跑 pm scan）\n" (srCarried result)
+    sink (printf "⚠ %d 条本轮没核对（子树未能枚举 / 读不出 / 云端未下载），按「查不出」保留上次快照值（解除占用/权限、下载到本机后重跑 pm scan）" (srCarried result))
   -- 审计 #8（用户裁定「不读，单列出来」）：云端未下载的单列，不混进「有错误」
   let (cloud, errs) = partition ((== cloudOnlyNote) . snd) (srErrors result)
   unless (null cloud) $ do
-    printf "☁ %d 个文件云端未下载，未读取（读就会触发下载）；设为「始终保留在此设备上」后重跑 pm scan:\n" (length cloud)
-    mapM_ (putStrLn . ("    ☁ " <>) . fst) (take 20 cloud)
+    sink (printf "☁ %d 个文件云端未下载，未读取（读就会触发下载）；设为「始终保留在此设备上」后重跑 pm scan:" (length cloud))
+    mapM_ (sink . ("    ☁ " <>) . fst) (take 20 cloud)
     when (length cloud > 20) $
-      printf "    …另有 %d 个\n" (length cloud - 20)
+      sink (printf "    …另有 %d 个" (length cloud - 20))
   unless (null errs) $ do
-    printf "⚠ %d 个条目有错误:\n" (length errs)
-    mapM_ (\(p, e) -> putStrLn ("    ! " <> p <> ": " <> e)) (take 20 errs)
+    sink (printf "⚠ %d 个条目有错误:" (length errs))
+    mapM_ (\(p, e) -> sink ("    ! " <> p <> ": " <> e)) (take 20 errs)
     when (length errs > 20) $
-      printf "    …另有 %d 条\n" (length errs - 20)
+      sink (printf "    …另有 %d 条" (length errs - 20))
 
 refreshBackupCache :: (String -> IO ()) -> Config -> FilePath -> Catalog -> BackupDiff -> IO ()
 refreshBackupCache sink cfg broot bakCat d = do

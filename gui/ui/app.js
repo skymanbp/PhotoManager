@@ -9,7 +9,8 @@
 // 动照片字节的端点，执行链与 CLI 的 pm apply 同源。git 仍只生成命令不执行（I9）。
 // 只读级的 POST /api/suggest（P8-D）拉起用户自己账号的 claude -p 看图，只出建议。
 // P8-A：「分类推送」页的逻辑在 vault.js（window.pmVault 工厂）；P8-D：「归档」页在
-// archive.js（window.pmArchive）——本文件触 750 行预算。
+// archive.js（window.pmArchive）——本文件触 750 行预算。1.3.0：跨页的一键动作（扫描
+// POST /api/scan——第十三个写端点、打开命令行、跳去计划页）在 actions.js（window.pmActions）。
 (async function () {
   const $ = (s) => document.querySelector(s);
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
@@ -89,9 +90,9 @@
         // 审计 #16：index 为空分两种——从没扫过（warnings 空）与索引读不出（可信闸拒 / 快照坏 / 身份缺，
         // warnings 带原因）。后者此前也说「尚未索引 → pm scan」，真正的原因被丢掉。
         if (s.warnings.length) {
-          banner.className = "banner bad"; banner.textContent = "主库索引读不出：" + s.root + "\n" + s.warnings.join("\n") + "\n→ 排除原因后重试，或在终端 pm scan 重建";
+          banner.className = "banner bad"; banner.textContent = "主库索引读不出：" + s.root + "\n" + s.warnings.join("\n") + "\n→ 排除原因后重试，或点右上「扫描」重建";
         } else {
-          banner.className = "banner warn"; banner.textContent = "主库尚未索引：" + s.root + "\n→ 在终端运行 pm scan（首次全量约 10–25 分钟）";
+          banner.className = "banner warn"; banner.textContent = "主库尚未索引：" + s.root + "\n→ 点右上「扫描」（首次全量约 10–25 分钟）";
         }
         $("#layer-cards").innerHTML = ""; return;
       }
@@ -117,8 +118,9 @@
       const fl = $("#fresh-line");
       if (i.freshness) {
         const f = i.freshness, errs = f.errors || 0, n = f.new + f.changed + f.missing + errs;
-        fl.textContent = n === 0 ? "✓ 索引与磁盘一致" : `⚠ 索引已过期或核对受阻：新增 ${f.new} / 变更 ${f.changed} / 消失 ${f.missing} / 读取错误 ${errs} → 在终端运行 pm scan`;
-        if (n) steps.push(["索引已过期或核对受阻", "pm scan"]);
+        fl.textContent = n === 0 ? "✓ 索引与磁盘一致" : `⚠ 索引已过期或核对受阻：新增 ${f.new} / 变更 ${f.changed} / 消失 ${f.missing} / 读取错误 ${errs} → 点右上「扫描」`;
+        // 1.3.0：第四元是页内动作（扫描就在本页，不是切页）——扫完重载状态
+        if (n) steps.push(["索引已过期或核对受阻", "点这里扫描", null, () => act.scan($("#scan-result")).then((ok) => { if (ok) loadStatus(false).catch(fail); })]);
       } else fl.textContent = "（未核对新鲜度——点右上「核对新鲜度」做一次 stat 级比对，约 2 秒）";
       if (i.oldestVerifiedDays != null) fl.textContent += ` · 最久未验证字节 ${i.oldestVerifiedDays} 天前`;
       if (i.stagingEvents.length) {
@@ -128,7 +130,7 @@
       // 备份盘
       const bchip = $("#backup-chip"), bsum = $("#backup-summary"), bdet = $("#backup-detail");
       const b = i.backup;
-      if (b.state === "absent") { bchip.textContent = "未登记"; bchip.className = "chip"; bsum.textContent = "还没有登记备份盘"; bdet.textContent = "插上硬盘后在终端运行：pm backup init <盘上镜像路径>，再 pm backup。之后这里会显示上次同步时间与滞后量。"; steps.push(["备份盘未登记", "pm backup init <镜像路径> → pm backup"]); }
+      if (b.state === "absent") { bchip.textContent = "未登记"; bchip.className = "chip"; bsum.textContent = "还没有登记备份盘"; bdet.textContent = "插上硬盘后到「设置」页登记这块盘，再在命令行跑 pm backup。之后这里会显示上次同步时间与滞后量。"; steps.push(["备份盘未登记", "去「设置」登记", "config"]); }
       else if (b.state === "untrusted") { bchip.textContent = "缓存不可信"; bchip.className = "chip bad"; bsum.textContent = b.error; bdet.textContent = "人工核查 .pm/backup-cache"; steps.push(["备份缓存不可信", "人工核查"]); }
       else { const m = b.meta, lag = m.add + m.update; bchip.textContent = lag === 0 ? "上次同步无滞后" : `落后 ${lag} 项`; bchip.className = "chip " + (lag === 0 ? "ok" : "warn"); bsum.textContent = `上次同步 ${when(m.at)} · ${m.path}`; bdet.textContent = `待新增 ${m.add} · 待更新 ${m.update} · 备份盘多出 ${m.extra}（EXTRA 只报告，永不删）。插盘后运行 pm backup 刷新。`; if (lag) steps.push([`备份盘落后 ${lag} 项`, "插盘后 pm backup"]); }
       // vault（用完整差异接口，"差哪些"）
@@ -188,7 +190,7 @@
       // 可能正好是待办本身）。
       if (!steps.length && !vaultFailed && !s.warnings.length) ns.appendChild(el("li", null, "✓ 没有待办：索引、vault、备份都无需动作。"));
       if (vaultFailed) ns.appendChild(el("li", null, "⚠ vault 状态没读出来，上面的清单可能不全——看 vault 卡片里的原因。"));
-      for (const [what, how, tab] of steps) { const li = el("li"); li.appendChild(el("span", null, what + " → ")); if (tab) { const a = el("a", null, how); a.onclick = () => showTab(tab); li.appendChild(a); } else li.appendChild(el("code", null, how)); ns.appendChild(li); }
+      for (const [what, how, tab, fn] of steps) { const li = el("li"); li.appendChild(el("span", null, what + " → ")); if (tab || fn) { const a = el("a", null, how); a.onclick = fn || (() => showTab(tab)); li.appendChild(a); } else li.appendChild(el("code", null, how)); ns.appendChild(li); }
       for (const w of s.warnings) { const li = el("li", null, "⚠ " + w); ns.appendChild(li); }
     } catch (e) {
       if (stale("status", gen)) return; // stale 失败不许改画面（41 轮 #2）
@@ -197,10 +199,13 @@
   }
 
   const post = (path, body) => req(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  // 1.3.0 跨页一键动作（actions.js）：扫描 / 打开命令行 / 跳去计划页（showTab 是函数声明，提升可见）。
+  const act = window.pmActions({ $, el, post, getJson, invoke, showTab });
   // 分类推送页（P8-A 拆到 vault.js）：用本文件的共享工具构造，页面状态封在工厂里。
-  const vault = window.pmVault({ $, el, mib, get, getJson, post, stamp, stale, bodyLines });
-  // 归档页（P8-D，archive.js）：缩略图缩放复用 vault.shrink，出计划后刷新计划页（loadPlans 是函数声明，提升可见）。
-  const archive = window.pmArchive({ $, el, mib, get, getJson, post, stamp, stale, bodyLines, shrink: vault.shrink, loadPlans });
+  const vault = window.pmVault({ $, el, mib, get, getJson, post, stamp, stale, bodyLines, goPlans: act.goPlansBtn });
+  // 归档页（P8-D，archive.js）：缩略图缩放复用 vault.shrink，出计划后刷新计划页（loadPlans 是函数声明，提升可见）；
+  // 1.3.0：「扫描并归档」先走 act.scan 再出计划。
+  const archive = window.pmArchive({ $, el, mib, get, getJson, post, stamp, stale, bodyLines, shrink: vault.shrink, loadPlans, scan: act.scan, goPlans: act.goPlansBtn });
 
   // ── 上线命令（P7）──
   // 文本由服务端 GET /api/publish-commands 生成（Pm.Publish，纯函数）；这里
@@ -651,6 +656,7 @@
       if (!r.ok) { sortNote("bad", (body.error || ("HTTP " + r.status)) + bodyLines(body)); return; }
       if (body.planId) {
         sortNote("ok", `计划已生成：${body.planId}\n下一步到「计划」页查看明细并执行（或在终端 pm apply ${body.planId}）`);
+        act.goPlansBtn($("#sort-result"));
       } else {
         // 「详情见终端」在 GUI 下是句空话：pm ui 拉起的 serve，stdout 挂在
         // 空设备上，没有哪个终端会印出来。逐行日志由响应体带回来（log），
@@ -689,6 +695,9 @@
   $("#sort-src").addEventListener("keydown", (e) => { if (e.key === "Enter") sortScan().catch(fail); });
   $("#btn-fresh").onclick = () => loadStatus(true).catch(fail);
   $("#btn-reload").onclick = () => loadStatus(false).catch(fail);
+  // 1.3.0：扫描（扫完重载状态，让四层卡 / 新鲜度 / 下一步按新索引说话）与打开命令行
+  $("#btn-scan").onclick = () => act.scan($("#scan-result")).then((ok) => { if (ok) loadStatus(false).catch(fail); });
+  $("#btn-terminal").onclick = () => act.openTerminal();
   $("#btn-plans-reload").onclick = () => loadPlans().catch(fail);
   $("#btn-plans-prune").onclick = () => prunePlansReq().catch(fail);
   $("#btn-plan").onclick = () => vault.makePlan();

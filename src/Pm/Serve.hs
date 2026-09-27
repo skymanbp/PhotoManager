@@ -83,7 +83,7 @@ import System.IO (IOMode (ReadMode), hClose, hFlush, stdout)
 
 import Pm.Catalog (CatalogLoad (..), catalogMaybe, loadCatalog, loadNote)
 import Pm.Cli (ExecStop (..), GoOpts (..), executePlanNowWith)
-import Pm.Commands (afterApply, loadPlanAnyRoot, prepareApply)
+import Pm.Commands (ScanCmd (..), afterApply, loadPlanAnyRoot, prepareApply, runScanTo)
 import Pm.Config (Config (..), RootIdState (..), configFilePath, loadConfig, readRootState, withConfigLock)
 import Pm.ConfigEdit (checkPatch, configTxn)
 import Pm.BackupCmd (BackupInitOutcome (..), backupInitRun)
@@ -405,6 +405,14 @@ routeMain cfg env req jsonR err corsHdrs respond = case (requestMethod req, path
                       , "id" .= case o of BiReused _ i -> i; BiCreated _ i _ _ -> i
                       ]
                   )
+  -- 1.3.0 写端点：扫描索引（用户 2026-09-26：「我在 GUI 怎么 pm scan？」——此前所有
+  -- 「→ 先 pm scan」都只能去终端）。与 CLI @pm scan@ 同一个 'runScanTo'：写域只有主库
+  -- @.pm@ 的索引快照，照片零改动，因此是 --writable 级。进程内与 apply 共用
+  -- 'seApplyLock' 排队（执行后的 catalog 回写与整库重扫不交错；跨进程仍是 I10 锁的事，
+  -- 与 CLI 同）。交代行随 log 回页面（GUI 拉起的 serve 已静音 stdout）；planId 恒 null。
+  ("POST", ["api", "scan"]) ->
+    planPost env req jsonR err "扫描索引" $ \ScanReq ->
+      Right (\sink -> withMVar (seApplyLock env) (\_ -> (\c -> (c, Nothing)) <$> runScanTo sink (ScanCmd Nothing True) cfg))
   -- P7 只读端点：把配置好的两仓路径/push 目标拼成上线命令文本。pm 绝不执行
   -- git（I9）——GUI 只把这段文本复制给用户，执行在用户终端。生成逻辑在
   -- 'Pm.Publish.publishCommands'（纯函数，测试直打）。
@@ -606,4 +614,10 @@ data PruneReq = PruneReq
 
 instance Aeson.FromJSON PruneReq where
   parseJSON = Aeson.withObject "plans-prune" (\_ -> pure PruneReq)
+
+-- | @{}@——scan 无参数（并发数取配置，同 @pm scan@ 不带 --workers）；体同上走 'withJsonBody'。
+data ScanReq = ScanReq
+
+instance Aeson.FromJSON ScanReq where
+  parseJSON = Aeson.withObject "scan" (\_ -> pure ScanReq)
 

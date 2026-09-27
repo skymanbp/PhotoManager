@@ -11,6 +11,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Data.List (isInfixOf)
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.Wai.Test
@@ -20,11 +21,13 @@ import System.IO.Temp (withSystemTempDirectory)
 import Test.Tasty
 import Test.Tasty.HUnit
 
+import Pm.Catalog (catalogMaybe, loadCatalog)
 import Pm.Config (Config (..), configFilePath, loadConfig, withConfigLock, writeConfig)
 import Pm.Hash (sha256File)
 import Pm.Op (Op (..))
 import Pm.Plan (ItemStatus (..), Plan (..), PlanItem (..), loadPlan, newPlanId, savePlan)
 import Pm.Serve (listPlans, serveApp)
+import Pm.Types (Catalog (..))
 import Pm.VaultHold (VaultHold (..), writeHolds)
 import Data.Foldable (toList)
 import Data.Time (getCurrentTime)
@@ -43,6 +46,7 @@ serveWriteTests =
     , testCase "工作流 F051/F052/F078 POST /api/sort/plan：交代清单与中止说明随 log 回响应；撞名 → code 2 + planId null + 两条源路径都在 log" caseServeSortPlanLog
     , testCase "工作流 F022/F078 POST /api/apply：屏障全量降级的理由进 log，逐项 status=needs-decision" caseServeApplyDemoteLog
     , testCase "工作流 C106 POST /api/apply：push 计划落位后收尾 git 步骤进 log（stdout 已静音），add 只列落位类目" caseServeApplyGitStepsLog
+    , testCase "1.3.0 POST /api/scan：只读 serve → 403；--writable → 200 {code 0, planId null, log 含「索引完成」}，盘上新放的文件进索引、照片零改动（与 pm scan 同一个 runScanTo）" caseServeScan
     , -- 下面这些用例都动**同一份**配置（PM_CONFIG 是进程级环境变量，见
       -- Spec.hs）。tasty 缺省并行执行，必须显式串行化，否则互相踩：一个
       -- 用例占着配置锁的时候，另一个的合法写入会变成 409。
@@ -456,6 +460,40 @@ logLines :: Aeson.Value -> [T.Text]
 logLines v = case field ["log"] v of
   Just (Aeson.Array xs) -> [t | Aeson.String t <- toList xs]
   _ -> []
+
+-- | 1.3.0（用户 2026-09-26「我在 GUI 怎么 pm scan？」——此前页面上每一句「→ 先 pm scan」都只能去终端）：
+-- 第十三个写端点与 CLI @pm scan@ 走同一个 'Pm.Commands.runScanTo'。只读 serve 拒（planPost 的 403 闸）；
+-- 写级 serve 扫完后索引里多出盘上新放的文件、退出码 0、planId 恒 null、「索引完成」那行随 log 回页面；
+-- 照片字节零改动。去掉路由、去掉 writable 闸、或把 sink 换回 putStrLn（log 变空），本例各转红。
+caseServeScan :: IO ()
+caseServeScan = withSystemTempDirectory "pm-serve-scan" $ \dir -> do
+  let root = dir </> "root"
+  (cfg, jpgBytes, _, _) <- fixture root
+  let newJpg = root </> "相册" </> "n.jpg"
+      newBytes = "\xFF\xD8\xFF\xE0JFIF-new-bytes"
+  BS.writeFile newJpg newBytes
+  envR <- mkEnv cfg
+  flip runSession (serveApp envR) $ postReq "/api/scan" "{}" >>= assertStatus 403
+  -- 只读被拒：索引仍是 fixture 那两条（新文件还没进）
+  before <- loadCatalog root
+  fmap (Map.member ("相册" </> "n.jpg") . catEntries) (fst (catalogMaybe before)) @?= Just False
+  envW <- mkEnvW cfg
+  flip runSession (serveApp envW) $ do
+    r <- postReq "/api/scan" "{}"
+    assertStatus 200 r
+    let v = decodeBody r
+    liftIO' $ do
+      field ["code"] v @?= Just (Aeson.Number 0)
+      field ["planId"] v @?= Just Aeson.Null
+      assertBool ("log 应含「索引完成」: " <> show (logLines v)) (any ("索引完成" `T.isInfixOf`) (logLines v))
+  after <- loadCatalog root
+  case fst (catalogMaybe after) of
+    Nothing -> assertFailure "扫描后应有索引"
+    Just cat -> do
+      Map.member ("相册" </> "n.jpg") (catEntries cat) @?= True
+      Map.size (catEntries cat) @?= 3
+  BS.readFile newJpg >>= (@?= newBytes)
+  BS.readFile (root </> "相册" </> "a.jpg") >>= (@?= jpgBytes)
 
 -- | `pm ui` 下 serve 的 stdout 是空设备：交代清单（区间外/侧车/读不出时间）
 -- 与四条中止路径的说明此前全部打进被静音的终端，页面只拿到一个数字。

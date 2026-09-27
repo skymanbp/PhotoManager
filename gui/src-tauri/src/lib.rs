@@ -1,8 +1,10 @@
 //! pm-ui — Tauri v2 desktop shell for `pm` (DESIGN §11).
 //!
 //! Boundary (invariant-level): this process never touches photo files. The
-//! only thing the Rust side does is (1) spawn `pm serve`, (2) hand the
-//! announced `{port, token}` to the webview, (3) kill the child on exit.
+//! only things the Rust side does are (1) spawn `pm serve`, (2) hand the
+//! announced `{port, token}` to the webview, (3) kill the child on exit, and
+//! since 1.3.0 (4) open a terminal window on request (`open_terminal`) — it
+//! runs nothing in it; the user types the git commands themselves (I9).
 //! Every read of library state goes over the loopback JSON API from JS.
 
 use std::io::{BufRead, BufReader};
@@ -48,6 +50,38 @@ fn pm_exe() -> String {
         }
     }
     "pm".to_string()
+}
+
+/// 1.3.0 (user 2026-09-26: "one click to open a command line, then do the
+/// GitHub push there"). Opens a fresh `cmd.exe` console in `dir` with the
+/// directory of the `pm` we run prepended to `PATH`, so `pm …` and the copied
+/// publish commands work as pasted. Nothing is executed on the user's behalf:
+/// pm never runs git (I9) — this only opens the window. `dir` comes from the
+/// page (vault dir / portfolio dir / main library, all read from `pm serve`)
+/// and must exist; the Windows-only `CREATE_NEW_CONSOLE` gives the child its
+/// own console (the release GUI has none), and the child is not waited on.
+#[tauri::command]
+fn open_terminal(dir: String) -> Result<(), String> {
+    let path = std::path::Path::new(&dir);
+    if !path.is_dir() {
+        return Err(format!("目录不存在：{dir}"));
+    }
+    let mut cmd = Command::new("cmd.exe");
+    cmd.arg("/K").arg("title pm 命令行").current_dir(path);
+    let pm = pm_exe();
+    if let Some(pm_dir) = std::path::Path::new(&pm).parent().filter(|d| d.is_absolute()) {
+        let mut paths = vec![pm_dir.to_path_buf()];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            cmd.env("PATH", joined);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| format!("打不开命令行：{e}"))
 }
 
 fn spawn_serve() -> Result<(ApiInfo, Child), String> {
@@ -139,7 +173,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(info)
         .manage(ServeChild(Mutex::new(Some(child))))
-        .invoke_handler(tauri::generate_handler![api_info])
+        .invoke_handler(tauri::generate_handler![api_info, open_terminal])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| fatal(&format!("窗口建不起来：{e}")))
         .run(|app, event| {

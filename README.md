@@ -32,7 +32,7 @@ a whole (`pm undo`).
 > review gate (**recorded round by round in [docs/REVIEW-LOG.md](docs/REVIEW-LOG.md);
 > the convergence verdict is whatever its last section says and is not copied
 > here**), and each gate with an observable automated anchor gets a "delete it and
-> exactly one test turns red" mutation case (508 tests, 0 GHC warnings); gates
+> exactly one test turns red" mutation case (510 tests, 0 GHC warnings); gates
 > without an anchor (the GUI has no harness; concurrent interleavings have no
 > deterministic observation point) are registered in REVIEW-LOG as residuals rather
 > than passed off as covered.
@@ -112,7 +112,12 @@ Adversarial review archive: [docs/reviews/](docs/reviews/).
   execution chain is the same as `pm apply`, `pm undo` works afterwards), and the
   Status page can **copy the publish commands** with one click (git command text
   generated from the two repo paths / push targets in Settings; paste it into your own
-  terminal — pm never runs git).
+  terminal — pm never runs git). Since 1.3.0 the pages are trimmed to one sentence + one
+  primary button each (long explanations fold away under "说明"), the Status page has a
+  **Scan** button (`POST /api/scan`, the same code path as `pm scan`), the Archive page's
+  first card is **"scan, then archive"** (it does the "run pm scan first" the import used
+  to ask for), and the vault card can **open a command line** in the repo directory with
+  pm on `PATH` — you paste the copied commands there yourself.
 
 **Explicitly out of scope**: no adaptation to other directory layouts; never runs git
 (I9); `photos.json` is outside the write domain (category and coordinates are judged by
@@ -151,13 +156,16 @@ pm                               # = pm status, the overview dashboard
 pm ui                            # desktop GUI
 ```
 
-The seven GUI pages (left-hand navigation order): **Status** (four tier cards Raw ·
-finished · album · staging + vault sync diff list + backup-drive lag + "next step"; the
+The seven GUI pages (left-hand navigation order): **Status** ("what to do now" on top,
+each item a clickable action; **Scan** button = `pm scan`; four tier cards Raw ·
+finished · album · staging + vault sync diff list + backup-drive lag; the
 vault card can **copy the publish commands** with one click — the git sequence for both
-repos is generated from Settings, pm never runs git), **Sort new photos** (enter the
+repos is generated from Settings, pm never runs git — and **open a command line** in the
+repo directory to paste them into), **Sort new photos** (enter the
 source directory → segment by capture time → per segment enter a place / pick an
 existing event → generate a copy plan; the source directory is read-only; "AI suggest
-place" only pre-fills), **Archive** (staging event folder → Raw/finished, optionally
+place" only pre-fills), **Archive** ("scan, then archive": staging event folder →
+Raw/finished after an index scan, optionally
 into the album at the same time; tick finished jpgs into the album — unwanted
 candidates can be **ignored** (remembered by content sha, undoable any time from the
 collapsed list); derive jpgs from tif/png etc. — all three only produce plans),
@@ -302,11 +310,13 @@ path).
    reading is a first-party minimal parser: only the tags needed, uniform bounds
    checking, and if it cannot be read the decision goes to a person (fail-closed); the
    file modification time is never guessed from.
-8. **The GUI never touches photos directly.** The Rust shell only does three things:
-   spawn / hand over the token / kill; everything goes through `pm serve` (127.0.0.1 +
+8. **The GUI never touches photos directly.** The Rust shell only does four things:
+   spawn / hand over the token / kill / open a command-line window on request (nothing
+   is run in it — you type the git commands); everything else goes through `pm serve` (127.0.0.1 +
    random port + Bearer token with constant-time comparison + Host/Origin checks);
    serve has three authorisation levels: **read-only by default**; `--writable` opens
-   twelve write endpoints — generate push / sort / archive / album / convert plans (writes
+   thirteen write endpoints — scan the index (writes `.pm/catalog.json`, the same code path
+   as `pm scan`), generate push / sort / archive / album / convert plans (writes
    `.pm/plans`; convert additionally writes derived files into `.pm/derived`, the
    originals untouched), record "not syncing for now" decisions and photo records,
    record "ignore this candidate" decisions, delete/prune plan files (only the
@@ -379,7 +389,7 @@ All measured on the real library (commands and sources reproducible, not estimat
 | Incremental scan (4633 files, 4633 reused / 0 to hash, workers=16) | 1.58 s | `pm scan` 2026-09-02 on 1.1.1, [release-notes/v1.1.1](docs/release-notes/v1.1.1.md) |
 | Hash throughput (14.0 GiB across 122 ARW, workers=16) | 19.4 s | `pm scan` 2026-08-26 — the pre-1.1.1 future-mtime re-hash, which no longer happens |
 | First full hash (480 GiB class) | ~10–25 min | first library build, recorded |
-| Test suite (508 tests, whole suite serialised — required by process-level stdout redirection) | 10–90 s | `stack test` |
+| Test suite (510 tests, whole suite serialised — required by process-level stdout redirection) | 10–90 s | `stack test` |
 | GHC warnings | 0 | `stack build` |
 | Adversarial review gate | recorded per round (NO-GO findings verified first-hand → class-level fix → focused re-review; convergence = the last section's verdict) | [REVIEW-LOG](docs/REVIEW-LOG.md) |
 | Mutation verification | one mutation per load-bearing gate with an observable automated anchor, its paired test turns red (all discrimination tables of rounds 34–36 and the P7 rounds pass; gates without an anchor registered as residuals) | REVIEW-LOG convergence evidence per round |
@@ -551,6 +561,18 @@ binaries in a Release are not built on the author's machine.
   media error) is no longer reported as "missing"; usage errors and an unfound backup drive
   exit 2. Photos and on-disk formats are unchanged. Details:
   [release notes](docs/release-notes/v1.2.1.md).
+- ~~GUI one-click surface + slim-down~~ ✅ 1.3.0 (2026-09-26; owner: "how do I `pm scan`
+  from the GUI?", "one click to open a command line for the GitHub push", "too cluttered —
+  make it idiot-proof / one-click, design for an ADHD user, keep every function and
+  behaviour"): thirteenth write endpoint `POST /api/scan` (same `runScanTo` as `pm scan`),
+  Status page **Scan** button and a clickable "index stale → scan" step, Archive page
+  **"scan, then archive"**, vault card **open a command line** (Tauri command
+  `open_terminal`: a `cmd.exe` window in the repo directory with pm on `PATH`, nothing
+  executed for you), every page cut to one sentence + one primary button with explanations
+  folded under "说明", Settings split into three everyday cards + an "advanced" fold, and a
+  "go to Plans" button after every generated plan. Element ids, button names, endpoints
+  and behaviour unchanged. The three PDF manuals still show the 1.2.1 layout. Details:
+  [release notes](docs/release-notes/v1.3.0.md).
 
 **Known limitations**:
 

@@ -688,6 +688,22 @@ N1 无对应源突变（是用例自身的健壮性），以反向核验代替�
 
 ## 1.2.1 收口：发布前第一方全量审（2026-09-26；对象 origin/main 14215e1 .. 本批，70 个提交）
 
+## 1.3.0 GUI 一键面与瘦身（2026-09-26 晚；用户实机 + 三条令）
+
+**起因**：用户在 GUI 归档页点「生成归档计划」，横幅答「暂存区归档：没有生成计划——暂存区与索引不一致（新增 3 / 变更 0 / 消失 0 / 读取错误 0）→ 先 pm scan」，问「我在 GUI 怎么 pm scan？上手那边说点归档或者 pm scan，这两个等价吗？」并令：①「GUI 给一键打开命令行、然后用命令行做 GitHub 操作（比如推送）的入口」；②「界面太复杂太乱、文字过多过密——朝傻瓜式 / 一键式瘦身，确保功能保留、行为不变，把目标群体当成 ADHD 患者来设计」。
+
+**判定**：不等价。`pm import`（归档）按现有索引出计划、且先过 `stagingFresh` 闸；`pm scan` 重读盘更新索引。用户刚放进暂存区的 3 个文件索引里没有，闸拒绝出计划是对的——错在 GUI：七页里没有任何一处能扫描，页面上共 7 句「在终端 pm scan」（app.js ×4、archive.js ×3），全是把用户赶去终端。根因一句话：**扫描没有端点**。
+
+**类级修法（一个根因，一处入口，三处消费）**：
+- 服务端：第十三个 `--writable` 写端点 `POST /api/scan {}`。不新写扫描逻辑——`Pm.Commands.runScanCmd` 改成 sink 化的 `runScanTo`（CLI = `runScanTo putStrLn`，`Pm.Cli.reportScanIssuesTo` 同一纪律，工作流 F051），端点走 `ServeAlbum.planPost` 壳（403 闸 / 413 / 400 / 500 带 log 都是现成的），planId 恒 null；进程内与 apply 共用 `seApplyLock`（执行后的 catalog 回写与整库重扫不交错，跨进程仍是 I10 锁的事，与 CLI 同）。写域只有主库 `.pm` 的索引快照，照片零改动。
+- 页面：三处消费同一个 `pmActions.scan`——状态页「扫描」按钮、「下一步」里「索引已过期 → 点这里扫描」（steps 第四元 = 页内动作）、归档页「扫描并归档」（先 scan、扫成了才 `POST /api/import/plan`，把闸那句提示替用户做了）。7 句「在终端 pm scan」全部改成页内动作；哨兵 `caseGuiOneClick` 禁止回潮。
+- 打开命令行：Rust 壳第四件事 `open_terminal {dir}`（`cmd.exe /K title …` + `CREATE_NEW_CONSOLE`；`pm_exe()` 所在目录前置进子进程 PATH——安装版没把 pm 加进 PATH，否则粘进去的 `pm …` 敲不动；目录不存在拒，`dir` 由页面从 `GET /api/config` 取 vault → portfolio → 主库第一个配置了的）。里面**不执行任何东西**——I9「pm 从不替你执行 git」不变；`caseGuiOneClick` 钉 `generate_handler![api_info, open_terminal]`。Tauri v2 应用自带 command 缺省放行（现有 `api_info` 同样不在 capabilities 里），不动 `capabilities/default.json`。
+- 瘦身（行为不变的判据 = 元素 id、按钮名、端点、脚本逻辑一个不改；只动 index.html 结构 / 文案与 style.css）：每页一句副标题 + 一个 `.btn.primary`（归档页第一张卡 `.big`），长说明收进 `<details class="help">`「说明」（默认一行）；侧栏图标 = 数字键；状态页「现在该做什么」置顶、每条可点；设置页只留主库 / vault / 备份盘三张卡，其余四组收进「高级设置」折叠；三处出计划横幅末尾挂「去「计划」页执行」（那边仍两次点击确认）；正文字号 14 → 15 px、行距 1.45。上手页四步改成「按 1 / 2、3 / 4 / 5」。app.js 746 行触 750 预算，跨页动作拆到 `gui/ui/actions.js`（`window.pmActions`，同 P8-A / P8-D 的工厂形态；`caseGuiNoInlineStyle` 自动要求它被外链）。
+
+**核验**：`caseServeScan`（只读 403 → 索引仍是两条；写级 200 + code 0 + planId null + log 含「索引完成」+ 盘上新放的 n.jpg 进索引、条目 3、两张照片字节不变）；`caseGuiOneClick`；`caseWritableEndpointCount` 自动把「十三个」钉到五处、`caseRouteRoster` 钉 DESIGN-GUI 列到 `POST /api/scan`；`node --check` 四个脚本；`cargo check`；`stack test` 510/510、GHC 警告 0；Edge headless 对夹具库出图七页目检（会话 scratchpad，不入仓）。**未做**：三本 PDF 手册未按 1.3.0 界面重生成（截图仍是 1.2.1 的），真机 Tauri 打包未跑（发布链在 CI）。
+
+## 1.2.1 收口：发布前第一方全量审（2026-09-26；对象 origin/main 14215e1 .. 本批，70 个提交）
+
 用户令「清掉所有遗留问题，收口项目后……走标准发布流程」；按评审收口硬要求，发布前由第一方逐层通读本批全部代码改动（54 个代码文件，+1924 / −856 行）并对照 DESIGN 的架构声明。分七层读 diff、核调用链：配置（Config / ConfigTypes / ConfigEdit / Commands）→ 扫描与索引（Scan / Hash / Types / Status）→ doctor（Doctor / DoctorDeep / DoctorProbe / Finding）→ 计划与执行（Plan / Cli / Exec / ExecTypes / Removable / Apply / Op / Journal / Trash / Clean）→ 整理、相册、派生、vault、备份（Import / Album / Derived / Sort / SortSource / Convert / Ingest / Names / Versions / Dedupe / Diff / Publish / GitGuard / Vault / VaultCmd / VaultHold / Backup / BackupCmd）→ serve 与页面（Serve / ServeAi / ServeAlbum / ServeVault / app.js / archive.js / index.html / lib.rs）→ 入口、构建与脚本（Main / package.yaml / build.yml / scripts）。结论：0 critical / 0 major；一条架构文档漂移按类修掉，三条观察登记。
 
 - **架构表缺一半模块**（修）：DESIGN §4 的模块表只给 55 个模块里的 23 个各留了一行，另有 25 个一次都没出现（Doctor、Import、Op、Trash、Types、Undo……），7 个只在别的行里顺带提到（ExecTypes、VaultCore、ServeEnv / ServeGuard / ServeVault、SortSource、Win）。上游机制：表没有完整性核对，历次拆分与新模块都不回填（本批新加的 ConfigTypes / Finding / DoctorDeep / DoctorProbe 是逐个手记上的，也只是碰巧没漏）。修：补齐 32 行（每个模块一句，描述取自各模块头注），加 DocDrift 常驻哨兵 `caseDesignModuleMap`——src/Pm 下每个模块（递归，同 `srcModules`）在 §4 代码块里各有一行、表里每行都真有其文件，两个方向都核；描述文字不核。先红后绿：只加哨兵时红（列出 23 对 55），补表后绿。突变 3 个：删一行、多一行不存在的模块 → 红；只改描述文字（对照）→ 绿。

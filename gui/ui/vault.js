@@ -1,13 +1,14 @@
 // pm-ui「分类推送」页（P8-A 自 app.js 拆出；P8-D 加照片记录三格与 AI 建议入口）。
 // 外链脚本、无内联；由 app.js 用共享工具构造：
-//   window.pmVault({ $, el, mib, get, getJson, post, stamp, stale, bodyLines })
+//   window.pmVault({ $, el, mib, get, getJson, post, stamp, stale, bodyLines, goPlans })
 //     → { loadVault, makePlan, suggest, shrink, busy }
+// （goPlans：1.3.0 出计划后往横幅末尾挂「去「计划」页执行」按钮，actions.js 提供。）
 // 端点：/api/vault/new（只读）、/api/vault/notes（GET 回显 / POST 写改过的记录）、
 // /api/vault/hold（记「暂不同步」决定）、/api/vault/push-plan（只生成计划文件）、
 // /api/suggest（只读级：拉起你自己账号下的 claude -p 看图，只出建议）。
 // 页面永不直接碰照片，一切经 pm serve。
 window.pmVault = function (u) {
-  const { $, el, mib, get, getJson, post, stamp, stale, bodyLines } = u;
+  const { $, el, mib, get, getJson, post, stamp, stale, bodyLines, goPlans } = u;
   let thumbUrls = [];
   let vaultDrift = 0; // 没有 NEW 但有 DRIFT 时，也能出纯裁决计划
   let heldInitial = new Set(); // 打开这一页时盘上已有的「暂不同步」决定
@@ -251,14 +252,17 @@ window.pmVault = function (u) {
       }
       // 3) 再按类目生成推送计划（没有类目指派、也没有 DRIFT 就跳过）
       const assignments = [...snap.entries()].filter(([, c]) => c !== HOLD).map(([name, category]) => ({ name, category }));
+      let planMade = false;
       if (assignments.length || driftSnap) {
         const r = await post("/api/vault/push-plan", { assignments });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) { out.className = "banner bad"; out.textContent = (lines.join("\n") + "\n未生成计划：" + (j.error || ("HTTP " + r.status)) + bodyLines(j)).trim(); btn.disabled = false; return; }
         lines.push(`已生成推送计划 ${j.plan.id}（${j.plan.items.length} 项）——只写了计划文件，照片未动。\n执行：${j.apply}\n计划文件：${j.path}` + (j.gitSteps.length ? "\n执行后的 git 步骤：\n" + j.gitSteps.join("\n") : ""));
+        planMade = true;
       }
       out.className = "banner ok";
       out.textContent = lines.length ? lines.join("\n\n") : "没有需要保存的改动。";
+      if (planMade) goPlans(out); // 1.3.0：一键跳去执行（那边仍两次点击确认）
       submitting = false;
       // 刷新失败不改判：计划已经生成，把它作为附注接在成功文案后面，别把
       // 横幅整段换成"请求失败"——那会让人以为计划没出来又点一次。

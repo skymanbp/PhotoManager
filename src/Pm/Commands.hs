@@ -17,6 +17,7 @@ module Pm.Commands
   , runInit
   , initPreflight
   , runScanCmd
+  , runScanTo
   , runTrash
   , runUndoCmd
   , runApply
@@ -244,25 +245,28 @@ initMarker o mainPath = do
       pure 0
 
 runScanCmd :: ScanCmd -> Config -> IO Int
-runScanCmd sc cfg
+runScanCmd = runScanTo putStrLn
+
+-- | 打印口由调用方给（工作流 F051 的 sink 纪律，同 'runImportTo'）：1.3.0 的
+-- @POST \/api\/scan@ 走**同一个**函数——GUI 的「扫描」与终端 @pm scan@ 不可能各扫各的。
+-- 写域只有主库 @.pm@ 的索引快照（'saveCatalog' 三代轮转），照片零改动。
+runScanTo :: (String -> IO ()) -> ScanCmd -> Config -> IO Int
+runScanTo sink sc cfg
   -- 审计 #14：手编进 config.toml 的越界并发数（写口已拒新增）在用它的地方说清楚，不静默夹紧
   | Nothing <- scWorkers sc
   , Just w <- cfgWorkers cfg
   , not (workersOk w) =
-      putStrLn ("配置里的并发数 " <> show w <> " 越界（1..64）——config.toml 被手改过？→ pm config set --workers <N>（或 --no-workers 回到默认）") >> pure 2
-  | otherwise = runScanCmd' sc cfg
-
-runScanCmd' :: ScanCmd -> Config -> IO Int
-runScanCmd' sc cfg = do
+      sink ("配置里的并发数 " <> show w <> " 越界（1..64）——config.toml 被手改过？→ pm config set --workers <N>（或 --no-workers 回到默认）") >> pure 2
+  | otherwise = do
   let root = cfgMainPath cfg
   -- P3b-5 复审 B1：主库路径必须是 RoleMain root（指向备份/vault 会改错库）
   er <- requireRole RoleMain root
   case er of
-    Left msg -> putStrLn msg >> pure 2
+    Left msg -> sink msg >> pure 2
     Right rootInfo -> do
       -- scan 是重建快照的那条路：被拒/坏掉的旧快照只当种子丢掉，从零重算
       (old, warns) <- catalogMaybe <$> loadCatalog root
-      mapM_ (\w -> putStrLn ("⚠ 快照损坏已跳过: " <> w)) warns
+      mapM_ (\w -> sink ("⚠ 快照损坏已跳过: " <> w)) warns
       defWorkers <- getNumProcessors
       let workers = fromMaybe (fromMaybe defWorkers (cfgWorkers cfg)) (scWorkers sc)
       t0 <- getCurrentTime
@@ -275,14 +279,16 @@ runScanCmd' sc cfg = do
       saveCatalog root (srCatalog result)
       t1 <- getCurrentTime
       let cat = srCatalog result
-      printf
-        "✓ 索引完成: %d 文件（复用 %d + 新 hash %d, %.1f GiB）用时 %s\n"
-        (length (catEntries cat))
-        (srReused result)
-        (srHashed result)
-        (fromIntegral (srHashedBytes result) / (1024 * 1024 * 1024 :: Double))
-        (show (diffUTCTime t1 t0))
-      reportScanIssues result
+      sink
+        ( printf
+            "✓ 索引完成: %d 文件（复用 %d + 新 hash %d, %.1f GiB）用时 %s"
+            (length (catEntries cat))
+            (srReused result)
+            (srHashed result)
+            (fromIntegral (srHashedBytes result) / (1024 * 1024 * 1024 :: Double))
+            (show (diffUTCTime t1 t0))
+        )
+      reportScanIssuesTo sink result
       pure (if null (srVolatile result) && null (srErrors result) then 0 else 1)
 
 -- ─── trash ──────────────────────────────────────────────────────────────────

@@ -39,7 +39,8 @@ data ServeEnv = ServeEnv
   , seVaultLock :: MVar ()
   , seApplyLock :: MVar ()
     -- ^ 同一 serve 进程内的 apply 串行化。跨进程另有 root 锁（I10）——这把只是
-    -- 让页面连点两下得到的是排队，而不是一条 "lock busy"。
+    -- 让页面连点两下得到的是排队，而不是一条 "lock busy"。1.3.0 起 @POST /api/scan@
+    -- 也在它上面排队：执行后的 catalog 回写与整库重扫不在同一进程里交错。
   , seConvertLock :: MVar ()
     -- ^ P8-D：转换第一段（python 写 @.pm/derived@）进程内串行化——两个并发请求
     -- 转同一张会争用同一个 @.tmp@ 名；排队而不是拒绝（转换是幂等的，后到者复用）。

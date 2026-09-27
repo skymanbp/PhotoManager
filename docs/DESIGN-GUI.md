@@ -52,8 +52,12 @@
   响应体**，不走 stdout——`pm ui` 只读一行 announce 就丢掉 BufReader，serve 的
   stdout 此后无人排空，照着打会填满管道缓冲。
 - **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
-  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。共**十二个** `--writable`
+  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。共**十三个** `--writable`
   级写端点，都不执行、不碰照片——
+  `POST /api/scan {}`（1.3.0，用户 2026-09-26「我在 GUI 怎么 pm scan？」——此前页面上每句
+  「→ 先 pm scan」都只能去终端：与 CLI `pm scan` 同一个 `Pm.Commands.runScanTo`，写域只有主库
+  `.pm` 的索引快照；走 `ServeAlbum.planPost` 壳、`planId` 恒 null、交代行随 `log` 回页面；进程内与
+  apply 共用 `seApplyLock` 排队，跨进程仍是 I10 锁的事，与 CLI 同）、
   `POST /api/vault/push-plan`（P4-5，本条）、`POST /api/vault/hold`（P4-7）、`POST /api/vault/notes`（P8-C，照片记录：写主库 `.pm/vault-notes.json`，与 hold 共用 `recordPost` 壳与锁序）、
   `POST /api/config` 与 `POST /api/backup-init`（P4-8，均见下）、
   `POST /api/sort/plan`（P5-E，见下）、`POST /api/import/plan`、`POST /api/album/add-plan`、
@@ -136,17 +140,31 @@
   BufReader，此后管道无人排空；库层任何一行 `putStrLn` 都会往里灌，填满
   64 KiB 缓冲后 serve 卡在写上。逐个端点记得传 sink 治不住——漏一个就复发。
   手工跑 `pm serve` 时不动 stdout，诊断照旧可见。
+- **一键面与瘦身（1.3.0，用户 2026-09-26：「界面太复杂太乱、文字过多过密——朝傻瓜式 / 一键式
+  瘦身，功能保留、行为不变，把目标群体当成 ADHD 患者来设计」）**：每页一句副标题 + **一个**主按钮
+  （`.btn.primary`，每页唯一；归档页第一张卡的「扫描并归档」是 `.big`），长说明一律收进
+  `<details class="help">`「说明」折叠区（默认只见一行）；侧栏图标改成数字 = 数字键；状态页把
+  「现在该做什么」（`#next-steps`）提到最上面、每条待办是可点的动作（切页，或页内动作——第四元
+  是函数）；设置页只留主库 / vault 目录 / 备份盘三张卡，其余（photos.json、并发数、上线命令三项、
+  掉线等待）收进「高级设置」折叠区；出计划的三处成功横幅末尾挂「去「计划」页执行」按钮。元素 id、
+  按钮名、端点、脚本逻辑一个不改（DocDrift `caseGuiNavOrder` / `caseGuiNoInlineStyle` 照旧）。
+  三个新入口：状态页「扫描」（`POST /api/scan`，扫完重载状态）；「下一步」里「索引已过期」那条
+  直接扫；归档页「扫描并归档」= 先 scan 再 `POST /api/import/plan`（把 `pm import` 那句
+  「暂存区与索引不一致 → 先 pm scan」替用户做了，两步都与终端同一条路）；状态页 vault 卡
+  「打开命令行」= Tauri command `open_terminal`（见下「进程生命周期」）。跨页动作住在
+  `gui/ui/actions.js`（`window.pmActions`：scan / openTerminal / goPlansBtn；app.js 触 750 行预算）。
+  哨兵 `caseGuiOneClick`。三本 PDF 手册的截图仍是 1.2.1 的界面（未重生成）。
 - **GUI（P4-4 UX 重做，用户反馈"清晰优雅、快速上手、直观可视化"+ 三项状态
   可视化）**：左侧导航**七页**（数字键 1–7 切换；编号即 `gui/ui/index.html` 的 nav
-  次序）。①**状态**——照片库四张分层卡（Raw / 成片 / 相册 / 暂存：文件数、体积、
-  容量占比条）+ 索引时间与「核对新鲜度」；**vault 展示集同步**卡（差异数 chip、
+  次序）。①**状态**——「现在该做什么」置顶（1.3.0）；照片库四张分层卡（Raw / 成片 / 相册 / 暂存：文件数、体积、
+  容量占比条）+ 索引时间与「扫描」（1.3.0）/「核对新鲜度」；**vault 展示集同步**卡（差异数 chip、
   **九态**计数 pill = OK/NEW/HELD/MISSING/RENAME/DRIFT/DUPLICATE/UNPUSHABLE/UNSTABLE，
   其中 NEW / HELD（含失效）/ MISSING / RENAME / DRIFT / UNSTABLE 可展开清单——"差哪些"）；
   **备份硬盘同步**卡（未登记 / 上次同步时间 + 滞后 add/update/extra / 缓存不可信）；
   「下一步」列表把 status 退出码的语义翻成可点的动作。②**整理新照片**——见上 P5-E 条（P8-D 加「AI 建议地点」：
   只预填空着的地点格，把握低的填 `<地点?>`，每段一行依据；重扫在请求之前就清掉旧概览、输入框与 AI 按钮，
   失败的重扫之后按钮不亮，AI 请求收尾按当前概览定按钮——横切审计 #83）。③**归档**——三张卡：暂存区归档
-  （勾「同时导入相册」）、成片 → 相册（按事件夹分组的缩略图网格勾选、「全选这个事件夹」；
+  （1.3.0 起按钮叫「扫描并归档」：先 `POST /api/scan` 再出计划；勾「同时导入相册」）、成片 → 相册（按事件夹分组的缩略图网格勾选、「全选这个事件夹」；
   每卡「忽略」按内容 sha 把候选压进折叠区——`GET /api/album/candidates` 的 `ignored` /
   `ignoreStale` 字段，随时「取消忽略」，失效记录单独提示，2026-08-31；`unaddable`——add 收不了的
   成片 jpg——不给卡片、在网格下单列路径并提示先移进事件夹，审计 #25）、
@@ -174,9 +192,13 @@
   serve 的 Origin 白名单里。渲染由主线用会话 scratchpad 的 `shot.ps1`（不入仓）自验。
 - **进程生命周期（P4-3）**：serve 的生命周期归 GUI 管，`pm ui` **不**启动
   serve——它只找到 `pm-ui.exe`（`PM_UI_EXE` 或 pm.exe 同目录）、把自己的路径经
-  `PM_EXE` 交给 GUI、等 GUI 退出。GUI 的 Rust 侧只做三件事：`spawn pm serve
+  `PM_EXE` 交给 GUI、等 GUI 退出。GUI 的 Rust 侧只做四件事：`spawn pm serve
   --exit-on-stdin-eof --writable --allow-apply`（接一条从不写的 stdin 管道；授权开关见上 P7 条）、
-  把 announce 的 port/token 经 Tauri command `api_info` 交给页面、退出时 kill 子进程。GUI 异常死亡（崩溃、
+  把 announce 的 port/token 经 Tauri command `api_info` 交给页面、退出时 kill 子进程，以及 1.3.0 起
+  应页面请求**开一个命令行窗口**（Tauri command `open_terminal {dir}`：`cmd.exe /K` 在 `dir` 下起新
+  控制台 `CREATE_NEW_CONSOLE`，把 `pm_exe()` 所在目录前置进它的 `PATH`——安装版没把 pm 加进 PATH，
+  否则粘进去的上线命令里 `pm …` 敲不动；`dir` 由页面从 `GET /api/config` 取「vault 目录 → portfolio
+  仓 → 主库」第一个配置了的，不存在即拒；里面**不执行任何东西**，git 仍由用户自己敲——I9 不变）。GUI 异常死亡（崩溃、
   被 taskkill 不带 /T）时 Windows 关闭管道，serve 读到 EOF 自行退出——冒烟实测
   500 ms 内监听消失、零残留。起不来时（serve 没报端口——还没 `pm init`、回环端口绑不上，serve 把原因打在
   stdout 第一行；或窗口建不起来）Rust 侧的致命出口只有一个 `fatal`：stderr 一行 + 系统消息框（原因原话），再按

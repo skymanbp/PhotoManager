@@ -86,7 +86,8 @@ routeAlbum cfg env req jsonR err = case (requestMethod req, pathInfo req) of
   root = cfgMainPath cfg
   noGo = GoOpts False False
 
--- | 「生成计划」类 POST 的共用壳（sort \/ import \/ album add \/ convert 四处同一道）：
+-- | 「生成计划」类 POST 的共用壳（sort \/ import \/ album add \/ convert 四处同一道；
+-- 1.3.0 的 @POST \/api\/scan@ 也走它、planId 恒 null——要的正是「交代行随 log 回页面」）：
 -- writable 闸 → 体上限与 JSON（'withJsonBody'）→ 请求级校验（Left → 400）→
 -- 交给 sink 化的 CLI 入口 → @{"code","planId","log"}@。计划 id 由入口直接交回，
 -- 不从 @.pm\/plans@ 里挑「最新的那个」（并发生成时那是猜）。
