@@ -58,7 +58,7 @@ newServeEnv cfg tok writable allowApply = do
 
 -- | 本次请求应答所依据的配置。第一方自审工作流 C105：此前快照只在本进程的
 -- POST 之后刷新，终端里 `pm config set` / `pm backup init` 改了 config.toml
--- 之后 GET /api/config 仍答启动时的旧值——设置页「重新载入」拿到同一份旧快照，
+-- 之后 GET /api/config 仍答启动时的旧值——设置页「刷新」拿到同一份旧快照，
 -- 还把旧 vault 路径预填进输入框，一点保存就把终端改动静默改回去。每次请求
 -- stat 一次配置文件（'configStamp'），戳变了才重读；只并入可变字段，主库路径
 -- 保持启动时的锚点（--allow-apply 授权的对象就是它；'Pm.ConfigEdit' 也拒改）。

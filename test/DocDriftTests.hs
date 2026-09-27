@@ -36,7 +36,7 @@ docDriftTests =
     , testCase "路由清点（P8-D）：src/Pm/Serve*.hs 的 (METHOD, [api,…]) 元组集合 = DESIGN-GUI 反引号里的 `METHOD /api/…` 集合" caseRouteRoster
     , testCase "CSP 逐字：DESIGN-GUI 引用的指令逐条出现在 tauri.conf.json 的 csp 里；style-src 只 self（F090）" caseCspQuoted
     , testCase "F090 前提（48 轮词法判据）：gui/ui 无内联样式/on*/非外链 script，全部脚本零 setAttribute、innerHTML 只赋空串、每个脚本都被外链" caseGuiNoInlineStyle
-    , testCase "1.3.0 GUI 一键面：状态页「扫描」/「打开命令行」与归档页「扫描并归档」接到真实入口（POST /api/scan、Tauri open_terminal 已注册）；归档先 scan 再出计划；页面与脚本不再指人去终端跑 pm scan" caseGuiOneClick
+    , testCase "1.3.0 GUI 一键面：状态页「扫描」/「打开命令行」与归档页「扫描并归档」接到真实入口（POST /api/scan、Tauri open_terminal 已注册）；归档先 scan 再出计划；页面与脚本不再指人去终端跑 pm scan；源码里「某页「名」」指得到页面上的真名字（1.3.1）" caseGuiOneClick
     , testCase "750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）" caseLineBudget
     , testCase "审计 #19：本套件读到的非源码文件（行预算清单 + tauri.conf.json）全部登记在 package.yaml extra-source-files" caseExtraSourceFiles
     , testCase "架构表（DESIGN §4）：src/Pm 每个模块各有一行、表里每行都有其文件（发布前第一方全量审）" caseDesignModuleMap
@@ -276,6 +276,11 @@ caseGuiOneClick = do
   assertBool "lib.rs 应注册 open_terminal command" ("generate_handler![api_info, open_terminal]" `isInfixOf` rs)
   assertBool "归档页第一张卡须先 scan 再 import/plan" ("ok = await scan(" `isInfixOf` arc && "if (ok) await planCall(\"/api/import/plan\"" `isInfixOf` arc)
   assertEqual "页面脚本不再指人去终端跑 pm scan" [] [f | (f, s) <- [("app.js", app), ("archive.js", arc)], any (`isInfixOf` s) ["在终端 pm scan", "在终端运行 pm scan"]]
+  -- 1.3.1：源码里「某页「名」」（同一行闭合）指的名字须真在 index.html 上——1.3.0 改名后两条报文仍指「非 jpg 转换」
+  refs <- concatMap (\(n, t) -> [(n, l) | l <- pageRefs t]) <$> (srcModules >>= mapM (\(n, p) -> (,) n <$> readUtf8 p))
+  assertEqual "源码指向页面元素的「…」须在 index.html 里" [] [r | r@(_, l) <- refs, not (l `isInfixOf` html)]
+ where
+  pageRefs t = [takeWhile (/= '」') s | l <- lines t, s <- mapMaybe (stripPrefix "页「") (tails l), '」' `elem` s]
 
 -- | gui/ui 脚本里 innerHTML 的违规出现（F090 前提：只许赋空串）。每次出现都须是 @= ""@ 且紧跟
 -- 语句结束的 @;@——审计 #59：此前只看等号后头两个字符，@el.innerHTML = "" + expr@ 也算「赋空串」

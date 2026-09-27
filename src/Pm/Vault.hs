@@ -473,7 +473,7 @@ renderHuman r = do
     (vdDrift d)
   mapM_ (\(n, cats) -> putStrLn ("  ! DUPLICATE " <> n <> " → " <> unwords cats)) (vdDuplicate d)
   mapM_
-    (\(n, loc) -> putStrLn ("  ✋ UNPUSHABLE " <> loc </> n <> "（非 jpg：status 可见、算差异，push 写路径拒收 → pm convert / 归档页「非 jpg 转换」派生 jpg 再推）"))
+    (\(n, loc) -> putStrLn ("  ✋ UNPUSHABLE " <> loc </> n <> "（非 jpg：status 可见、算差异，push 写路径拒收 → pm convert / 归档页「非 jpg 转成 jpg」派生 jpg 再推）"))
     unpushable
   mapM_
     (\(n, loc) -> putStrLn ("  ⚠ UNSTABLE " <> loc </> n <> "（读取期间持续变化，已退出六态分类；稍后重跑）"))

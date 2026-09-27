@@ -130,7 +130,7 @@ holdRequest r olds freshHold toUnhold now
          ]
       -- 门禁 F1：UNPUSHABLE（相册里的 .png）本来就推不上 vault，「暂不同步」对它没有
       -- 意义——放它进名单只会让页面把它当可指派的 HELD 卡渲染，一勾整批 push-plan 400。
-      <> [ n <> " 不是 jpg（相册只收 jpg 推 vault，UNPUSHABLE 无需暂不同步）→ 归档页「非 jpg 转换」"
+      <> [ n <> " 不是 jpg（相册只收 jpg 推 vault，UNPUSHABLE 无需暂不同步）→ 归档页「非 jpg 转成 jpg」"
          | n <- hs
          , n `elem` vdNew (vrDiff r)
          , not (pushableExt n)

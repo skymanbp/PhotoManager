@@ -350,12 +350,13 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 「归档」页三张卡：
 
 1. **暂存区归档**：复用 `/api/status` 的 `stagingEvents/stagingFiles/stagingArchived`
-   摘要；勾选「同时导入相册（成片里的 jpg）」；按钮「生成归档计划」→ import/plan；
+   摘要；勾选「同时导入相册（成片里的 jpg）」；按钮「生成归档计划」→ import/plan（1.3.0 起按钮「扫描并归档」：先 `POST /api/scan` 再 import/plan，标题
+   「暂存区 → Raw / 成片」，勾选框缩成「同时导入相册」）；
    结果横幅带 `log`（返修/无法识别/目标重复的交代行）与计划 id。
 2. **成片 → 相册**：`album/candidates` 缩略图网格（`/api/thumb/<sha>`，
-   `createImageBitmap` 缩放，同分类推送页）按事件夹分组；多选 → 「加入相册（生成计划）」
+   `createImageBitmap` 缩放，同分类推送页）按事件夹分组；多选 → 「加入相册（生成计划）」（1.3.0 起「加入相册」）
    → album/add-plan；`conflict` 项标「相册已有同名不同内容」。
-3. **非 jpg 转换**：`nonJpg` 清单（tif/png/psd/heic…，含所在层）；多选 + 勾选
+3. **非 jpg 转换**（1.3.0 起标题「非 jpg 转成 jpg」、按钮「转换」）：`nonJpg` 清单（tif/png/psd/heic…，含所在层）；多选 + 勾选
    「同时进相册」→ 「转换并生成计划」→ convert/plan；转换在生成期发生（第一段），
    落位仍要到计划页执行（第二段），页面文案把两段说清。
 

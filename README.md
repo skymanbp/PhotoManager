@@ -570,9 +570,15 @@ binaries in a Release are not built on the author's machine.
   `open_terminal`: a `cmd.exe` window in the repo directory with pm on `PATH`, nothing
   executed for you), every page cut to one sentence + one primary button with explanations
   folded under "说明", Settings split into three everyday cards + an "advanced" fold, and a
-  "go to Plans" button after every generated plan. Element ids, button names, endpoints
-  and behaviour unchanged. The three PDF manuals still show the 1.2.1 layout. Details:
+  "go to Plans" button after every generated plan. Element ids and endpoints unchanged; three
+  plan buttons got shorter names (生成归档计划 → 扫描并归档, 加入相册（生成计划） → 加入相册,
+  转换并生成计划 → 转换 — the 1.3.0 notes wrongly said no button was renamed). Details:
   [release notes](docs/release-notes/v1.3.0.md).
+- ~~1.3.0 leftovers~~ ✅ 1.3.1 (2026-09-27): two CLI hints still pointed at the Archive
+  page's old "非 jpg 转换" heading (now "非 jpg 转成 jpg"); a DocDrift sentinel now checks
+  that every "<page>页「<name>」" reference in the Haskell sources names something on the page.
+  The three PDF manuals (outside the repo) were revised in place for the 1.3.0 layout. Details:
+  [release notes](docs/release-notes/v1.3.1.md).
 
 **Known limitations**:
 
