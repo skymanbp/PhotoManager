@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | P7-J：发布前第一方自审的**工作流侧**收口试针——ultracode 全模块评审的
--- 101 条发现在 HEAD 上逐条核实后仍成立的那些（docs/REVIEW-LOG.md「P7-J」）。
+-- 101 条发现在 HEAD 上逐条核实后仍成立的那些（docs/REVIEW-LOG-4.md「P7-J」）。
 -- 每条钉一个屏障：拆掉对应修复，用例必须转红。
 module SweepTests (sweepTests) where
 

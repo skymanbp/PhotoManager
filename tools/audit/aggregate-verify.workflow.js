@@ -92,7 +92,7 @@ impossible, a caller that never passes such input, or a misreading. If the claim
 step, quoting lines. Either you reach the wrong outcome (refuted=false, put the trace in reasoning) or you do not
 (refuted=true, say where the trace diverges).
 (3) DESIGN: grep docs/DESIGN.md, docs/DESIGN-COMMANDS.md, docs/DESIGN-GUI.md, docs/DESIGN-P8.md, docs/REVIEW-LOG*.md,
-README.md lines 465-553, and the comments near the site. If the behaviour is documented as intended, a known limitation,
+README.md section "Roadmap and known limitations", and the comments near the site. If the behaviour is documented as intended, a known limitation,
 or was explicitly ruled on in a review round, set refuted=true and cite where. If a test in test/*.hs pins the behaviour
 AND the docs agree with the test, refute. If the docs agree with the FINDER (code contradicts the documented contract), do
 not refute. Refute anything that needs a malicious local process racing at millisecond scale or a non-Windows OS.

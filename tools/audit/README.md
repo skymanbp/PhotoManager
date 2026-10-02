@@ -10,7 +10,7 @@ the pm build.
 - `find-verify.workflow.js` — per-file-cluster finders (two lenses per code cluster, one per test
   cluster) → per-cluster dedup → three adversarial verifiers per finding. Args:
   `{ctx: <brief path>, clusters: [{key, kind: 'code'|'test', files: [...], focus}]}`.
-  The 2026-09-25 run used 14 clusters (see the HANDOFF doc) and, to save tokens, was later cut
+  The 2026-09-25 run used 14 clusters (see §0 of `docs/reviews/2026-09-25-full-debug-audit.md`) and, to save tokens, was later cut
   to finders only (strip the merge/verify stages) with verification done once at the end.
 - `aggregate-verify.workflow.js` — the single aggregation + verification pass: chunked semantic
   dedup of all raw findings (read from JSON chunk files on disk) → final cross-chunk dedup → one

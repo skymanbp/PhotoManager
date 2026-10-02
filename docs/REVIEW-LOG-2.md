@@ -2,7 +2,7 @@
 
 > 2026-08-26 自 [`REVIEW-LOG.md`](REVIEW-LOG.md)（现行卷）拆出（750 行预算）。
 > 装 P5 后期→P6 中期（第 29–34 轮）的评审段，逐字搬移，不再追加。
-> 更早的在 [`REVIEW-LOG-1.md`](REVIEW-LOG-1.md)；处置表在 [`docs/reviews/`](reviews/)。
+> 更早的在 [`REVIEW-LOG-1B.md`](REVIEW-LOG-1B.md)（第 25–28 轮）与 [`REVIEW-LOG-1.md`](REVIEW-LOG-1.md)；本卷各轮处置就在当轮节内。
 
 ## 第 29 轮（P5-B…F 六个提交）——NO-GO 7 条，**逐条独立核实后**处置
 

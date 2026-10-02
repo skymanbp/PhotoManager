@@ -53,7 +53,7 @@ h2.sec { font-size: 1.05rem; margin: 1.6rem 0 .6rem; }
 .page-head { flex-wrap: wrap; }
 .btn { font: inherit; padding: .5rem 1rem; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; white-space: nowrap; line-height: 1.3; }
 .btn:hover { border-color: var(--accent); }
-/* 1.3.0：主按钮更醒目（每页只有一个）；.big 是那一页唯一的「一键」 */
+/* 1.3.0：主按钮更醒目（每张卡至多一个）；.big 是归档页「扫描并归档」那一键 */
 .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
 .btn.primary.big { font-size: 1.1rem; padding: .7rem 1.5rem; }
 .btn.primary:disabled { opacity: .45; cursor: not-allowed; }

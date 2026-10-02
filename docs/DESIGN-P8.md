@@ -56,16 +56,16 @@ D:\Photography（SoT，主库 root）
    再拷一份进相册）、`pm album add`（成片→相册，CLI 与 GUI 挑选同一条计划路径）、
    `pm convert`（非 jpg → 派生 jpg 进成片同事件夹与相册）。三条都是主库 root 内的
    `OpCopy` 计划，走既有 Plan/Exec 内核（I3/I4/I5 自动成立）。
-2. **diff 只报告，不落文件**：待分类集合就是 `newActive`（Vault.hs:219-220，
+2. **diff 只报告，不落文件**：待分类集合就是 `newActive`（Vault.hs:228，
    NEW − HELD），它已经由 `pm vault status`、`GET /api/vault/new`、GUI 分类推送页
    三处报出。把它再拷一份进 `_inbox` 只会多出一份无人 doctor 的字节、一个第十态、
    一条 `mv → _done` 的删档步骤、一个投影与分类之间的 fail-open 窗口——而这四样
    没有一样是用户要的「pm 分类 + 提示推送命令」所需要的。九态模型一字不动。
 3. **分类仍是现有 `pm vault push`**：GUI「保存决定并生成推送计划」/ CLI `--category`
-   → `checkAssignments` / `vaultPushItems` / `mkVaultPushPlan`（Vault.hs:614-672）
+   → `checkAssignments` / `vaultPushItems` / `mkVaultPushPlan`（Vault.hs:651-711）
    原字节从相册直拷进类目，收尾打印 git 步骤（`gitStepsLines`，I9）。零改动。
 4. **`_inbox` 降为遗留通道**：`pm vault ingest`（库外源 → 相册 + vault 两份计划，
-   Ingest.hs）保留原样，`knownAux`（Vault.hs:309）不变；`_inbox/README.txt` 与
+   Ingest.hs）保留原样，`knownAux`（Vault.hs:334）不变；`_inbox/README.txt` 与
    `/photo-inbox` 改写为「正路是 `pm sort` → `pm import --also-album` → GUI 分类」，
    `_inbox` 只在照片**不经成片**时用（例如手机直出且不想进成片）。
 5. **技能变薄**：`/photo-inbox` v3 读 `pm vault status --json` 的 `new`（减 `held`），
@@ -79,29 +79,29 @@ D:\Photography（SoT，主库 root）
 ### 19.1 单一 jpg 谓词
 
 `Pm.Ingest.jpegExt`（Ingest.hs:269-272）是 `Pm.VaultCore.pushableExt`
-（VaultCore.hs:55-56）的第二份定义（同为 `.jpg/.jpeg` case-fold）。P8-B 删掉前者，
+（VaultCore.hs:58）的第二份定义（同为 `.jpg/.jpeg` case-fold）。P8-B 删掉前者，
 ingest 的 `badExt` 改用 `pushableExt`；`caseNoDeadNames` 把 `jpegExt` 列进死名单。
 相册收什么、vault 收什么，从此只有一句话（R1：只收 JPEG）。
 
 ### 19.2 `pm import --also-album`
 
 - `Pm.Import.planImport` 不动（纯分类，§7）。`importPlanItems` 之后由新模块
-  `Pm.Album.albumItemsForImport` 为 `irCopy` 里 **dst 在 `成片\` 下且 `pushableExt`**
+  `Pm.Album.withAlbumForImport` 为 `irCopy` 里 **dst 在 `成片\` 下且 `pushableExt`**
   的每一项再生成一条**同源** `OpCopy`：src 仍是暂存区那个文件（`opSrcAbs` 相同），
-  dst = `相册\<basename>`。非 jpg 的成片（如 `.tif`）只进成片，报告一行
-  `→ N 个非 jpg 未入相册：pm convert <路径…>`。
+  dst = `相册\<basename>`。非 jpg 的成片（如 `.tif`）只进成片，逐个交代一行
+  「· 非 jpg 只进成片，不入相册: <路径>（要进相册 → pm convert）」（convert 不收的类型另说明）。
 - **I5**：`相册\<basename>`（case-fold）已在 catalog：同 sha → 不出该项（幂等，
   同 `irAlready` 口径）；异 sha → `StNeedsDecision`「相册已有同名不同内容 →
   pm resolve --keep」。**同批 basename 撞车**（两个事件夹各有 `_DSC0001.jpg`）→
   两条都不出相册项并逐条报告（同 `irDupTarget` 的整组拒绝纪律；相册是平铺，
   同名只能进一份，pm 不替用户挑）。
-- **I7 次序（相册 ⊆ 成片）**：成片项与相册项**同一 `piGroup`**（Plan.hs:68），成片
-  项在前。Exec 的组语义（Exec.hs:79-82）保证成片那份没落位（CONFLICT/FAILED）时
+- **I7 次序（相册 ⊆ 成片）**：成片项与相册项**同一 `piGroup`**（Plan.hs:91），成片
+  项在前。Exec 的组语义（Exec.hs `execPlan` 头注）保证成片那份没落位（CONFLICT/FAILED）时
   相册那份不执行；`--only` 组闭包让两者不可拆开执行。成片项是返修 NEEDS-DECISION
   （`irRework`/`irReworkKin`）时**不分组**、相册项同样压成 NEEDS-DECISION（同
   `Pm.Ingest.coupleWithMain` 的耦合）——复合组成员不能单独 `--keep` 裁决，分组反而
   会把返修锁死。
-- `inArchiveLayer`（Import.hs:156-157）**不动**：相册仍不算归档层（clean/三副本判定
+- `inArchiveLayer`（Import.hs:191-192）**不动**：相册仍不算归档层（clean/三副本判定
   不受影响）。`pm status` 的暂存区「已归档，冗余」口径同样不动。
 - CLI：`pm import [--apply] [--also-album]`；GUI：归档页勾选「同时导入相册」→
   `POST /api/import/plan {"alsoAlbum": true}`（§23）。
@@ -111,7 +111,7 @@ ingest 的 `badExt` 改用 `pushableExt`；`caseNoDeadNames` 把 `jpegExt` 列�
 - 参数是**相对成片层**的路径（`26-06-R66/_DSC9621.jpg`），只接受这一种形态：绝对
   路径、`成片\` 前缀、`..`、盘符一律拒绝（`userRelOk` 同款词法闸 + `resolveUnder`
   实体闸）。文件必须在主库 catalog 里、`enKind == KindPhoto`、`pushableExt`。
-- 校验与 19.2 **同一组谓词**（`Pm.Album.checkAlbumTargets`）：相册同名同 sha →
+- 校验与 19.2 **同一组谓词**（`Pm.Album.classifyAlbum`，即以相册为目标的 `classifyInto`）：相册同名同 sha →
   跳过并说明；同名异 sha → NEEDS-DECISION；批内 case-fold 重名 → 整批拒绝；
   catalog 缺席/被拒 → 拒绝（「无索引」是拒绝而不是当作目标为空，§7）。
 - 计划：主库 root、`plKind = "album-add"`、每项 `OpCopy (root </> 成片\…) (相册\<名>)`
@@ -124,8 +124,8 @@ ingest 的 `badExt` 改用 `pushableExt`；`caseNoDeadNames` 把 `jpegExt` 列�
 
 `GET /api/album/candidates`（§23）按 catalog 算：成片下 `KindPhoto ∧ pushableExt`
 且相册无同名同 sha 的条目（按事件夹分组；同名异 sha 标 `conflict`），另列
-`nonJpg`：成片与相册下 `KindPhoto ∧ ¬pushableExt` 的条目（`renderExts` 里的
-tif/tiff/png/psd/psb/heic，Types.hs:96；RAW 不列——原始档不是转换对象）。CLI 侧
+`nonJpg`：成片与相册下 `KindPhoto ∧ convertibleExt` 的条目（`renderExts` 里 jpg 之外的
+tif/tiff/png/psd/psb/heic，Types.hs:105-106；与 `pm convert` 准入同一谓词；RAW 不列——原始档不是转换对象）。CLI 侧
 `pm album candidates` 同源同形（只读，不另起一套口径）。候选的准入与 `pm album add`
 是同一个解析 `parseProcessedRel`：它收不了的（成片根下不在事件夹里、事件夹名就叫
 「成片」）不进候选，另列 `unaddable` 带拒绝理由（审计 #25：此前事件夹名取了文件名，
@@ -230,9 +230,9 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
   无控制符；`source` ∈ {`exif`,`ai-high`,`ai-med`,`ai-low`,`user`,`none`}。GUI 侧 `user` 来源且有内容的记录归用户所有：AI 建议不问、不填、不改它的 `source`（门禁 F4 / 二轮 N2）。
 - `sha` 与 HELD 同一纪律：创建与复核都用本轮**真实重读**（`freshSrcSha`），字节变了
   → `stale`，回到「待确认」。
-- 事务：与 `withHoldsTxn`（VaultCmd.hs:31-50）同一壳——取锁前 `requireMain` 预检
+- 事务壳 `withVaultTxn`（VaultCmd.hs:55 起，holds/notes 共用）：取锁前 `requireMain` 预检
   → 主库 root lock（I10）→ 锁内 `computeVault` → 读 → 校验 → `writePmState`
-  （`requireWritable`，I11）。壳泛化为一处 `withVaultTxn`，holds/notes 两个文件共用。
+  （`requireWritable`，I11）。
 
 ### 21.2 命令与端点
 
@@ -247,7 +247,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 技能侧（§24）：`/photo-publish` 第一阶段多一步——`pm vault notes --json` 取
 `pending` 条目渲染成 photos.json 条目（`src` 的 Pages 基址是技能的知识，pm 不知道
 也不该知道），写入、`json.tool` 校验、上线。`published` 状态由 pm 从 photos.json
-**只读**反查（`photosJsonRef`，Vault.hs:539-548），所以记录不需要「已消费」标记，
+**只读**反查（`photosJsonRef`，Vault.hs:569 起），所以记录不需要「已消费」标记，
 也不需要技能回写 pm。
 
 ---
@@ -257,7 +257,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 ### 22.1 边界（照抄 photo-place 的四条，不放宽）
 
 只出建议；不进 pm 内核判断；不改任何计划参数；出不来就说出不来。GUI 把建议**预填**
-进本来就要用户填的那一格（类目下拉 / 地点输入框），**不标已定、不自动点提交**
+进本来就要用户填的那一格（类目按钮只描边 `.ai`、不代点 / 地点等输入框只填空着的），**不标已定、不自动点提交**
 （DESIGN-COMMANDS §7：「GUI 与将来的 AI 都只是替用户填这一格」）。
 
 ### 22.2 后端：`pm serve` 拉起 `claude -p`
@@ -281,7 +281,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
   占大头），响应带 `cost`，页面文案写明「你自己账号、每次有费用」。
 - 并发：`seSuggestLock`（进程内 MVar）；上一次未完成 → 409。
 - 上限：分类每次 ≤ 20 张；地点每次 ≤ 12 段、每段抽样 ≤ 5 张（首/中/尾）；超出 400
-  让页面分批。请求体上限沿用 64 KiB（ServeGuard.hs:71）。
+  让页面分批。请求体上限沿用 64 KiB（`maxBodyBytes`，ServeGuard.hs:73）。
 - 授权级：**① 只读级**（不写 `.pm`、不碰照片）；但页面上明说「会把这些照片交给你
   自己账号下的 Claude」——每次点击都是显式同意，没有自动触发。
 
@@ -310,8 +310,8 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 ### 22.4 测试
 
 `PM_CLAUDE_EXE` 指向测试夹具（`test/fixtures/fake-claude.cmd` → 打印预置 JSON /
-打印垃圾 / 退出非零 / 睡到超时 / 地点预置 / `is_error:true`）六种（`PM_FAKE_CLAUDE`）；as-built 落在
-`test/ServeP8Tests.hs` 6 例：三个计划端点各一（只读 403 + 写域断言 + 计划可装回）、classify 一例
+打印垃圾 / 退出非零 / 睡到超时 / 地点预置 / `is_error:true`）六种（`PM_FAKE_CLAUDE`；`PM_FAKE_CLAUDE_LOG` 给了就先记下参数行与工作目录，#81 钉针用）；as-built 落在
+`test/ServeP8Tests.hs`（P8-D 时 6 例，此后补到 12 例：album/ignore ×2、计划删除 / 清理、#49/#50 查找与坐标、#81 隔离、runTool 灌满管道）：三个计划端点各一（只读 403 + 写域断言 + 计划可装回）、classify 一例
 含五道闸（只读级仍放行、413、400 ×6、409 锁 / 缺 claude / 超时、502 垃圾 / 退出非零 / `is_error`）、place 一例
 （serve 自己重跑分段、围栏 JSON、只有 RAW 的段答 null、> 12 段 400）、纯函数一例；契约：建议
 **不写** `vault-holds.json` / `vault-notes.json` / 计划文件（不出现），jpg 字节不变。
@@ -325,18 +325,18 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 | 端点 | 级 | 写域 | 同源 CLI |
 |---|---|---|---|
 | `POST /api/import/plan {"alsoAlbum"}` | ② | 主库 `.pm/plans` | `pm import [--also-album]`（`runImportTo sink`） |
-| `GET /api/album/candidates` | ① | — | 无（`Pm.Album.albumCandidates`，只读数据面） |
+| `GET /api/album/candidates` | ① | — | `pm album candidates`（同源 `Pm.Album.albumCandidates`，只读） |
 | `POST /api/album/add-plan {"paths":[…]}` | ② | 主库 `.pm/plans` | `pm album add` |
 | `POST /api/convert/plan {"paths":[…],"alsoAlbum"}` | ② | 主库 `.pm/derived` + `.pm/plans` | `pm convert` |
 | `GET /api/vault/notes` / `POST /api/vault/notes` | ① / ② | 主库 `.pm/vault-notes.json` | `pm vault notes` / `note` |
 | `POST /api/suggest` | ① | —（拉起 `claude -p`） | 无（技能自己看图） |
 
-- `--writable` 级 POST 从六个变**九个**：`app/Main.hs` 的 `--writable` help、DESIGN-GUI.md §11、
+- `--writable` 级 POST 从六个变**九个**（现为十三个，见 DESIGN-GUI §11）：`app/Main.hs` 的 `--writable` help、DESIGN-GUI.md §11、
   README 三处计数同 commit 改；as-built：三个计划端点与 `POST /api/sort/plan` 共用
   `ServeAlbum.planPost` 壳，JSON 体读取上提为 `ServeGuard.withJsonBody`（五处复制合一）；
   convert 请求在 `seConvertLock` 上排队而非 409；新增 DocDrift 哨兵 `caseRouteRoster`：从
   `Serve.hs`/`ServeVault.hs`/新端点模块里抽 `("GET"|"POST", [...])` 路由元组与
-  DESIGN-GUI.md 的端点表逐项对账。
+  DESIGN-GUI.md 反引号里的 `METHOD /api/…` 集合逐项对账。
 - 端点模块按边界拆：`Pm.ServeAlbum`（import/album/convert）、`Pm.ServeAi`（suggest）、
   notes 进 `Pm.ServeVault`；`Serve.hs` 只加两行路由分派（同 P8-A 的 `routeVault`）。
 - CSP、Host/Origin/token 闸、`readBodyCapped` 全部沿用，不新开传输原语。
@@ -345,7 +345,7 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 
 左侧导航 **七页**：①状态 ②整理新照片 **③归档** ④分类推送 ⑤计划 ⑥设置 ⑦上手
 （归档插在 sort 与分类推送之间——这就是流水线次序）。数字键 1–7；`caseGuiNavOrder`
-的标记改 ①—⑦；README:57/94、DESIGN-GUI.md:95、HISTORY 的「六页」全部改「七页」。
+的标记改 ①—⑦；README、DESIGN-GUI、HISTORY 的「六页」同批改「七页」。
 
 「归档」页三张卡：
 
@@ -403,12 +403,12 @@ photos.json 不在 pm 写域（DESIGN-COMMANDS §10.2；I9 同款边界），但
 |---|---|---|
 | P8-B | §19 | `test/AlbumTests.hs`（纯函数 + 沙盒库端到端）；突变：同批重名闸拆掉→红、异 sha 不出 NEEDS-DECISION→红、非 jpg 入相册→红、组耦合拆掉→红 |
 | P8-C | §21 | `test/VaultNoteTests.hs`；突变：坐标越界放行→红、sha 不新鲜→红、事务不取锁→红 |
-| P8-C2 | §20 | `test/ConvertTests.hs` 4 例（参数闸 / 真 Pillow 端到端：16 位缩放、alpha 白底、`--also-album` 同组、`--redo`、I7 耦合、坏源 / doctor 四态 + `--repair`）；突变 m1–m6 见 REVIEW-LOG。原拟「`PM_PYTHON` 指向夹具脚本」一例改为「指向不存在 → 拒绝」：真 Pillow 已在端到端里覆盖，夹具脚本只会再抄一遍转换器接口 |
-| P8-D | §22–23 | `test/ServeP8Tests.hs` 6 例（三个计划端点 / classify 五道闸 / place / 纯函数）+ `caseRouteRoster` + `caseGuiNavOrder` ①—⑦ + `node --check`；突变见 REVIEW-LOG |
+| P8-C2 | §20 | `test/ConvertTests.hs` 4 例（当时；参数闸 / 真 Pillow 端到端：16 位缩放、alpha 白底、`--also-album` 同组、`--redo`、I7 耦合、坏源 / doctor 四态 + `--repair`）；突变 m1–m6 见 REVIEW-LOG。原拟「`PM_PYTHON` 指向夹具脚本」一例改为「指向不存在 → 拒绝」：真 Pillow 已在端到端里覆盖，夹具脚本只会再抄一遍转换器接口 |
+| P8-D | §22–23 | `test/ServeP8Tests.hs` 6 例（当时；三个计划端点 / classify 五道闸 / place / 纯函数）+ `caseRouteRoster` + `caseGuiNavOrder` ①—⑦ + `node --check`；突变见 REVIEW-LOG |
 | P8-E | §24 | 档案 vault commit（不 push） |
 | 步 9 修复批 | §20.1 写纪律 · §22 · §25 | 第一方全量审（7 视角工作流，11 项确认 / 6 项否证）聚 A–H 八簇上游修；新哨兵 `caseDerivedGuards` / `caseQuarantineCensus`，AlbumTests RAW 入成片、`is_error` 502、`/api/vault/new` 单列 `unpushable`；突变见 REVIEW-LOG |
 | 门禁 | 第一方全量审 → Opus 轮到 FINAL GO → 突变配对 → `caseLineBudget` → leakscan | 记 REVIEW-LOG（一轮 NO-GO F1–F8 修 → 二轮 GO + N1–N4 收口） |
 | 提醒 | 装新构建 → 用户 GUI 审查 + **首次真实数据跑**（`pm import --also-album` / `pm album add` / `pm convert` 那 1 张 tif / GUI 分类 → 首次建 vault root）——每一步动真实照片前 AskUserQuestion 摆清单 | 用户裁定（2026-08-28）：复核两项 GUI 修（58f136d）；真实数据跑按裁定完成（REVIEW-LOG「用户复核 + 首次真实数据跑」）——import / convert / 首次 claude -p 无对象未发生，如实登记 |
-| 文档 | README（含七页、新命令、AI 与转换段）、DESIGN*、DESIGN-COMMANDS §5 命令表 + §11 表、HISTORY、本文回改 | DocDrift 哨兵；1.0.0 批：README 路线图 + 版本串（package.yaml / Cargo.toml / Cargo.lock / tauri.conf.json / DESIGN-COMMANDS 状态行）+ HISTORY 收官行 + `docs/release-notes/v1.0.0.md` |
+| 文档 | README（含七页、新命令、AI 与转换段）、DESIGN*（DESIGN §5 命令表、DESIGN-COMMANDS §11 表）、HISTORY、本文回改 | DocDrift 哨兵；1.0.0 批：README 路线图 + 版本串（package.yaml / Cargo.toml / Cargo.lock / tauri.conf.json / DESIGN-COMMANDS 状态行）+ HISTORY 收官行 + `docs/release-notes/v1.0.0.md` |
 | CI | `.github/workflows/build.yml`（windows-latest：stack test、版本一致闸、sidecar、tauri build 带 remap、leakscan、sha256 同 run、750 行闸）+ tag 触发 release job | 抓包分支 `ci-probe` 先验：symlink / hardlink / junction 夹具在提权 runner 上可用；ACL 注入用例要求套件自禁 SeBackup/SeRestore 特权（REVIEW-LOG「CI 抓包分支」）；run 33152288443 全绿后并入 main |
 | 发布 | AskUserQuestion 清单 → push main → tag `v1.0.0` → CI release → 重新下载校验 | 项目收官：release job 把 tag 所在 run 的 zip + NSIS + sha256.txt 挂上，说明 = release notes + SHA-256；下载校验记 REVIEW-LOG |

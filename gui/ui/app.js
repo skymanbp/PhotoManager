@@ -1,6 +1,6 @@
 // pm-ui frontend: vanilla JS, no bundler. Everything comes from `pm serve`
 // over 127.0.0.1 with the session token handed over by the Rust shell.
-// Twelve plan-free writes: POST /api/vault/push-plan、/api/sort/plan、/api/import/plan、
+// Thirteen plan-free writes: POST /api/scan（重扫索引）、/api/vault/push-plan、/api/sort/plan、/api/import/plan、
 // /api/album/add-plan、/api/convert/plan（只生成计划文件；convert 另写 .pm/derived
 // 派生件）、/api/vault/hold（记一条「暂不同步」决定）、/api/vault/notes（照片记录）、
 // /api/album/ignore（忽略候选）、/api/plan/delete、/api/plans/prune（只删可再生成的

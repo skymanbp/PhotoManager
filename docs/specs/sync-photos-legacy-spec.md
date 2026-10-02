@@ -5,6 +5,10 @@
 > （DESIGN §10.1 / I8）的验收基线：**「保留」清单必须逐项复刻，「修复」清单是
 > pm 相对 legacy 的有意偏离，验收比对时需逐项豁免登记。**
 > （`<vault-root>` = 档案 vault 根目录的占位，公开仓不写本机真实路径。）
+>
+> **快照说明（2026-08-23 基线，正文保持当时口径）**：sync_photos.py 已于 P5-F 退役但保留、
+> 代码冻结（DESIGN-COMMANDS §10.3 落实表第 5 项）；§7 的指针改写已于 P5-F 完成（档案 vault
+> commit `3859e1c`）。字段形状仍与 `Pm.VaultCore.renderVaultJson` 一致。
 
 ## 1. 常量与扫描范围
 

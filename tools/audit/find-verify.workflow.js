@@ -103,7 +103,7 @@ const VLENSES = [
   },
   {
     key: 'design-refuter',
-    prompt: `YOUR LENS: refute by design intent and documentation. Check docs/DESIGN.md, docs/DESIGN-COMMANDS.md, docs/DESIGN-GUI.md, docs/DESIGN-P8.md, README.md lines 465-553 (known limitations), docs/REVIEW-LOG*.md (grep for the function/file/behaviour) and the code comments around the site. If the behaviour is documented as intended, listed as a known limitation, or was explicitly ruled on in a review round, set refuted=true and cite where. Also check whether an existing test in test/*.hs pins the behaviour the finder calls a bug; if the test encodes the finder's "buggy" behaviour as expected AND the docs agree with the test, refute. If the docs agree with the FINDER (the code contradicts the documented contract), do not refute.`,
+    prompt: `YOUR LENS: refute by design intent and documentation. Check docs/DESIGN.md, docs/DESIGN-COMMANDS.md, docs/DESIGN-GUI.md, docs/DESIGN-P8.md, README.md section "Roadmap and known limitations", docs/REVIEW-LOG*.md (grep for the function/file/behaviour) and the code comments around the site. If the behaviour is documented as intended, listed as a known limitation, or was explicitly ruled on in a review round, set refuted=true and cite where. Also check whether an existing test in test/*.hs pins the behaviour the finder calls a bug; if the test encodes the finder's "buggy" behaviour as expected AND the docs agree with the test, refute. If the docs agree with the FINDER (the code contradicts the documented contract), do not refute.`,
   },
   {
     key: 'repro-judge',

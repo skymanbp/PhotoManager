@@ -1,5 +1,8 @@
 # PhotoManager (`pm`) full-debug audit — shared context for finder/verifier agents
 
+> Snapshot of the brief used for the 2026-09-25 run (pm 1.2.0, 440 tests, branch below). Update
+> the branch and counts before reusing it.
+
 Repo: /home/user/PhotoManager (git branch claude/full-debug-o8absa). Working tree is clean at
 the start of the audit; do NOT modify any file under the repo. Use bash (cat / sed -n / grep -n)
 to read code. Read files IN FULL — do not skim the first 200 lines and extrapolate.
@@ -13,8 +16,8 @@ tasty test suite (`test/*.hs`, 440 tests, Windows-only too). Docs are in Chinese
 `docs/DESIGN.md` (core invariants §2, domain model §3, safe-write protocol §6, risks §14),
 `docs/DESIGN-COMMANDS.md` (per-command semantics), `docs/DESIGN-GUI.md`, `docs/DESIGN-P8.md`,
 `docs/REVIEW-LOG*.md` (history of prior review findings and decisions — a suspected bug that
-was already ruled "intended" there is NOT a bug), `README.md` lines 465-553 ("Roadmap and known
-limitations").
+was already ruled "intended" there is NOT a bug), the `README.md` section "Roadmap and known
+limitations".
 
 No Haskell toolchain is available in this container and the code cannot be compiled or run here.
 All findings must therefore be established by careful reading and tracing. Cite exact

@@ -1,5 +1,5 @@
-// pm-ui「归档」页（P8-D，DESIGN-P8 §23.2）：三张卡——暂存区归档 / 成片 → 相册 /
-// 非 jpg 转换。外链脚本、无内联；由 app.js 用共享工具构造：
+// pm-ui「归档」页（P8-D，DESIGN-P8 §23.2）：三张卡——暂存区 → Raw / 成片 / 成片 → 相册 /
+// 非 jpg 转成 jpg。外链脚本、无内联；由 app.js 用共享工具构造：
 //   window.pmArchive({ $, el, mib, get, getJson, post, stamp, stale, bodyLines, shrink, loadPlans, scan, goPlans })
 //     → { loadArchive, busy }
 // 端点：/api/status（暂存摘要，只读）、/api/album/candidates（只读）、

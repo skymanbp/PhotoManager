@@ -448,4 +448,4 @@ P3b-13 把闸下沉到 loader 才真正盖住），`createRootInfo` 自身
   处置（用户）。
 
 
-> （续卷：P4 GUI 与用户决策记录在 [`REVIEW-LOG-1B.md`](REVIEW-LOG-1B.md)——2026-08-26 按 750 行预算拆出，39 轮 #6。）
+> （续卷：P4 GUI、用户决策记录、P5-A 与第 25–28 轮在 [`REVIEW-LOG-1B.md`](REVIEW-LOG-1B.md)——2026-08-26 按 750 行预算拆出，39 轮 #6。）

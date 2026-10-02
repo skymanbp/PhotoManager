@@ -7,7 +7,7 @@
 > [`DESIGN.md` §2](DESIGN.md#2-需求--不变量)，命令面在 DESIGN.md §5。
 > 读本节的 DocDrift 哨兵（页序 ①—⑦、路由清点 `caseRouteRoster`——本文件反引号里全部
 > `METHOD /api/…` 的集合与 `src/Pm/Serve*.hs` 的路由元组集合逐项相等、CSP 逐字、配置锁
-> 「四条读改写路径」清点）
+> 「四条读改写路径」清点、写端点个数 `caseWritableEndpointCount`——「共**N个**」与逐个列到）
 > 自 P8-A 起以本文件为证据。
 
 ---
@@ -52,7 +52,7 @@
   响应体**，不走 stdout——`pm ui` 只读一行 announce 就丢掉 BufReader，serve 的
   stdout 此后无人排空，照着打会填满管道缓冲。
 - **写端点（P4-5 起，用户裁定"先做生成计划，apply 后置"）**：serve 加
-  `--writable` 开关（缺省只读；`pm ui` 拉起时置位）。共**十三个** `--writable`
+  `--writable` 开关（缺省只读；GUI（pm-ui.exe）拉起时置位）。共**十三个** `--writable`
   级写端点，都不执行、不碰照片——
   `POST /api/scan {}`（1.3.0，用户 2026-09-26「我在 GUI 怎么 pm scan？」——此前页面上每句
   「→ 先 pm scan」都只能去终端：与 CLI `pm scan` 同一个 `Pm.Commands.runScanTo`，写域只有主库
@@ -75,7 +75,7 @@
   草稿与带裁决残余的计划不动；1.1.3 起**失效草稿**（`planStale`：从未执行且每条待办的源
   都已不在盘上而卷还在）也一并清，journal 有告警的根整根不删）；执行是第 ③ 级 `POST /api/apply`
   （P5-C 实现，P7 起由 GUI 使用，见上文三级授权与下文 P7 条）。
-  第一个是 `POST /api/vault/push-plan`，
+  最早的一个（P4-5）是 `POST /api/vault/push-plan`，
   体 `{"assignments":[{"name","category"},…]}`，上限 64 KiB（413）；校验与计划
   构造和 CLI `pm vault push` **共用**（`checkAssignments` / `vaultPushItems` /
   `mkVaultPushPlan`，fail-closed：任一指派不合法整体 400 并列出全部错误）；落盘
@@ -121,33 +121,30 @@
   `seConvertLock` 上排队——第一段派生件写主库 `.pm/derived`，两个并发转换同一源会撞 tmp）。
   JSON 体读取上提为 `ServeGuard.withJsonBody`（413 超 64 KiB / 400 非 JSON），此前五处
   复制合一。`POST /api/suggest` 是**只读级**（缺省授权即可）：serve 用 `PM_CLAUDE_EXE`
-  （给了但不存在 → 409，不回退）或 PATH 上的 `claude` 拉起 `claude -p --output-format json
-  --permission-mode plan --max-turns 8 --safe-mode --setting-sources user --strict-mcp-config
-  --add-dir <主库 | 源目录>`（cwd ＝ pm 自己的空目录：照片目录只经 `--add-dir` 放行读、不作 claude 的
-  项目——横切审计 #81，见 DESIGN-P8 §22.2；提示经 stdin，
-  `PM_SUGGEST_TIMEOUT` 秒超时、缺省 180），只把模型答的 JSON 规范化后交回——pm 不据此写
-  任何东西，建议落不落盘由用户在页面上点「保存决定」/「生成计划」决定。
+  （给了但不存在 → 409，不回退）或 PATH 上的 `claude` 拉起只读的 `claude -p`（调用形、cwd 隔离——横切审计 #81、
+  `PM_SUGGEST_TIMEOUT` 超时与费用见 DESIGN-P8 §22.2），只把模型答的 JSON 规范化后交回——pm 不据此写
+  任何东西，建议落不落盘由用户在页面上点「保存决定并生成推送计划」/ 整理页每段的「生成计划」决定。
   `kind:"classify"`（≤ 20 个相册文件名 → 类目 / 地点 / 坐标 / 来源 / 依据 / 标题；未请求的
   名字丢弃、模型没答的名字列进 `dropped`，类目不在三类 → null，坐标经 `parseCoordinates` 规范）；`kind:"place"`
   （`src` + `gap` → serve 自己重跑 `surveySort`，不信任客户端的分段；每段 `evenSample 5`
   取首/中/尾均匀 5 张 jpg，> 12 段 400，一张 jpg 也没有的段不交给模型、答 `place:null`）。
   同一时刻只跑一个（`seSuggestLock` 满 → 409）；找不到 claude / 超时（`Pm.Subprocess.runTool`：子进程挂 job 对象、到点整树杀）/ 子进程 IO 失败 →
-  409，模型答非 JSON → 502 带 `raw`，退出非零或信封 `is_error:true` → 502 带原文摘要。每次调用花的是用户自己 Claude 账号的钱
-  （实测每次 ≈ $0.7–1.3，系统提示缓存写入占大头），响应带 `cost`、页面文案写明。测试用
-  `test/fixtures/fake-claude.cmd` 顶替（`PM_FAKE_CLAUDE` 六种模式；`PM_FAKE_CLAUDE_LOG` 给了就先记下参数行与工作目录，#81 钉针用）。
+  409，模型答非 JSON → 502 带 `raw`，退出非零或信封 `is_error:true` → 502 带原文摘要。每次调用花的是用户自己 Claude 账号的钱，
+  响应带 `cost`、页面文案写明；测试用 `test/fixtures/fake-claude.cmd` 顶替（DESIGN-P8 §22.4）。
 - **GUI 拉起时静音 stdout（P5-E）**：`pm serve --exit-on-stdin-eof` 打完
   announce 那一行之后把进程 stdout 引到空设备。`pm ui` 只读那一行就丢掉
   BufReader，此后管道无人排空；库层任何一行 `putStrLn` 都会往里灌，填满
   64 KiB 缓冲后 serve 卡在写上。逐个端点记得传 sink 治不住——漏一个就复发。
   手工跑 `pm serve` 时不动 stdout，诊断照旧可见。
 - **一键面与瘦身（1.3.0，用户 2026-09-26：「界面太复杂太乱、文字过多过密——朝傻瓜式 / 一键式
-  瘦身，功能保留、行为不变，把目标群体当成 ADHD 患者来设计」）**：每页一句副标题 + **一个**主按钮
-  （`.btn.primary`，每页唯一；归档页第一张卡的「扫描并归档」是 `.big`），长说明一律收进
+  瘦身，功能保留、行为不变，把目标群体当成 ADHD 患者来设计」）**：每页一句副标题 + 主按钮
+  （`.btn.primary`：状态 / 整理新照片 / 分类推送页各一个——整理页另有每段一个「生成计划」；归档页三张卡各一个，
+  第一张的「扫描并归档」是 `.big`；计划 / 设置 / 上手页没有），长说明一律收进
   `<details class="help">`「说明」折叠区（默认只见一行）；侧栏图标改成数字 = 数字键；状态页把
-  「现在该做什么」（`#next-steps`）提到最上面、每条待办是可点的动作（切页，或页内动作——第四元
-  是函数）；设置页只留主库 / vault 目录 / 备份盘三张卡，其余（photos.json、并发数、上线命令三项、
-  掉线等待）收进「高级设置」折叠区；出计划的三处成功横幅末尾挂「去「计划」页执行」按钮。元素 id、
-  端点、脚本逻辑一个不改（DocDrift `caseGuiNavOrder` / `caseGuiNoInlineStyle` 照旧）；按钮名改了三个出计划的
+  「现在该做什么」（`#next-steps`）提到最上面、能在页内做的待办是可点的动作（切页，或页内动作——第四元
+  是函数），只能在终端做的给一行命令；设置页只留主库 / vault 目录 / 备份盘三张卡，其余（photos.json、并发数、上线命令三项、
+  掉线等待）收进「高级设置」折叠区；出计划的三处成功横幅末尾挂「去「计划」页执行」按钮。既有元素 id 
+  一个不改（只新增 `#btn-scan` / `#btn-terminal` / `#scan-result`）、既有端点与脚本逻辑不变（DocDrift `caseGuiNavOrder` / `caseGuiNoInlineStyle` 照旧）；按钮名改了三个出计划的
   短名——「扫描并归档」「加入相册」「转换」（原「生成归档计划」「加入相册（生成计划）」「转换并生成计划」；
   1.3.0 当时误记为「按钮名一个不改」，1.3.1 更正）。
   三个新入口：状态页「扫描」（`POST /api/scan`，扫完重载状态）；「现在该做什么」里「索引已过期」那条
@@ -165,20 +162,19 @@
   **九态**计数 pill = OK/NEW/HELD/MISSING/RENAME/DRIFT/DUPLICATE/UNPUSHABLE/UNSTABLE，
   其中 NEW / HELD（含失效）/ MISSING / RENAME / DRIFT / UNSTABLE 可展开清单——"差哪些"）；
   **备份硬盘**卡（1.3.0 前叫「备份硬盘同步」；未登记 / 上次同步时间 + 滞后 add/update/extra / 缓存不可信）；
-  「现在该做什么」（1.3.0 前叫「下一步」、在页底）把 status 退出码的语义翻成可点的动作。②**整理新照片**——见上 P5-E 条（P8-D 加「AI 建议地点」：
+  「现在该做什么」（1.3.0 前叫「下一步」、在页底）把 status 退出码的语义翻成动作（页内能做的可点，其余给命令）。②**整理新照片**——见上 P5-E 条（P8-D 加「AI 建议地点」：
   只预填空着的地点格，把握低的填 `<地点?>`，每段一行依据；重扫在请求之前就清掉旧概览、输入框与 AI 按钮，
   失败的重扫之后按钮不亮，AI 请求收尾按当前概览定按钮——横切审计 #83）。③**归档**——三张卡：暂存区 → Raw / 成片
-  （1.3.0 前标题「暂存区归档」；1.3.0 起按钮叫「扫描并归档」：先 `POST /api/scan` 再出计划；勾「同时导入相册」）、成片 → 相册（按事件夹分组的缩略图网格勾选、「全选这个事件夹」；
+  （「扫描并归档」：先 `POST /api/scan` 再出计划；勾「同时导入相册」）、成片 → 相册（按事件夹分组的缩略图网格勾选、「全选这个事件夹」；
   每卡「忽略」按内容 sha 把候选压进折叠区——`GET /api/album/candidates` 的 `ignored` /
   `ignoreStale` 字段，随时「取消忽略」，失效记录单独提示，2026-08-31；`unaddable`——add 收不了的
   成片 jpg——不给卡片、在网格下单列路径并提示先移进事件夹，审计 #25）、
-  非 jpg 转成 jpg（勾选 + 「同时进相册」→「转换」；1.3.0 前标题「非 jpg 转换」、按钮「转换并生成计划」，
-  成片 → 相册的按钮也从「加入相册（生成计划）」缩成「加入相册」）——三者都只出计划，见上 P8-D 条。
+  非 jpg 转成 jpg（勾选 + 「同时进相册」→「转换」；1.3.0 改名见上「一键面与瘦身」条）——三者都只出计划，见上 P8-D 条。
   ④**分类推送**——NEW 缩略图网格（原图 4–75 MB，GUI 侧 `createImageBitmap(resizeWidth
   640)` 缩放后再挂，修掉"滚动后缩略图消失"——全分辨率位图撑爆 WebView 的根因）+ 三
   类目分段按钮 + 每卡三格照片记录（地点 / 坐标 / 标题，P8-D：打开页时从 GET notes 回显，改了的差集随下一步
   经 POST notes 写主库）+「AI 建议分类/地点」（P8-D：类目只在按钮上描边 `.ai`、三格只填空着的；用户拥有的卡——本页亲手改过、或盘上记录本就是 `user` 来源且有内容——不进请求也不被改 `source`，门禁 F4 / 二轮 N2）
-  + 进度「已选 x/N」+「保存决定并生成推送计划」→ hold → notes → push-plan（hold 先行：服务端拒收 held 文件的 push）→ 结果
+  + 进度「已定 x / N（分类 … · 暂不同步 …）」+「保存决定并生成推送计划」→ hold → notes → push-plan（hold 先行：服务端拒收 held 文件的 push）→ 结果
   面板（计划 id、`pm apply` 命令、git 步骤）。⑤**计划**——表格（类型徽标、id、时间、
   项/待执行/跳过/待裁决 + **执行态**列：已执行/部分/未执行/已失效（含失败注记）从 journal
   折叠 + 探源而来（`GET /api/plans` 的 done/failed/executed/stale/lastRunAt 字段与 `state`
@@ -202,8 +198,8 @@
   把 announce 的 port/token 经 Tauri command `api_info` 交给页面、退出时 kill 子进程，以及 1.3.0 起
   应页面请求**开一个命令行窗口**（Tauri command `open_terminal {dir}`：`cmd.exe /K` 在 `dir` 下起新
   控制台 `CREATE_NEW_CONSOLE`，把 `pm_exe()` 所在目录前置进它的 `PATH`——安装版没把 pm 加进 PATH，
-  否则粘进去的上线命令里 `pm …` 敲不动；`dir` 由页面从 `GET /api/config` 取「vault 目录 → portfolio
-  仓 → 主库」第一个配置了的，不存在即拒；里面**不执行任何东西**，git 仍由用户自己敲——I9 不变）。GUI 异常死亡（崩溃、
+  否则粘进去的上线命令里 `pm …` 敲不动；`dir` 由页面从 `GET /api/config` 取「vault 目录（存在时）→ portfolio
+  仓（配置了即取）→ 主库」的第一个，目录不存在由 Rust 侧拒；里面**不执行任何东西**，git 仍由用户自己敲——I9 不变）。GUI 异常死亡（崩溃、
   被 taskkill 不带 /T）时 Windows 关闭管道，serve 读到 EOF 自行退出——冒烟实测
   500 ms 内监听消失、零残留。起不来时（serve 没报端口——还没 `pm init`、回环端口绑不上，serve 把原因打在
   stdout 第一行；或窗口建不起来）Rust 侧的致命出口只有一个 `fatal`：stderr 一行 + 系统消息框（原因原话），再按
@@ -229,7 +225,7 @@
   重载失败答 500「配置文件已在外部改动但无法重新载入（…）——修正后重试」。并发数
   只作用于**扫描**；备份盘那边默认单线程防 HDD 寻道抖动，另用 `pm backup --workers N`。
   1.1.2 起 `backup` 对象多一格 `driveWait`（`[backup] drive-wait`，null = 缺省 1800 s，
-  0 = 关闭瞬断保护），补丁键 `driveWait` 同三态，0..86400 之外拒；设置页备份卡有
+  0 = 关闭瞬断保护），补丁键 `driveWait` 同三态，0..86400 之外拒；设置页「高级设置」里的「备份盘掉线等待」卡有
   对应输入框（DESIGN-COMMANDS §9「瞬断保护」）。
 - **配置文件的写纪律（P4-8b，二十四轮）**：配置在 XDG 目录、**不在任何 root 的
   `.pm` 下**，因此 `resolveUnder` 那套限域不适用——但**其余三条纪律适用**，而它

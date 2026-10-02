@@ -147,7 +147,7 @@ caseJsonFlagCensus = do
   design <- readUtf8 ("docs" </> "DESIGN.md")
   assertBool "DESIGN 的 --json 清点声明还在" ("`--json` 只有 `pm vault status` 与 `pm vault notes` 两个" `isInfixOf` design)
 
--- | DESIGN-GUI.md §11「GUI（P4-4 UX 重做…）」的 ①—⑥ 与 gui/ui/index.html 的 nav
+-- | DESIGN-GUI.md §11「GUI（P4-4 UX 重做…）」的 ①—⑦ 与 gui/ui/index.html 的 nav
 -- 次序：编号即次序（P8-A 起 §11 住在 DESIGN-GUI.md）。
 caseGuiNavOrder :: IO ()
 caseGuiNavOrder = do

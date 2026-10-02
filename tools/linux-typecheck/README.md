@@ -2,9 +2,9 @@
 
 pm is Windows-only (`Win32` FFI + `cbits/pm_win.c`), so it cannot be built or run in a Linux
 container. This directory lets a Linux session still **compile** the whole library, the
-executable and all 27 test modules under the project's `-Wall` flags, and run the pure-logic
+executable and every test module under the project's `-Wall` flags, and run the pure-logic
 subset of the test suite. It exists for AI/CI sessions that edit Haskell without a Windows box;
-the authoritative build remains `stack test` on Windows (README「从源码构建」).
+the authoritative build remains `stack test` on Windows (README "Build from source").
 
 How it works:
 

@@ -110,8 +110,8 @@ Adversarial review archive: [docs/reviews/](docs/reviews/).
   never clicks for you, and each call costs money); the Plans page can **execute** a saved
   plan directly (details under Quick start), and the Status page can **copy the publish commands** with one click (git command text
   generated from the two repo paths / push targets in Settings; paste it into your own
-  terminal — pm never runs git). Since 1.3.0 the pages are trimmed to one sentence + one
-  primary button each (long explanations fold away under "说明"), the Status page has a
+  terminal — pm never runs git). Since 1.3.0 the pages are trimmed to one sentence + a
+  highlighted primary button (long explanations fold away under "说明"), the Status page has a
   **Scan** button (`POST /api/scan`, the same code path as `pm scan`), the Archive page's
   first card's main button is **"scan, then archive"** (it does the "run pm scan first" the import used
   to ask for), and the vault card can **open a command line** in the repo directory with
@@ -573,9 +573,9 @@ binaries in a Release are not built on the author's machine.
   Status page **Scan** button and a clickable "index stale → scan" step, Archive page
   **"scan, then archive"**, vault card **open a command line** (Tauri command
   `open_terminal`: a `cmd.exe` window in the repo directory with pm on `PATH`, nothing
-  executed for you), every page cut to one sentence + one primary button with explanations
+  executed for you), every page cut to one sentence + a highlighted primary button with explanations
   folded under "说明", Settings split into three everyday cards + an "advanced" fold, and a
-  "go to Plans" button after every generated plan. Element ids and endpoints unchanged; three
+  "go to Plans" button after every generated plan. Existing element ids and endpoints unchanged; three
   plan buttons got shorter names (生成归档计划 → 扫描并归档, 加入相册（生成计划） → 加入相册,
   转换并生成计划 → 转换 — the 1.3.0 notes wrongly said no button was renamed). Details:
   [release notes](docs/release-notes/v1.3.0.md).
