@@ -11,7 +11,8 @@ T=$(find "$WORK/dist-newstyle" -type f -name pm-test -perm -u+x 2>/dev/null | he
 [ -n "$T" ] || { echo "no pm-test binary — run check.sh first"; exit 3; }
 save=0; if [ "$1" = "--baseline" ]; then save=1; shift; fi
 LOG="$WORK/test-run.log"
-( cd "$REPO" && timeout 1200 "$T" --num-threads 1 "$@" ) > "$LOG" 2>&1
+# Some Windows-only ingest cases block forever on the Win32 stubs; a per-case timeout lets the run finish.
+( cd "$REPO" && timeout 1200 "$T" --num-threads 1 --timeout 60s "$@" ) > "$LOG" 2>&1
 code=$?
 grep -E 'tests passed|tests failed|out of' "$LOG" | tail -1
 grep -E ':\s+OK' "$LOG" | sed -E 's/:\s+OK.*//; s/^\s+//' | sort > "$WORK/now-ok.txt"

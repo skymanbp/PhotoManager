@@ -17,7 +17,7 @@ How it works:
   (minus `Win32`).
 - `check.sh` re-syncs and builds lib + exe + tests. Exit code is cabal's.
 - `run-tests.sh` runs the test binary from the repo root under a UTF-8 locale and compares the
-  set of passing cases against `baseline-ok.txt` (132 pure cases as of 1.2.0). Cases that need
+  set of passing cases against `baseline-ok.txt` (150 pure cases, re-saved at 1.3.1; cases that block on the stubs are cut off by a 60 s per-case timeout). Cases that need
   Win32, `mklink`, ACLs, `\\.\NUL`, `tasklist` or `USERNAME` fail on Linux by construction.
 
 Usage (first time takes ~15 min for GHC + dependencies):

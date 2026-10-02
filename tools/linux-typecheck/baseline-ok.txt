@@ -1,3 +1,18 @@
+#15 打包版 pm-ui 起不来（pm serve 没报端口 / 窗口建不起来）时退出前弹系统消息框、按 2 退出（无控制台时此前一声不响就没了）
+#16 #18 GUI：索引读不出 ≠ 尚未索引（状态页 / 归档页带原因）；候选读不出 ≠ 没有非 jpg（按未知渲染、清掉上一轮残留）
+#20 #23 核验途中盘没回来：已核出的结果照写 --out、没读到的记进 bad、退出码 3；隔离件的「不在」只在盘在时算，盘不在记「没核」而不是 0/N
+#21 leakscan 用法错与读不到退 2（与命中 1、干净 0 分得开）：--extra 在末尾 / 给空串、没给文件、文件不存在；命中优先
+#22 verify_backup_dst 只核 pending 条目：pm resolve 跳过 / 待裁决的 copy 与隔离件 Exec 不执行，不再被报成缺失
+#49 #50 AI 建议：分类按确切键 相册\<名> 取条目（子目录同名不顶替、只在子目录里的不算）；坐标定点小数不出指数
+#58 测试里临时改环境变量须原样还原（有值写回、没有才删、异常同样还原）；test/ 里删环境变量只许在 TestUtil.withEnv
+#65 #84 命令行参数：日期只收十位 YYYY-MM-DD（26-09-01 不再是公元 26 年）；空路径参数不再落到当前目录（init / backup init / sort）
+#68 历史时刻按当时的时区偏移换算（冬 / 夏两个时刻各用各的）；src 不再用 getCurrentTimeZone 换算历史时刻
+#70 控制台输出代码页：stdout 或 stderr 任一是控制台就切 UTF-8（stdout 重定向时 stderr 的进度不再按 936 乱码）
+#72 README「从源码构建」：cp 的目标目录若被 .gitignore 忽略（新克隆里没有），块里之前得先 mkdir -p（同 CI）
+#75 #76 DESIGN §5 命令表 ↔ 真 CLI：写出的 --旗标都真有、位置参数与 CLI 相符（拿同一次构建的 pm.exe 逐段跑 --help）
+#77 DESIGN §5.1 的 pm status mock：每个「→ 下一步」都是渲染器真有的提示；提到「命名」行，渲染器就得真有
+#78 --writable 级写端点个数从源码清点（Serve*.hs 的 POST 路由去掉 apply / suggest）：DESIGN §14、DESIGN-GUI、两份 README、help 五处都说这个数，DESIGN-GUI 逐个列到
+#83 整理页重扫先清模型再请求：失败的重扫之后没有旧概览、AI 按钮不亮；AI 请求收尾按当前概览定按钮
 --also-album（纯）：成片项与相册项同组、返修 → 相册项待裁决不分组、Raw 无相册项、非 jpg 交代
 --json 清点：全 CLI 只有 vault status 与 vault notes 两处 long "json"（P8-C）
 .JPG is photo
@@ -6,6 +21,7 @@
 .arw is photo
 .txt is meta
 0.6.0 发布链：pm.exe 不带构建机路径——Main.hs 不用 Paths 模块、版本走 CPP 宏、每个 exe stanza 显式 other-modules
+1.3.0 GUI 一键面：状态页「扫描」/「打开命令行」与归档页「扫描并归档」接到真实入口（POST /api/scan、Tauri open_terminal 已注册）；归档先 scan 再出计划；页面与脚本不再指人去终端跑 pm scan；源码里「某页「名」」指得到页面上的真名字（1.3.1）
 41 轮 #7 README 发布字段：测试计数与 DESIGN-COMMANDS 状态行一致、undo 提要 = 真 CLI、轮次判定委托 REVIEW-LOG
 41 轮 GO-note #9 运行契约：cwd = 仓库根（本套件按根相对路径读仓库文件）
 750 行预算（DESIGN §16）：手写源码/测试/文档/页面/脚本全部 ≤ 750 行（P8-A 起自动化）
@@ -29,12 +45,10 @@ Haddock 标记卫生：一段连续注释里至多一个 -- | / -- ^ 标记
 JSON 值形状 = legacy 六键 + unpushable（hash 截 16）
 JSON 键序与 legacy 一致（unpushable 殿后）
 P2 旧格式（无 rootId/group）仍可解析为 Nothing
-P2.2: --keep 拒绝复合组成员与非待裁决条目
 P2.3(mj-3v3): 跨源布局同目标 stem 组——返修主文件悬置另一布局的侧车
 P3b gitStepsLines/planCategories：显式类目、无 -A、隔离项不入 add；与上线命令同一生成点（R2）
 P3b-12 pathAtOrUnder 三态：解析不出时不得被当成「不在 .pm 里」放行
 P3b-4 #4 racy 判据 statHitStable：同刻度窗口不信任缓存
-P3b-5 B2 dirFingerprint 递归：子目录内文件变化改变指纹；目录自身改名不变
 P3b-7 A1 opIdParts 拒绝非规范十进制（前导零）；quarTrashRel 畸形 → Nothing
 P4-2 --port 范围 0..65535（越界不得静默折回）
 P8-C 纯校验：坐标格式/越界、source、控制符/超长、类目、无字段 → 拒；同名两条/带路径名/坏 sha → 拒；合法通过并按名排序
@@ -98,12 +112,15 @@ versionsReport：设计内成片↔相册对排除；同目录版本组；真重
 命名同步：DESIGN-COMMANDS 讲的是 freshStagingCatalog（F025 收尾）
 备份范围（2026-08-31 裁定）：To-Be-Sync'd 不产生 add/update；备份盘上的暂存副本计入 EXTRA
 字节出口清点：deleteBoundAt 引用模块集合固定；Exec 头注不再写 no delete call anywhere
+审计 #19：本套件读到的非源码文件（行预算清单 + tauri.conf.json）全部登记在 package.yaml extra-source-files
+审计 #1：整理页 AI 建议地点须在 await 之后按 sort 代号与概览对象守卫；请求在途时重扫不得放开按钮
+审计 #2：设置页数字项（并发数 / 掉线等待）留空点保存须拒绝并指向「恢复默认」，不得 Number(val( 直提成 0
+审计 #7：app/Main.hs 的 main 在进程起手设 SEM_FAILCRITICALERRORS（suppressCriticalErrorDialogs），不只备份发现那一条路
 工作流 C101 checkConfig：vault 与主库嵌套（两个方向、既有配置改无关字段）拒；旁边的 vault 放行；备份半对登记拒
 工作流 F052：planIdOf——PrRefused 无 id（盘上没有计划）；PrSaved/PrRun 带 id
 工作流 F056/F057 backupVerdict 判定表：零降级零差异才 ✓/0；主库回退告警、备份盘读错/被改/未枚举 → 1
 工作流 F058 stagingArchivedSummary：相册镜像不算「已归档」（口径 = inArchiveLayer）
 工作流 F082 tri/mkPatch：--X 与 --no-X 同给 → Left「只能给一个」；三态其余三格照旧
-工作流 F096 threeCopiesStillExist：主库见证只认 Raw/成片——相册镜像不算归档副本
 工作流 F097 holdKin：主文件待裁决 → 同目录同 stem 侧车（case-fold）一并悬置；别组不受牵连
 待修改 不碰；顶层散文件 unrecognized
 待修改 从不清理
@@ -114,6 +131,7 @@ versionsReport：设计内成片↔相册对排除；同目录版本组；真重
 易变守卫：次序须为 stat→hash→stat；两次 stat 不同则不出 sha
 显式年份层与事件名年份不一致 → 不猜，unrecognized
 月份 13 拒绝
+架构表（DESIGN §4）：src/Pm 每个模块各有一行、表里每行都有其文件（发布前第一方全量审）
 死名清扫：opRelPaths / isPng / stemKey / jpegExt 不再出现在 src/app
 每一份都是独立可裁决条目：全 NEEDS-DECISION、不绑复合组
 汇点复验（39/40 轮）：手编配置绕过 checkPatch 的路径/push 目标/选项注入在生成处再拒，整体不出
