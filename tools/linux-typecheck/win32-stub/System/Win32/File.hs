@@ -22,7 +22,8 @@ fILE_SHARE_NONE = 0
 cREATE_NEW, oPEN_EXISTING :: CreateMode
 cREATE_NEW = 1
 oPEN_EXISTING = 3
-fILE_ATTRIBUTE_NORMAL, fILE_ATTRIBUTE_REPARSE_POINT :: FileAttributeOrFlag
+fILE_ATTRIBUTE_DIRECTORY, fILE_ATTRIBUTE_NORMAL, fILE_ATTRIBUTE_REPARSE_POINT :: FileAttributeOrFlag
+fILE_ATTRIBUTE_DIRECTORY = 0x10
 fILE_ATTRIBUTE_NORMAL = 0x80
 fILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
@@ -36,3 +37,9 @@ getFileInformationByHandle :: HANDLE -> IO BY_HANDLE_FILE_INFORMATION
 getFileInformationByHandle = error "Win32 stub (Linux harness): getFileInformationByHandle"
 getLogicalDrives :: IO DWORD
 getLogicalDrives = error "Win32 stub (Linux harness): getLogicalDrives"
+
+getFileAttributes :: String -> IO FileAttributeOrFlag
+getFileAttributes = error "Win32 stub (Linux harness): getFileAttributes"
+
+setFileAttributes :: String -> FileAttributeOrFlag -> IO ()
+setFileAttributes = error "Win32 stub (Linux harness): setFileAttributes"

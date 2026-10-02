@@ -27,6 +27,8 @@ DWORD GetDriveTypeW(LPCWSTR p) { (void)p; return 0; }
 DWORD GetVolumeInformationW(LPCWSTR a, LPWSTR b, DWORD c, DWORD *d, DWORD *e, DWORD *f, LPWSTR g, DWORD h) { (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h; return 0; }
 HANDLE FindFirstFileW(LPCWSTR p, void *d) { (void)p;(void)d; return (HANDLE)-1; }
 int FindClose(HANDLE h) { (void)h; return 1; }
+/* test/cbits/pm_test.c (test suite only) */
+DWORD pm_test_set_foreign_reparse(LPCWSTR p, DWORD tag, DWORD *err) { (void)p;(void)tag; *err=0; return 0; }
 CEOF
 LIBMODS=$(cd src && find . -name '*.hs' | sed 's|^\./||; s|\.hs$||; s|/|.|g' | sort | sed 's/^/                    /')
 TESTMODS=$(cd test && find . -name '*.hs' ! -name Spec.hs | sed 's|^\./||; s|\.hs$||; s|/|.|g' | sort | sed 's/^/                    /')
