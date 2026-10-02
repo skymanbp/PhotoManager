@@ -55,7 +55,7 @@ data Cmd
   | CmdVaultNotes Bool -- --json；列出照片记录与发布状态（只读）
   | CmdVaultIngest GoOpts String [FilePath] -- --category + FILES；两份计划（主库 相册/ + vault <类目>/）
   | CmdConfigShow -- 打印配置与路径健康（只读）
-  | CmdConfigSet ConfigSetOpts -- 改 vault / photos.json / 并发数（主库路径只读）
+  | CmdConfigSet ConfigSetOpts -- 改 vault / photos.json / 并发数 / 掉线等待 / 上线命令设置（主库路径只读）
   | CmdNames GoOpts -- Raw 事件夹 Scheme A 统一
   | CmdVersions -- 版本组/精确重复报告（只读）
   | CmdDedupe GoOpts -- 精确重复 → 逐份可裁决的隔离计划（全部 NEEDS-DECISION）
@@ -213,7 +213,7 @@ parserInfo =
             ( info
                 ( hsubparser
                     ( command "show" (info (pure CmdConfigShow) (progDesc "打印配置与每条路径的健康状态（只读）"))
-                        <> command "set" (info (CmdConfigSet <$> patchP) (progDesc "改 vault / photos.json / 并发数（主库路径只读，用 pm init）"))
+                        <> command "set" (info (CmdConfigSet <$> patchP) (progDesc "改 vault / photos.json / 并发数 / 备份盘掉线等待 / 上线命令的 portfolio 路径与两仓 push 目标（主库路径只读，用 pm init）"))
                     )
                     <|> pure CmdConfigShow
                 )
@@ -436,7 +436,7 @@ parserInfo =
               "empty"
               ( info
                   (TrashEmpty <$> switch (long "yes" <> help "确认清除下列条目（无此开关只列清单）"))
-                  (progDesc "最终清除隔离区已登记条目（逐项列出；clean-staging 条目须再过三副本屏障）")
+                  (progDesc "最终清除隔离区已登记条目（逐项列出；clean-staging 条目须再过三副本屏障、dedupe 条目须再核归档层仍有活副本）")
               )
         )
       <*> backupSw

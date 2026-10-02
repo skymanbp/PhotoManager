@@ -107,15 +107,13 @@ Adversarial review archive: [docs/reviews/](docs/reviews/).
   / Archive / Categorise & push / Plans / Settings / Getting started) — generates
   plans, records decisions, edits configuration, AI suggestions (launches `claude -p`
   under your own account in read-only mode to look at the pictures; it only pre-fills,
-  never clicks for you, and each call costs money); since 0.6.0 the Plans page can
-  **execute** a saved plan directly (the same button clicked twice to confirm; the
-  execution chain is the same as `pm apply`, `pm undo` works afterwards), and the
-  Status page can **copy the publish commands** with one click (git command text
+  never clicks for you, and each call costs money); the Plans page can **execute** a saved
+  plan directly (details under Quick start), and the Status page can **copy the publish commands** with one click (git command text
   generated from the two repo paths / push targets in Settings; paste it into your own
   terminal — pm never runs git). Since 1.3.0 the pages are trimmed to one sentence + one
   primary button each (long explanations fold away under "说明"), the Status page has a
   **Scan** button (`POST /api/scan`, the same code path as `pm scan`), the Archive page's
-  first card is **"scan, then archive"** (it does the "run pm scan first" the import used
+  first card's main button is **"scan, then archive"** (it does the "run pm scan first" the import used
   to ask for), and the vault card can **open a command line** in the repo directory with
   pm on `PATH` — you paste the copied commands there yourself.
 
@@ -181,7 +179,7 @@ list and detail stacked full-width since 1.1.3; plans can be deleted one by one 
 in one click ("clear executed/stale"), which only removes the regenerable plan files; since 0.6.0 pending plans can be **executed directly** — the
 same button clicked twice to confirm, the execution chain is the same as `pm apply`,
 `pm undo` works afterwards), **Settings** (paths and concurrency: vault /
-photos.json / worker count editable, backup drive registrable, the portfolio repo path
+photos.json / worker count / backup-drive drop wait editable, backup drive registrable, the portfolio repo path
 and both repos' push targets for the publish commands customisable; changes take
 effect immediately, and so does `pm config set` run in a terminal; the main library
 path is read-only — it is the identity anchor, changing it means switching libraries,
@@ -225,7 +223,7 @@ pm versions                      # version groups / exact duplicates outside the
 pm dedupe                        # exact duplicates → a quarantine plan adjudicated copy by copy (all await adjudication; which to keep
                                  # is not chosen for you — approve each with pm resolve --item N --unskip)
 
-pm plan [list]                   # list plans with execution state (executed / partial / not executed — folded from the journal; plan files are never written back)
+pm plan [list]                   # list plans with execution state (executed / partial / not executed / stale — folded from the journal + source probing; plan files are never written back)
 pm plan rm <id> … / pm plan prune   # delete plan files / one-click prune of executed plans and stale drafts (never executed, every pending source gone; only regenerable files are removed; journal/undo unaffected)
 pm apply <planId>                # execute a plan (--dry full preview / --only 1,3-5 partial execution)
 pm resolve <id> --item N [--unskip]            # skip that item (default action) / --unskip restores it to pending;
@@ -247,12 +245,15 @@ plan is `pm trash empty --yes` (final purge of the quarantine: itemised listing,
 confirmation, see item 1 below). A few commands write pm's own state and configuration
 directly, **none of them touch photo bytes**: `pm scan`, `pm init` / `pm backup init`,
 `pm config set`, `pm vault hold|unhold` / `pm vault note` (one "not syncing for now"
-decision / one photo record in the main library's `.pm`), `pm convert` (phase one writes
+decision / one photo record in the main library's `.pm`), `pm album ignore|unignore` (one
+"ignore this candidate" record in the main library's `.pm/album-ignore.json`), `pm plan rm` /
+`pm plan prune` (delete regenerable plan files only), `pm convert` (phase one writes
 the derived jpg into the main library's `.pm/derived` — pm's own state; landing still
 goes through a plan), `pm resolve` (edits a plan), `pm doctor --repair` (also removes
 derived files in `.pm/derived` that have landed, lost their source or are half-written),
-`pm serve --writable` (behind the GUI: writes plans / configuration / the "not syncing
-for now" list / photo records; `--allow-apply` executes plans through the very same plan
+`pm serve --writable` (behind the GUI: writes the index / plans / configuration / the "not
+syncing for now" list / photo records / ignored candidates / the backup-root marker, and
+deletes plan files; `--allow-apply` executes plans through the very same plan
 path).
 
 ## How it is built — why this tool deserves your photos
@@ -371,8 +372,10 @@ plus item-by-item user rulings):
   regenerating the comparison afterwards yields zero: 0 new · 0 updated);
 - staging cleanup 220 items / 21.4 GiB — the redundant staging copies of the "first
   archive run" batch above, quarantined after a real three-copy re-hash at generation
-  time and the execution-time barrier re-check (4 items HELD: pm refused them, left for
-  `pm import`).
+  time and the execution-time barrier re-check (4 items HELD: pm refused them — the 4
+  files of event `26-06-R66` had no archive-tier copy yet; after `pm import` archived them
+  the same day, a second cleanup plan cleared their staging copies, and since then the
+  staging area holds only the user's work-in-progress `待修改\`).
 
 An example of "no guessing": on a real card `pm sort` found the New York and Atlanta
 events back to back — time **cannot** separate the events, so 7 consecutively numbered
@@ -473,6 +476,8 @@ tauri build (remapped) → `scripts/leakscan.py` → zip + NSIS installer + `sha
 produced by one run; after pushing the tag `v<version>` the release job attaches the
 artifacts of **that same run** to the Release, with the SHA-256 of every asset in the
 release notes (this is where the promise in the "Install" section above is kept). The
+only deviation from the local chain: CI uses the npm-prebuilt `@tauri-apps/cli` of the
+same version instead of compiling `cargo tauri`. The
 binaries in a Release are not built on the author's machine.
 
 ## Roadmap and known limitations
@@ -586,13 +591,13 @@ binaries in a Release are not built on the author's machine.
   library and are not meant to be generalised.
 - File identity is exact on NTFS; on ReFS the 128-bit id truncated to 64 bits **can only
   reject more** (HELD / awaiting adjudication), never admit more — deliberate
-  (DESIGN-COMMANDS §8.1).
+  (DESIGN-COMMANDS §8.2).
 - If the library sits on a mounted volume without a DOS path, handle lookup fails → the
   trusted access port rejects everything (explicit failure, not silent).
 - Threat model (DESIGN §14): guards against crashes / power loss / media errors /
   concurrent benign processes; **does not** guard against millisecond-level races by a
-  malicious process of the same user on the same machine — the six residual windows are
-  registered one by one in §14, not hidden behind "etc.".
+  malicious process of the same user on the same machine — the remaining windows are
+  registered one by one in §14 (six entries, one closed in P6-C), not hidden behind "etc.".
 - No code signing.
 
 ## License

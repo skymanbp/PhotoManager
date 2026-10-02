@@ -2,6 +2,8 @@
 
 [English](README.md) · 中文版：与英文版逐节对应；英文版是主入口，本文件是它的中文镜像。
 
+****零维护。虽然公开，仅供自用。要用请自行克隆、自行调整。****
+
 ## 简介
 
 Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一个三层照片库
@@ -70,12 +72,11 @@ Haskell 写的**零丢失**照片库管理器 + Rust/Tauri 桌面前端：为一
   也没有库外来源记录的照片逐条报出交人裁决，永不自动处置）。
 - **功能十 · GUI**：七页 Tauri 桌面前端（状态 / 整理新照片 / 归档 / 分类推送 /
   计划 / 设置 / 上手）——生成计划、记录决定、改配置、AI 建议（拉起你自己账号的
-  `claude -p` 只读模式看图，只预填、不代点、每次有费用）；0.6.0 起计划页可**直接执行**
-  已存计划（同一按钮两次点击确认，执行链与 `pm apply` 同源，事后可 `pm undo`），
+  `claude -p` 只读模式看图，只预填、不代点、每次有费用）；计划页可**直接执行**已存计划（细节见「快速上手」），
   状态页可一键**复制上线命令**（按设置里的两仓路径/push 目标生成 git 命令文本，
   复制后自己粘进终端——pm 不执行 git）。1.3.0 起每页只剩一句话 + 一个主按钮（长说明收进
   「说明」折叠区），状态页有**「扫描」**按钮（`POST /api/scan`，与 `pm scan` 同一条路），
-  归档页第一张卡是**「扫描并归档」**（把 import 那句「先 pm scan」替你做了），vault 卡可
+  归档页第一张卡的主按钮是**「扫描并归档」**（把 import 那句「先 pm scan」替你做了），vault 卡可
   **「打开命令行」**（在仓目录开一个 cmd 窗口、pm 已在 PATH——上线命令你自己粘进去）。
 
 **明确不做的**：不适配其他目录结构；不执行 git（I9）；`photos.json` 不在写域
@@ -124,7 +125,7 @@ GUI 七页（左侧导航次序）：**状态**（「现在该做什么」置顶
 可逐个删除或「清理已执行/失效」，删的只是可再生成的计划文件；
 0.6.0 起可**直接执行**待执行计划——
 同一按钮两次点击确认，执行链与 `pm apply` 同源，事后可 `pm undo`）、**设置**
-（路径与并发：vault / photos.json / 并发数可改、备份盘可登记、上线命令的
+（路径与并发：vault / photos.json / 并发数 / 备份盘掉线等待可改、备份盘可登记、上线命令的
 portfolio 仓路径与两仓 push 目标可自定义；改完立刻生效，终端里跑 `pm config set`
 改的同样立刻生效；主库路径只读——它是身份锚点，改它等于换一个库，留给
 `pm init`）、**上手**。
@@ -187,9 +188,9 @@ pm serve                         # 127.0.0.1 JSON API（GUI 用；缺省只读�
 `pm trash empty --yes` 一条（隔离区最终清除：逐项列出、二次确认，见下文第 1 条）。
 此外若干命令直接写 pm 自己的状态与配置，**都不碰照片字节**：`pm scan`、
 `pm init` / `pm backup init`、`pm config set`、`pm vault hold|unhold` / `pm vault note`（主库 `.pm`
-里一条「暂不同步」决定 / 一条照片记录）、`pm convert`（第一段把派生 jpg 写进主库 `.pm/derived`——pm 自建状态，落位仍走计划）、
+里一条「暂不同步」决定 / 一条照片记录）、`pm album ignore|unignore`（主库 `.pm/album-ignore.json` 里一条「忽略候选」）、`pm plan rm` / `pm plan prune`（只删可再生成的计划文件）、`pm convert`（第一段把派生 jpg 写进主库 `.pm/derived`——pm 自建状态，落位仍走计划）、
 `pm resolve`（改计划）、`pm doctor --repair`（也清 `.pm/derived` 里已落位/失源/半成品的派生件）、`pm serve --writable`
-（GUI 背后：写计划/配置/「暂不同步」名单/照片记录；`--allow-apply` 执行计划仍走同一条计划路径）。
+（GUI 背后：写索引/计划/配置/「暂不同步」名单/照片记录/忽略候选/备份 root 标识、删计划文件；`--allow-apply` 执行计划仍走同一条计划路径）。
 
 ## 具体实现——为什么这个工具值得把照片交给它
 
@@ -349,7 +350,7 @@ python ../../scripts/leakscan.py binaries/pm-x86_64-pc-windows-msvc.exe \
   "target/x86_64-pc-windows-msvc/release/bundle/nsis/pm-ui_${V}_x64-setup.exe"
 ```
 
-CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同一条链**，外加上面本地链里没有的两道闸（版本一致、`pm --version`）：版本一致闸 → `stack test`（含 750 行闸与文档漂移哨兵）→ `pm --version` 闸 → sidecar → tauri build（remap）→ `scripts/leakscan.py` → zip + NSIS 安装包 + `sha256.txt` 同一 run 产出；推 tag `v<版本>` 后 release job 把**同一 run** 的产物挂到 Release，说明附每个资产的 SHA-256（上面「安装」节的承诺就是这里兑现的）。Release 里的二进制不是本机编的。
+CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同一条链**，外加上面本地链里没有的两道闸（版本一致、`pm --version`）：版本一致闸 → `stack test`（含 750 行闸与文档漂移哨兵）→ `pm --version` 闸 → sidecar → tauri build（remap）→ `scripts/leakscan.py` → zip + NSIS 安装包 + `sha256.txt` 同一 run 产出；推 tag `v<版本>` 后 release job 把**同一 run** 的产物挂到 Release，说明附每个资产的 SHA-256（上面「安装」节的承诺就是这里兑现的）。Release 里的二进制不是本机编的。与本地链唯一的差异：CI 用同版本号的 npm 预编译 `@tauri-apps/cli`，不现编 `cargo tauri`。
 
 ## 路线图与已知限制
 
@@ -428,11 +429,11 @@ CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同�
 
 - Windows-only；目录结构、层级语义为作者的库定制，不打算通用化。
 - 文件身份判据在 NTFS 上精确；ReFS 的 128 位 id 被截到 64 位**只会多拒**
-  （HELD/待裁决），不会放行——方向刻意（DESIGN-COMMANDS §8.1）。
+  （HELD/待裁决），不会放行——方向刻意（DESIGN-COMMANDS §8.2）。
 - 库若放在无 DOS 路径的挂载卷上，句柄反查失败 → 受信取用口全部拒绝（显式失败，
   非静默）。
 - 威胁模型（DESIGN §14）：防崩溃/掉电/介质错误/并发良性进程；**不防**同机同
-  用户恶意进程的毫秒级竞争——剩余窗口六条逐项登记在 §14，不藏在"等等"里。
+  用户恶意进程的毫秒级竞争——剩余窗口逐项登记在 §14（六条，其中一条已于 P6-C 关闭），不藏在"等等"里。
 - 无代码签名。
 
 ## License
