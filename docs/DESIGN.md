@@ -92,8 +92,8 @@ R4 Haskell）落成以下**硬不变量**，每条都有机制背书，不靠自
 | I1 | 任何 pm 操作不使任何仓库丢失字节或信息（含文件名） | I2+I4+I5；重命名旧名先持久化进日志再动盘 |
 | I2 | **pm 没有删除原语，也没有覆盖写原语**。唯一移出机制 = quarantine（移入 `.pm/trash/` 保持相对路径 + manifest）。产地据实清点（步 9 C10；DocDrift `caseQuarantineCensus` 钉住引用 `OpQuarantine` 的模块集合，新模块一碰就转红）：`pm clean staging`（Clean）、`pm undo`（Undo）、supersede 复合——`pm resolve --keep src`（Apply，§6.5）、`pm dedupe`（Dedupe）、`pm doctor --repair` 的 C5 隔离计划（Doctor）、`pm diff` 备份盘更新的旧件（Diff，`supersede:backup-update`）、执行期回滚的位移件 `rollback-displaced:`（Exec） | `Op` 代数只有 `Copy/Rename/Quarantine` 构造子；落位一律走「目标存在即失败」的 rename（§6.1 步 7） |
 | I3 | 每次写盘前有可打印的 Plan 且经确认；每个文件落盘后 sha256 复读校验（**缓存级**：捕获写逻辑错误/截断/串文件与缓存副本位翻转，不覆盖介质层损坏——介质层见 I3b） | Exec 只接受 Plan；写协议 §6.1 |
-| I3b | 介质级验证为显式能力：`pm doctor --deep` 把 catalog 的**全部**条目重读重 hash 一遍（默认那次只复验上次 CleanShutdown 之后的 Done），`pm status` 显示「最久未验证字节的年龄」（`lastVerified` 随每次 hash 写进 catalog——`--deep` 核对无误的条目同样记回，横切审计 #67）。**没有轮转/抽样机制**——全库覆盖只有 `--deep` 一条路；落位后绕缓存重读的 `--verify-media` **尚未实现**（§6.6/§12 的它是设计预留） | §6.6 + §12 单列开销 |
-| I4 | 所有 mutation 先写 intent、成功后写 done（append-only NDJSON），**带真实持久化屏障**：intent 在其效果落盘前 `hFlush + FlushFileBuffers`；Copy 的 done 可组提交，Rename 的屏障强制且不可组提交（旧名仅存于日志）。**追加前先封尾**：`.pm/journal.ndjson` 与隔离区 manifest 的每次追加都先查末字节，不是换行（掉电写了半行）就先补 `\n`，新记录绝不与残行黏成一条——journal 另落一条 `torn-gap` 标记把残行**封**成可识别的撕裂尾（§6.4） | Journal 模块（Win32 boot 库 `flushFileBuffers`，本机已验证存在）；`pm doctor` 对账 §6.4 |
+| I3b | 介质级验证为显式能力：`pm doctor --deep` 全库重读重 hash（默认只复验上次 CleanShutdown 之后的 Done），`pm status` 显示最久未验证字节的年龄；没有轮转/抽样，`--verify-media` 尚未实现——细节见 §6.6 | §6.6 + §12 单列开销 |
+| I4 | 所有 mutation 先写 intent、成功后写 done（append-only NDJSON），**带真实持久化屏障**：intent 在其效果落盘前 `hFlush + FlushFileBuffers`；Copy 的 done 可组提交，Rename 的屏障强制且不可组提交（旧名仅存于日志）。**追加前先封尾**：掉电写的半行不与新记录黏连，journal 另记 `torn-gap` 标记（§6.4） | Journal 模块（Win32 boot 库 `flushFileBuffers`，本机已验证存在）；`pm doctor` 对账 §6.4 |
 | I5 | 目的地已存在且内容不同 → **conflict，停该项，不覆盖，无例外**。vault DRIFT 的 supersede 与备份盘更新**不是覆盖**：先 Quarantine 移出旧文件、再 Copy 落新字节（§6.5），旧字节始终在隔离区可还原 | Plan 生成期检查 + Exec 执行期二次检查 + 落位 rename 的 no-replace（ReplaceIfExists=FALSE）语义三重防线 |
 | I6 | 断电 / 拔盘 / 进程被杀后，`pm doctor` 能检出半成品并安全恢复；恢复矩阵覆盖三种 Op 的全部协议步骤与掉电（journal 尾部丢失）模型 | §6.4 矩阵 + §13 两类故障注入 |
 | I7 | 拓扑不变量持续可校验：vault ⊆ 相册；相册 ⊆ 成片 ∪ inbox-origin（journal 中有 ingest 来源记录的集合）；侧车与主文件同批移动 | vault⊆相册 由 `pm vault status` 的 MISSING 态校验；相册⊆成片∪inbox-origin 记录侧是 ingest 的 journal Intent（带库外 srcAbs）、判定侧是 `pm doctor` 的 **I7 行**（同 sha 的成片副本 / 库外来源记录两条都不成立 → Warn 交人裁决，1.2.0；§10.3 第 2 项）；侧车同批由 import/sort 的整组悬置保证 |
@@ -240,11 +240,11 @@ test/                       -- tasty: 单元 + QuickCheck + 双模故障注入 +
 
 **依赖清单**（boot 库注明；其余为 Hackage 主流包）：`base directory filepath
 aeson bytestring text time containers crypton
-optparse-applicative ansi-terminal async toml-reader wai warp http-types
+optparse-applicative async toml-reader wai warp http-types
 tasty tasty-hunit tasty-quickcheck temporary` +
 boot：`Win32`（flushFileBuffers / SetConsoleOutputCP / createFile 等句柄工具；
 提交型 rename/unlink 自 P6-C 起走 cbits 的 SetFileInformationByHandle）、
-`process`（拉起 pm-ui / python / claude，统一壳 `Pm.Subprocess`）；`ansi-terminal` 列在 package.yaml 但未被引用。P4-1 实际加入：`wai warp http-types network memory`
+`process`（拉起 pm-ui / python / claude，统一壳 `Pm.Subprocess`）。P4-1 实际加入：`wai warp http-types network memory`
 （测试 `wai-extra`）。缩略图/看图渲染全部在 GUI 侧（Tauri WebView），
 Haskell 侧无图像解码依赖。
 
@@ -294,7 +294,7 @@ y/N 确认；`--yes` 跳过交互供脚本用），要么两段式 `pm apply <pl
 | `pm names [--apply]` | 命名规范化计划（事件夹 scheme 统一、同批目标唯一性校验；跨层地点别名表推迟） | apply 时 |
 | `pm versions` | 版本组/精确重复报告 | 否 |
 | `pm dedupe [--apply]` | **精确重复的逐份裁决计划**（§8.1）：来源就是 `pm versions` 的非设计内精确重复组，每一份出一个 Quarantine 条目、**全部** `NEEDS-DECISION`——留哪一份 pm 判不出就不猜（I1），用 `pm resolve --item N --unskip` 逐份批准。**不**绑复合组（复合组语义是不可拆，而这里要求逐份裁决）；组的完整性由执行期屏障保证：某个 sha 在归档层的最后一份**活**副本不会被隔离掉 | apply 时 |
-| `pm doctor [--deep] [--repair] [--backup\|--vault]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留与撕裂尾）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash（工作量只有被中断那场会话，有界）；**`--deep` 另外把 catalog 的全部条目重读重 hash 一遍**（`DEEP` / `DEEP-CORRUPT` 行）。没有轮转/抽样档位：要么默认那个有界窗口，要么 `--deep` 全库。P8-C2 起另对账 `.pm/derived` 派生件（`DERIVED-STALE` 已落位 / `DERIVED-ORPHAN` 源已不在库 / `DERIVED-TMP` 半成品 → Warn，`--repair` 删；`DERIVED-PENDING` Info——还有没做完的计划项引用的、计划读不全核不了的也归这一行、不删，审计 #31；枚举失败 `DERIVED-ENUM` Bad 不修）；1.2.0 起另校验 I7 拓扑（`I7` 行：相册 ⊆ 成片 ∪ inbox-origin，未解释的逐条 Warn 交人裁决，`--repair` 不碰；journal/快照有告警即整条不判）；`--deep` 核对无误的条目把验证时间记回快照（`DEEP-STAMP`：锁内重读快照，sha 与 (size, mtime) 仍一致才记、记读前时刻；锁被占 / root 不可写 / 快照回退到较旧一代只报 Warn 不记——横切审计 #67） | `--repair` / `--deep` 时仅 .pm/ |
+| `pm doctor [--deep] [--repair] [--backup\|--vault]` | 完整性体检：catalog↔盘对账、journal 对账（含掉电残留与撕裂尾）、半成品处置、I11 复查；**默认**对上次 CleanShutdown 之后的全部 Done 重 hash（工作量只有被中断那场会话，有界）；**`--deep` 另外全库重读重 hash**（`DEEP` / `DEEP-CORRUPT` 行，§6.6）。P8-C2 起另对账 `.pm/derived` 派生件（`DERIVED-STALE` 已落位 / `DERIVED-ORPHAN` 源已不在库 / `DERIVED-TMP` 半成品 → Warn，`--repair` 删；`DERIVED-PENDING` Info——还有没做完的计划项引用的、计划读不全核不了的也归这一行、不删，审计 #31；枚举失败 `DERIVED-ENUM` Bad 不修）；1.2.0 起另校验 I7 拓扑（`I7` 行：相册 ⊆ 成片 ∪ inbox-origin，未解释的逐条 Warn 交人裁决，`--repair` 不碰；journal/快照有告警即整条不判）；`--deep` 核对无误的条目把验证时间记回快照（`DEEP-STAMP`，§6.6） | `--repair` / `--deep` 时仅 .pm/ |
 | `pm apply <planId> [--dry] [--only 3,7-9]` | 执行（或部分执行）已存的计划；conflict 项只停该项、批次继续、末尾汇总。**P2.1/P2.2**：执行 root 按计划 `rootId` 重新发现绑定（Exec 拿锁后再验一次；无 rootId 的计划 CLI 层 fail-closed 拒绝，含 --apply 即时路径）；`--only` 自动扩到复合组闭包，**语法错误或序号超出 `0-N` 一律拒绝**（`--only 语法错误或序号超出计划范围（0-N）`，exit 2——不静默夹取，也不"照能认出的那几个跑"）；绑不上 root 时报文**逐槽位列出读不出身份的那些**（`缺席（尚未 init）` / `损坏: …` / `读不出: …`），而不是一句"均不符"宣称一次从未发生的 UUID 比对；clean 计划**每次执行前**逐项重验三副本（真实重 hash），不过的降级暂停——`pm apply` 与 `clean --apply` 即时路径无差别，无豁免 | 是 |
 | `pm plan list` / `pm plan rm <id>…` / `pm plan prune` | 计划文件管理：执行态（已执行/部分/未执行/已失效）、删除、一键清理已执行与失效草稿（GUI 计划页同源；判据见 DESIGN-COMMANDS §11 登记） | 只删 `.pm/plans` |
 | `pm resolve <planId> --item N [--unskip] [--keep src\|dst\|both]` | 裁决计划中的一项：缺省**跳过**该项，`--unskip` 恢复为待执行，`--keep` 裁决标 `NEEDS-DECISION` 的冲突项（both = 新名并存）。**P2.1**：`--keep` 只接受独立的 NEEDS-DECISION Copy（复合组成员不可单独裁决）；skip/unskip 扩到全组；`--keep src` 追加的 supersede 对共享组 id | 改计划 |
@@ -663,7 +663,7 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 |---|---|
 | **Windows 输出编码（ACP=936）**：GHC 默认 CP936，emoji/勾号直接崩进程、重定向输出 GBK 字节（本机已实测复现） | main 首行 `hSetEncoding stdout/stderr utf8`；`--json` 走 ByteString 直写绕开编码器与 CRLF；stdout 或 stderr 任一挂在控制台就 `SetConsoleOutputCP(65001)`（代码页是整个控制台的属性：`pm scan > log` 时进度与报错仍经 stderr 上屏，横切审计 #70）；§13 编码回归测试（**尚未实现**，见 §13） |
 | `directory` rename/copy 的替换语义（静默覆盖） | Exec 禁用清单 + 一律 `Pm.Win.moveBoundNoReplace`（句柄形态 no-replace，§6.1/§6.2）；P1 测试覆盖目标已存在分支 |
-| 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C4（C3 行写明 doctor 不归属的边界）+ doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6；**无轮转档位**，全库覆盖要人主动跑 `--deep`）；会反复瞬断的盘由 `Pm.Removable` 内建等盘续跑（1.1.2；§6.4 末段，2026-09-02 实录：当日掉线 11 次、527 组更新落位并核过）+ `scripts/verify_backup_dst.py` 写后全文重读 |
+| 掉电/谎报 flush/劣质 USB 桥 | 持久化屏障（I4，含追加前封尾 + `torn-gap` 标记）+ 矩阵 C4（C3 行写明 doctor 不归属的边界）+ doctor 默认复验窗口（上次 CleanShutdown 之后的 Done）+ 显式 `pm doctor --deep` 全库重 hash（§6.6）；会反复瞬断的盘由 `Pm.Removable` 内建等盘续跑（1.1.2；§6.4 末段，2026-09-02 实录：当日掉线 11 次、527 组更新落位并核过）+ `scripts/verify_backup_dst.py` 写后全文重读 |
 | 长路径 (>260) / Unicode 路径 | FilePath 方案（P0 落锤，§4）+ ≥240 预检（P0 落锤；源路径在 scan、派生路径在 `validatePlan`，审计 #45）；CJK 路径入 fixture 树用例 |
 | 库 / 整理源在 OneDrive 按需下载、Dedup、WOF 压缩卷上（这些对象也带 reparse 属性） | 「是不是链接」一律按 reparse tag 的 name-surrogate 位判——遍历、目录指纹、隔离区枚举、sort 源根说明（审计 #8；写路径 P3b-12 起已如此）：云占位 / Dedup / WOF 照常枚举，junction / symlink / 挂载点照旧不跟随。内容不在本机的文件（OFFLINE / RECALL_ON_OPEN / RECALL_ON_DATA_ACCESS）stat 照常核对、已索引没改过的照常复用；要读内容时（scan 的 hash、sort 的源清单）不读、单列「云端未下载」，旧条目按「查不出」保留（用户裁定「不读，单列出来」） |
 | 备份盘符漂移 / 弹「请插入磁盘」框 | marker UUID + SetErrorMode（main 起手按进程设，审计 #7）+ 只探 REMOVABLE/FIXED（§9） |
@@ -674,7 +674,7 @@ SHA-256（crypton）单核 ~1-2 GB/s，多 worker 下 NVMe 场景磁盘先饱和
 | vault 改名打断 portfolio 线上 URL | RENAME 默认只报告 + photos.json 只读引用检查标 BLOCKED（§10.2） |
 | ARW 无缩略图影响 GUI | v1 明示不做；v2 在 GUI 侧提取内嵌 JPEG |
 | GUI 工具链 | 2026-08-24 改判 Rust/Tauri：cargo、tauri-cli、WebView2、MSVC 本机均已在，零安装；GUI 缺席不影响 CLI 全功能（§11 边界） |
-| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable` 开十三个写端点：扫描索引（写主库的 `.pm/catalog.json`，与 `pm scan` 同一个 `runScanTo`，1.3.0）、生成推送计划（写 vault 的 `.pm/plans` + 首次 root-id）、记录「暂不同步」决定 / 照片记录（写主库的 `.pm/vault-holds.json` / `.pm/vault-notes.json`）、记「忽略候选」决定（写主库的 `.pm/album-ignore.json`）、删除 / 一键清理计划文件（只删可再生成的 `.pm/plans` 文件，journal 不动——写端点里仅有的删除）、改配置（写 XDG 的 config.toml，主库路径只读）、登记备份盘（在目标盘上建备份 root 标识，守卫链同 CLI）、生成 sort / 归档 / 相册 / 转换计划（写主库 `.pm/plans`；转换另写 `.pm/derived` 派生件）（§11），照片零改动；只读级 `POST /api/suggest` 拉起用户自己账号的 `claude -p --permission-mode plan`，只出建议、不写 `.pm`；照片目录只经 `--add-dir` 放行读、**不作 claude 的项目**（cwd = pm 自己的空目录 + `--safe-mode --setting-sources user --strict-mcp-config`——此前 cwd = 源目录，`-p` 跳过工作区信任确认，一张预埋 `.claude/settings.json` hooks 的存储卡点一下「AI 建议地点」即可以用户身份执行任意命令，横切审计 #81）。P7 起 GUI（pm-ui.exe）以 `--writable --allow-apply` 拉起 serve：同用户进程若拿到 token 还能经 `POST /api/apply` 执行**已存的计划**——本节威胁模型本就不防同机同用户恶意进程（这样的进程不需要 token，直接跑 `pm apply` 甚至直接改文件即可），token 不是对同用户进程的防线；apply 能做的仍只限两段式的第二段（有计划文件才有动作，journal 全程记录、可 undo，无删除/覆盖原语） |
+| 本机其它进程打 `pm serve` | 只绑 127.0.0.1 + 随机端口 + Bearer token（常量时间比对）+ Host/Origin 校验；缺省**只读**，`--writable` 开十三个写端点（逐个清单与各写什么见 DESIGN-GUI §11：只写 `.pm` 下的索引 / 计划 / 决定 / 派生件、XDG 的 config.toml 与备份盘 root 标识；唯一的删除是可再生成的计划文件），照片零改动；只读级 `POST /api/suggest` 拉起用户自己账号的 `claude -p --permission-mode plan`，只出建议、不写 `.pm`；照片目录只经 `--add-dir` 放行读、**不作 claude 的项目**（cwd = pm 自己的空目录 + `--safe-mode --setting-sources user --strict-mcp-config`——此前 cwd = 源目录，`-p` 跳过工作区信任确认，一张预埋 `.claude/settings.json` hooks 的存储卡点一下「AI 建议地点」即可以用户身份执行任意命令，横切审计 #81）。P7 起 GUI（pm-ui.exe）以 `--writable --allow-apply` 拉起 serve：同用户进程若拿到 token 还能经 `POST /api/apply` 执行**已存的计划**——本节威胁模型本就不防同机同用户恶意进程（这样的进程不需要 token，直接跑 `pm apply` 甚至直接改文件即可），token 不是对同用户进程的防线；apply 能做的仍只限两段式的第二段（有计划文件才有动作，journal 全程记录、可 undo，无删除/覆盖原语） |
 | 「暂不同步」把照片长期挡在视野外 | 决定记录里存决定当时的 sha（创建与复核都强制真实重算，不吃 (size,mtime) 缓存快路）：**下一次比对**（`pm vault status` / GUI 刷新）复核到字节已变即失效并回到 NEW——不是实时监视；`pm vault status` 单列 HELD 与失效项；名单是主库 `.pm` 下的普通 JSON，可读可手删 |
 | release 资产无代码签名 | 个人项目无证书：安装包/exe 首次运行触发 SmartScreen "未知发布者"。README 给从源码构建的完整路径；安装包内容 = zip 内容 = `stack install` + `cargo tauri build` 的产物，可自行比对 |
 | `待修改` 散文件无事件结构 | import 不碰，单列报告 |

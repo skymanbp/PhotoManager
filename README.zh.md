@@ -424,6 +424,9 @@ CI（`.github/workflows/build.yml`）在 GitHub 的 windows-latest 上跑**同�
 - ~~1.3.0 遗留收尾~~ ✅ 1.3.1（2026-09-27）：两条 CLI 报文仍指向归档页旧标题「非 jpg 转换」（现为「非 jpg 转成 jpg」），
   改正；DocDrift 另钉「源码里「某页「名」」的名字须真在页面上」。三本 PDF 手册（仓外）按 1.3.0 界面就地修订。
   细节见 [发布说明](docs/release-notes/v1.3.1.md)。
+- ~~文档漂移~~ ✅ 1.3.2（2026-10-02）：全部文档回源码逐条核对并改正；重复讲的只留一处、其余改指针；
+  `pm config set` / `pm trash empty` 的帮助补齐；删掉没人用的 `ansi-terminal` 依赖。
+  细节见 [发布说明](docs/release-notes/v1.3.2.md)。
 
 **已知限制**：
 

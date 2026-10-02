@@ -584,6 +584,10 @@ binaries in a Release are not built on the author's machine.
   that every "<page>页「<name>」" reference in the Haskell sources names something on the page.
   The three PDF manuals (outside the repo) were revised in place for the 1.3.0 layout. Details:
   [release notes](docs/release-notes/v1.3.1.md).
+- ~~Documentation drift~~ ✅ 1.3.2 (2026-10-02): every document re-checked against the code and
+  corrected; duplicated explanations reduced to one home plus pointers; `pm config set` /
+  `pm trash empty` help completed; the unused `ansi-terminal` dependency removed. Details:
+  [release notes](docs/release-notes/v1.3.2.md).
 
 **Known limitations**:
 

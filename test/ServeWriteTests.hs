@@ -486,8 +486,8 @@ caseServeScan = withSystemTempDirectory "pm-serve-scan" $ \dir -> do
       field ["code"] v @?= Just (Aeson.Number 0)
       field ["planId"] v @?= Just Aeson.Null
       assertBool ("log 应含「索引完成」: " <> show (logLines v)) (any ("索引完成" `T.isInfixOf`) (logLines v))
-  after <- loadCatalog root
-  case fst (catalogMaybe after) of
+  afterScan <- loadCatalog root
+  case fst (catalogMaybe afterScan) of
     Nothing -> assertFailure "扫描后应有索引"
     Just cat -> do
       Map.member ("相册" </> "n.jpg") (catEntries cat) @?= True
